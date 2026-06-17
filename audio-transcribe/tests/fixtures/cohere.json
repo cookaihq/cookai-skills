@@ -1,0 +1,23 @@
+{
+  "id": "task-unified-1781724427-jljfrqg4",
+  "object": "audio.generation.task",
+  "type": "audio",
+  "model": "cohere-transcribe",
+  "status": "completed",
+  "progress": 100,
+  "created": 1781724427,
+  "results": [
+    {
+      "text": " ",
+      "timings": {
+        "download": 2.746,
+        "inference": 0.885
+      }
+    }
+  ],
+  "error": null,
+  "usage": {
+    "credits_reserved": 153,
+    "user_group": "Enterprise"
+  }
+}
