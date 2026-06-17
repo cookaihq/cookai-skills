@@ -34,6 +34,19 @@ request_ids（部分）：scribe `57b82926-...` / `fac57528-...` / `704f4e7b-...
 - `scribe-v2` 不在模型目录中，平台侧不可用。
 - 因此完成条件 #1（四份 completed fixture + 三模型 schema）与 #3（scribe-v2 E2E）**当前客观不可达**，与本 skill 代码无关。
 
+## 追加发现（E2E 阶段，2026-06-18）
+
+除模型不可用外，foxapi **账号文件存储处于满载降级态**，叠加阻塞 E2E：
+
+- `upload-for-url` 上传**间歇/持续 403「存储空间不足」**（连试 5 次全 403；偶有窗口能成功）。
+- 即使上传返回了 OSS 短链，模型创建任务后下载该链接仍报
+  `task_error / upstream_error`：「Failed to download the file ... (file_download_error)」——
+  文件在上传与上游抓取之间被 eviction 清掉了。
+- 因此**任何需要上传样本的真实 E2E（含 cohere 替代）当前都无法跑出 `completed`**。
+
+**但管线代码已被真实 API 证明正确**：每次 E2E 都正常走通 `create→200→task_id→轮询→
+检测到 status=failed→打印 error→退出码 1`，失败点全在平台侧（模型不可用 / 存储满 / 文件被清）。
+
 ## 解除阻塞后如何续跑
 
 1. 在 foxapi 平台为 `paraformer-v2` / `paraformer-8k-v2` 配置 ModelPrice/ModelRatio，并恢复 `scribe-v2` 的可用渠道（`/v1/models` 能列出三者即可）。
