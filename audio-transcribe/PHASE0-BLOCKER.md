@@ -47,6 +47,30 @@ request_ids（部分）：scribe `57b82926-...` / `fac57528-...` / `704f4e7b-...
 **但管线代码已被真实 API 证明正确**：每次 E2E 都正常走通 `create→200→task_id→轮询→
 检测到 status=failed→打印 error→退出码 1`，失败点全在平台侧（模型不可用 / 存储满 / 文件被清）。
 
+### ✅ cohere E2E 已跑通（存储恢复窗口内，2026-06-18）
+
+存储恢复后，用唯一可用模型 `cohere-transcribe` 完整跑通 Task 10 E2E：
+
+```
+$ python3 audio-transcribe/scripts/transcribe.py --model cohere-transcribe \
+    --audio-url <fresh 72h 短链> --language zh --label e2e-cohere --output-dir /tmp/at_e2e
+Task created: task-unified-...  → [poll] processing → completed
+Saved to: /tmp/at_e2e/20260618-095839-e2e-cohere   （退出码 0）
+
+$ find /tmp/at_e2e -type f
+  .../20260618-095839-e2e-cohere/result.json      (status=completed)
+  .../20260618-095839-e2e-cohere/transcript.txt   ("好好好"，非空，10 bytes)
+  .../20260618-095839-e2e-cohere/transcript.md
+```
+
+- 样本实为**中文语音**（`--language zh` 时转出 "好好好"；默认 `en` 时为空白，故先前 `cohere.json` 文本为 `" "`）。
+- `.srt/.vtt` 按设计跳过（cohere 无逐词时间戳），stderr 打印提示。✅
+- `tests/fixtures/cohere.json` 已更新为这次真实 `completed` 响应（`{"text":" 好好好","timings":{...}}`）。
+
+**结论**：上传/管线/落盘/格式化/退出码全部经真实 API 验证正确。完成条件 #3 唯一未满足点是
+「必须用 **scribe-v2**」——而 scribe-v2 仍 `service_unavailable`；#1 唯一未满足点是 scribe/paraformer
+两模型未在平台 provision。两者纯属 foxapi 平台侧，待 provision 后即可补齐。
+
 ## 解除阻塞后如何续跑
 
 1. 在 foxapi 平台为 `paraformer-v2` / `paraformer-8k-v2` 配置 ModelPrice/ModelRatio，并恢复 `scribe-v2` 的可用渠道（`/v1/models` 能列出三者即可）。
