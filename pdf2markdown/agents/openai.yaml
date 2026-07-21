@@ -1,0 +1,4 @@
+interface:
+  display_name: "PDF to Markdown"
+  short_description: "将 PDF 转为可核验、可恢复的 GFM Markdown"
+  default_prompt: "使用 $pdf2markdown 将这个 PDF 转为可核验、可恢复的 GFM Markdown。"

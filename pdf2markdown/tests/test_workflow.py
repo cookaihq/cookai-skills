@@ -1,0 +1,845 @@
+import fcntl
+import json
+import os
+import stat
+from datetime import datetime, timezone
+from pathlib import Path
+
+import workflow
+
+
+PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
+PDF_SHA256 = "d7dd0115be8b79ae057b3f6ca0fcee578085ba6919dcb70e8643a2aff537d9b5"
+NOW = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+
+def no_network(*_args, **_kwargs):
+    raise AssertionError("local bundle creation must not use the network")
+
+
+def invoke(capsys, argv, *, cwd, environ=None, now=NOW):
+    rc = workflow.main(
+        argv,
+        environ={} if environ is None else environ,
+        cwd=str(cwd),
+        config_home=str(Path(cwd) / "config-home"),
+        transport=no_network,
+        now=now,
+    )
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert len(lines) == 1
+    return rc, json.loads(lines[0]), captured.err
+
+
+def state_snapshot(bundle):
+    snapshot = {}
+    for path in sorted(bundle.rglob("*")):
+        relative = str(path.relative_to(bundle))
+        info = path.lstat()
+        snapshot[relative] = {
+            "mode": stat.S_IMODE(info.st_mode),
+            "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+            "content": path.read_bytes() if path.is_file() else None,
+        }
+    return snapshot
+
+
+def test_start_preserves_local_pdf_bytes_in_a_versioned_work_bundle(tmp_path, capsys):
+    source = tmp_path / "Report 2024.pdf"
+    source.write_bytes(PDF_BYTES)
+    output_root = tmp_path / "bundles"
+
+    rc, result, stderr = invoke(
+        capsys,
+        ["start", "--source", str(source), "--output-dir", str(output_root)],
+        cwd=tmp_path,
+    )
+
+    bundle = Path(result["work_bundle"])
+    assert rc == 0
+    assert result == {
+        "schema_version": 1,
+        "work_bundle": str(bundle),
+        "generation": 1,
+        "conversion_state": "preparing",
+        "publication_state": "not_requested",
+        "outcome": "created",
+        "action_required": None,
+        "action_id": None,
+        "evidence_hash": f"sha256:{PDF_SHA256}",
+        "artifacts": {
+            "manifest": "manifest.json",
+            "source_pdf": "01-source/source.pdf",
+        },
+        "errors": [],
+    }
+    assert bundle.name == f"20240102-030405-report-2024-{PDF_SHA256[:8]}"
+    assert (bundle / "01-source" / "source.pdf").read_bytes() == PDF_BYTES
+    assert "created" in stderr
+
+
+def test_start_persists_a_private_recoverable_initial_state(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    secret = "must-not-be-persisted"
+    previous_umask = os.umask(0)
+    try:
+        rc, result, _stderr = invoke(
+            capsys,
+            ["start", "--source", str(source)],
+            cwd=tmp_path,
+            environ={"AIHUB_API_KEY": secret, "UNRELATED_SECRET": secret},
+        )
+    finally:
+        os.umask(previous_umask)
+
+    bundle = Path(result["work_bundle"])
+    directories = [
+        bundle,
+        bundle / ".state",
+        bundle / "01-source",
+        bundle / "02-pages",
+        bundle / "03-converted",
+        bundle / "03-converted" / "attempts",
+        bundle / "04-review",
+        bundle / "05-published",
+    ]
+    files = [
+        bundle / "manifest.json",
+        bundle / ".state" / "lock",
+        bundle / ".state" / "private.json",
+        bundle / ".state" / "history.ndjson",
+        bundle / "01-source" / "source.pdf",
+    ]
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    history = [json.loads(line) for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()]
+    persisted_text = "\n".join(path.read_text(errors="replace") for path in files)
+
+    assert rc == 0
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in directories)
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files)
+    assert manifest["source"] == {
+        "original_name": "source.pdf",
+        "origin": {"kind": "local", "path": str(source)},
+        "physical_path": "01-source/source.pdf",
+        "sha256": PDF_SHA256,
+        "size_bytes": len(PDF_BYTES),
+    }
+    assert manifest["settings_snapshot"] == {
+        "schema_version": 1,
+        "interaction_mode": "confirm",
+        "publishing": {"mode": "skip", "publisher_binding": None},
+        "sources": {
+            "interaction_mode": "built_in_default",
+            "publishing.mode": "built_in_default",
+        },
+    }
+    assert private_state == {
+        "schema_version": 1,
+        "generation": 1,
+        "source_uploads": [],
+        "result_urls": [],
+    }
+    assert history == [
+        {
+            "schema_version": 1,
+            "event": "bundle_started",
+            "generation": 1,
+            "at": "2024-01-02T03:04:05Z",
+            "source_sha256": PDF_SHA256,
+        }
+    ]
+    assert manifest["conversion_state"] == "preparing"
+    assert manifest["publication_state"] == "not_requested"
+    assert secret not in persisted_text
+
+
+def test_start_rejects_invalid_unreadable_and_unsafe_sources_as_json(tmp_path, capsys):
+    invalid = tmp_path / "not-a-pdf.bin"
+    invalid.write_bytes(b"plain text")
+    regular = tmp_path / "regular.pdf"
+    regular.write_bytes(PDF_BYTES)
+    symlink = tmp_path / "linked.pdf"
+    symlink.symlink_to(regular)
+    output_root = tmp_path / "bundles"
+
+    cases = [
+        (invalid, "invalid_pdf"),
+        (tmp_path / "missing.pdf", "source_unreadable"),
+        (symlink, "unsafe_source_type"),
+    ]
+    for source, error_code in cases:
+        rc, result, stderr = invoke(
+            capsys,
+            ["start", "--source", str(source), "--output-dir", str(output_root)],
+            cwd=tmp_path,
+        )
+        assert rc == 3
+        assert result == {
+            "schema_version": 1,
+            "work_bundle": None,
+            "generation": None,
+            "conversion_state": None,
+            "publication_state": None,
+            "outcome": "error",
+            "action_required": "provide_valid_local_pdf",
+            "action_id": None,
+            "evidence_hash": None,
+            "artifacts": {},
+            "errors": [{"code": error_code, "message": result["errors"][0]["message"]}],
+        }
+        assert error_code in stderr
+
+    assert not list(output_root.glob(".pdf2markdown-*"))
+    assert not [path for path in output_root.iterdir() if path.is_dir()]
+
+
+def test_inspect_returns_current_state_without_writing_the_work_bundle(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    _rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+    bundle = Path(started["work_bundle"])
+    before = state_snapshot(bundle)
+
+    rc, result, stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+    )
+
+    assert rc == 0
+    assert result == {**started, "outcome": "inspected"}
+    assert "inspected" in stderr
+    assert state_snapshot(bundle) == before
+
+
+def test_resume_returns_the_same_state_without_rebuilding_the_bundle(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    _rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+    bundle = Path(started["work_bundle"])
+    before = state_snapshot(bundle)
+
+    rc, result, stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(started["generation"]),
+        ],
+        cwd=tmp_path,
+    )
+
+    assert rc == 0
+    assert result == {**started, "outcome": "no_progress"}
+    assert "no_progress" in stderr
+    assert state_snapshot(bundle) == before
+
+
+def test_resume_rejects_stale_generation_and_a_concurrent_writer(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    _rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+    bundle = Path(started["work_bundle"])
+    before = state_snapshot(bundle)
+
+    stale_rc, stale, _stderr = invoke(
+        capsys,
+        ["resume", "--work-bundle", str(bundle), "--expected-generation", "0"],
+        cwd=tmp_path,
+    )
+    assert stale_rc == 5
+    assert stale["work_bundle"] == str(bundle)
+    assert stale["generation"] == 1
+    assert stale["conversion_state"] == "preparing"
+    assert stale["publication_state"] == "not_requested"
+    assert stale["errors"][0]["code"] == "generation_conflict"
+    assert stale["action_required"] == "inspect_current_generation"
+
+    lock_descriptor = os.open(bundle / ".state" / "lock", os.O_RDWR)
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        locked_rc, locked, _stderr = invoke(
+            capsys,
+            ["resume", "--work-bundle", str(bundle), "--expected-generation", "1"],
+            cwd=tmp_path,
+        )
+        inspect_rc, inspected, _stderr = invoke(
+            capsys,
+            ["inspect", "--work-bundle", str(bundle)],
+            cwd=tmp_path,
+        )
+    finally:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        os.close(lock_descriptor)
+
+    assert locked_rc == 5
+    assert locked["work_bundle"] == str(bundle)
+    assert locked["errors"][0]["code"] == "bundle_locked"
+    assert locked["action_required"] == "retry_after_writer_finishes"
+    assert inspect_rc == 0
+    assert inspected["generation"] == 1
+    assert state_snapshot(bundle) == before
+
+
+def test_inspect_reports_integrity_and_schema_failures_without_completion(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    _rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+    bundle = Path(started["work_bundle"])
+    (bundle / "01-source" / "source.pdf").write_bytes(b"%PDF-tampered")
+
+    integrity_rc, integrity, stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+    )
+
+    assert integrity_rc == 4
+    assert integrity["work_bundle"] == str(bundle)
+    assert integrity["generation"] == 1
+    assert integrity["conversion_state"] == "preparing"
+    assert integrity["publication_state"] == "not_requested"
+    assert integrity["outcome"] == "error"
+    assert integrity["errors"][0]["code"] == "integrity_violation"
+    assert integrity["conversion_state"] != "local_complete"
+    assert "integrity_violation" in stderr
+
+    second_source = tmp_path / "second.pdf"
+    second_source.write_bytes(PDF_BYTES)
+    _rc, second_started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(second_source)],
+        cwd=tmp_path,
+    )
+    second_bundle = Path(second_started["work_bundle"])
+    manifest_path = second_bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schema_version"] = 99
+    manifest_path.write_text(json.dumps(manifest))
+
+    schema_rc, schema_error, stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(second_bundle)],
+        cwd=tmp_path,
+    )
+
+    assert schema_rc == 4
+    assert schema_error["work_bundle"] == str(second_bundle)
+    assert schema_error["outcome"] == "error"
+    assert schema_error["errors"][0]["code"] == "invalid_bundle"
+    assert schema_error["conversion_state"] != "local_complete"
+    assert "invalid_bundle" in stderr
+
+
+def test_inspect_rejects_states_not_created_by_ticket_one(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+
+    for field, fabricated_state in (
+        ("conversion_state", "local_complete"),
+        ("publication_state", "published"),
+    ):
+        _rc, started, _stderr = invoke(
+            capsys,
+            ["start", "--source", str(source)],
+            cwd=tmp_path,
+        )
+        bundle = Path(started["work_bundle"])
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest[field] = fabricated_state
+        manifest_path.write_text(json.dumps(manifest))
+
+        rc, result, stderr = invoke(
+            capsys,
+            ["inspect", "--work-bundle", str(bundle)],
+            cwd=tmp_path,
+        )
+
+        assert rc == 4
+        assert result["outcome"] == "error"
+        assert result["errors"][0]["code"] == "invalid_bundle"
+        assert result["conversion_state"] != "local_complete"
+        assert result["publication_state"] != "published"
+        assert "invalid_bundle" in stderr
+
+
+def test_inspect_rejects_impossible_ticket_one_authoritative_state(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+
+    for scenario in (
+        "generation",
+        "history",
+        "private",
+        "settings",
+        "manifest_unknown",
+        "source_unknown",
+        "origin_unknown",
+        "private_unknown",
+        "settings_schema_type",
+        "history_time",
+    ):
+        _rc, started, _stderr = invoke(
+            capsys,
+            ["start", "--source", str(source)],
+            cwd=tmp_path,
+        )
+        bundle = Path(started["work_bundle"])
+        manifest_path = bundle / "manifest.json"
+        private_path = bundle / ".state" / "private.json"
+        history_path = bundle / ".state" / "history.ndjson"
+
+        if scenario == "generation":
+            manifest = json.loads(manifest_path.read_text())
+            manifest["generation"] = 7
+            manifest_path.write_text(json.dumps(manifest))
+            private_state = json.loads(private_path.read_text())
+            private_state["generation"] = 7
+            private_path.write_text(json.dumps(private_state))
+        elif scenario == "history":
+            with history_path.open("a") as history:
+                history.write(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "event": "fabricated",
+                            "generation": 999,
+                        }
+                    )
+                    + "\n"
+                )
+        elif scenario == "private":
+            private_state = json.loads(private_path.read_text())
+            private_state["source_uploads"] = [{"state": "fabricated"}]
+            private_path.write_text(json.dumps(private_state))
+        elif scenario == "settings":
+            manifest = json.loads(manifest_path.read_text())
+            del manifest["settings_snapshot"]
+            manifest_path.write_text(json.dumps(manifest))
+        elif scenario == "manifest_unknown":
+            manifest = json.loads(manifest_path.read_text())
+            manifest["unexpected"] = "value"
+            manifest_path.write_text(json.dumps(manifest))
+        elif scenario == "source_unknown":
+            manifest = json.loads(manifest_path.read_text())
+            manifest["source"]["unexpected"] = "value"
+            manifest_path.write_text(json.dumps(manifest))
+        elif scenario == "origin_unknown":
+            manifest = json.loads(manifest_path.read_text())
+            manifest["source"]["origin"]["unexpected"] = "value"
+            manifest_path.write_text(json.dumps(manifest))
+        elif scenario == "private_unknown":
+            private_state = json.loads(private_path.read_text())
+            private_state["unexpected"] = "value"
+            private_path.write_text(json.dumps(private_state))
+        elif scenario == "settings_schema_type":
+            manifest = json.loads(manifest_path.read_text())
+            manifest["settings_snapshot"]["schema_version"] = True
+            manifest_path.write_text(json.dumps(manifest))
+        else:
+            history_event = json.loads(history_path.read_text())
+            history_event["at"] = "not-a-timestamp"
+            history_path.write_text(json.dumps(history_event) + "\n")
+
+        rc, result, stderr = invoke(
+            capsys,
+            ["inspect", "--work-bundle", str(bundle)],
+            cwd=tmp_path,
+        )
+
+        assert rc == 4
+        assert result["outcome"] == "error"
+        assert result["errors"][0]["code"] == "invalid_bundle"
+        assert "invalid_bundle" in stderr
+
+
+def test_start_uses_output_priority_and_never_overwrites_a_name_collision(tmp_path, capsys):
+    source = tmp_path / "Source.pdf"
+    source.write_bytes(PDF_BYTES)
+    environment_root = tmp_path / "environment-bundles"
+    environment_root.mkdir()
+    occupied_name = f"20240102-030405-source-{PDF_SHA256[:8]}"
+    occupied = environment_root / occupied_name
+    occupied.symlink_to(environment_root / "missing-target")
+
+    env_rc, from_environment, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source), "--output-dir", ""],
+        cwd=tmp_path,
+        environ={"PDF2MARKDOWN_OUTPUT_DIR": str(environment_root)},
+    )
+    cli_rc, from_cli, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source), "--output-dir", "cli-bundles"],
+        cwd=tmp_path,
+        environ={"PDF2MARKDOWN_OUTPUT_DIR": str(environment_root)},
+    )
+    default_rc, from_default, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+        environ={"PDF2MARKDOWN_OUTPUT_DIR": ""},
+    )
+
+    assert env_rc == cli_rc == default_rc == 0
+    assert Path(from_environment["work_bundle"]) == environment_root / f"{occupied_name}-2"
+    assert occupied.is_symlink()
+    assert Path(from_cli["work_bundle"]).parent == tmp_path / "cli-bundles"
+    assert Path(from_default["work_bundle"]).parent == tmp_path / "pdf2markdown-output"
+
+
+def test_start_bounds_the_slug_for_a_maximum_length_source_name(tmp_path, capsys):
+    source = tmp_path / f"{'a' * 240}.pdf"
+    source.write_bytes(PDF_BYTES)
+
+    rc, result, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+
+    bundle = Path(result["work_bundle"])
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert rc == 0
+    assert len(bundle.name.encode()) <= os.pathconf(bundle.parent, "PC_NAME_MAX")
+    assert bundle.name.endswith(f"-{PDF_SHA256[:8]}")
+    assert manifest["source"]["original_name"] == source.name
+
+
+def test_inspect_canonicalizes_a_symlinked_bundle_ancestor(tmp_path, capsys):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    real_root = tmp_path / "real-root"
+    _rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source), "--output-dir", str(real_root)],
+        cwd=tmp_path,
+    )
+    bundle = Path(started["work_bundle"])
+    alias_root = tmp_path / "alias-root"
+    alias_root.symlink_to(real_root, target_is_directory=True)
+
+    rc, result, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(alias_root / bundle.name)],
+        cwd=tmp_path,
+    )
+
+    assert rc == 0
+    assert Path(result["work_bundle"]) == bundle
+
+    dotdot_rc, dotdot_result, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle / "02-pages" / "..")],
+        cwd=tmp_path,
+    )
+    assert dotdot_rc == 0
+    assert Path(dotdot_result["work_bundle"]) == bundle
+
+
+def test_inspect_preserves_posix_symlink_dotdot_resolution(tmp_path, capsys):
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    child = right / "child"
+    left.mkdir()
+    child.mkdir(parents=True)
+    first_source = tmp_path / "first.pdf"
+    first_source.write_bytes(PDF_BYTES)
+    second_source = tmp_path / "second.pdf"
+    second_source.write_bytes(b"%PDF-1.4\nright-side bundle\n%%EOF\n")
+    _rc, first, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(first_source), "--output-dir", str(left)],
+        cwd=tmp_path,
+    )
+    _rc, second, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(second_source), "--output-dir", str(right)],
+        cwd=tmp_path,
+    )
+    left_bundle = left / "bundle"
+    right_bundle = right / "bundle"
+    Path(first["work_bundle"]).rename(left_bundle)
+    Path(second["work_bundle"]).rename(right_bundle)
+    (left / "jump").symlink_to(child, target_is_directory=True)
+
+    rc, result, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(left / "jump" / ".." / "bundle")],
+        cwd=tmp_path,
+    )
+
+    assert rc == 0
+    assert Path(result["work_bundle"]) == right_bundle
+    assert result["evidence_hash"] == second["evidence_hash"]
+
+
+def test_resume_rejects_a_bundle_replaced_after_its_lock_is_acquired(
+    tmp_path, capsys, monkeypatch
+):
+    first_source = tmp_path / "first.pdf"
+    first_source.write_bytes(PDF_BYTES)
+    second_source = tmp_path / "second.pdf"
+    second_source.write_bytes(b"%PDF-1.4\nreplacement bundle\n%%EOF\n")
+    output_root = tmp_path / "bundles"
+    _rc, first, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(first_source), "--output-dir", str(output_root)],
+        cwd=tmp_path,
+    )
+    _rc, second, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(second_source), "--output-dir", str(output_root)],
+        cwd=tmp_path,
+    )
+    bundle = Path(first["work_bundle"])
+    replacement = Path(second["work_bundle"])
+    moved_bundle = output_root / "moved-original"
+    original_flock = workflow.fcntl.flock
+    replacement_lock = None
+    swapped = False
+
+    def lock_then_replace(descriptor, operation):
+        nonlocal replacement_lock, swapped
+        result = original_flock(descriptor, operation)
+        if not swapped and operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+            swapped = True
+            bundle.rename(moved_bundle)
+            replacement.rename(bundle)
+            replacement_lock = os.open(bundle / ".state" / "lock", os.O_RDWR)
+            original_flock(replacement_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return result
+
+    monkeypatch.setattr(workflow.fcntl, "flock", lock_then_replace)
+    try:
+        rc, result, stderr = invoke(
+            capsys,
+            ["resume", "--work-bundle", str(bundle), "--expected-generation", "1"],
+            cwd=tmp_path,
+        )
+    finally:
+        if replacement_lock is not None:
+            original_flock(replacement_lock, fcntl.LOCK_UN)
+            os.close(replacement_lock)
+
+    assert swapped
+    assert rc == 4
+    assert result["outcome"] == "error"
+    assert result["errors"][0]["code"] == "invalid_bundle"
+    assert "invalid_bundle" in stderr
+
+
+def test_resume_reads_from_the_locked_bundle_during_an_aba_path_swap(
+    tmp_path, capsys, monkeypatch
+):
+    first_source = tmp_path / "first.pdf"
+    first_source.write_bytes(PDF_BYTES)
+    second_source = tmp_path / "second.pdf"
+    second_source.write_bytes(b"%PDF-1.4\ntemporary replacement\n%%EOF\n")
+    output_root = tmp_path / "bundles"
+    _rc, first, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(first_source), "--output-dir", str(output_root)],
+        cwd=tmp_path,
+    )
+    _rc, second, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(second_source), "--output-dir", str(output_root)],
+        cwd=tmp_path,
+    )
+    bundle = Path(first["work_bundle"])
+    replacement = Path(second["work_bundle"])
+    moved_bundle = output_root / "moved-original"
+    original_read_json = workflow._read_json
+    original_source_digest = workflow._source_digest
+    original_flock = workflow.fcntl.flock
+    replacement_lock = None
+    swapped = False
+
+    def read_json_after_swap(*args, **kwargs):
+        nonlocal replacement_lock, swapped
+        if not swapped:
+            swapped = True
+            bundle.rename(moved_bundle)
+            replacement.rename(bundle)
+            replacement_lock = os.open(bundle / ".state" / "lock", os.O_RDWR)
+            original_flock(replacement_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return original_read_json(*args, **kwargs)
+
+    def digest_then_restore(*args, **kwargs):
+        nonlocal replacement_lock
+        try:
+            return original_source_digest(*args, **kwargs)
+        finally:
+            bundle.rename(replacement)
+            moved_bundle.rename(bundle)
+            original_flock(replacement_lock, fcntl.LOCK_UN)
+            os.close(replacement_lock)
+            replacement_lock = None
+
+    monkeypatch.setattr(workflow, "_read_json", read_json_after_swap)
+    monkeypatch.setattr(workflow, "_source_digest", digest_then_restore)
+    try:
+        rc, result, _stderr = invoke(
+            capsys,
+            ["resume", "--work-bundle", str(bundle), "--expected-generation", "1"],
+            cwd=tmp_path,
+        )
+    finally:
+        if replacement_lock is not None:
+            original_flock(replacement_lock, fcntl.LOCK_UN)
+            os.close(replacement_lock)
+
+    assert swapped
+    assert rc == 0
+    assert result["outcome"] == "no_progress"
+    assert result["evidence_hash"] == first["evidence_hash"]
+    assert result["evidence_hash"] != second["evidence_hash"]
+
+
+def test_inspect_rejects_unsafe_bundle_paths_and_authoritative_state(tmp_path, capsys):
+    def new_bundle(name):
+        source = tmp_path / f"{name}.pdf"
+        source.write_bytes(PDF_BYTES)
+        _rc, started, _stderr = invoke(
+            capsys,
+            ["start", "--source", str(source)],
+            cwd=tmp_path,
+        )
+        return Path(started["work_bundle"])
+
+    aliased_bundle = new_bundle("aliased")
+    alias = tmp_path / "bundle-alias"
+    alias.symlink_to(aliased_bundle, target_is_directory=True)
+    alias_rc, alias_error, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(alias)],
+        cwd=tmp_path,
+    )
+
+    linked_manifest_bundle = new_bundle("linked-manifest")
+    manifest_path = linked_manifest_bundle / "manifest.json"
+    external_manifest = tmp_path / "external-manifest.json"
+    manifest_path.replace(external_manifest)
+    manifest_path.symlink_to(external_manifest)
+    manifest_rc, manifest_error, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(linked_manifest_bundle)],
+        cwd=tmp_path,
+    )
+
+    private_schema_bundle = new_bundle("private-schema")
+    private_path = private_schema_bundle / ".state" / "private.json"
+    private_state = json.loads(private_path.read_text())
+    private_state["schema_version"] = 99
+    private_path.write_text(json.dumps(private_state))
+    private_rc, private_error, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(private_schema_bundle)],
+        cwd=tmp_path,
+    )
+
+    malformed_bundle = new_bundle("malformed-generation")
+    malformed_manifest_path = malformed_bundle / "manifest.json"
+    malformed_manifest = json.loads(malformed_manifest_path.read_text())
+    malformed_manifest["generation"] = "1"
+    malformed_manifest_path.write_text(json.dumps(malformed_manifest))
+    malformed_private_path = malformed_bundle / ".state" / "private.json"
+    malformed_private = json.loads(malformed_private_path.read_text())
+    malformed_private["generation"] = "1"
+    malformed_private_path.write_text(json.dumps(malformed_private))
+    malformed_rc, malformed_error, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(malformed_bundle)],
+        cwd=tmp_path,
+    )
+
+    assert alias_rc == manifest_rc == private_rc == malformed_rc == 4
+    assert alias_error["errors"][0]["code"] == "invalid_bundle"
+    assert manifest_error["errors"][0]["code"] == "invalid_bundle"
+    assert private_error["errors"][0]["code"] == "invalid_bundle"
+    assert malformed_error["errors"][0]["code"] == "invalid_bundle"
+
+
+def test_invalid_command_arguments_still_return_one_json_object(tmp_path, capsys):
+    cases = [
+        [],
+        ["--help"],
+        ["unknown-command"],
+        ["start"],
+        ["start", "--help"],
+        ["resume", "--work-bundle", "missing", "--expected-generation", "not-an-int"],
+    ]
+
+    for argv in cases:
+        rc, result, stderr = invoke(capsys, argv, cwd=tmp_path)
+        assert rc == 2
+        assert result["schema_version"] == 1
+        assert result["outcome"] == "error"
+        assert result["action_required"] == "correct_command_arguments"
+        assert result["errors"] == [
+            {"code": "invalid_arguments", "message": "Command arguments are invalid."}
+        ]
+        assert "invalid_arguments" in stderr
+        assert "usage:" not in stderr
+
+
+def test_start_copies_and_hashes_the_same_open_source_descriptor(
+    tmp_path, capsys, monkeypatch
+):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    replacement = tmp_path / "replacement.pdf"
+    replacement_bytes = b"%PDF-1.4\nreplacement bytes\n%%EOF\n"
+    replacement.write_bytes(replacement_bytes)
+    opened_source = tmp_path / "opened-source.pdf"
+    original_open = workflow.os.open
+    swapped = False
+
+    def open_then_swap(path, flags, *args):
+        nonlocal swapped
+        descriptor = original_open(path, flags, *args)
+        if not swapped and os.fspath(path) == str(source):
+            source.replace(opened_source)
+            replacement.replace(source)
+            swapped = True
+        return descriptor
+
+    monkeypatch.setattr(workflow.os, "open", open_then_swap)
+    rc, result, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+
+    bundle = Path(result["work_bundle"])
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert rc == 0
+    assert source.read_bytes() == replacement_bytes
+    assert (bundle / "01-source" / "source.pdf").read_bytes() == PDF_BYTES
+    assert result["evidence_hash"] == f"sha256:{PDF_SHA256}"
+    assert manifest["source"]["sha256"] == PDF_SHA256
