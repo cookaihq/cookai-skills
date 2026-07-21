@@ -9,7 +9,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [feishu-use](feishu-use/) | 安全调用飞书官方 `lark-cli` 的通用入口：检查安装与最新版、确认更新选择、核对用户/应用身份和目标账户、引导链接 + 二维码登录、增量授权后再执行 Base / 文档 / 日历等操作 | [README](feishu-use/README.md) · [SKILL.md](feishu-use/SKILL.md) |
 | [image-2](image-2/) | `gpt-image-2` 生成图片：文生图 / 图生图、11 种预设比例 + 自定义分辨率（最高 4K）、任务完成自动下载到工作区 | [README](image-2/README.md) · [SKILL.md](image-2/SKILL.md) |
 | [banana-2](banana-2/) | Nano Banana 2（`gemini-3.1-flash-image-preview`）生成 / 编辑图片：文生图 / 图生图 / 图像编辑、15 种宽高比 + `512`~`4K` 画质档、可选联网搜索 / 图片搜索增强、任务完成自动下载到工作区 | [README](banana-2/README.md) · [SKILL.md](banana-2/SKILL.md) |
-| [memoji-sticker-pack](memoji-sticker-pack/) | 从一张人物照片生成一套 Apple Memoji 风格（拟我表情）表情贴纸包：先出基准头像锁定长相，再并发生成 N 个表情（默认 16），绿幕出图 + 自动抠成透明底 PNG，产出画廊 `index.html`（编排调用 `image-2` 生成 + `upload-for-url` 上传参考图换 URL） | [README](memoji-sticker-pack/README.md) · [SKILL.md](memoji-sticker-pack/SKILL.md) |
+| [memoji-sticker-pack](memoji-sticker-pack/) | 从一张人物照片生成一套 Apple Memoji 风格（拟我表情）表情贴纸包：先出基准头像锁定长相，再并发生成 N 个表情（默认 16），绿幕出图 + 自动抠成透明底 PNG，产出画廊 `index.html`（调用 `image-2` 生成，内置参考图上传） | [README](memoji-sticker-pack/README.md) · [SKILL.md](memoji-sticker-pack/SKILL.md) |
 | [multimodal-ask](multimodal-ask/) | 指定模型做多模态理解与文本生成：分析 / 转写音视频、让指定模型读取本地或远程图片 / PDF、对混合媒体一次性推理（异步） | [README](multimodal-ask/README.md) · [SKILL.md](multimodal-ask/SKILL.md) |
 | [pdf2md_docx](pdf2md_docx/) | PDF 转 Markdown / LaTeX / DOCX：公式识别、跨页表格合并，返回 ZIP 自动解压到带时间戳的目录 | [README](pdf2md_docx/README.md) · [SKILL.md](pdf2md_docx/SKILL.md) |
 | [upload-for-url](upload-for-url/) | 通过 foxapi 文件接口把本地文件（图 / 音 / 视频 / 文档）上传成 72 小时有效的公开 URL 供 AI API 消费，也可把远程 URL 转成短链 | [README](upload-for-url/README.md) · [SKILL.md](upload-for-url/SKILL.md) |

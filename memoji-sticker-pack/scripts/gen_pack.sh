@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # memoji-sticker-pack — 从一张人物照片生成一套 Apple Memoji 风格表情贴纸包。
 #
-# 本脚本是「编排器」：不自己调生成/上传 API，而是循环调用已安装的 image-2
-# (gpt-image-2) 的 create_task.sh（生成，复用它的 key 链、轮询、下载、401 兜底），
-# 并调用已安装的 upload-for-url 的 upload.py（把本地图/URL/base64 上传到 foxapi
-# 文件接口换成 72h 公网 URL，同一把 X_API_KEY）。
+# 本脚本循环调用已安装的 image-2 (gpt-image-2) 的 create_task.sh（生成，复用它的
+# key 链、轮询、下载、401 兜底），并调用同目录内置的 upload.py（把本地图/URL/base64
+# 上传到 foxapi 文件接口换成 72h 公网 URL，同一把 X_API_KEY）。
 #
 # 参考图统一走「上传取 URL」，不再内联 base64 data URI：所有 image_urls 都是
 # foxapi CDN 链接。这样上游收到的是真实 URL，也不受命令行 ARG_MAX 限制。
@@ -19,7 +18,9 @@
 # 成功判定：create_task.sh 退出码 0 且产物文件确实存在（双重判断）。
 set -uo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+UPLOAD_PY="$SCRIPT_DIR/upload.py"
 
 # ---------------- 默认参数 ----------------
 IMAGE=""
@@ -91,7 +92,7 @@ gen_pack.sh v${VERSION} — Memoji 表情包生成器（编排 image-2）
   --resolution WxH    贴纸分辨率，默认 1024x1024
   --expressions STR   覆盖默认表情，格式 "slug:描述;slug:描述;..."（英文描述）
   --no-retry          关闭失败重试（默认每次失败生成重试 1 次）
-  --use-local-key     允许 image-2 / upload-for-url 读取各自 ~/.config/<skill>/.env
+  --use-local-key     允许 image-2 / memoji-sticker-pack 读取各自 ~/.config/<skill>/.env
   --plan              只打印将要做什么 + 预计调用次数，不真正生成（不消耗积分）
   -h, --help          显示帮助
 
@@ -180,15 +181,6 @@ find_image2() {
   return 1
 }
 
-# ---------------- 定位 upload-for-url 的 upload.py ----------------
-find_uploader() {
-  local c
-  for c in "$HOME"/.claude/skills/upload-for-url*/scripts/upload.py; do
-    [[ -f "$c" ]] && { printf '%s' "$c"; return 0; }
-  done
-  return 1
-}
-
 # ---------------- 计划模式（不消耗积分） ----------------
 if [[ $PLAN_ONLY -eq 1 ]]; then
   echo "PLAN（不消耗积分）："
@@ -213,11 +205,9 @@ if [[ $PLAN_ONLY -eq 1 ]]; then
     echo "- ⚠️ 未找到 image-2 的 create_task.sh（请确认 image-2 技能已安装）"
   fi
   if [[ $NEEDS_UPLOADER -eq 0 ]]; then
-    echo "- upload-for-url: 本次不需要"
-  elif UPLOAD_PY="$(find_uploader)"; then
-    echo "- 复用上传脚本: $UPLOAD_PY"
+    echo "- 内置上传: 本次不需要"
   else
-    echo "- ⚠️ 未找到 upload-for-url 的 upload.py（请确认 upload-for-url 技能已安装）"
+    echo "- 内置上传脚本: $UPLOAD_PY"
   fi
   echo "- 上传目标 host: $FOXAPI_BASE"
   echo "- ⚠️ 实际运行会消耗 foxapi 积分。"
@@ -229,14 +219,6 @@ CREATE_SH=""
 if [[ $NEEDS_IMAGE2 -eq 1 ]] && ! CREATE_SH="$(find_image2)"; then
   echo "错误：未找到 image-2 的 create_task.sh。" >&2
   echo "本技能依赖 image-2 (gpt-image-2) 技能，请先安装它。" >&2
-  exit 1
-fi
-
-# 只在本次确实有上传时确认 upload-for-url 存在
-UPLOAD_PY=""
-if [[ $NEEDS_UPLOADER -eq 1 ]] && ! UPLOAD_PY="$(find_uploader)"; then
-  echo "错误：未找到 upload-for-url 的 upload.py。" >&2
-  echo "本技能把参考图上传到 foxapi 换 URL，依赖 upload-for-url 技能，请先安装它。" >&2
   exit 1
 fi
 

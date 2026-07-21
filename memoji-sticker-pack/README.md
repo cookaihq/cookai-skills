@@ -2,7 +2,7 @@
 
 从**一张人物照片**生成一套 **Apple Memoji 风格（拟我表情）** 的表情贴纸包：先把照片转成一张「基准 Memoji」头像锁定长相，再以它为参考并发生成多个表情（默认 16 个），输出**透明底 PNG** + 可浏览的 `index.html` 画廊。
 
-这是一个**编排型 skill**——自己不调生成/上传 API，而是编排同仓两个兄弟技能：用 [`image-2`](../image-2/)（`gpt-image-2`）的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），用 [`upload-for-url`](../upload-for-url/) 的 `upload.py` 把参考图上传到 foxapi 换成公网 URL。**参考图统一走「上传取 URL」，不再内联 base64**——传给生成接口的 `image_urls` 全是 foxapi CDN 链接。
+本 skill 用 [`image-2`](../image-2/)（`gpt-image-2`）的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），并用自身 `scripts/upload.py` 把参考图上传到 foxapi 换成公网 URL。**参考图统一走「上传取 URL」，不再内联 base64**——传给生成接口的 `image_urls` 全是 foxapi CDN 链接。
 
 ## 效果
 
@@ -14,7 +14,7 @@
 
 ## 工作原理
 
-1. **预处理 + 上传**：本地照片用 `sips`（缺失回退 `ffmpeg`）缩到 ≤768px，再经 `upload-for-url` 上传到 foxapi 换成公网 URL（不再内联 base64）。
+1. **预处理 + 上传**：本地照片用 `sips`（缺失回退 `ffmpeg`）缩到 ≤768px，再经内置上传器上传到 foxapi 换成公网 URL（不再内联 base64）。
 2. **基准 Memoji**：`gpt-image-2` 图生图 → `base.png`，锁定人物长相与风格。
 3. **基准图上传**：`base.png` 缩到 ≤640px 上传换 URL（上传 1 次，全套表情复用该 URL）。
 4. **逐表情（并发）**：以基准图 URL 为参考、只改表情/动作，**并发提交** N 张（墙钟≈单张耗时，而非 N×）。每张失败自动重试一次再跳过。
@@ -24,8 +24,8 @@
 ## 依赖
 
 - 需要生成图片时，安装 [`image-2`](../image-2/) skill（脚本按 `~/.claude/skills/image-2*/scripts/create_task.sh` 定位）。
-- 需要上传输入图或基准图时，安装 [`upload-for-url`](../upload-for-url/) skill（脚本按 `~/.claude/skills/upload-for-url*/scripts/upload.py` 定位）。只有 `--base-url ... --mode single` 完全不需要这两个兄弟 Skill。
-- foxapi.cc 的 key（生成与上传共用 `X_API_KEY`；`--use-local-key` 时两技能各读自己的 `~/.config/<skill>/.env`，最省事是放进程 env 或 `$PWD/.env`）。
+- 上传实现已内置，无需安装额外上传 Skill。只有 `--base-url ... --mode single` 完全不需要 image-2。
+- foxapi.cc 的 key（生成与上传共用 `X_API_KEY`；`--use-local-key` 时 image-2 读 `~/.config/image-2/.env`，内置上传器读 `~/.config/memoji-sticker-pack/.env`，最省事是放进程 env 或 `$PWD/.env`）。
 - Python3 + `Pillow` + `numpy`（用于抠图）；macOS `sips`（或 `ffmpeg`）用于缩图。
 
 ## 用法
@@ -58,7 +58,7 @@ bash scripts/gen_pack.sh --image "./me.jpg" \
 | `--resolution WxH` | 贴纸分辨率，默认 `1024x1024` |
 | `--no-retry` | 关闭失败重试 |
 | `--base-url URL` | 与 `--image` 二选一。复用已有基准图 URL（跳过基准生成、可断点续跑） |
-| `--use-local-key` | 允许读 `~/.config/image-2/.env` 里的 key |
+| `--use-local-key` | 允许 image-2 读 `~/.config/image-2/.env`，内置上传器读 `~/.config/memoji-sticker-pack/.env` |
 | `--plan` | 只打印计划与调用次数，不生成、不消耗积分 |
 
 ## 成本

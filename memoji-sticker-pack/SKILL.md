@@ -9,7 +9,7 @@ description: 从一张人物照片生成一套 Apple Memoji 风格（拟我表�
 
 输入**一张人物照片**，产出一套 **Apple Memoji 风格**的表情贴纸包：先把照片转成一张「基准 Memoji」头像锁定长相，再以它为参考逐个生成多个表情（默认 16 个），最后给出透明底 PNG + 可浏览的 `index.html` 画廊。
 
-本技能是**编排器**：自己不调生成/上传 API，而是编排两个已安装的兄弟技能——用 **image-2 (gpt-image-2)** 的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），用 **upload-for-url** 的 `upload.py` 把参考图上传到 foxapi 文件接口换成 72h 公网 URL。**参考图统一走「上传取 URL」，不再内联 base64 data URI**：传给生成接口的 `image_urls` 全是 foxapi CDN 链接。两者共用同一把 `X_API_KEY`、同一 host（`api.foxapi.cc`，可用 `FOXAPI_BASE_URL` 覆盖）。
+本技能用 **image-2 (gpt-image-2)** 的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），并用自身 `scripts/upload.py` 把参考图上传到 foxapi 文件接口换成 72h 公网 URL。**参考图统一走「上传取 URL」，不再内联 base64 data URI**：传给生成接口的 `image_urls` 全是 foxapi CDN 链接。生成与上传共用同一把 `X_API_KEY`、同一 host（`api.foxapi.cc`，可用 `FOXAPI_BASE_URL` 覆盖）。
 
 ## 何时使用
 
@@ -27,9 +27,9 @@ description: 从一张人物照片生成一套 Apple Memoji 风格（拟我表�
 ## 依赖
 
 - 需要生成图片时，已安装 **image-2** 技能（`~/.claude/skills/image-2*/scripts/create_task.sh`）。
-- 需要上传输入图或基准图时，已安装 **upload-for-url** 技能（`~/.claude/skills/upload-for-url*/scripts/upload.py`）。只有 `--base-url ... --mode single` 完全不需要这两个兄弟 Skill。
+- 上传实现已内置在 `scripts/upload.py`，无需安装额外上传 Skill。只有 `--base-url ... --mode single` 完全不需要 image-2。
 - 配好 **foxapi.cc 的 key**（生成与上传共用，环境变量 `X_API_KEY`，或工作目录下 `.env` / `.env.local`）。
-  - ⚠️ 用 `--use-local-key` 时，image-2 读 `~/.config/image-2/.env`、upload-for-url 读 `~/.config/upload-for-url/.env`（本仓约定每个 skill 各自持久化配置）。若只在其中一个配了 key，另一步会因缺 key 失败——**最省事是把 key 放进程 env 或 `$PWD/.env`，两步都能读到**。
+  - ⚠️ 用 `--use-local-key` 时，image-2 读 `~/.config/image-2/.env`，本技能内置上传器读 `~/.config/memoji-sticker-pack/.env`（本仓约定每个 skill 各自持久化配置）。若只在其中一个配了 key，另一步会因缺 key 失败——**最省事是把 key 放进程 env 或 `$PWD/.env`，两步都能读到**。
 - macOS 自带 `sips`（用于缩图；缺失时回退 `ffmpeg`）。
 
 ## ⚠️ 成本与确认（重要）
@@ -93,7 +93,7 @@ bash "$SKILL_DIR/scripts/gen_pack.sh" \
 | `--resolution WxH` | 贴纸分辨率，默认 `1024x1024` |
 | `--no-retry` | 关闭失败重试 |
 | `--base-url URL` | 与 `--image` 二选一。复用已有基准图，跳过基准生成 |
-| `--use-local-key` | 允许读 `~/.config/image-2/.env` 里的 key |
+| `--use-local-key` | 允许 image-2 读 `~/.config/image-2/.env`，内置上传器读 `~/.config/memoji-sticker-pack/.env` |
 | `--plan` | 只打印计划与调用次数，不生成、不消耗积分 |
 
 ## 默认 16 表情
@@ -119,10 +119,9 @@ memoji-<name>/
 ## 排错
 
 - **"未找到 image-2 的 create_task.sh"**：先装 image-2 技能。
-- **"未找到 upload-for-url 的 upload.py"**：先装 upload-for-url 技能（参考图上传换 URL 靠它）。
 - **上传失败**：看 `<outdir>/.log-upload.txt`。
-  - `403` + 响应体 `error code: 1010` = Cloudflare 拦截了非浏览器 UA；upload-for-url 的 `client.py` 已内置浏览器 UA 修复，若仍出现说明装的是旧版 upload-for-url，更新它。
-  - `401` = key 无效/缺失；确认 `X_API_KEY` 可被 upload-for-url 读到（见「依赖」里 `--use-local-key` 的配置目录说明）。
+  - `403` + 响应体 `error code: 1010` = Cloudflare 拦截了非浏览器 UA；本技能的 `scripts/client.py` 已使用浏览器 UA，若仍出现请更新本技能并检查网关配置。
+  - `401` = key 无效/缺失；确认 `X_API_KEY` 可被内置上传器读到（见「依赖」里 `--use-local-key` 的配置目录说明）。
   - `413` = 文件过大；脚本已缩到 ≤768px，正常不会触发。
 - **基准生成就失败**：多半是 key/积分问题，看 `.log-base.txt`，按 image-2 的报错处理（401 key 无效 / 402 余额不足 / 429 限流）。
 - **个别表情总失败**：手势类（OK/点赞/比心）偶尔不稳，可改 `--expressions` 换个描述单独补跑。

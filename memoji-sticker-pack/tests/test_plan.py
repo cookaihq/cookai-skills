@@ -27,6 +27,7 @@ def test_pack_plan_counts_generation_retries_and_uploads(tmp_path):
     assert "image-2 生成调用总数（无重试）: 3 次" in result.stdout
     assert "最大生成调用数（每次失败生成最多重试 1 次）: 6 次" in result.stdout
     assert "文件上传调用: 2 次" in result.stdout
+    assert "内置上传脚本:" in result.stdout
 
 
 def test_no_retry_plan_omits_retry_maximum(tmp_path):
@@ -73,7 +74,7 @@ def test_reused_base_single_needs_no_generation_or_upload_dependency(tmp_path):
     assert "image-2 生成调用总数（无重试）: 0 次" in result.stdout
     assert "文件上传调用: 0 次" in result.stdout
     assert "image-2: 本次不需要" in result.stdout
-    assert "upload-for-url: 本次不需要" in result.stdout
+    assert "内置上传: 本次不需要" in result.stdout
 
 
 def test_reused_base_single_runs_without_sibling_skills(tmp_path):
