@@ -13,13 +13,16 @@ import stat
 import sys
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
+import aihub_upload
 import bundle as bundle_module
+import config as config_module
 import pdf_source
 import preflight as preflight_module
 import settings as settings_module
+import source_staging as source_staging_module
 
 
 SCHEMA_VERSION = 1
@@ -32,6 +35,7 @@ SUPPORTED_CONVERSION_STATES = frozenset(
         "preflight_warning",
         "preflight_blocked",
         "ready_to_submit",
+        "awaiting_user",
         "recoverable_error",
         "terminal_error",
     }
@@ -93,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     advance.add_argument(
         "--render-dpi", type=int, default=preflight_module.DEFAULT_RENDER_DPI
     )
+    advance.add_argument("--use-local-key", action="store_true")
     record = subcommands.add_parser("record", add_help=False)
     record_commands = record.add_subparsers(
         dest="record_command", required=True, parser_class=JsonArgumentParser
@@ -114,6 +119,15 @@ def _parser() -> argparse.ArgumentParser:
     record_decision.add_argument("--evidence-hash", required=True)
     record_decision.add_argument("--decision", choices=("accept", "decline"), required=True)
     record_decision.add_argument("--basis", required=True)
+    record_staging = record_commands.add_parser("source-staging", add_help=False)
+    record_staging.add_argument(
+        "--work-bundle", "--bundle", dest="work_bundle", required=True
+    )
+    record_staging.add_argument("--expected-generation", required=True, type=int)
+    record_staging.add_argument("--action-id", required=True)
+    record_staging.add_argument("--evidence-hash", required=True)
+    record_staging.add_argument("--decision", choices=("retry", "wait"), required=True)
+    record_staging.add_argument("--basis", required=True)
     resume = subcommands.add_parser("resume", add_help=False)
     resume.add_argument("--work-bundle", "--bundle", dest="work_bundle", required=True)
     resume.add_argument("--expected-generation", required=True, type=int)
@@ -832,7 +846,12 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     if (
         type(manifest.get("schema_version")) is not int
         or manifest["schema_version"] != SCHEMA_VERSION
-        or set(manifest) not in {frozenset(required), frozenset({*required, "preflight"})}
+        or set(manifest)
+        not in {
+            frozenset(required),
+            frozenset({*required, "preflight"}),
+            frozenset({*required, "preflight", "source_staging"}),
+        }
         or type(manifest.get("generation")) is not int
         or manifest["generation"] < 1
         or manifest.get("conversion_state") not in SUPPORTED_CONVERSION_STATES
@@ -895,6 +914,7 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             action_required="repair_or_restore_work_bundle",
             context=state_context,
         ) from None
+    has_source_staging = "source_staging" in manifest
     if (
         type(private_state.get("schema_version")) is not int
         or private_state["schema_version"] != SCHEMA_VERSION
@@ -902,8 +922,17 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         != {"schema_version", "generation", "source_uploads", "result_urls"}
         or type(private_state.get("generation")) is not int
         or private_state["generation"] != manifest["generation"]
-        or private_state.get("source_uploads") != []
         or private_state.get("result_urls") != []
+        or (
+            not has_source_staging
+            and private_state.get("source_uploads") != []
+        )
+        or (
+            has_source_staging
+            and not source_staging_module.valid_private_state(
+                private_state, manifest
+            )
+        )
     ):
         raise WorkflowError(
             "invalid_bundle",
@@ -913,12 +942,18 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             context=state_context,
         )
     valid_history = (
-        bundle_module.valid_settings_history(history, manifest, source.get("sha256"))
-        or preflight_module.valid_preflight_history(
-            history, manifest, private_state
-        )
-        or preflight_module.valid_pending_preflight_history(
-            history, manifest, private_state
+        source_staging_module.valid_history(history, manifest, private_state)
+        if has_source_staging
+        else (
+            bundle_module.valid_settings_history(
+                history, manifest, source.get("sha256")
+            )
+            or preflight_module.valid_preflight_history(
+                history, manifest, private_state
+            )
+            or preflight_module.valid_pending_preflight_history(
+                history, manifest, private_state
+            )
         )
     )
     if not valid_history:
@@ -959,6 +994,10 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             ) from None
     _assert_bundle_descriptors_current(bundle, descriptors)
     print(f"[pdf2markdown] inspected work bundle {bundle.name}", file=sys.stderr)
+    if has_source_staging:
+        return source_staging_module.result_from_manifest(
+            manifest, work_bundle=str(bundle), outcome="inspected"
+        )
     if manifest["conversion_state"] != "preparing":
         return preflight_module.result_from_manifest(
             manifest, work_bundle=str(bundle), outcome="inspected"
@@ -1068,7 +1107,15 @@ def _assert_frozen_source_before_recovery(
         )
 
 
-def _advance(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
+def _advance(
+    args,
+    *,
+    cwd: Path,
+    environ: dict[str, str],
+    config_home: Path,
+    transport,
+    now,
+) -> dict:
     if not preflight_module.MIN_RENDER_DPI <= args.render_dpi <= (
         preflight_module.MAX_RENDER_DPI
     ):
@@ -1093,6 +1140,46 @@ def _advance(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
                 manifest=recovery_manifest,
                 work_bundle=str(bundle),
             )
+            try:
+                recovered_staging = source_staging_module.recover_interrupted_attempt(
+                    descriptors=descriptors,
+                    manifest=recovery_manifest,
+                    private_state=_read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    ),
+                    at=operation_at,
+                    expected_generation=args.expected_generation,
+                )
+            except (
+                bundle_module.BundleStateError,
+                source_staging_module.SourceStagingError,
+            ) as exc:
+                raise WorkflowError(
+                    getattr(exc, "code", "integrity_violation"),
+                    "A pending source staging operation cannot be recovered safely.",
+                    return_code=(5 if getattr(exc, "code", None) == "generation_conflict" else 4),
+                    action_required=(
+                        "inspect_current_generation"
+                        if getattr(exc, "code", None) == "generation_conflict"
+                        else "repair_or_restore_work_bundle"
+                    ),
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            if recovered_staging is not None:
+                recovered_manifest, _recovered_private = recovered_staging
+                _assert_bundle_descriptors_current(bundle, descriptors)
+                inspected = _inspect_open_bundle(bundle, descriptors)
+                recovered_state = recovered_manifest["source_staging"]["state"]
+                result = source_staging_module.result_from_manifest(
+                    recovered_manifest,
+                    work_bundle=str(bundle),
+                    outcome=recovered_state,
+                )
+                print(
+                    f"[pdf2markdown] {recovered_state} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
             try:
                 history = bundle_module.read_history(state_fd=descriptors["state"])
                 pending_baseline = (
@@ -1247,6 +1334,97 @@ def _advance(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
                     context=inspected,
                 )
             manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
+            source_staging = manifest.get("source_staging")
+            if (
+                isinstance(source_staging, dict)
+                and source_staging.get("state") == "source_upload_started"
+            ):
+                private_state = _read_json(
+                    "private.json", dir_fd=descriptors["state"]
+                )
+                try:
+                    updated_manifest, _updated_private = (
+                        source_staging_module.finish_attempt(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=private_state,
+                            result=aihub_upload.UploadResult(
+                                "source_upload_unknown",
+                                None,
+                                "interrupted_before_result_commit",
+                                None,
+                                None,
+                            ),
+                            at=operation_at,
+                            expires_at=None,
+                        )
+                    )
+                except source_staging_module.SourceStagingError as exc:
+                    raise WorkflowError(
+                        exc.code,
+                        exc.message,
+                        return_code=4,
+                        action_required="repair_or_restore_work_bundle",
+                        context=inspected,
+                    ) from None
+                result = source_staging_module.result_from_manifest(
+                    updated_manifest,
+                    work_bundle=str(bundle),
+                    outcome="source_upload_unknown",
+                )
+                print(
+                    f"[pdf2markdown] source_upload_unknown for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if (
+                isinstance(source_staging, dict)
+                and source_staging.get("state")
+                in {
+                    "source_upload_rejected",
+                    "source_upload_unknown",
+                    "source_upload_expired",
+                }
+            ):
+                outcome = source_staging["state"]
+                if (
+                    source_staging.get("state") == "source_upload_unknown"
+                    and source_staging.get("wait_until") is not None
+                ):
+                    private_state = _read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    )
+                    wait_moment = _moment(now)
+                    try:
+                        if source_staging_module.unknown_wait_has_elapsed(
+                            manifest=manifest,
+                            now=wait_moment,
+                        ):
+                            manifest = source_staging_module.renew_unknown_action(
+                                descriptors=descriptors,
+                                manifest=manifest,
+                                private_state=private_state,
+                                at=_isoformat(wait_moment),
+                            )
+                            outcome = "source_upload_unknown"
+                        else:
+                            outcome = "source_upload_waiting"
+                    except source_staging_module.SourceStagingError as exc:
+                        raise WorkflowError(
+                            exc.code,
+                            exc.message,
+                            return_code=4,
+                            action_required="repair_or_restore_work_bundle",
+                            context=inspected,
+                        ) from None
+                result = source_staging_module.result_from_manifest(
+                    manifest, work_bundle=str(bundle), outcome=outcome
+                )
+                print(
+                    f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
             if manifest["conversion_state"] == "preflight_pending":
                 result = preflight_module.result_from_manifest(
                     manifest,
@@ -1261,13 +1439,163 @@ def _advance(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
             stable_outcomes = {
                 "preflight_warning": "preflight_warning",
                 "preflight_blocked": "preflight_blocked",
-                "ready_to_submit": "ready_to_submit",
                 "terminal_error": "preflight_warning_declined",
             }
             if manifest["conversion_state"] in stable_outcomes:
                 outcome = stable_outcomes[manifest["conversion_state"]]
                 result = preflight_module.result_from_manifest(
                     manifest, work_bundle=str(bundle), outcome=outcome
+                )
+                print(
+                    f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if manifest["conversion_state"] == "ready_to_submit":
+                source_staging = manifest.get("source_staging")
+                if (
+                    isinstance(source_staging, dict)
+                    and source_staging.get("state") == "source_upload_ready"
+                ):
+                    ready_private = _read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    )
+                    try:
+                        expired = source_staging_module.ready_is_expired(
+                            manifest=manifest,
+                            private_state=ready_private,
+                            now=_moment(now),
+                        )
+                        if expired:
+                            manifest, ready_private = (
+                                source_staging_module.expire_ready_attempt(
+                                    descriptors=descriptors,
+                                    manifest=manifest,
+                                    private_state=ready_private,
+                                    at=_isoformat(_moment(now)),
+                                )
+                            )
+                    except source_staging_module.SourceStagingError as exc:
+                        raise WorkflowError(
+                            exc.code,
+                            exc.message,
+                            return_code=4,
+                            action_required="repair_or_restore_work_bundle",
+                            context=inspected,
+                        ) from None
+                    if expired:
+                        if (
+                            manifest["settings_snapshot"]["interaction_mode"]
+                            == "auto"
+                        ):
+                            pending = manifest["source_staging"]["pending_action"]
+                            manifest = source_staging_module.commit_decision(
+                                descriptors=descriptors,
+                                manifest=manifest,
+                                private_state=ready_private,
+                                expected_generation=manifest["generation"],
+                                action_id=pending["action_id"],
+                                evidence_hash=pending["evidence_hash"],
+                                decision="retry",
+                                basis="interaction_mode_auto",
+                                at=_isoformat(_moment(now)),
+                            )
+                            source_staging = manifest["source_staging"]
+                        else:
+                            result = source_staging_module.result_from_manifest(
+                                manifest,
+                                work_bundle=str(bundle),
+                                outcome="source_upload_expired",
+                            )
+                            print(
+                                f"[pdf2markdown] source_upload_expired for work bundle {bundle.name}",
+                                file=sys.stderr,
+                            )
+                            return result
+                    else:
+                        result = source_staging_module.result_from_manifest(
+                            manifest,
+                            work_bundle=str(bundle),
+                            outcome="source_upload_ready",
+                        )
+                        print(
+                            f"[pdf2markdown] {result['outcome']} for work bundle {bundle.name}",
+                            file=sys.stderr,
+                        )
+                        return result
+                try:
+                    credential = config_module.resolve_api_key(
+                        environ=environ,
+                        cwd=cwd,
+                        config_home=config_home,
+                        use_local_key=getattr(args, "use_local_key", False),
+                    )
+                except config_module.ConfigError:
+                    raise WorkflowError(
+                        "configuration_invalid",
+                        "AIHUB_API_KEY is missing or its selected configuration source is invalid.",
+                        return_code=6,
+                        action_required="configure_aihub_api_key",
+                        context=inspected,
+                    ) from None
+                private_state = _read_json(
+                    "private.json", dir_fd=descriptors["state"]
+                )
+                request_moment = _moment(now)
+                request_at = _isoformat(request_moment)
+                try:
+                    started_manifest, started_private, _attempt = (
+                        source_staging_module.begin_attempt(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=private_state,
+                            credential=credential,
+                            at=request_at,
+                        )
+                    )
+                    source_descriptor = source_staging_module.open_frozen_source(
+                        source_fd=descriptors["source"], manifest=started_manifest
+                    )
+                    try:
+                        upload_result = aihub_upload.upload_open_source(
+                            source_fd=source_descriptor,
+                            source_sha256=started_manifest["source"]["sha256"],
+                            source_size=started_manifest["source"]["size_bytes"],
+                            api_key=credential.value,
+                            transport=transport,
+                        )
+                    finally:
+                        os.close(source_descriptor)
+                    completed_moment = _moment(now)
+                    expires_at = (
+                        _isoformat(completed_moment + timedelta(hours=72))
+                        if upload_result.state == "source_upload_ready"
+                        else None
+                    )
+                    updated_manifest, _updated_private = (
+                        source_staging_module.finish_attempt(
+                            descriptors=descriptors,
+                            manifest=started_manifest,
+                            private_state=started_private,
+                            result=upload_result,
+                            at=_isoformat(completed_moment),
+                            expires_at=expires_at,
+                        )
+                    )
+                except (source_staging_module.SourceStagingError, aihub_upload.UploadError) as exc:
+                    raise WorkflowError(
+                        getattr(exc, "code", "integrity_violation"),
+                        "The frozen source could not be staged safely.",
+                        return_code=4,
+                        action_required="repair_or_restore_work_bundle",
+                        context=inspected,
+                    ) from None
+                _assert_bundle_descriptors_current(bundle, descriptors)
+                outcome = upload_result.state
+                result = source_staging_module.result_from_manifest(
+                    updated_manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
                 )
                 print(
                     f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
@@ -1415,6 +1743,45 @@ def _record(args, *, cwd: Path, now) -> dict:
                 work_bundle=str(bundle),
             )
             try:
+                recovered_staging = source_staging_module.recover_interrupted_attempt(
+                    descriptors=descriptors,
+                    manifest=recovery_manifest,
+                    private_state=_read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    ),
+                    at=_isoformat(_moment(now)),
+                    expected_generation=args.expected_generation,
+                )
+            except source_staging_module.SourceStagingError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    "A pending source staging operation cannot be recovered safely.",
+                    return_code=(5 if exc.code == "generation_conflict" else 4),
+                    action_required=(
+                        "inspect_current_generation"
+                        if exc.code == "generation_conflict"
+                        else "repair_or_restore_work_bundle"
+                    ),
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            if recovered_staging is not None:
+                recovered_manifest, _recovered_private = recovered_staging
+                state = recovered_manifest["source_staging"]["state"]
+                outcome = {
+                    "source_upload_not_started": "source_upload_retry_authorized",
+                    "source_upload_unknown": "source_upload_unknown",
+                }.get(state, state)
+                result = source_staging_module.result_from_manifest(
+                    recovered_manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
+                print(
+                    f"[pdf2markdown] recovered {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            try:
                 recovered_operation = preflight_module.recover_pending_operation(
                     descriptors=descriptors, at=_isoformat(_moment(now))
                 )
@@ -1498,7 +1865,19 @@ def _record(args, *, cwd: Path, now) -> dict:
                 private_state = _read_json(
                     "private.json", dir_fd=descriptors["state"]
                 )
-                if args.record_command == "preflight":
+                if args.record_command == "source-staging":
+                    updated_manifest = source_staging_module.commit_decision(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=private_state,
+                        expected_generation=args.expected_generation,
+                        action_id=args.action_id,
+                        evidence_hash=args.evidence_hash,
+                        decision=args.decision,
+                        basis=args.basis,
+                        at=_isoformat(_moment(now)),
+                    )
+                elif args.record_command == "preflight":
                     payload = preflight_module.load_record_input(
                         Path(args.input), cwd=cwd
                     )
@@ -1524,6 +1903,14 @@ def _record(args, *, cwd: Path, now) -> dict:
                         basis=args.basis,
                         at=_isoformat(_moment(now)),
                     )
+            except source_staging_module.SourceStagingError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=5,
+                    action_required="inspect_current_generation",
+                    context=inspected,
+                ) from None
             except preflight_module.PreflightError as exc:
                 action_conflicts = {
                     "preflight_action_mismatch",
@@ -1544,7 +1931,13 @@ def _record(args, *, cwd: Path, now) -> dict:
                     context=inspected,
                 ) from None
             _assert_bundle_descriptors_current(bundle, descriptors)
-            if args.record_command == "decision":
+            if args.record_command == "source-staging":
+                outcome = (
+                    "source_upload_retry_authorized"
+                    if args.decision == "retry"
+                    else "source_upload_waiting"
+                )
+            elif args.record_command == "decision":
                 outcome = (
                     "preflight_warning_accepted"
                     if updated_manifest["conversion_state"] == "ready_to_submit"
@@ -1563,10 +1956,18 @@ def _record(args, *, cwd: Path, now) -> dict:
                 outcome = "preflight_warning_auto_accepted"
             else:
                 outcome = "preflight_recorded"
-            result = preflight_module.result_from_manifest(
-                updated_manifest,
-                work_bundle=str(bundle),
-                outcome=outcome,
+            result = (
+                source_staging_module.result_from_manifest(
+                    updated_manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
+                if "source_staging" in updated_manifest
+                else preflight_module.result_from_manifest(
+                    updated_manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
             )
             print(
                 f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
@@ -1673,21 +2074,74 @@ def _exclusive_bundle_lock(bundle: Path):
                 os.close(descriptor)
 
 
-def _resume(args, *, cwd: Path, now) -> dict:
+def _resume(
+    args,
+    *,
+    cwd: Path,
+    environ: dict[str, str],
+    config_home: Path,
+    transport,
+    now,
+) -> dict:
     bundle = _canonical_bundle_path(args.work_bundle, cwd)
+    advance_after_unlock = False
     with _exclusive_bundle_lock(bundle) as locked_descriptors:
         root_descriptor, state_descriptor, _lock_descriptor = locked_descriptors
         resume_manifest = _read_json("manifest.json", dir_fd=root_descriptor)
+        resume_private = _read_json("private.json", dir_fd=state_descriptor)
+        try:
+            recovered_staging = source_staging_module.recover_interrupted_attempt(
+                descriptors={"root": root_descriptor, "state": state_descriptor},
+                manifest=resume_manifest,
+                private_state=resume_private,
+                at=_isoformat(_moment(now)),
+                expected_generation=args.expected_generation,
+            )
+        except source_staging_module.SourceStagingError as exc:
+            raise WorkflowError(
+                exc.code,
+                "A pending source staging operation cannot be recovered safely.",
+                return_code=(5 if exc.code == "generation_conflict" else 4),
+                action_required=(
+                    "inspect_current_generation"
+                    if exc.code == "generation_conflict"
+                    else "repair_or_restore_work_bundle"
+                ),
+                context={"work_bundle": str(bundle)},
+            ) from None
+        if recovered_staging is not None:
+            recovered_manifest, _recovered_private = recovered_staging
+            state = recovered_manifest["source_staging"]["state"]
+            result = source_staging_module.result_from_manifest(
+                recovered_manifest,
+                work_bundle=str(bundle),
+                outcome=state,
+            )
+            print(
+                f"[pdf2markdown] recovered {state} for work bundle {bundle.name}",
+                file=sys.stderr,
+            )
+            return result
+        if "source_staging" in resume_manifest:
+            prefix_state_resolver = lambda history: source_staging_module.resolve_history_state(
+                history,
+                manifest_template=resume_manifest,
+                private_template=resume_private,
+            )
+            manifest_transform = source_staging_module.apply_settings_override_transition
+        elif "preflight" in resume_manifest:
+            prefix_state_resolver = preflight_module.reduce_preflight_history
+            manifest_transform = None
+        else:
+            prefix_state_resolver = None
+            manifest_transform = None
         try:
             recovered_override = bundle_module.recover_pending_settings_override(
                 root_fd=root_descriptor,
                 state_fd=state_descriptor,
                 committed_at=_isoformat(_moment(now)),
-                prefix_state_resolver=(
-                    preflight_module.reduce_preflight_history
-                    if "preflight" in resume_manifest
-                    else None
-                ),
+                prefix_state_resolver=prefix_state_resolver,
+                manifest_transform=manifest_transform,
             )
         except bundle_module.BundleStateError:
             raise WorkflowError(
@@ -1757,8 +2211,15 @@ def _resume(args, *, cwd: Path, now) -> dict:
                     overridden_fields=overridden_fields,
                     at=recorded_at,
                     state_validator=(
-                        preflight_module.valid_preflight_history
+                        source_staging_module.valid_history
+                        if "source_staging" in manifest
+                        else preflight_module.valid_preflight_history
                         if "preflight" in manifest
+                        else None
+                    ),
+                    manifest_transform=(
+                        source_staging_module.apply_settings_override_transition
+                        if "source_staging" in manifest
                         else None
                     ),
                 )
@@ -1778,9 +2239,28 @@ def _resume(args, *, cwd: Path, now) -> dict:
                 file=sys.stderr,
             )
             return result
-        result["outcome"] = "no_progress"
-        print(f"[pdf2markdown] no_progress for work bundle {bundle.name}", file=sys.stderr)
-        return result
+        if (
+            result["conversion_state"] == "ready_to_submit"
+            or result.get("source_upload_state") is not None
+        ):
+            advance_after_unlock = True
+        else:
+            result["outcome"] = "no_progress"
+            print(
+                f"[pdf2markdown] no_progress for work bundle {bundle.name}",
+                file=sys.stderr,
+            )
+            return result
+    if advance_after_unlock:
+        return _advance(
+            args,
+            cwd=cwd,
+            environ=environ,
+            config_home=config_home,
+            transport=transport,
+            now=now,
+        )
+    raise AssertionError("resume progression was not resolved")
 
 
 def _settings(
@@ -1902,19 +2382,37 @@ def main(
             result = _inspect(args, cwd=invocation_cwd)
         elif args.command == "advance":
             result = _advance(
-                args, cwd=invocation_cwd, environ=environment, now=now
+                args,
+                cwd=invocation_cwd,
+                environ=environment,
+                config_home=settings_home,
+                transport=transport,
+                now=now,
             )
         elif args.command == "record":
             result = _record(args, cwd=invocation_cwd, now=now)
         elif args.command == "resume":
-            if args.visual_capability is not None and not any(
+            has_resume_overrides = any(
                 value is not None for value in _settings_cli(args).values()
-            ):
+            )
+            if not has_resume_overrides and args.visual_capability is not None:
                 result = _advance(
-                    args, cwd=invocation_cwd, environ=environment, now=now
+                    args,
+                    cwd=invocation_cwd,
+                    environ=environment,
+                    config_home=settings_home,
+                    transport=transport,
+                    now=now,
                 )
             else:
-                result = _resume(args, cwd=invocation_cwd, now=now)
+                result = _resume(
+                    args,
+                    cwd=invocation_cwd,
+                    environ=environment,
+                    config_home=settings_home,
+                    transport=transport,
+                    now=now,
+                )
         else:
             result = _settings(
                 args,

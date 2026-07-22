@@ -1,11 +1,11 @@
 ---
 name: pdf2markdown
-description: Create and preflight a private, recoverable PDF-to-Markdown work bundle with frozen settings, a source inventory, and full-page reference images. Use when a user asks to begin or resume a verifiable workflow from one local PDF or public HTTPS PDF URL, inspect every source page before conversion, or configure confirm or auto behavior.
+description: Create, preflight, and temporarily stage a private, recoverable PDF-to-Markdown work bundle with frozen settings, a source inventory, and full-page reference images. Use when a user asks to begin or resume a verifiable workflow from one local PDF or public HTTPS PDF URL, inspect every source page before conversion, or prepare the frozen PDF for Doc2X without an external uploader.
 ---
 
 # PDF to Markdown
 
-Establish a durable work bundle and complete its preflight gate before any upload or paid conversion. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
+Establish a durable work bundle, complete its preflight gate, and use the built-in AIHub source-staging upload before any paid conversion. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
 
 ## Manage Settings
 
@@ -100,7 +100,46 @@ python3 scripts/workflow.py record decision \
   --basis <non-empty-reason>
 ```
 
-In `auto` mode, a warning records `interaction_mode_auto` acceptance and advances without a decision action. A block never advances in either mode. The furthest state implemented here is `ready_to_submit`; no source upload or conversion request is sent.
+In `auto` mode, a warning records `interaction_mode_auto` acceptance and advances without a decision action. A block never advances in either mode. A successful preflight reaches `ready_to_submit`; run `advance` or `resume` again to perform source staging.
+
+## Stage The Frozen Source
+
+Configure `AIHUB_API_KEY` for the staging invocation. Resolve exactly one non-empty value in this order: process environment, `$PWD/.env.local`, `$PWD/.env`, then `~/.config/pdf2markdown/.env` only with `--use-local-key`. Dotenv values are literal and are never shell-expanded. The selected attempt records a stable non-secret source locator and key fingerprint; it never records the key and never falls back to a lower source after 401.
+
+Run either command after preflight reaches `ready_to_submit`:
+
+```bash
+python3 scripts/workflow.py advance \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  --visual-capability available \
+  [--use-local-key]
+
+python3 scripts/workflow.py resume \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  [--use-local-key]
+```
+
+Staging sends one non-retried, non-redirected POST to the fixed AIHub stream endpoint. It streams the same `source.pdf` bytes, sends `auto_cleanup=false`, and never calls `upload-for-url`, `s3-upload`, or another uploader. Read [references/api-guide.md](references/api-guide.md) for the verified upstream contract and conservative result classification.
+
+`source_upload_ready` keeps the temporary URL and locally derived 72-hour expiry only in `.state/private.json`. Before expiry, later `advance` or `resume` calls reuse it without reading a key or sending another POST. Expiry preserves the old attempt and URL evidence. Confirm mode returns a bound retry action; auto mode appends a new attempt and performs one replacement upload without an intermediate question.
+
+HTTP 403 is `source_upload_rejected` for this fixed `auto_cleanup=false` request. Repair storage capacity, then apply the returned retry action. Network interruption, redirects, 401, 413, 429, 5xx, abnormal 2xx, and invalid URLs are `source_upload_unknown` and are never replayed automatically.
+
+In confirm mode, resolve a returned staging action through the same workflow boundary:
+
+```bash
+python3 scripts/workflow.py record source-staging \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  --action-id <action-id> \
+  --evidence-hash <sha256-evidence> \
+  --decision retry|wait \
+  --basis <non-empty-reason>
+```
+
+Use `retry` only after accepting the disclosed possibility that an unknown attempt left a remote file, or after repairing a rejected/expired attempt. It appends a new attempt; it never overwrites history. `wait` is valid only for unknown results. It waits through a conservative 72-hour window, does not claim remote deletion, and issues a fresh bound decision action when the window elapses. Auto mode keeps unknown and rejected results stopped.
 
 ## Inspect Saved State
 
@@ -129,9 +168,9 @@ python3 scripts/workflow.py resume \
   [--use-local-key]
 ```
 
-Resume without an explicit setting override from the saved work-bundle snapshot; ignore later environment, dotenv, home, and persistent-settings drift. A valid explicit override creates the next generation and appends its evidence without changing the old history. `--use-local-key` authorizes only the current invocation and does not re-resolve snapshotted non-secret settings.
+Resume without an explicit setting override from the saved work-bundle snapshot; ignore later non-secret environment, dotenv, home, and persistent-settings drift. A valid explicit override creates the next generation and appends its evidence without changing the old history. `--use-local-key` authorizes only the current invocation. Source staging resolves a key only when a new attempt is about to start; ready and unknown recovery never silently chooses another key.
 
-Handle `generation_conflict` by inspecting again before retrying. Handle `bundle_locked` by waiting for the active writer to finish. A resume without overrides returns `outcome: no_progress`. Supplying `--visual-capability` makes `resume` use the same deterministic preflight progression as `advance`; it still stops at an action or `ready_to_submit`.
+Handle `generation_conflict` by inspecting again before retrying. Handle `bundle_locked` by waiting for the active writer to finish. Before preflight is ready, a resume without overrides returns `outcome: no_progress`. Supplying `--visual-capability` makes `resume` use the same deterministic preflight progression as `advance`; once preflight is ready, resume can stage or recover the source without rerunning visual work.
 
 ## Interpret Results
 
@@ -146,4 +185,4 @@ Expect exactly one versioned JSON object on stdout for every supported command a
 
 ## Scope Boundary
 
-Use these commands to manage settings, freeze the source PDF, generate the page baseline, and complete the preflight gate. Do not claim that Markdown was generated. This implementation does not yet support AIHub source staging, Doc2X calls, result archives, content review, publication plans, or image publication. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
+Use these commands to manage settings, freeze the source PDF, generate the page baseline, complete the preflight gate, and temporarily stage the frozen source for Doc2X. Do not claim that Markdown was generated. This implementation does not yet create or poll Doc2X tasks, download result archives, perform content review, create publication plans, or publish images. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
