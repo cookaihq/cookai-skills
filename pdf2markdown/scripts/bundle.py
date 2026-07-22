@@ -209,7 +209,7 @@ def _valid_manifest_base(manifest) -> bool:
     )
 
 
-def _valid_private_state(private_state) -> bool:
+def _valid_private_state_base(private_state) -> bool:
     return (
         isinstance(private_state, dict)
         and set(private_state)
@@ -218,6 +218,14 @@ def _valid_private_state(private_state) -> bool:
         and private_state["schema_version"] == SCHEMA_VERSION
         and type(private_state.get("generation")) is int
         and private_state["generation"] >= 1
+        and isinstance(private_state.get("source_uploads"), list)
+        and isinstance(private_state.get("result_urls"), list)
+    )
+
+
+def _valid_private_state(private_state) -> bool:
+    return (
+        _valid_private_state_base(private_state)
         and private_state.get("source_uploads") == []
         and private_state.get("result_urls") == []
     )
@@ -404,6 +412,15 @@ def _manifest_after_settings_override(
             updated_pending["generation"] = generation
             updated_preflight["pending_action"] = updated_pending
         updated["preflight"] = updated_preflight
+    source_staging = manifest.get("source_staging")
+    if isinstance(source_staging, dict):
+        updated_staging = dict(source_staging)
+        pending_action = source_staging.get("pending_action")
+        if isinstance(pending_action, dict):
+            updated_pending = dict(pending_action)
+            updated_pending["generation"] = generation
+            updated_staging["pending_action"] = updated_pending
+        updated["source_staging"] = updated_staging
     return updated
 
 
@@ -413,8 +430,11 @@ def apply_settings_override_events(
     intent: dict,
     prepared: dict,
     committed: dict,
+    manifest_transform=None,
 ) -> tuple[dict, dict] | None:
-    if not isinstance(current_manifest, dict) or not _valid_private_state(current_private):
+    if not isinstance(current_manifest, dict) or not _valid_private_state_base(
+        current_private
+    ):
         return None
     generation = current_manifest.get("generation")
     current_snapshot = current_manifest.get("settings_snapshot")
@@ -448,6 +468,10 @@ def apply_settings_override_events(
         generation=generation + 1,
         settings_snapshot=updated_snapshot,
     )
+    if manifest_transform is not None:
+        updated_manifest = manifest_transform(current_manifest, updated_manifest)
+        if not isinstance(updated_manifest, dict):
+            return None
     updated_private = dict(current_private)
     updated_private["generation"] = generation + 1
     return updated_manifest, updated_private
@@ -520,12 +544,14 @@ def commit_settings_override(
     overridden_fields: list[str],
     at: str,
     state_validator=None,
+    manifest_transform=None,
 ) -> dict:
     manifest = read_json("manifest.json", dir_fd=root_fd)
     private_state = read_json("private.json", dir_fd=state_fd)
     history = read_history(state_fd=state_fd)
-    if not _valid_private_state(private_state) or (
-        not _valid_manifest_base(manifest) if state_validator is None else False
+    if not _valid_private_state_base(private_state) or (
+        state_validator is None
+        and (not _valid_private_state(private_state) or not _valid_manifest_base(manifest))
     ):
         raise BundleStateError("work bundle state schema is invalid")
     source = manifest.get("source")
@@ -592,6 +618,10 @@ def commit_settings_override(
         generation=new_generation,
         settings_snapshot=updated_snapshot,
     )
+    if manifest_transform is not None:
+        updated_manifest = manifest_transform(manifest, updated_manifest)
+        if not isinstance(updated_manifest, dict):
+            raise BundleStateError("settings override manifest transition is invalid")
     atomic_write_json("manifest.json", updated_manifest, dir_fd=root_fd)
     committed = _committed_event(intent, at=at)
     append_history(committed, state_fd=state_fd)
@@ -618,15 +648,18 @@ def recover_pending_settings_override(
     state_fd: int,
     committed_at: str,
     prefix_state_resolver=None,
+    manifest_transform=None,
 ) -> dict | None:
     manifest = read_json("manifest.json", dir_fd=root_fd)
     private_state = read_json("private.json", dir_fd=state_fd)
     history = read_history(state_fd=state_fd)
-    final_event = history[-1].get("event")
+    final_record = history[-1] if history else None
+    final_event = final_record.get("event") if isinstance(final_record, dict) else None
     if final_event not in {"settings_override_intent", "settings_override_prepared"}:
         return None
-    if not _valid_private_state(private_state) or (
-        prefix_state_resolver is None and not _valid_manifest_base(manifest)
+    if not _valid_private_state_base(private_state) or (
+        prefix_state_resolver is None
+        and (not _valid_private_state(private_state) or not _valid_manifest_base(manifest))
     ):
         raise BundleStateError("pending work bundle state schema is invalid")
     if final_event == "settings_override_intent":
@@ -707,6 +740,7 @@ def recover_pending_settings_override(
         intent,
         prepared,
         committed,
+        manifest_transform=manifest_transform,
     )
     if transition is None:
         raise BundleStateError("pending settings override events are invalid")
