@@ -1,0 +1,1 @@
+{"schema_version":1,"task_id":"task-index-unsafe","status":"ok","outputs":[{"index":9007199254740992,"local_path":"/tmp/image-2-contract/unsafe.png","upstream_url":"https://images.example.test/unsafe.png","content_type":"image/png","status":"saved"}],"error":null}

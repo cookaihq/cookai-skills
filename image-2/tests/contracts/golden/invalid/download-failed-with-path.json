@@ -1,0 +1,1 @@
+{"schema_version":1,"task_id":"task-failed-path","status":"partial_success","outputs":[{"index":1,"local_path":"/tmp/image-2-contract/partial.png","upstream_url":"https://images.example.test/partial.png","content_type":"image/png","status":"download_failed"}],"error":null}

@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "json-all-saved",
+      "mode": "json",
+      "covers": ["json_all_saved", "secret_redaction"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 2, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "json-partial-download",
+      "mode": "json",
+      "covers": ["json_partial_download", "download_partial", "multi_output"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 2, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "json-no-save-temporary-url",
+      "mode": "json",
+      "covers": ["json_no_save", "temporary_url"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "upstream-terminal-failed",
+      "mode": "json",
+      "covers": ["upstream_failed"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 2, "create_calls": 1, "query_calls": 1, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "polling-timeout",
+      "mode": "json",
+      "covers": ["poll_timeout"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 3, "create_calls": 1, "query_calls": 3, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "create-transport-failure",
+      "mode": "json",
+      "covers": ["preterminal_error"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 0, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "reflected-task-id",
+      "mode": "json",
+      "covers": ["task_id_invalid", "secret_redaction"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 0, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "fallback-key-url-reflection",
+      "mode": "json",
+      "covers": ["url_reflection", "all_active_keys_reflection", "secret_redaction"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 2, "query_calls": 1, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "same-host-redirect",
+      "mode": "json",
+      "covers": ["same_host_redirect"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 2, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "cross-host-redirect",
+      "mode": "json",
+      "covers": ["cross_host_redirect", "secret_redaction"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 2, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "redirect-http-downgrade",
+      "mode": "json",
+      "covers": ["http_downgrade"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "private-address-before-connect",
+      "mode": "json",
+      "covers": ["private_address"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "mixed-public-private-dns",
+      "mode": "json",
+      "covers": ["multi_address_dns", "private_address"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "ambient-proxy-disabled",
+      "mode": "json",
+      "covers": ["proxy_env"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "redirect-loop",
+      "mode": "json",
+      "covers": ["redirect_loop"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 2, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "sixth-redirect-rejected",
+      "mode": "json",
+      "covers": ["redirect_overflow"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 6, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "download-http-error",
+      "mode": "json",
+      "covers": ["download_http_error"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "download-interrupted",
+      "mode": "json",
+      "covers": ["download_interrupted"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "atomic-publication-collision",
+      "mode": "json",
+      "covers": ["atomic_publish_failure"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "legacy-download-failure",
+      "mode": "legacy",
+      "covers": ["legacy_download_failure", "download_http_error"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 1, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "mapping-present-without-persistent-request",
+      "mode": "agent-handoff",
+      "covers": ["mapping_no_request"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    },
+    {
+      "id": "mapped-persistent-external-output-dir",
+      "mode": "agent-handoff",
+      "covers": ["persistent_request", "project_cwd_external_output"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 1, "s3_exit_codes": [0], "put_calls": 1}
+    },
+    {
+      "id": "explicit-project-target",
+      "mode": "agent-handoff",
+      "covers": ["persistent_request", "explicit_project_target"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 1, "s3_exit_codes": [0], "put_calls": 1}
+    },
+    {
+      "id": "explicit-global-target",
+      "mode": "agent-handoff",
+      "covers": ["persistent_request", "explicit_global_target"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 1, "s3_exit_codes": [0], "put_calls": 1}
+    },
+    {
+      "id": "global-mapping-without-home-authorization",
+      "mode": "agent-handoff",
+      "covers": ["persistent_request", "global_mapping_unauthorized"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 1, "s3_exit_codes": [2], "put_calls": 0}
+    },
+    {
+      "id": "persistent-request-without-target",
+      "mode": "agent-handoff",
+      "covers": ["persistent_request", "no_target"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 1, "s3_exit_codes": [2], "put_calls": 0}
+    },
+    {
+      "id": "multi-output-upload-partial",
+      "mode": "agent-handoff",
+      "covers": ["persistent_request", "multi_output", "upload_partial"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 2, "s3_upload_calls": 2, "s3_exit_codes": [0, 1], "put_calls": 2}
+    },
+    {
+      "id": "ambiguous-upload-checkpoint",
+      "mode": "agent-handoff",
+      "covers": ["persistent_request", "upload_ambiguous"],
+      "expected": {"image_command_calls": 1, "image_exit_code": 0, "create_calls": 1, "query_calls": 1, "download_requests": 1, "s3_upload_calls": 1, "s3_exit_codes": [1], "put_calls": 1}
+    },
+    {
+      "id": "persistent-request-no-save-conflict",
+      "mode": "agent-handoff",
+      "covers": ["no_save_conflict"],
+      "expected": {"image_command_calls": 0, "image_exit_code": null, "create_calls": 0, "query_calls": 0, "download_requests": 0, "s3_upload_calls": 0, "s3_exit_codes": [], "put_calls": 0}
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "task_id": "task-unified-multi-1",
+  "status": "ok",
+  "outputs": [
+    {
+      "index": 1,
+      "local_path": "/tmp/image-2-contract/cover-01.png",
+      "upstream_url": "https://images.example.test/cover-01.png",
+      "content_type": "image/png; profile=srgb",
+      "status": "saved"
+    },
+    {
+      "index": 2,
+      "local_path": "/tmp/image-2-contract/cover-02.webp",
+      "upstream_url": "https://images.example.test/cover-02.webp",
+      "content_type": "image/webp",
+      "status": "saved"
+    }
+  ],
+  "error": null
+}

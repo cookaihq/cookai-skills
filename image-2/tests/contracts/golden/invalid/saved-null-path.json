@@ -1,0 +1,1 @@
+{"schema_version":1,"task_id":"task-null-path","status":"ok","outputs":[{"index":1,"local_path":null,"upstream_url":"https://images.example.test/null-path.png","content_type":"image/png","status":"saved"}],"error":null}

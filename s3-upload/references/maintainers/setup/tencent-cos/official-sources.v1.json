@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "provider": "tencent-cos",
+  "fixture_kind": "synthetic/docs-derived",
+  "retrieved_at": "2026-07-22",
+  "region_policy_class": "tencent-cos-regional-console",
+  "sources": [
+    {
+      "id": "tencent-cos-create-bucket",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/14106",
+      "anchor": "Using the COS console; bucket name, region, and access permission",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Regional COS console bucket creation. Bucket name and region are immutable after creation.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-create-dedicated-bucket-v1",
+        "tencent-cos-setup-hypothesis-apply-new-bucket-public-read-v1"
+      ]
+    },
+    {
+      "id": "tencent-cos-bucket-identity",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/13312",
+      "anchor": "Bucket naming conventions",
+      "retrieved_at": "2026-07-22",
+      "applicability": "The complete bucket identity is BucketName-APPID. The setup candidate never derives APPID from a credential.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-create-dedicated-bucket-v1"
+      ]
+    },
+    {
+      "id": "tencent-cos-bucket-policy",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/18031",
+      "anchor": "Bucket policy composition; all users; specified directory",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Anonymous GetObject may be scoped to one specified directory prefix. Account-level and existing-bucket bucket-wide expansion remain disabled.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-apply-new-bucket-public-read-v1",
+        "tencent-cos-setup-hypothesis-apply-prefix-public-read-v1"
+      ]
+    },
+    {
+      "id": "tencent-cos-lifecycle-prefix-merge",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/8280",
+      "anchor": "Function description; overwrite warning; Rule Filter Prefix",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Positive expiration days on one non-empty exclusive prefix. PUT Bucket lifecycle replaces the existing configuration, so unrelated rules must be retained.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-merge-prefix-lifecycle-v1"
+      ]
+    },
+    {
+      "id": "tencent-cos-cors",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/8279",
+      "anchor": "PUT Bucket cors; complete CORS configuration; CORSRule",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Bucket-level CORS on a newly created dedicated bucket only. The complete ruleset must retain unrelated rows and reject overlap.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-merge-bucket-cors-v1"
+      ]
+    },
+    {
+      "id": "tencent-cam-sub-user",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/598/13674",
+      "anchor": "Create a sub-user; custom creation",
+      "retrieved_at": "2026-07-22",
+      "applicability": "A dedicated programmatic CAM sub-user under the confirmed account; no root-account credential is requested.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-issue-persistent-access-key-v1"
+      ]
+    },
+    {
+      "id": "tencent-cam-access-key",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/598/37140",
+      "anchor": "Create a sub-account API key; SecretKey shown only at creation",
+      "retrieved_at": "2026-07-22",
+      "applicability": "One SecretId/SecretKey pair for the planned CAM sub-user, handed off once and never put in a normal result.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-issue-persistent-access-key-v1"
+      ]
+    },
+    {
+      "id": "tencent-cos-least-privilege",
+      "publisher": "Tencent Cloud",
+      "url": "https://intl.cloud.tencent.com/document/product/436/30580",
+      "anchor": "Working with COS API Authorization Policies; prefix-scoped resource example",
+      "retrieved_at": "2026-07-22",
+      "applicability": "A CAM policy restricted to the planned complete BucketName-APPID and object-key prefix.",
+      "hypothesis_ids": [
+        "tencent-cos-setup-hypothesis-issue-persistent-access-key-v1"
+      ]
+    },
+    {
+      "id": "tencent-sts-assume-role",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/1312/48197",
+      "anchor": "AssumeRole; Credentials; Expiration; least-privilege best practice",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Caller-supplied process-only live verification input. Temporary credentials are neither issued nor persisted by setup.",
+      "hypothesis_ids": []
+    },
+    {
+      "id": "tencent-cos-region-domain",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/6224",
+      "anchor": "Default domain; BucketName-APPID.cos.region.myqcloud.com",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Regional virtual-hosted Public Base URL and bucket identity. The S3-compatible service endpoint remains the separate data candidate.",
+      "hypothesis_ids": []
+    }
+  ]
+}

@@ -6,6 +6,7 @@
 .pytest_cache/
 __pycache__/
 CLAUDE.md
+s3-upload/tests/results/
 
 # xhs-downloader vendored upstream clone (auto-provisioned on first use) + its venv/downloads
 xhs-downloader/vendor/

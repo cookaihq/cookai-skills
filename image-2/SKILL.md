@@ -32,6 +32,7 @@ description: Use when the user asks to generate, render, or recreate an image �
 - 创建接口返回的是异步任务，必须接着轮询查询接口直到终态
 - 生成的图片 URL 24 小时后失效，需要长期保留请下载或转存
 - **默认会把图片下载到当前工作区根目录**，文件名 `{YYYYMMDD-HHMMSS}-{≤10字标签}.{ext}`；优先级：`--filename` > `--label` > 自动从 prompt 前 10 字提取。环境变量 `IMAGE_2_OUTPUT_DIR` 或 `--output-dir` 可改保存目录
+- 项目存在 `image-2 -> Upload Target` 映射时也不得自动上传；只有用户明确要求持久 URL/Object Reference 才进入独立的 `s3-upload` 第二阶段
 
 ## Auth & Key Handling
 
@@ -192,6 +193,29 @@ X_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "..." --resolution 1024x1024 --no-save
 ```
 
+## Persistent Upload Handoff
+
+用户明确要求把结果持久保存到自己的对象存储时，Agent 使用结构化模式完成两个独立阶段。Mapping 只选择目的地，不构成上传授权。
+
+1. 在原项目 cwd 调用 image-2，加入 `--json`，不要 `--no-save`。
+2. 只读取 `status=saved` 且具有非空绝对 `local_path` 的 outputs；生成失败、下载失败或未保存项不进入上传。
+3. 保持同一个原项目 cwd，逐项调用 `s3-upload upload --json --caller-skill image-2 --file <absolute-local-path>`。
+4. 关联每个 image output 与对应上传结果。上传失败、partial 或 ambiguous 不重新生成图片、不删除本地文件，也不盲目重放对象写入。
+
+```bash
+# 阶段一：结构化生成与原子本地保存
+./scripts/create_task.sh --json \
+  --prompt "产品封面" --resolution 1024x1024
+
+# 阶段二：仅在明确 Persistent Upload Request 后，由 Agent 对 saved output 调用
+python3 /absolute/s3-upload/scripts/upload.py upload \
+  --file /absolute/output/cover.png \
+  --caller-skill image-2 \
+  --json
+```
+
+如果用户显式选择了 Target，第二阶段可加 `--target project:name|global:name`；否则先读取项目环境和 `.s3-upload/config.json` 中的 `image-2` mapping/default。Global Target 的间接 mapping 仍需 `--use-local-key`。
+
 ## Error Handling
 
 - 缺 `prompt`：提示用户补全提示词
@@ -225,6 +249,6 @@ X_API_KEY='sk-xxx' ./scripts/create_task.sh \
 ## Directory
 
 - `SKILL.md`
-- `scripts/set_key.sh`、`scripts/create_task.sh`
+- `scripts/set_key.sh`、`scripts/create_task.sh`、`scripts/image_task.py`
 - `references/api-guide.md`
-- `tests/`（pressure 场景文档）
+- `tests/`（pressure 场景、handoff contract、runtime tests）

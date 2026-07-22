@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "artifact_type": "s3-upload-setup-fixture",
+  "fixture_kind": "synthetic/docs-derived",
+  "fixture_id": "tencent-cos-strict-replay-v1",
+  "provider": "tencent-cos",
+  "contract_id": "tencent-cos.setup.console.v1",
+  "surface_version": "tencent-cos-console.synthetic.v1",
+  "registry_revision": "tencent-cos-setup-registry.v1",
+  "official_source_refs": [
+    "https://cloud.tencent.com/document/product/436/18031",
+    "https://cloud.tencent.com/document/product/598/37140"
+  ],
+  "redaction_sentinels": [
+    "COS_SYNTHETIC_SECRET_ID_DO_NOT_USE_0001",
+    "COS_SYNTHETIC_SECRET_KEY_DO_NOT_USE_0001"
+  ],
+  "calls": [
+    {
+      "operation": "wait-login",
+      "request_digest": "sha256:9287b25f864a03b01c0eec873cc2613c17c28c79149732f519d473f1d679bb47",
+      "response": null,
+      "credential_delivery": null
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:2854498a6ba29f858ecc57f866674f50684e1728b7f4e75cd4fd131f95d7ed86",
+      "response": {
+        "schema": {"id": "tencent-cos.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "ap-guangzhou",
+          "bucket": "website-assets-1250000000",
+          "bucket_identity": "website-assets-1250000000",
+          "prefix": "assets/",
+          "surface_marker": "tencent-cos-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets-1250000000.cos.ap-guangzhou.myqcloud.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "guarded-mutate",
+      "request_digest": "sha256:e020d5af3e45864a82408bcab543778f33639219bfe06b3ecdeee71d0709315a",
+      "response": {
+        "status": "accepted",
+        "created_resource": {
+          "resource_type": "bucket-policy",
+          "resource_id": "website-assets-1250000000:assets"
+        },
+        "recovery_instructions": []
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:42589c015b51f357691981966507d64e905beeb643d128ddec407b6abeaf578e",
+      "response": {
+        "schema": {"id": "tencent-cos.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "ap-guangzhou",
+          "bucket": "website-assets-1250000000",
+          "bucket_identity": "website-assets-1250000000",
+          "prefix": "assets/",
+          "surface_marker": "tencent-cos-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets-1250000000.cos.ap-guangzhou.myqcloud.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "wait-login",
+      "request_digest": "sha256:bc8e8e095bc02f9db587920942b062f70c1290dc6df493c9351e2054c288a753",
+      "response": null,
+      "credential_delivery": null
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:eb31b40756fba960295bd9b0ac040390314a10ad287856843a437dbce134002e",
+      "response": {
+        "schema": {"id": "tencent-cos.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "ap-guangzhou",
+          "bucket": "website-assets-1250000000",
+          "bucket_identity": "website-assets-1250000000",
+          "prefix": "assets/",
+          "surface_marker": "tencent-cos-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets-1250000000.cos.ap-guangzhou.myqcloud.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "guarded-mutate",
+      "request_digest": "sha256:65aa243c335cba14bbf4d238d988ecbe7acacc3e57e2a9ae1339cbaf472b6ffb",
+      "response": {
+        "status": "accepted",
+        "created_resource": {
+          "resource_type": "sub-identity",
+          "resource_id": "s3-upload-website-assets"
+        },
+        "recovery_instructions": []
+      },
+      "credential_delivery": {
+        "access_key_id": "COS_SYNTHETIC_SECRET_ID_DO_NOT_USE_0001",
+        "secret_access_key": "COS_SYNTHETIC_SECRET_KEY_DO_NOT_USE_0001"
+      }
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:4fea755c36bf68c85e123d7d3cf12fe5021c39fe692a7f67ebb76872e3180fed",
+      "response": {
+        "schema": {"id": "tencent-cos.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "ap-guangzhou",
+          "bucket": "website-assets-1250000000",
+          "bucket_identity": "website-assets-1250000000",
+          "prefix": "assets/",
+          "surface_marker": "tencent-cos-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets-1250000000.cos.ap-guangzhou.myqcloud.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    }
+  ]
+}

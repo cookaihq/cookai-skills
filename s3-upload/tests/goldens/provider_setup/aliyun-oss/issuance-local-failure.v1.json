@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "artifact_type": "s3-upload-setup-result",
+  "plan_id": "123e4567-e89b-42d3-a456-426614174001",
+  "plan_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "partial",
+  "action_results": [
+    {
+      "action_id": "oss-issuance-1",
+      "status": "succeeded",
+      "before_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "after_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "recovery_instructions": ["manual_revoke_and_reissue"]
+    }
+  ],
+  "created_resources": [
+    {
+      "action_id": "oss-issuance-1",
+      "resource_type": "sub-identity",
+      "resource_id": "s3-upload-website-assets"
+    }
+  ],
+  "local_install_result": "failed",
+  "recovery_instructions": ["manual_revoke_and_reissue"]
+}

@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "retrieved_at": "2026-07-22",
+  "sources": [
+    {
+      "id": "aliyun-oss-aws-sdk-guide",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/zh/oss/developer-reference/use-aws-sdks-to-access-oss",
+      "section": "Endpoint; SDK virtual-addressing examples; FAQ on chunked encoding and signature versions",
+      "retrieved_at": "2026-07-22",
+      "applicability": "OSS S3-compatible access; endpoint rows distinguish public, internal, and acceleration networks; examples use cn-hangzhou",
+      "observed_last_modified": "2026-04-16T18:47:09+08:00"
+    },
+    {
+      "id": "aliyun-oss-public-endpoint-policy",
+      "publisher": "Alibaba Cloud",
+      "url": "https://www.alibabacloud.com/help/en/oss/user-guide/0048-00000401",
+      "section": "Cause and Solutions",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Buckets in Chinese mainland regions for accounts that activated OSS on or after 2025-03-20 00:00:00 UTC+8",
+      "observed_last_modified": "2026-06-04"
+    },
+    {
+      "id": "tencent-cos-s3-compatibility-guide",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/41284",
+      "section": "Using third-party applications compatible with AWS S3; service address, bucket, signature, and access-style notes",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Third-party S3-compatible applications using a selected COS region; document warns that COS does not guarantee complete S3 compatibility",
+      "retrieval_note": "The official page returned an anti-automation challenge to the command-line fetch on the retrieval date; claim text and section identity were retained from the reviewed official source in the approved project spec and must be rechecked during provider evidence review."
+    },
+    {
+      "id": "tencent-cos-bucket-overview",
+      "publisher": "Tencent Cloud",
+      "url": "https://www.tencentcloud.com/zh/document/product/436/13312",
+      "section": "Bucket naming conventions",
+      "retrieved_at": "2026-07-22",
+      "applicability": "COS bucket identity; bucket name and APPID are joined with a hyphen as BucketName-APPID",
+      "retrieval_note": "Official international documentation page; exact identity is also enforced by the pinned official SDK source below."
+    },
+    {
+      "id": "tencent-cos-java-sdk-endpoint-source",
+      "publisher": "Tencent Cloud",
+      "url": "https://github.com/tencentyun/cos-java-sdk-v5/blob/499c86d7d5a658a16ea25627875b373f2469b721/src/main/java/com/qcloud/cos/endpoint/RegionEndpointBuilder.java",
+      "section": "buildGeneralApiEndpoint",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Official native Java SDK at pinned commit; confirms that native SDK endpoint generation carries the complete bucket identity but is not evidence for the third-party S3 service-address shape",
+      "commit": "499c86d7d5a658a16ea25627875b373f2469b721"
+    },
+    {
+      "id": "tencent-cos-java-sdk-bucket-source",
+      "publisher": "Tencent Cloud",
+      "url": "https://github.com/tencentyun/cos-java-sdk-v5/blob/499c86d7d5a658a16ea25627875b373f2469b721/src/main/java/com/qcloud/cos/internal/BucketNameUtils.java",
+      "section": "validateBucketName",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Official native Java SDK at pinned commit; validates the bucket-name portion before the final APPID suffix and rejects uppercase/whitespace/characters outside lowercase letters, digits, and hyphen",
+      "commit": "499c86d7d5a658a16ea25627875b373f2469b721"
+    }
+  ],
+  "claims": [
+    {
+      "id": "oss-public-service-endpoint",
+      "provider": "aliyun-oss",
+      "statement": "The S3-compatible public service endpoint format is https://s3.oss-{region}.aliyuncs.com.",
+      "evidence": "docs-derived",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "Replace region with an actual OSS region ID; this does not override the separate Chinese-mainland default-public policy gate."
+    },
+    {
+      "id": "oss-internal-service-endpoint",
+      "provider": "aliyun-oss",
+      "statement": "The S3-compatible internal endpoint format is https://s3.oss-{region}-internal.aliyuncs.com.",
+      "evidence": "docs-derived",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "Eligible only from the corresponding Alibaba Cloud VPC/network; it is a separate network contract."
+    },
+    {
+      "id": "oss-virtual-addressing",
+      "provider": "aliyun-oss",
+      "statement": "The official AWS SDK examples disable path-style access or select virtual addressing for the S3-compatible endpoint.",
+      "evidence": "docs-derived",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "Candidate default only; CNAME endpoints use a distinct bucket-bound contract."
+    },
+    {
+      "id": "oss-aws-signature-v4-format",
+      "provider": "aliyun-oss",
+      "statement": "OSS documents support for the AWS Signature V4 algorithm on this compatibility surface.",
+      "evidence": "docs-derived",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "Algorithm support does not prove this implementation's exact canonical request or any operation."
+    },
+    {
+      "id": "oss-unsigned-payload",
+      "provider": "aliyun-oss",
+      "statement": "The documented V4 compatibility request uses canonical payload literal UNSIGNED-PAYLOAD and x-oss-content-sha256: UNSIGNED-PAYLOAD.",
+      "evidence": "docs-derived",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "This is the candidate's unsigned fixed-length profile, not live evidence."
+    },
+    {
+      "id": "oss-nonchunked-framing",
+      "provider": "aliyun-oss",
+      "statement": "The documented compatibility request must not use Transfer-Encoding: chunked; official examples disable AWS SDK chunked encoding.",
+      "evidence": "docs-derived",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "The candidate therefore rejects Transfer-Encoding: chunked, Content-Encoding: aws-chunked, and AWS streaming payload literals."
+    },
+    {
+      "id": "oss-known-content-length",
+      "provider": "aliyun-oss",
+      "statement": "The candidate requires a known Content-Length to produce deterministic non-chunked request framing.",
+      "evidence": "docs-derived-implementation-constraint",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "The source forbids chunked transfer but does not separately state that every compatible client must emit a Content-Length header."
+    },
+    {
+      "id": "oss-ordinary-payload-sha256",
+      "provider": "aliyun-oss",
+      "statement": "Using the generic S3 ordinary payload SHA-256 and x-amz-content-sha256 instead of the documented OSS unsigned profile may work.",
+      "evidence": "hypothesis",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "Separate test-only wire profile; no automatic fallback after an ambiguous mutation."
+    },
+    {
+      "id": "oss-mainland-default-public-policy",
+      "provider": "aliyun-oss",
+      "statement": "For affected newer accounts, Chinese-mainland default public endpoints reject data API calls with PublicEndpointForbidden; official solutions are an eligible internal endpoint or a bucket-bound custom domain.",
+      "evidence": "docs-derived",
+      "source_ids": ["aliyun-oss-public-endpoint-policy"],
+      "conditions": "Account activation date is evidence context, not a normal-mode bypass; the candidate keeps the recognizable mainland public family disabled."
+    },
+    {
+      "id": "oss-remote-operation-compatibility",
+      "provider": "aliyun-oss",
+      "statement": "Put, HEAD, all GET modes, conditional write, both delete scopes and observers, metadata, response parsing, reconciliation, and multipart compatibility remain unverified for the exact contract.",
+      "evidence": "not-tested",
+      "source_ids": ["aliyun-oss-aws-sdk-guide"],
+      "conditions": "Each operation is registered only as a test-only hypothesis pending authorized live evidence."
+    },
+    {
+      "id": "cos-third-party-service-address",
+      "provider": "tencent-cos",
+      "statement": "The third-party S3-compatible application service address is https://cos.{region}.myqcloud.com.",
+      "evidence": "docs-derived",
+      "source_ids": ["tencent-cos-s3-compatibility-guide"],
+      "conditions": "This is the S3 compatibility service address, not a claim that it is COS's only endpoint or the native SDK default."
+    },
+    {
+      "id": "cos-bucket-name-appid",
+      "provider": "tencent-cos",
+      "statement": "COS bucket identity is the complete BucketName-APPID value; APPID is not inferred from credentials.",
+      "evidence": "docs-derived",
+      "source_ids": ["tencent-cos-s3-compatibility-guide", "tencent-cos-bucket-overview", "tencent-cos-java-sdk-bucket-source"],
+      "conditions": "The candidate requires the complete identity as input before constructing a virtual host."
+    },
+    {
+      "id": "cos-virtual-addressing",
+      "provider": "tencent-cos",
+      "statement": "Combining the complete bucket identity with the documented S3 service address in virtual-hosted style yields https://<BucketName-APPID>.cos.{region}.myqcloud.com.",
+      "evidence": "docs-derived",
+      "source_ids": ["tencent-cos-s3-compatibility-guide", "tencent-cos-bucket-overview"],
+      "conditions": "Candidate construction only; the native Java SDK uses its own endpoint builder and is not used to derive this S3 host."
+    },
+    {
+      "id": "cos-path-style-boundary",
+      "provider": "tencent-cos",
+      "statement": "The S3 compatibility guide says buckets created after 2024-01-01 do not support path-style domains.",
+      "evidence": "docs-derived",
+      "source_ids": ["tencent-cos-s3-compatibility-guide"],
+      "conditions": "The candidate never generates path-style requests for COS, regardless of bucket creation date."
+    },
+    {
+      "id": "cos-v2-v4-signature-formats",
+      "provider": "tencent-cos",
+      "statement": "The S3 compatibility guide documents support for AWS V2 and AWS V4 signature formats.",
+      "evidence": "docs-derived",
+      "source_ids": ["tencent-cos-s3-compatibility-guide"],
+      "conditions": "Format support is not proof of this implementation's exact AWS SigV4 canonicalization."
+    },
+    {
+      "id": "cos-v4-exact-canonical-request",
+      "provider": "tencent-cos",
+      "statement": "The generic signer used here produces the exact V4 canonical request accepted by COS for this service address.",
+      "evidence": "hypothesis",
+      "source_ids": ["tencent-cos-s3-compatibility-guide"],
+      "conditions": "Offline vector only; no COS key or remote execution was available."
+    },
+    {
+      "id": "cos-incomplete-s3-compatibility",
+      "provider": "tencent-cos",
+      "statement": "Tencent Cloud does not guarantee complete Amazon S3 compatibility.",
+      "evidence": "docs-derived",
+      "source_ids": ["tencent-cos-s3-compatibility-guide"],
+      "conditions": "No result from AWS, OSS, or a different COS endpoint enables this contract."
+    },
+    {
+      "id": "cos-remote-operation-compatibility",
+      "provider": "tencent-cos",
+      "statement": "Put, HEAD, all GET modes, conditional write, both delete scopes and observers, metadata, response parsing, reconciliation, and multipart compatibility remain unverified for the exact contract.",
+      "evidence": "not-tested",
+      "source_ids": ["tencent-cos-s3-compatibility-guide"],
+      "conditions": "No COS credential was available; every remote operation remains a test-only hypothesis."
+    }
+  ]
+}

@@ -1,25 +1,68 @@
-# API and error notes
+# API and result notes
 
 ## Output
 
-- 成功：stdout 严格一行 URL；stderr 为 `[s3-upload]` 元数据。
-- public：用户配置 `S3_UPLOAD_PUBLIC_BASE_URL` 即声明拼接结果可读；Skill 不做 GET/HEAD。
-- presigned：stderr 含 `expires_in` 与 UTC `expires_at`。
-- Put 成功而 URL 失败：退出 1、stdout 空、stderr 含 `partial_success object_written=true bucket=... key=...`；不得重试 Put。
+`--json` prints one closed result object with every key present:
+
+```json
+{
+  "schema_version": 1,
+  "operation": "upload",
+  "status": "ok",
+  "object_written": true,
+  "object_reference": {},
+  "url": "https://...",
+  "url_kind": "presigned",
+  "expires_at": "2026-07-22T13:00:00Z",
+  "retention": {"mode": "retain", "days": null, "enforcement": "external-unverified"},
+  "delete_scope": null,
+  "deleted_version_id": null,
+  "checkpoint_id": null,
+  "plan": null
+}
+```
+
+Statuses are `ok`, `dry_run`, `partial_success`, `not_started`, `collision`, `deleted`, `not_deleted`, `aborted`, and `ambiguous`. A failure with no durable outcome leaves stdout empty, including JSON mode.
+
+Without `--json`:
+
+- successful upload/url/resume prints exactly one URL to stdout;
+- delete/abort and dry-run keep stdout empty and report status/plan on stderr;
+- ambiguous/partial outcomes keep or report their recovery checkpoint and never print logs to stdout.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | 成功，或 dry-run 预检通过 |
-| 1 | 网络、HTTP、签名或 URL 运行时错误；检查是否 `object_written=true` |
-| 2 | CLI 或连接配置错误、profile 错误 |
-| 3 | 本地文件不存在、不可读或超过软上限 |
+| 0 | confirmed success or executable dry-run |
+| 1 | runtime/remote failure, partial result, ambiguous result, not-deleted observation |
+| 2 | CLI/config/reference error or formed-but-blocked dry-run |
+| 3 | local source error before durable remote state |
+| 4 | verified atomic collision |
 
-argparse 用法错误保持 2。v1 不自动重试 429/5xx/网络错误，也不在 401/403 后切换 profile。
+## Recovery
 
-## PutObject
+Every mutating Put/Delete/multipart operation persists a Secret-free checkpoint before its first request. A lost/unknown response is never treated as “not written” and the whole mutation is not automatically repeated.
 
-单次 PUT，直接覆盖同 key，不先 Head。发送 Content-Length、Content-Type 与 SigV4 headers；不发送 `x-amz-acl: public-read`。响应 body 最多回传前 2000 字符。
+- `ambiguous`: `object_written=null`, non-null `checkpoint_id`; use read-only reconcile when the exact contract permits it.
+- `partial_success`: a confirmed object/reference or resumable multipart state exists; do not restart the original operation.
+- `not_started`: checkpoint proves no request was issued.
+- terminal checkpoint replay rebuilds output without another mutation, then cleans up after output flush.
 
-对象键是 UTF-8；`/` 保留为分隔符，segment 按 RFC 3986 编码。空格 `%20`、加号 `%2B`、百分号 `%25`。Put、presign、public URL 使用同一编码函数。
+AWS/R2/custom normal baseline currently lacks Delete, multipart and HEAD reconciliation capabilities, so those command paths remain blocked before checkpoint/network. Their parser presence is a stable interface, not a support claim.
+
+## Object Reference and URL
+
+Object Reference snapshots provider, endpoint, addressing, region, bucket, actual key, optional version id, Access and Retention. Before signing a later command, a current Target with the same location fingerprint must authorize credentials.
+
+All public and presigned URLs address the current Object Key. A captured version id is never added to URL query; it only chooses exact-version delete scope when that capability is available. Replacing the same key can therefore make an older Object Reference URL serve newer content.
+
+Public Base URL is a user declaration and is not probed. Private presigned expiry is capped by temporary credential expiry minus a 60-second safety margin.
+
+## Dry-run plan
+
+Dry-run performs configuration, source/reference and capability validation but creates no checkpoint, signs no request and performs no network I/O. Its strict `plan` includes resolved Target provenance, exact Contract Key, ordered remote operations, required capability states/evidence, headers, Access/Retention, collision policy and blocker codes.
+
+## Secret boundaries
+
+Credential values are used only for signing. Object References, plans, checkpoints, evidence summaries and stderr never contain Secret Access Key, Session Token, Authorization headers or signed URL query values outside the result's designated `url` field.

@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "provider": "aliyun-oss",
+  "fixture_kind": "synthetic/docs-derived",
+  "retrieved_at": "2026-07-22",
+  "region_policy_class": "aliyun-oss-regional-console",
+  "sources": [
+    {
+      "id": "aliyun-oss-create-bucket",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/oss/user-guide/create-a-bucket-4",
+      "anchor": "Console; Basic configuration",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Regional OSS console bucket creation; region is immutable and new console buckets default to private ACL with Block Public Access enabled.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-create-dedicated-bucket-v1",
+        "aliyun-oss-setup-hypothesis-apply-new-bucket-public-read-v1"
+      ]
+    },
+    {
+      "id": "aliyun-oss-bucket-policy",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/oss/user-guide/bucket-policy/",
+      "anchor": "Configure a bucket policy; Applied To; Resource Paths; All Accounts",
+      "retrieved_at": "2026-07-22",
+      "applicability": "An existing regional bucket whose account and bucket public-access controls already permit a policy limited to the confirmed object-key prefix.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-apply-prefix-public-read-v1"
+      ]
+    },
+    {
+      "id": "aliyun-oss-bucket-domain",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/oss/user-guide/0003-00001401",
+      "anchor": "Solutions; BucketName.Endpoint format",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Regional OSS bucket domain identity and HTTPS object URL construction. This is a candidate Public Base URL input, not proof of anonymous readability.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-apply-new-bucket-public-read-v1",
+        "aliyun-oss-setup-hypothesis-apply-prefix-public-read-v1"
+      ]
+    },
+    {
+      "id": "aliyun-oss-block-public-access",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/oss/user-guide/block-public-access",
+      "anchor": "Block public access to OSS buckets, access points, and accounts",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Account and bucket controls override ACL and bucket policy. Existing-bucket or account-level relaxation is outside the automatic candidate flow.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-apply-new-bucket-public-read-v1",
+        "aliyun-oss-setup-hypothesis-apply-prefix-public-read-v1"
+      ]
+    },
+    {
+      "id": "aliyun-oss-lifecycle-prefix-merge",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/oss/user-guide/lifecycle-rules-based-on-the-last-modified-time",
+      "anchor": "Matching conditions; Overwrite semantics",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Positive expiration days on one non-empty exclusive prefix. PutBucketLifecycle overwrites the bucket configuration, so all unrelated rules must be read, retained, and written back.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-merge-prefix-lifecycle-v1"
+      ]
+    },
+    {
+      "id": "aliyun-oss-cors",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/oss/user-guide/configure-cross-origin-resource-sharing",
+      "anchor": "Configure CORS rules; Rule matching order",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Bucket-level CORS on a newly created dedicated bucket only. Existing rules must be retained and overlapping rules stop the automatic flow.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-merge-bucket-cors-v1"
+      ]
+    },
+    {
+      "id": "aliyun-ram-access-key",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/ram/user-guide/create-an-accesskey-pair",
+      "anchor": "AccessKey types; RAM user AccessKey pair; displayed only once",
+      "retrieved_at": "2026-07-22",
+      "applicability": "One AccessKey pair for a dedicated RAM application user. Alibaba Cloud account AccessKeys are explicitly excluded.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-issue-persistent-access-key-v1"
+      ]
+    },
+    {
+      "id": "aliyun-ram-least-privilege",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/ram/user-guide/grant-permissions-to-the-ram-user",
+      "anchor": "Core concepts; Always follow the principle of least privilege",
+      "retrieved_at": "2026-07-22",
+      "applicability": "A custom policy limited to the planned bucket and object-key prefix; no root or broad account policy is inferred.",
+      "hypothesis_ids": [
+        "aliyun-oss-setup-hypothesis-issue-persistent-access-key-v1"
+      ]
+    },
+    {
+      "id": "aliyun-oss-sts",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/en/oss/developer-reference/use-temporary-access-credentials-provided-by-sts-to-access-oss",
+      "anchor": "How it works; temporary credentials automatically expire",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Caller-supplied process-only verification input. The setup candidate never persists or issues STS as an installed profile.",
+      "hypothesis_ids": []
+    },
+    {
+      "id": "aliyun-oss-public-endpoint-policy",
+      "publisher": "Alibaba Cloud",
+      "url": "https://www.alibabacloud.com/help/en/oss/user-guide/0048-00000401",
+      "anchor": "Cause and Solutions",
+      "retrieved_at": "2026-07-22",
+      "applicability": "Chinese-mainland buckets affected by the post-2025-03-20 default-public endpoint restriction. A Public Base URL does not make that data endpoint usable.",
+      "hypothesis_ids": []
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"schema_version":1,"task_id":"task-failed-output","status":"failed","outputs":[{"index":1,"local_path":null,"upstream_url":"https://images.example.test/image.png","content_type":"image/png","status":"download_failed"}],"error":{"code":"upstream_failed","message":"Image generation failed."}}

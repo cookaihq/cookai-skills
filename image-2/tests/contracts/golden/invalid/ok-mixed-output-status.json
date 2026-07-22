@@ -1,0 +1,1 @@
+{"schema_version":1,"task_id":"task-ok-mixed","status":"ok","outputs":[{"index":1,"local_path":"/tmp/image-2-contract/saved.png","upstream_url":"https://images.example.test/saved.png","content_type":"image/png","status":"saved"},{"index":2,"local_path":null,"upstream_url":"https://images.example.test/not-saved.png","content_type":"image/png","status":"not_saved"}],"error":null}

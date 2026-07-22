@@ -144,6 +144,24 @@ X_API_KEY=sk-xxx ./scripts/create_task.sh \
 
 完整参数：`./scripts/create_task.sh --help`。
 
+## 持久上传（显式 opt-in）
+
+`--json` 会输出固定 schema 的任务结果；每个成功保存项具有绝对 `local_path`。当用户明确要求长期 URL/Object Reference 时，Agent 才把这些 `saved` 文件交给独立的 `s3-upload` 阶段：
+
+```bash
+# 阶段一：生成并保存本地文件
+./scripts/create_task.sh --json \
+  --prompt "产品封面" --resolution 1024x1024
+
+# 阶段二：保持原项目 cwd，对每个 saved local_path 单独执行
+python3 /absolute/s3-upload/scripts/upload.py upload \
+  --file /absolute/output/cover.png \
+  --caller-skill image-2 \
+  --json
+```
+
+项目可以在 `.s3-upload/config.json` 声明 `"image-2":"project:website-images"` mapping。该 mapping 只选择目的地，不会让 image-2 脚本自动调用 S3。只有明确的持久上传请求才执行第二阶段；上传 partial/ambiguous 时保留本地图片和 checkpoint，不重新生成或盲目重复 Put。
+
 ## Security / Privacy
 
 - **联网**：是。调用 `https://api.aihubmax.com/v1/*`，从阿里云 OSS 下载生成图片
@@ -177,12 +195,15 @@ image-2/
 ├── README.md             # 本文件（给人看）
 ├── scripts/
 │   ├── create_task.sh    # 主脚本：创建任务 + 轮询 + 自动下载
+│   ├── image_task.py     # 标准库 runtime：JSON/legacy、轮询与安全下载
 │   └── set_key.sh        # 持久化 key 到 ~/.config/image-2/.env
 ├── references/
 │   └── api-guide.md      # aihubmax.com API 完整规范
 └── tests/
+    ├── contracts/        # handoff schema、golden 与 validator
+    ├── runtime/          # JSON/legacy 与下载安全测试
     ├── README.md         # 测试场景索引
-    └── scenario-*.md     # 6 个 pressure 测试场景文档
+    └── scenario-*.md     # pressure 测试场景文档
 ```
 
 ## Troubleshooting

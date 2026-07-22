@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "task_id": "task-unified-partial-1",
+  "status": "partial_success",
+  "outputs": [
+    {
+      "index": 1,
+      "local_path": "/tmp/image-2-contract/partial-01.png",
+      "upstream_url": "https://images.example.test/partial-01.png",
+      "content_type": "image/png",
+      "status": "saved"
+    },
+    {
+      "index": 2,
+      "local_path": null,
+      "upstream_url": "https://images.example.test/partial-02.png",
+      "content_type": "image/png",
+      "status": "download_failed"
+    }
+  ],
+  "error": null
+}

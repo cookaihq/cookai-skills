@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "artifact_type": "s3-upload-provider-setup-playbook",
+  "provider": "tencent-cos",
+  "contract_id": "tencent-cos.setup.console.v1",
+  "surface_version": "tencent-cos-console.synthetic.v1",
+  "registry_revision": "tencent-cos-setup-registry.v1",
+  "fixture_kind": "synthetic/docs-derived",
+  "network_requests_allowed": false,
+  "live_evidence_ids": [],
+  "data_plane_evidence_enables_setup": false,
+  "remote_evidence": "not-tested",
+  "process_only_temporary_credential": {
+    "allowed_as_verification_input": true,
+    "issued_by_setup": false,
+    "persisted_by_setup": false,
+    "source_id": "tencent-sts-assume-role"
+  },
+  "credential_issuance": {
+    "identity": "least-privilege CAM programmatic sub-user",
+    "credential": "long-lived SecretId and SecretKey",
+    "root_key_allowed": false,
+    "session_token": "",
+    "expires_at": null,
+    "handoff": "plan-and-action-bound one-shot memory sink",
+    "unknown_or_local_failure": "manual revoke-and-reissue"
+  },
+  "identity_boundary": {
+    "bucket": "complete BucketName-APPID",
+    "addressing": "virtual-hosted only",
+    "service_endpoint": "https://cos.{region}.myqcloud.com",
+    "public_base_url": "https://{BucketName-APPID}.cos.{region}.myqcloud.com"
+  },
+  "scenarios": [
+    {
+      "id": "new-dedicated-bucket",
+      "automatic_boundary": "BucketName-APPID is absent and dedicated, exact account/region identity is observed, and public access is a creation-time choice on that new bucket.",
+      "actions": ["create-dedicated-bucket", "apply-new-bucket-public-read"],
+      "blocked_when": ["bucket identity mismatch", "account-level change", "unverified console marker", "missing HTTPS Public Base URL"]
+    },
+    {
+      "id": "existing-exclusive-prefix",
+      "automatic_boundary": "Prefix is non-empty, exclusive, empty, non-overlapping, and the policy change is limited to anonymous GetObject for that prefix.",
+      "actions": ["apply-prefix-public-read", "merge-prefix-lifecycle"],
+      "blocked_when": ["existing object", "shared or overlapping prefix", "bucket-wide control change", "account-level control change"]
+    },
+    {
+      "id": "bucket-cors",
+      "automatic_boundary": "Only a newly created dedicated bucket is eligible because COS CORS is bucket-scoped.",
+      "actions": ["merge-bucket-cors"],
+      "blocked_when": ["existing bucket", "overlapping rule", "unrelated rule cannot be preserved exactly"]
+    }
+  ],
+  "merge_rules": {
+    "lifecycle": "Read all rules, retain unrelated rows in order, reject any prefix overlap, and append or exactly match one deterministic managed id.",
+    "cors": "Read the complete ruleset, retain unrelated rows in order, reject origin/method overlap, and append or exactly match one deterministic managed id."
+  },
+  "no_credentials_available": "No COS Key or authenticated browser session was available. Every real state, permission, UI marker, success observation, and recovery boundary is not-tested.",
+  "enablement": "Requires a separate human-gated COS console recording, data matrix, reviewed setup evidence, and an enabling ADR."
+}

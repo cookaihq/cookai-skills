@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "provider": "aliyun-oss",
+  "region_policy_class": "aliyun-oss-regional-console",
+  "contract_id": "aliyun-oss.setup.console.v1",
+  "surface_version": "aliyun-oss-console.synthetic.v1",
+  "registry_revision": "aliyun-oss-setup-registry.v1",
+  "fixture_kind": "synthetic/docs-derived",
+  "remote_evidence": "not-tested",
+  "actions": [
+    {
+      "action_type": "create-dedicated-bucket",
+      "state": "test-only",
+      "evidence_id": "aliyun-oss-setup-hypothesis-create-dedicated-bucket-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-oss-create-bucket"]
+    },
+    {
+      "action_type": "apply-new-bucket-public-read",
+      "state": "test-only",
+      "evidence_id": "aliyun-oss-setup-hypothesis-apply-new-bucket-public-read-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-oss-create-bucket", "aliyun-oss-block-public-access", "aliyun-oss-bucket-domain"]
+    },
+    {
+      "action_type": "apply-prefix-public-read",
+      "state": "test-only",
+      "evidence_id": "aliyun-oss-setup-hypothesis-apply-prefix-public-read-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-oss-bucket-policy", "aliyun-oss-block-public-access", "aliyun-oss-bucket-domain"]
+    },
+    {
+      "action_type": "merge-prefix-lifecycle",
+      "state": "test-only",
+      "evidence_id": "aliyun-oss-setup-hypothesis-merge-prefix-lifecycle-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-oss-lifecycle-prefix-merge"]
+    },
+    {
+      "action_type": "merge-bucket-cors",
+      "state": "test-only",
+      "evidence_id": "aliyun-oss-setup-hypothesis-merge-bucket-cors-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-oss-cors"]
+    },
+    {
+      "action_type": "issue-long-lived-access-key",
+      "state": "test-only",
+      "evidence_id": "aliyun-oss-setup-hypothesis-issue-persistent-access-key-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-ram-access-key", "aliyun-ram-least-privilege"]
+    },
+    {
+      "action_type": "change-account-public-access",
+      "state": "disabled",
+      "evidence_id": "aliyun-oss-setup-disabled-change-account-public-access-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-oss-block-public-access"]
+    },
+    {
+      "action_type": "change-existing-bucket-wide-public-access",
+      "state": "disabled",
+      "evidence_id": "aliyun-oss-setup-disabled-change-existing-bucket-wide-public-access-v1",
+      "observation_schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+      "resource_scope_schema": {"id": "aliyun-oss.setup.resource-scope", "version": 1},
+      "mutation_schema": {"id": "aliyun-oss.setup.mutation", "version": 1},
+      "diff_schema": {"id": "aliyun-oss.setup.diff", "version": 1},
+      "success_schema": {"id": "aliyun-oss.setup.success", "version": 1},
+      "recovery_schema": {"id": "aliyun-oss.setup.recovery", "version": 1},
+      "source_ids": ["aliyun-oss-block-public-access"]
+    }
+  ]
+}

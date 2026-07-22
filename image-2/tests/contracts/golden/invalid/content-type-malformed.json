@@ -1,0 +1,1 @@
+{"schema_version":1,"task_id":"task-content-type-malformed","status":"ok","outputs":[{"index":1,"local_path":null,"upstream_url":"https://images.example.test/image.png","content_type":"image","status":"not_saved"}],"error":null}

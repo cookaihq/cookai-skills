@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "artifact_type": "s3-upload-setup-fixture",
+  "fixture_kind": "synthetic/docs-derived",
+  "fixture_id": "aliyun-oss-strict-replay-v1",
+  "provider": "aliyun-oss",
+  "contract_id": "aliyun-oss.setup.console.v1",
+  "surface_version": "aliyun-oss-console.synthetic.v1",
+  "registry_revision": "aliyun-oss-setup-registry.v1",
+  "official_source_refs": [
+    "https://help.aliyun.com/en/oss/user-guide/bucket-policy/",
+    "https://help.aliyun.com/en/ram/user-guide/create-an-accesskey-pair"
+  ],
+  "redaction_sentinels": [
+    "OSS_SYNTHETIC_AKID_DO_NOT_USE_0001",
+    "OSS_SYNTHETIC_SECRET_DO_NOT_USE_0001"
+  ],
+  "calls": [
+    {
+      "operation": "wait-login",
+      "request_digest": "sha256:566a3609065e3daf46db6e04f8515e78f17c14f10a35a260495b3978d073867a",
+      "response": null,
+      "credential_delivery": null
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:cbb281aed6347afdc37c89b75c88b289cf6992d5acebb9c710e0a70a0de4d765",
+      "response": {
+        "schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "us-west-1",
+          "bucket": "website-assets",
+          "bucket_identity": "website-assets",
+          "prefix": "assets/",
+          "surface_marker": "aliyun-oss-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets.oss-us-west-1.aliyuncs.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "guarded-mutate",
+      "request_digest": "sha256:93e5df6443bd5555c7d1462dda9b57784afd57ccb32f69441df5d86f918e4579",
+      "response": {
+        "status": "accepted",
+        "created_resource": {
+          "resource_type": "bucket-policy",
+          "resource_id": "website-assets:assets"
+        },
+        "recovery_instructions": []
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:d3a557bab14eb2220040ec7784b156ab6bf55fad33ab10b4e7c79b4cb1104be4",
+      "response": {
+        "schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "us-west-1",
+          "bucket": "website-assets",
+          "bucket_identity": "website-assets",
+          "prefix": "assets/",
+          "surface_marker": "aliyun-oss-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets.oss-us-west-1.aliyuncs.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "wait-login",
+      "request_digest": "sha256:f865305657a0130690f458539c1da46bb1b6715ce852cc370c61f94f116ac30f",
+      "response": null,
+      "credential_delivery": null
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:1648dab2447392841fe25999e79c2b82a4cf4f125c0d521c13499114c0920a69",
+      "response": {
+        "schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "us-west-1",
+          "bucket": "website-assets",
+          "bucket_identity": "website-assets",
+          "prefix": "assets/",
+          "surface_marker": "aliyun-oss-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets.oss-us-west-1.aliyuncs.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    },
+    {
+      "operation": "guarded-mutate",
+      "request_digest": "sha256:64ed0ddec7ee41b54904497e289d81c7b24a4ade66da50809003cbfe17a6adba",
+      "response": {
+        "status": "accepted",
+        "created_resource": {
+          "resource_type": "sub-identity",
+          "resource_id": "s3-upload-website-assets"
+        },
+        "recovery_instructions": []
+      },
+      "credential_delivery": {
+        "access_key_id": "OSS_SYNTHETIC_AKID_DO_NOT_USE_0001",
+        "secret_access_key": "OSS_SYNTHETIC_SECRET_DO_NOT_USE_0001"
+      }
+    },
+    {
+      "operation": "observe",
+      "request_digest": "sha256:a887d70b388cba2fee0acdcc6373296152706c4844b55aace64e4353a835926c",
+      "response": {
+        "schema": {"id": "aliyun-oss.setup.observation", "version": 1},
+        "payload": {
+          "account": "account-10001",
+          "region": "us-west-1",
+          "bucket": "website-assets",
+          "bucket_identity": "website-assets",
+          "prefix": "assets/",
+          "surface_marker": "aliyun-oss-console.synthetic.v1",
+          "state": "present",
+          "dedicated": true,
+          "new_bucket": false,
+          "prefix_empty": true,
+          "prefix_overlap": false,
+          "public_access_change_scope": "prefix",
+          "account_public_access": "allows-public",
+          "bucket_public_access": "allows-public",
+          "public_base_url": "https://website-assets.oss-us-west-1.aliyuncs.com",
+          "public_policy_rules": [],
+          "lifecycle_rules": [],
+          "cors_rules": []
+        }
+      },
+      "credential_delivery": null
+    }
+  ]
+}

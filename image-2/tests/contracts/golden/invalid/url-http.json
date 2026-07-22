@@ -1,0 +1,1 @@
+{"schema_version":1,"task_id":"task-http-url","status":"ok","outputs":[{"index":1,"local_path":null,"upstream_url":"http://images.example.test/image.png","content_type":"image/png","status":"not_saved"}],"error":null}

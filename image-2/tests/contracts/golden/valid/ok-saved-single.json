@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "task_id": "task-unified-saved-1",
+  "status": "ok",
+  "outputs": [
+    {
+      "index": 1,
+      "local_path": "/tmp/image-2-contract/cover.png",
+      "upstream_url": "https://images.example.test/cover.png?signature=test-independent-upstream-signature-3e8b",
+      "content_type": "image/png",
+      "status": "saved"
+    }
+  ],
+  "error": null
+}

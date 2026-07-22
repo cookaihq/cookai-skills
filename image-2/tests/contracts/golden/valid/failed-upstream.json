@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "task_id": "task-unified-upstream-failed-1",
+  "status": "failed",
+  "outputs": [],
+  "error": {
+    "code": "upstream_failed",
+    "message": "Image generation failed."
+  }
+}

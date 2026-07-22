@@ -1,65 +1,88 @@
 # s3-upload
 
-把一个本地文件上传到用户自己的 AWS SigV4-compatible S3 bucket，并输出 public 或 presigned URL。Python 3.9+ 标准库实现，无运行时第三方依赖。
+把一个本地文件持久写入用户自己的 AWS SigV4-compatible object store，并返回严格 JSON Object Reference 与 public/presigned current-key URL。Python 3.9+ 标准库实现。
 
-## 支持范围
+## Normal 支持范围
 
-- AWS S3 (`aws-s3`)
-- Cloudflare R2 (`cloudflare-r2`)
-- 明确兼容 AWS SigV4 PutObject + presigned GET 的 custom/MinIO endpoint (`custom`)
+- AWS S3 (`aws-s3`)：单次 PutObject、private presigned GET。
+- Cloudflare R2 (`cloudflare-r2`)：单次 PutObject、private presigned GET。
+- `custom`：用户明确断言 exact endpoint 兼容同一单次 Put/presign 合同。
+- Public Access：只从用户声明的 HTTPS Public Base URL 拼接，不修改 ACL/policy，不主动探测。
+- Retention：结果保存声明值；lifecycle 执行始终是 `external-unverified`。
 
-v1 不含 OSS/COS preset、远程/base64/stdin 输入、ACL、list/delete/copy、multipart、自动重试或 JSON 输出。
+普通模式只执行 `collision=replace`。Delete、multipart、HEAD reconciliation 和 assisted setup 都是 capability-gated，当前 normal baseline 不可用。`aliyun-oss` / `tencent-cos` normal preset 尚未发布；不要用 `custom` 绕过该限制。
 
 ## 快速开始
 
-```bash
-export S3_UPLOAD_ACCESS_KEY_ID='...'
-export S3_UPLOAD_SECRET_ACCESS_KEY='...'
-export S3_UPLOAD_BUCKET='my-bucket'
-export S3_UPLOAD_ENDPOINT='https://s3.example.com'
-export S3_UPLOAD_PUBLIC_BASE_URL='https://cdn.example.com'
-
-python3 scripts/upload.py --file ./report.pdf --dry-run
-python3 scripts/upload.py --file ./report.pdf
-```
-
-成功 stdout 只有一行 URL；元数据和错误写 stderr。没有 public base 时自动返回默认 3600 秒的 presigned GET URL。
-
-## 命名凭证档案
+先按 [配置说明](references/configuration.md) 创建完整的 scoped Credential Profile 与 Upload Target，然后从项目根目录执行：
 
 ```bash
-# 剪贴板内容是 S3_UPLOAD_* dotenv 字段
-pbpaste | ./scripts/set_profile.sh prod --stdin
-python3 scripts/upload.py --file ./report.pdf --use-local-key --profile prod
+python3 scripts/upload.py upload \
+  --file ./report.pdf \
+  --target project:documents \
+  --dry-run --json
+
+python3 scripts/upload.py upload \
+  --file ./report.pdf \
+  --target project:documents \
+  --reference-out ./report.object-reference.json \
+  --json
+
+python3 scripts/upload.py url \
+  --reference-file ./report.object-reference.json \
+  --json
 ```
 
-档案目录为 `~/.config/s3-upload/profiles/`（目录 0700、文件 0600）。已有档案必须显式加 `--force` 才覆盖。项目可以只在 `.env.local` 钉选 `S3_UPLOAD_PROFILE=prod`。
+非 JSON 的 upload/url 成功时 stdout 只有一个 URL。JSON 始终使用固定 v1 result schema；遇到 `partial_success` 或 `ambiguous` 时，不要重放 Put，保留 `checkpoint_id`。
+
+## 项目 Mapping
+
+项目 `.s3-upload/config.json` 可以为不同 calling Skill 固定不同目的地：
+
+```json
+{
+  "schema_version": 1,
+  "default_target": "project:temporary-builds",
+  "skill_targets": {
+    "image-2": "project:website-images",
+    "pdf2markdown": "global:shared-documents"
+  }
+}
+```
+
+只有明确的 Persistent Upload Request 才执行第二阶段。调用时保持 cwd 为原项目，传绝对本地路径：
+
+```bash
+python3 /path/to/s3-upload/scripts/upload.py upload \
+  --file /absolute/output/cover.png \
+  --caller-skill image-2 \
+  --json
+```
+
+映射选择 Target，但不会自动上传，也不会让生成失败触发重新生成。
 
 ## CLI
 
 ```text
---file PATH                 必填，本地普通文件
---key KEY                   完全覆盖默认对象键
---prefix PREFIX             仅没有 --key 时生效
---content-type TYPE         覆盖 MIME 推断
---profile NAME              选择命名凭证档案
---use-local-key             显式允许读取 home 档案
---provider NAME             custom / aws-s3 / cloudflare-r2
---presign-expires SEC       1…604800，默认 3600
---max-bytes N               1…536870912，默认 104857600
---public-base-url URL       本轮公开基址
---dry-run                   完整预检，不读 body、不签名、不访问网络
+upload FILE/TARGET options    normal 单次上传；multipart 由 capability gate 控制
+url REFERENCE|TARGET+KEY      零远端请求生成 current-key URL
+delete                       capability-gated；normal baseline unavailable
+resume                       capability-gated multipart recovery
+reconcile                    capability-gated read-only recovery
+abort                        capability-gated multipart cleanup
 ```
 
-## 测试
+运行 `python3 scripts/upload.py --help` 查看稳定 parser surface。完整状态/退出码见 [API notes](references/api-notes.md)。
 
-从公开仓根运行：
+## v1 迁移
+
+无 subcommand 的旧 CLI、flat `S3_UPLOAD_ACCESS_KEY_ID`/bucket 字段合并、`--profile` 和 `set_profile.sh` 已移除。v2 不自动读取或迁移旧配置；必须先选择 project/global scope，再把 Secret 放进命名 Credential map，把位置和策略放进完整 Target。迁移例子见 [configuration.md](references/configuration.md#从-v1-flat-配置迁移)。
+
+## 测试
 
 ```bash
 python3 -m pytest s3-upload/tests -q
 python3 -m compileall -q s3-upload/scripts
 ```
 
-真实云 smoke 需要用户提供测试桶；CI 不需要云密钥。
-
-详细 provider 规则见 [`references/providers.md`](references/providers.md)，错误合同见 [`references/api-notes.md`](references/api-notes.md)。
+CI 不读取真实 Key、不发云请求。Provider 候选与真实 evidence 仅位于 maintainer/test surface，不属于用户 normal workflow。

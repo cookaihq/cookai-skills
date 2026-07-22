@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cookaihq.github.io/awesome-skills/image-2/handoff.schema.json",
+  "title": "image-2 terminal handoff v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "status",
+    "outputs",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "task_id": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._~-]{1,256}$"
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "partial_success",
+        "failed",
+        "timed_out"
+      ]
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/output"
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/error"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "local_path",
+        "upstream_url",
+        "content_type",
+        "status"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "local_path": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ]
+        },
+        "upstream_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "pattern": "^https://[^\\s]+$"
+        },
+        "content_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[\\x20-\\x7E]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "saved",
+            "download_failed",
+            "not_saved"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "saved"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "local_path": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "local_path": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_arguments",
+            "configuration_error",
+            "invalid_task_id",
+            "create_transport_error",
+            "create_http_error",
+            "create_response_invalid",
+            "query_transport_error",
+            "query_http_error",
+            "query_response_invalid",
+            "upstream_failed",
+            "poll_timeout",
+            "internal_error"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "ok"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outputs": {
+            "minItems": 1,
+            "oneOf": [
+              {
+                "items": {
+                  "properties": {
+                    "status": {
+                      "const": "saved"
+                    }
+                  }
+                }
+              },
+              {
+                "items": {
+                  "properties": {
+                    "status": {
+                      "const": "not_saved"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "partial_success"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outputs": {
+            "minItems": 1,
+            "items": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "saved",
+                    "download_failed"
+                  ]
+                }
+              }
+            },
+            "contains": {
+              "properties": {
+                "status": {
+                  "const": "download_failed"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "minContains": 1
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outputs": {
+            "maxItems": 0
+          },
+          "error": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "timed_out"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~-]{1,256}$"
+          },
+          "outputs": {
+            "maxItems": 0
+          },
+          "error": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/error"
+              },
+              {
+                "properties": {
+                  "code": {
+                    "const": "poll_timeout"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

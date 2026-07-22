@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "artifact_type": "s3-upload-setup-result",
+  "plan_id": "123e4567-e89b-42d3-a456-426614174002",
+  "plan_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "status": "unknown",
+  "action_results": [
+    {
+      "action_id": "cos-issuance-1",
+      "status": "unknown",
+      "before_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "after_digest": null,
+      "recovery_instructions": ["manual_revoke_and_reissue"]
+    }
+  ],
+  "created_resources": [
+    {
+      "action_id": "cos-issuance-1",
+      "resource_type": "sub-identity",
+      "resource_id": "s3-upload-website-assets"
+    }
+  ],
+  "local_install_result": "not_started",
+  "recovery_instructions": ["manual_revoke_and_reissue"]
+}

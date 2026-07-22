@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "task_id": null,
+  "status": "failed",
+  "outputs": [],
+  "error": {
+    "code": "create_http_error",
+    "message": "Image task creation was rejected."
+  }
+}

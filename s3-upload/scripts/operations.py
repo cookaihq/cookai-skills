@@ -1,0 +1,667 @@
+from __future__ import annotations
+
+import os
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, Optional
+
+from artifacts import (
+    ArtifactError, CheckpointStore, ReferenceOutputSnapshot, build_object_reference,
+    preflight_reference_output, write_reference_output,
+)
+from config import Connection
+from planning import (
+    derive_contract_key, provider_candidate_for_target, registry_for_target,
+)
+from provider_candidates import build_candidate_put_request
+from response_parser import parse_operation_response
+from resolver import ResolvedTarget
+from results import build_result
+from s3 import (
+    Response, TransportError, build_signed_request, parse_provider_identifier,
+    presign_get, public_url,
+)
+from source_file import SourceError, VerifiedSource
+
+
+class OperationError(RuntimeError):
+    pass
+
+
+@dataclass
+class OperationOutcome:
+    result: Dict[str, Any]
+    store: CheckpointStore
+    checkpoint_id: str
+    retain_checkpoint: bool
+
+    def finalize(self) -> None:
+        if not self.retain_checkpoint:
+            try:
+                self.store.remove(self.checkpoint_id)
+            except (ArtifactError, FileNotFoundError):
+                pass
+
+
+def _timestamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def connection_for(resolved: ResolvedTarget) -> Connection:
+    credential = resolved.credential
+    if credential is None:
+        raise OperationError("Credential Profile is unavailable")
+    target = resolved.target
+    return Connection(
+        access_key_id=credential.access_key_id,
+        secret_access_key=credential.secret_access_key,
+        session_token=credential.session_token,
+        bucket=target.bucket,
+        endpoint=target.endpoint,
+        region=target.region,
+        provider=target.provider,
+        addressing=target.addressing,
+        public_base_url=target.access.public_base_url or "",
+        prefix=target.prefix,
+        max_bytes=target.limits.soft_max_bytes,
+        presign_expires=target.access.presign_expires_seconds or 3600,
+    )
+
+
+def _header(response: Response, name: str) -> Optional[str]:
+    for key, value in (response.headers or {}).items():
+        if key.lower() == name.lower():
+            return value
+    return None
+
+
+def _unknown_status(status: int) -> bool:
+    return 300 <= status < 400 or status in {408, 425, 429} or status >= 500
+
+
+def _set_state(checkpoint: Dict[str, Any], state: str, moment: datetime,
+               **changes: Any) -> Dict[str, Any]:
+    updated = dict(checkpoint)
+    updated["state"] = state
+    updated["updated_at"] = _timestamp(moment)
+    updated.update(changes)
+    return updated
+
+
+def _unique_key(base_key: str, token: str) -> str:
+    directory, separator, basename = base_key.rpartition("/")
+    suffix_at = basename.rfind(".")
+    if suffix_at > 0:
+        basename = basename[:suffix_at] + "-" + token + basename[suffix_at:]
+    else:
+        basename = basename + "-" + token
+    return directory + separator + basename
+
+
+def _new_uuid(factory: Callable[[], uuid.UUID], *excluded: str) -> str:
+    for _ in range(8):
+        value = factory().hex
+        if value not in excluded:
+            return value
+    raise OperationError("could not allocate an independent operation identifier")
+
+
+def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
+                       transport: Callable[..., Response], project_root: str,
+                       config_home: str, now: Optional[datetime],
+                       checkpoint_notice: Callable[[str], None],
+                       source: VerifiedSource,
+                       uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4) -> OperationOutcome:
+    if not plan["executable"] or plan["upload_mode"] != "single-put":
+        raise OperationError("single Put execution requires an executable single-Put plan")
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    target = resolved.target
+    connection = connection_for(resolved)
+    collision = plan["collision"]
+    policy = collision["policy"]
+    maximum = collision["max_attempts"]
+    if policy not in {"replace", "unique", "reject"}:
+        raise OperationError("unsupported single Put collision policy")
+    if policy != "unique" and maximum != 1:
+        raise OperationError("non-unique single Put must use one collision attempt")
+    if (
+        source.snapshot.path != plan["source"]["path"]
+        or source.snapshot.size != plan["source"]["size"]
+    ):
+        raise SourceError("planned source descriptor does not match the upload plan")
+    with source:
+        body = source.single_put_bytes()
+        checkpoint_id = _new_uuid(uuid_factory)
+        operation_id = _new_uuid(uuid_factory, checkpoint_id)
+        actual_key = (
+            _unique_key(plan["object_key"], _new_uuid(uuid_factory, checkpoint_id, operation_id))
+            if policy == "unique"
+            else plan["object_key"]
+        )
+        reference = build_object_reference(
+            target_ref=resolved.ref.text,
+            target=target,
+            key=actual_key,
+            version_id=None,
+        )
+        reference_snapshot = None
+        if plan["reference_out"] is not None:
+            reference_snapshot = preflight_reference_output(
+                plan["reference_out"]["path"],
+                project_root=project_root,
+                config_home=config_home,
+                source_identity=(source.snapshot.device, source.snapshot.inode),
+            )
+        checkpoint = {
+            "schema_version": 1,
+            "checkpoint_id": checkpoint_id,
+            "kind": "put",
+            "state": "prepared",
+            "operation_id": operation_id,
+            "created_at": _timestamp(moment),
+            "updated_at": _timestamp(moment),
+            "target_ref": resolved.ref.text,
+            "target_fingerprint": resolved.target_fingerprint,
+            "object_reference_draft": reference,
+            "upload_plan": {
+                "content_type": plan["headers"]["content_type"],
+                "cache_control": plan["headers"]["cache_control"],
+                "content_disposition": plan["headers"]["content_disposition"],
+                "presign_expires_seconds": plan["access"]["presign_expires_seconds"],
+            },
+            "collision": {
+                "policy": policy,
+                "base_key": plan["object_key"],
+                "attempt": 1,
+                "max_attempts": maximum,
+            },
+            "source": source.snapshot.as_checkpoint(),
+            "reference_out": None if reference_snapshot is None else reference_snapshot.value,
+            "multipart": None,
+            "delete_scope": None,
+        }
+        store = CheckpointStore(project_root)
+        store.create(checkpoint)
+        active_credentials = (
+            connection.access_key_id,
+            connection.secret_access_key,
+            connection.session_token,
+        )
+        contract_key = derive_contract_key(target)
+        registry = registry_for_target(target, contract_key)
+        metadata_enabled = (
+            registry.lookup(contract_key, "ReservedMetadataRoundTrip").state == "enabled"
+        )
+        notice_sent = False
+        version = None
+        while True:
+            checkpoint = _set_state(checkpoint, "put_in_flight", moment)
+            store.replace(checkpoint)
+            if not notice_sent:
+                checkpoint_notice(checkpoint_id)
+                notice_sent = True
+            request_headers = [
+                ("content-length", str(len(body))),
+                ("content-type", checkpoint["upload_plan"]["content_type"]),
+            ]
+            if checkpoint["upload_plan"]["cache_control"] is not None:
+                request_headers.append(("cache-control", checkpoint["upload_plan"]["cache_control"]))
+            if checkpoint["upload_plan"]["content_disposition"] is not None:
+                request_headers.append(("content-disposition", checkpoint["upload_plan"]["content_disposition"]))
+            if metadata_enabled:
+                request_headers.extend(
+                    (
+                        ("x-amz-meta-s3-upload-sha256", checkpoint["source"]["sha256"]),
+                        ("x-amz-meta-s3-upload-operation-id", checkpoint["operation_id"]),
+                    )
+                )
+            if policy != "replace":
+                request_headers.append(("if-none-match", "*"))
+            actual_key = checkpoint["object_reference_draft"]["location"]["key"]
+            candidate = provider_candidate_for_target(target)
+            if candidate is None:
+                signed = build_signed_request(
+                    connection,
+                    method="PUT",
+                    key=actual_key,
+                    body=body,
+                    headers=tuple(request_headers),
+                    now=moment,
+                )
+            else:
+                signed = build_candidate_put_request(
+                    candidate,
+                    connection,
+                    key=actual_key,
+                    body=body,
+                    content_type=checkpoint["upload_plan"]["content_type"],
+                    extra_headers=tuple(request_headers[2:]),
+                    now=moment,
+                )
+            try:
+                response = transport(signed.method, signed.url, signed.headers, signed.body)
+            except Exception:
+                response = None
+            parsed = None if response is None else parse_operation_response(
+                response,
+                operation="PutObject",
+                active_credentials=active_credentials,
+                conditional=policy != "replace",
+            )
+            if parsed is None or parsed.classification in {"unknown", "identifier_rejected"}:
+                checkpoint = _set_state(checkpoint, "put_unknown", moment)
+                store.replace(checkpoint)
+                result = build_result(
+                    "upload", "ambiguous", object_written=None,
+                    retention=target.retention.result(), checkpoint_id=checkpoint_id,
+                )
+                return OperationOutcome(result, store, checkpoint_id, True)
+            if parsed.classification == "precondition":
+                attempt = checkpoint["collision"]["attempt"]
+                if policy != "unique" or attempt >= maximum:
+                    result = build_result(
+                        "upload", "collision", object_written=False,
+                        object_reference=checkpoint["object_reference_draft"],
+                        retention=target.retention.result(),
+                    )
+                    return OperationOutcome(result, store, checkpoint_id, False)
+                operation_id = _new_uuid(uuid_factory, checkpoint_id, checkpoint["operation_id"])
+                token = _new_uuid(uuid_factory, checkpoint_id, operation_id)
+                reference = build_object_reference(
+                    target_ref=resolved.ref.text,
+                    target=target,
+                    key=_unique_key(plan["object_key"], token),
+                    version_id=None,
+                )
+                updated_collision = dict(checkpoint["collision"])
+                updated_collision["attempt"] = attempt + 1
+                checkpoint = _set_state(
+                    checkpoint,
+                    "prepared",
+                    moment,
+                    operation_id=operation_id,
+                    object_reference_draft=reference,
+                    collision=updated_collision,
+                )
+                store.replace(checkpoint)
+                continue
+            if parsed.classification != "success":
+                try:
+                    store.remove(checkpoint_id)
+                except ArtifactError:
+                    pass
+                raise OperationError("remote Put returned a definitive no-write response")
+            version = parsed.identifiers.get("version_id")
+            break
+
+    reference = build_object_reference(
+        target_ref=resolved.ref.text,
+        target=target,
+        key=checkpoint["object_reference_draft"]["location"]["key"],
+        version_id=version,
+        credentials=active_credentials,
+    )
+    checkpoint = _set_state(checkpoint, "complete", moment, object_reference_draft=reference)
+    store.replace(checkpoint)
+    try:
+        if target.access.mode == "public":
+            url = public_url(
+                target.access.public_base_url or "", reference["location"]["key"]
+            )
+            url_kind = "public"
+            expires_at = None
+        else:
+            effective = plan["access"]["presign_effective_seconds"]
+            if not isinstance(effective, int) or effective <= 0:
+                raise OperationError("presigned URL duration is unavailable")
+            url = presign_get(connection, reference["location"]["key"], effective, moment)
+            url_kind = "presigned"
+            expires_at = _timestamp(moment + timedelta(seconds=effective))
+    except Exception:
+        result = build_result(
+            "upload", "partial_success", object_written=True,
+            object_reference=reference, url_kind=("public" if target.access.mode == "public" else "presigned"),
+            retention=target.retention.result(),
+        )
+        return OperationOutcome(result, store, checkpoint_id, False)
+    if reference_snapshot is not None:
+        try:
+            write_reference_output(reference_snapshot, reference)
+        except ArtifactError:
+            result = build_result(
+                "upload", "partial_success", object_written=True,
+                object_reference=reference, url=url, url_kind=url_kind,
+                expires_at=expires_at, retention=target.retention.result(),
+                checkpoint_id=checkpoint_id,
+            )
+            return OperationOutcome(result, store, checkpoint_id, True)
+    result = build_result(
+        "upload", "ok", object_written=True, object_reference=reference,
+        url=url, url_kind=url_kind, expires_at=expires_at,
+        retention=target.retention.result(),
+    )
+    return OperationOutcome(result, store, checkpoint_id, False)
+
+
+def generate_object_url(*, resolved: ResolvedTarget, reference: Dict[str, Any],
+                        presign_expires: Optional[int], now: Optional[datetime]) -> Dict[str, Any]:
+    if reference["target_fingerprint"] != resolved.target_fingerprint:
+        raise OperationError("Object Reference Target fingerprint does not match the selected Target")
+    if resolved.credential is None:
+        raise OperationError("Credential Profile is unavailable")
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    access = reference["access"]
+    if access["mode"] == "public":
+        if presign_expires is not None:
+            raise OperationError("--presign-expires is unavailable for a public Object Reference")
+        url = public_url(access["public_base_url"], reference["location"]["key"])
+        url_kind = "public"
+        expires_at = None
+    else:
+        requested = access["presign_expires_seconds"] if presign_expires is None else presign_expires
+        if not isinstance(requested, int) or isinstance(requested, bool) or not 1 <= requested <= 604800:
+            raise OperationError("presign expiry must be from 1 to 604800 seconds")
+        effective = resolved.presign_effective_seconds(requested, moment)
+        if effective is None or effective <= 0:
+            raise OperationError("Credential Profile cannot sign a positive URL lifetime")
+        url = presign_get(connection_for(resolved), reference["location"]["key"], effective, moment)
+        url_kind = "presigned"
+        expires_at = _timestamp(moment + timedelta(seconds=effective))
+    return build_result(
+        "url", "ok", object_reference=reference, url=url, url_kind=url_kind,
+        expires_at=expires_at, retention=reference["retention"],
+    )
+
+
+def _delete_terminal_result(operation: str, status: str, checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    reference = checkpoint["object_reference_draft"]
+    scope = checkpoint["delete_scope"]
+    return build_result(
+        operation,
+        status,
+        object_reference=reference,
+        retention=reference["retention"],
+        delete_scope=scope,
+        deleted_version_id=(
+            reference["location"]["version_id"]
+            if status == "deleted" and scope == "exact-version"
+            else None
+        ),
+    )
+
+
+def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
+                   plan: Dict[str, Any], transport: Callable[..., Response],
+                   project_root: str, now: Optional[datetime],
+                   checkpoint_notice: Callable[[str], None],
+                   uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4) -> OperationOutcome:
+    if not plan["executable"] or plan["delete_scope"] not in {"current-key", "exact-version"}:
+        raise OperationError("Delete execution requires an executable scoped plan")
+    if reference["target_fingerprint"] != resolved.target_fingerprint:
+        raise OperationError("Object Reference Target fingerprint does not match the selected Target")
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    checkpoint_id = _new_uuid(uuid_factory)
+    operation_id = _new_uuid(uuid_factory, checkpoint_id)
+    checkpoint = {
+        "schema_version": 1,
+        "checkpoint_id": checkpoint_id,
+        "kind": "delete",
+        "state": "prepared",
+        "operation_id": operation_id,
+        "created_at": _timestamp(moment),
+        "updated_at": _timestamp(moment),
+        "target_ref": reference["target_ref"],
+        "target_fingerprint": resolved.target_fingerprint,
+        "object_reference_draft": reference,
+        "upload_plan": None,
+        "collision": None,
+        "source": None,
+        "reference_out": None,
+        "multipart": None,
+        "delete_scope": plan["delete_scope"],
+    }
+    store = CheckpointStore(project_root)
+    store.create(checkpoint)
+    checkpoint = _set_state(checkpoint, "delete_in_flight", moment)
+    store.replace(checkpoint)
+    checkpoint_notice(checkpoint_id)
+    query = ()
+    parser_operation = "DeleteObjectCurrentKey"
+    if checkpoint["delete_scope"] == "exact-version":
+        query = (("versionId", reference["location"]["version_id"]),)
+        parser_operation = "DeleteObjectVersion"
+    connection = connection_for(resolved)
+    signed = build_signed_request(
+        connection,
+        method="DELETE",
+        key=reference["location"]["key"],
+        query=query,
+        now=moment,
+    )
+    try:
+        response = transport(signed.method, signed.url, signed.headers, signed.body)
+    except Exception:
+        response = None
+    active_credentials = (
+        connection.access_key_id,
+        connection.secret_access_key,
+        connection.session_token,
+    )
+    parsed = None if response is None else parse_operation_response(
+        response,
+        operation=parser_operation,
+        active_credentials=active_credentials,
+    )
+    if parsed is None or parsed.classification in {"unknown", "identifier_rejected"}:
+        checkpoint = _set_state(checkpoint, "delete_unknown", moment)
+        store.replace(checkpoint)
+        result = build_result(
+            "delete",
+            "ambiguous",
+            retention=reference["retention"],
+            checkpoint_id=checkpoint_id,
+        )
+        return OperationOutcome(result, store, checkpoint_id, True)
+    if parsed.classification != "success":
+        try:
+            store.remove(checkpoint_id)
+        except ArtifactError:
+            pass
+        raise OperationError("remote Delete returned a definitive no-delete response")
+    checkpoint = _set_state(checkpoint, "deleted", moment)
+    store.replace(checkpoint)
+    return OperationOutcome(
+        _delete_terminal_result("delete", "deleted", checkpoint),
+        store,
+        checkpoint_id,
+        False,
+    )
+
+
+def reconcile_delete(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
+                     store: CheckpointStore, transport: Callable[..., Response],
+                     now: Optional[datetime]) -> OperationOutcome:
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    checkpoint_id = checkpoint["checkpoint_id"]
+    state = checkpoint["state"]
+    reference = checkpoint["object_reference_draft"]
+    scope = checkpoint["delete_scope"]
+    if state == "prepared":
+        checkpoint = _set_state(checkpoint, "not_started", moment)
+        store.replace(checkpoint)
+        return OperationOutcome(
+            _delete_terminal_result("reconcile", "not_started", checkpoint),
+            store,
+            checkpoint_id,
+            False,
+        )
+    if state == "delete_in_flight":
+        checkpoint = _set_state(checkpoint, "delete_unknown", moment)
+        store.replace(checkpoint)
+        state = "delete_unknown"
+    if state == "delete_unknown":
+        contract_key = derive_contract_key(resolved.target)
+        registry = registry_for_target(resolved.target, contract_key)
+        observer_name = (
+            "ObserveDeleteVersion" if scope == "exact-version" else "ObserveDeleteCurrentKey"
+        )
+        if registry.lookup(contract_key, observer_name).state != "enabled":
+            result = build_result(
+                "reconcile",
+                "ambiguous",
+                retention=reference["retention"],
+                checkpoint_id=checkpoint_id,
+            )
+            return OperationOutcome(result, store, checkpoint_id, True)
+        query = ()
+        if scope == "exact-version":
+            query = (("versionId", reference["location"]["version_id"]),)
+        signed = build_signed_request(
+            connection_for(resolved),
+            method="HEAD",
+            key=reference["location"]["key"],
+            query=query,
+            now=moment,
+        )
+        try:
+            response = transport(signed.method, signed.url, signed.headers, signed.body)
+        except Exception:
+            response = None
+        if response is not None and response.status in {404, 410}:
+            checkpoint = _set_state(checkpoint, "deleted", moment)
+            store.replace(checkpoint)
+            state = "deleted"
+        elif response is not None and 200 <= response.status < 300:
+            checkpoint = _set_state(checkpoint, "not_deleted", moment)
+            store.replace(checkpoint)
+            state = "not_deleted"
+        else:
+            result = build_result(
+                "reconcile",
+                "ambiguous",
+                retention=reference["retention"],
+                checkpoint_id=checkpoint_id,
+            )
+            return OperationOutcome(result, store, checkpoint_id, True)
+    if state in {"deleted", "not_deleted", "not_started"}:
+        return OperationOutcome(
+            _delete_terminal_result("reconcile", state, checkpoint),
+            store,
+            checkpoint_id,
+            False,
+        )
+    raise OperationError("checkpoint state is not reconcilable as a Delete")
+
+
+def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
+                  store: CheckpointStore, transport: Callable[..., Response],
+                  config_home: str, now: Optional[datetime]) -> OperationOutcome:
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    checkpoint_id = checkpoint["checkpoint_id"]
+    reference = checkpoint["object_reference_draft"]
+    retention = reference["retention"]
+    state = checkpoint["state"]
+    if state == "prepared":
+        checkpoint = _set_state(checkpoint, "not_started", moment)
+        store.replace(checkpoint)
+        result = build_result(
+            "reconcile", "not_started", object_written=False, retention=retention,
+        )
+        return OperationOutcome(result, store, checkpoint_id, False)
+    if state == "put_in_flight":
+        checkpoint = _set_state(checkpoint, "put_unknown", moment)
+        store.replace(checkpoint)
+        state = "put_unknown"
+    if state == "put_unknown":
+        contract_key = derive_contract_key(resolved.target)
+        registry = registry_for_target(resolved.target, contract_key)
+        head = registry.lookup(contract_key, "HeadObject")
+        metadata = registry.lookup(contract_key, "ReservedMetadataRoundTrip")
+        if head.state != "enabled" or metadata.state != "enabled":
+            result = build_result(
+                "reconcile", "ambiguous", object_written=None,
+                retention=retention, checkpoint_id=checkpoint_id,
+            )
+            return OperationOutcome(result, store, checkpoint_id, True)
+        signed = build_signed_request(
+            connection_for(resolved), method="HEAD",
+            key=reference["location"]["key"], now=moment,
+        )
+        try:
+            response = transport(signed.method, signed.url, signed.headers, signed.body)
+        except Exception:
+            response = None
+        if response is not None and 200 <= response.status < 300:
+            operation_id = _header(response, "x-amz-meta-s3-upload-operation-id")
+            source_hash = _header(response, "x-amz-meta-s3-upload-sha256")
+            content_length = _header(response, "content-length")
+            if (
+                operation_id == checkpoint["operation_id"]
+                and source_hash == checkpoint["source"]["sha256"]
+                and content_length == str(checkpoint["source"]["size"])
+            ):
+                checkpoint = _set_state(checkpoint, "complete", moment)
+                store.replace(checkpoint)
+                state = "complete"
+        if state == "put_unknown":
+            result = build_result(
+                "reconcile", "ambiguous", object_written=None,
+                retention=retention, checkpoint_id=checkpoint_id,
+            )
+            return OperationOutcome(result, store, checkpoint_id, True)
+    if state == "complete":
+        try:
+            generated = generate_object_url(
+                resolved=resolved, reference=checkpoint["object_reference_draft"],
+                presign_expires=None, now=moment,
+            )
+        except Exception:
+            result = build_result(
+                "reconcile",
+                "partial_success",
+                object_written=True,
+                object_reference=checkpoint["object_reference_draft"],
+                url_kind=(
+                    "public"
+                    if checkpoint["object_reference_draft"]["access"]["mode"] == "public"
+                    else "presigned"
+                ),
+                retention=retention,
+            )
+            return OperationOutcome(result, store, checkpoint_id, False)
+        generated["operation"] = "reconcile"
+        if checkpoint["reference_out"] is not None:
+            source = checkpoint["source"]
+            identity = (
+                None if source["device"] is None else int(source["device"]),
+                None if source["inode"] is None else int(source["inode"]),
+            )
+            snapshot = ReferenceOutputSnapshot(
+                checkpoint["reference_out"],
+                store.project_root,
+                config_home,
+                identity,
+            )
+            try:
+                write_reference_output(snapshot, checkpoint["object_reference_draft"])
+            except ArtifactError:
+                result = build_result(
+                    "reconcile",
+                    "partial_success",
+                    object_written=True,
+                    object_reference=generated["object_reference"],
+                    url=generated["url"],
+                    url_kind=generated["url_kind"],
+                    expires_at=generated["expires_at"],
+                    retention=retention,
+                    checkpoint_id=checkpoint_id,
+                )
+                return OperationOutcome(result, store, checkpoint_id, True)
+        return OperationOutcome(generated, store, checkpoint_id, False)
+    if state == "not_started":
+        result = build_result(
+            "reconcile", "not_started", object_written=False, retention=retention,
+        )
+        return OperationOutcome(result, store, checkpoint_id, False)
+    raise OperationError("checkpoint state is not reconcilable as a Put")

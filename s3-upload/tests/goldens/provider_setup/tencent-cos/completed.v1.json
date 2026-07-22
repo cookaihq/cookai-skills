@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "artifact_type": "s3-upload-setup-result",
+  "plan_id": "123e4567-e89b-42d3-a456-426614174002",
+  "plan_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "status": "completed",
+  "action_results": [
+    {
+      "action_id": "cos-action-1",
+      "status": "succeeded",
+      "before_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "after_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "recovery_instructions": []
+    }
+  ],
+  "created_resources": [
+    {
+      "action_id": "cos-action-1",
+      "resource_type": "bucket-policy",
+      "resource_id": "website-assets-1250000000:assets"
+    }
+  ],
+  "local_install_result": "installed",
+  "recovery_instructions": []
+}
