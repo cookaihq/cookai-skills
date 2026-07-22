@@ -25,7 +25,7 @@ from capabilities import (
 from operations import connection_for, generate_object_url
 from planning import derive_contract_key, registry_for_target
 from resolver import ResolvedTarget
-from response_parser import parse_operation_response
+from response_parser import VERSION_HEADERS, parse_operation_response
 from results import build_result, validate_result
 from s3 import Response, build_signed_request, parse_provider_identifier
 from source_file import (
@@ -240,7 +240,7 @@ def _head_completion_observation(
     if response is None or not 200 <= response.status < 300:
         return "not-complete", None
     version_values = []
-    for name in ("x-amz-version-id", "x-oss-version-id", "x-cos-version-id"):
+    for name in VERSION_HEADERS:
         value = _header(response, name)
         if value is not None:
             version_values.append(value)

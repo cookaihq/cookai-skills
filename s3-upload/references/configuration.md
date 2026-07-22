@@ -104,7 +104,7 @@ S3_UPLOAD_PROJECT_CREDENTIALS_JSON='{"aws-main":{"access_key_id":"...","secret_a
 
 它解析为 `https://cos.ap-guangzhou.myqcloud.com` + virtual addressing。`bucket` 必须包含完整 `BucketName-APPID`。以上片段只展示需要替换的字段，不是可单独保存的不完整 Target；Access、Retention、limits 等仍必须完整存在。
 
-两种 preset 当前 capability state 为 `experimental`：先执行 `upload --dry-run --json` 并核对状态。只有 `endpoint=null`、`addressing=null` 继承 preset 合同；显式 endpoint/addressing 是独立 test-only 合同。高级 operation 与 assisted setup 仍不可用。
+两种 preset 当前 capability state 为 `experimental`：先执行 `upload --dry-run --json` 并核对状态。只有 `endpoint=null`、`addressing=null` 继承 preset 合同；显式写出同一个默认 endpoint 或 `virtual` 会形成独立 exact/test-only 合同，其他 endpoint/addressing 变体不属于当前默认 preset 并会被拒绝。高级 operation 与 assisted setup 仍不可用。
 
 ## 全局配置
 

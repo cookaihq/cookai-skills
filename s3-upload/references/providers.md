@@ -28,7 +28,7 @@ Both names are selectable normal presets for the two baseline operations above. 
 
 For affected Alibaba Cloud accounts activated on or after 2025-03-20, Chinese-mainland default public endpoints can return `PublicEndpointForbidden`; use of the preset does not bypass that account policy. Tencent COS requires the complete `BucketName-APPID`, and the preset never generates path-style requests.
 
-An experimental Target must leave `endpoint` and `addressing` null. Explicit values, even when textually equal to the default, form a separate exact/test-only contract. Known OSS/COS service hosts cannot inherit the `custom` baseline. Live interlocks and synthetic setup playbooks remain maintainer-only, and assisted setup is still unavailable.
+An experimental Target must leave `endpoint` and `addressing` null. Explicitly spelling the same default endpoint or `virtual` forms a separate exact/test-only contract; other endpoint/addressing variants are rejected by the normal Target path and require a separately specified maintainer candidate. Known OSS/COS service hosts cannot inherit the `custom` baseline. Live interlocks and synthetic setup playbooks remain maintainer-only, and assisted setup is still unavailable.
 
 ## Exact contract isolation
 
