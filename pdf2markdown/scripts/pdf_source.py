@@ -480,6 +480,11 @@ def validate_pdf_identity(path: Path) -> None:
         raise PdfSourceError(
             "pdf_parser_unavailable", "PyMuPDF is required to validate the source PDF."
         ) from exc
+    previous_errors = bool(fitz.TOOLS.mupdf_display_errors())
+    previous_warnings = bool(fitz.TOOLS.mupdf_display_warnings())
+    fitz.TOOLS.mupdf_display_errors(False)
+    fitz.TOOLS.mupdf_display_warnings(False)
+    fitz.TOOLS.reset_mupdf_warnings()
     try:
         document = fitz.open(str(path))
         try:
@@ -496,6 +501,10 @@ def validate_pdf_identity(path: Path) -> None:
         raise PdfSourceError(
             "invalid_pdf", "The source does not contain a parseable PDF."
         ) from exc
+    finally:
+        fitz.TOOLS.reset_mupdf_warnings()
+        fitz.TOOLS.mupdf_display_errors(previous_errors)
+        fitz.TOOLS.mupdf_display_warnings(previous_warnings)
 
 
 def _close_quietly(value) -> None:

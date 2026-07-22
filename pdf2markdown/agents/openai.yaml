@@ -1,4 +1,4 @@
 interface:
   display_name: "PDF to Markdown"
-  short_description: "从本地或公开 HTTPS PDF 创建可恢复工作包"
-  default_prompt: "使用 $pdf2markdown 为这个本地或公开 HTTPS PDF 创建可恢复工作包，并冻结本次交互与发布设置。"
+  short_description: "为本地或公开 HTTPS PDF 创建并预检可恢复工作包"
+  default_prompt: "使用 $pdf2markdown 固化这个 PDF，生成逐页基准图和结构清单，并在任何上传或转换前完成可恢复预检。"

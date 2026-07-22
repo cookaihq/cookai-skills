@@ -18,13 +18,24 @@ from pathlib import Path
 
 import bundle as bundle_module
 import pdf_source
+import preflight as preflight_module
 import settings as settings_module
 
 
 SCHEMA_VERSION = 1
 MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_SLUG_BYTES = 200
-SUPPORTED_CONVERSION_STATES = frozenset({"preparing"})
+SUPPORTED_CONVERSION_STATES = frozenset(
+    {
+        "preparing",
+        "preflight_pending",
+        "preflight_warning",
+        "preflight_blocked",
+        "ready_to_submit",
+        "recoverable_error",
+        "terminal_error",
+    }
+)
 SUPPORTED_PUBLICATION_STATES = frozenset({"not_requested", "blocked"})
 
 
@@ -73,6 +84,36 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--use-local-key", action="store_true")
     inspect = subcommands.add_parser("inspect", add_help=False)
     inspect.add_argument("--work-bundle", "--bundle", dest="work_bundle", required=True)
+    advance = subcommands.add_parser("advance", add_help=False)
+    advance.add_argument("--work-bundle", "--bundle", dest="work_bundle", required=True)
+    advance.add_argument("--expected-generation", required=True, type=int)
+    advance.add_argument(
+        "--visual-capability", choices=("available", "unavailable"), required=True
+    )
+    advance.add_argument(
+        "--render-dpi", type=int, default=preflight_module.DEFAULT_RENDER_DPI
+    )
+    record = subcommands.add_parser("record", add_help=False)
+    record_commands = record.add_subparsers(
+        dest="record_command", required=True, parser_class=JsonArgumentParser
+    )
+    record_preflight = record_commands.add_parser("preflight", add_help=False)
+    record_preflight.add_argument(
+        "--work-bundle", "--bundle", dest="work_bundle", required=True
+    )
+    record_preflight.add_argument("--expected-generation", required=True, type=int)
+    record_preflight.add_argument("--action-id", required=True)
+    record_preflight.add_argument("--evidence-hash", required=True)
+    record_preflight.add_argument("--input", required=True)
+    record_decision = record_commands.add_parser("decision", add_help=False)
+    record_decision.add_argument(
+        "--work-bundle", "--bundle", dest="work_bundle", required=True
+    )
+    record_decision.add_argument("--expected-generation", required=True, type=int)
+    record_decision.add_argument("--action-id", required=True)
+    record_decision.add_argument("--evidence-hash", required=True)
+    record_decision.add_argument("--decision", choices=("accept", "decline"), required=True)
+    record_decision.add_argument("--basis", required=True)
     resume = subcommands.add_parser("resume", add_help=False)
     resume.add_argument("--work-bundle", "--bundle", dest="work_bundle", required=True)
     resume.add_argument("--expected-generation", required=True, type=int)
@@ -81,6 +122,12 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--publish-with")
     resume.add_argument("--publish-target")
     resume.add_argument("--use-local-key", action="store_true")
+    resume.add_argument(
+        "--visual-capability", choices=("available", "unavailable")
+    )
+    resume.add_argument(
+        "--render-dpi", type=int, default=preflight_module.DEFAULT_RENDER_DPI
+    )
     settings = subcommands.add_parser("settings", add_help=False)
     settings_commands = settings.add_subparsers(
         dest="settings_command", required=True, parser_class=JsonArgumentParser
@@ -627,11 +674,20 @@ def _source_digest(name, *, dir_fd: int) -> tuple[str, int]:
         size = 0
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             while True:
-                chunk = source.read(1024 * 1024)
+                chunk = source.read(
+                    min(1024 * 1024, opened_info.st_size + 1 - size)
+                )
                 if not chunk:
                     break
                 digest.update(chunk)
                 size += len(chunk)
+                if size > opened_info.st_size:
+                    raise WorkflowError(
+                        "integrity_violation",
+                        "The saved source PDF changed while it was being inspected.",
+                        return_code=4,
+                        action_required="repair_or_restore_work_bundle",
+                    )
         final_info = os.fstat(descriptor)
         if (
             final_info.st_size != size
@@ -776,7 +832,7 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     if (
         type(manifest.get("schema_version")) is not int
         or manifest["schema_version"] != SCHEMA_VERSION
-        or set(manifest) != required
+        or set(manifest) not in {frozenset(required), frozenset({*required, "preflight"})}
         or type(manifest.get("generation")) is not int
         or manifest["generation"] < 1
         or manifest.get("conversion_state") not in SUPPORTED_CONVERSION_STATES
@@ -794,7 +850,8 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         or source["size_bytes"] < 0
         or manifest.get("conversion_attempts") != []
         or manifest.get("final_markdown") is not None
-        or manifest.get("artifacts") != {"source_pdf": "01-source/source.pdf"}
+        or not isinstance(manifest.get("artifacts"), dict)
+        or manifest["artifacts"].get("source_pdf") != "01-source/source.pdf"
     ):
         raise WorkflowError(
             "invalid_bundle",
@@ -855,9 +912,16 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             action_required="repair_or_restore_work_bundle",
             context=state_context,
         )
-    if not bundle_module.valid_settings_history(
-        history, manifest, source.get("sha256")
-    ):
+    valid_history = (
+        bundle_module.valid_settings_history(history, manifest, source.get("sha256"))
+        or preflight_module.valid_preflight_history(
+            history, manifest, private_state
+        )
+        or preflight_module.valid_pending_preflight_history(
+            history, manifest, private_state
+        )
+    )
+    if not valid_history:
         raise WorkflowError(
             "invalid_bundle",
             "Work bundle history uses an unknown or inconsistent schema.",
@@ -866,7 +930,9 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             context=state_context,
         )
     try:
-        digest, size = _source_digest("source.pdf", dir_fd=descriptors["source"])
+        digest, size = _source_digest(
+            "source.pdf", dir_fd=descriptors["source"]
+        )
     except WorkflowError as exc:
         exc.context = state_context
         raise
@@ -878,8 +944,25 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             action_required="repair_or_restore_work_bundle",
             context=state_context,
         )
+    if manifest["conversion_state"] not in {"preparing", "recoverable_error"}:
+        try:
+            preflight_module.validate_baseline_artifacts(
+                descriptors=descriptors, manifest=manifest
+            )
+        except preflight_module.PreflightError as exc:
+            raise WorkflowError(
+                exc.code,
+                exc.message,
+                return_code=4,
+                action_required="repair_or_restore_work_bundle",
+                context=state_context,
+            ) from None
     _assert_bundle_descriptors_current(bundle, descriptors)
     print(f"[pdf2markdown] inspected work bundle {bundle.name}", file=sys.stderr)
+    if manifest["conversion_state"] != "preparing":
+        return preflight_module.result_from_manifest(
+            manifest, work_bundle=str(bundle), outcome="inspected"
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "work_bundle": str(bundle),
@@ -912,6 +995,584 @@ def _inspect_bundle(bundle: Path, *, locked_descriptors=None) -> dict:
 
 def _inspect(args, *, cwd: Path) -> dict:
     return _inspect_bundle(_canonical_bundle_path(args.work_bundle, cwd))
+
+
+def _commit_baseline_block(
+    *,
+    descriptors: dict,
+    manifest: dict,
+    private_state: dict,
+    dependencies: list[dict],
+    render_dpi: int,
+    blocker: dict,
+    at: str,
+) -> dict:
+    history = bundle_module.read_history(state_fd=descriptors["state"])
+    if history and history[-1].get("event") == "preflight_baseline_intent":
+        preflight_module.abort_pending_baseline(
+            descriptors=descriptors,
+            manifest=manifest,
+            private_state=private_state,
+            blocker=blocker,
+            at=at,
+        )
+    return preflight_module.commit_deterministic_block(
+        descriptors=descriptors,
+        manifest=manifest,
+        private_state=private_state,
+        dependencies=dependencies,
+        render_dpi=render_dpi,
+        blocker=blocker,
+        at=at,
+    )
+
+
+def _assert_frozen_source_before_recovery(
+    *, descriptors: dict, manifest: dict, work_bundle: str
+) -> None:
+    source = manifest.get("source")
+    context = {
+        "work_bundle": work_bundle,
+        "generation": manifest.get("generation"),
+        "conversion_state": manifest.get("conversion_state"),
+        "publication_state": manifest.get("publication_state"),
+    }
+    if (
+        not isinstance(source, dict)
+        or not isinstance(source.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
+        or type(source.get("size_bytes")) is not int
+        or source["size_bytes"] < 0
+    ):
+        raise WorkflowError(
+            "invalid_bundle",
+            "Work bundle source identity is invalid.",
+            return_code=4,
+            action_required="repair_or_restore_work_bundle",
+            context=context,
+        )
+    try:
+        digest, size = _source_digest(
+            "source.pdf", dir_fd=descriptors["source"]
+        )
+    except WorkflowError as exc:
+        exc.context = context
+        raise
+    if digest != source["sha256"] or size != source["size_bytes"]:
+        raise WorkflowError(
+            "integrity_violation",
+            "The saved source PDF does not match the manifest.",
+            return_code=4,
+            action_required="repair_or_restore_work_bundle",
+            context=context,
+        )
+
+
+def _advance(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
+    if not preflight_module.MIN_RENDER_DPI <= args.render_dpi <= (
+        preflight_module.MAX_RENDER_DPI
+    ):
+        raise WorkflowError(
+            "invalid_render_dpi",
+            "Render DPI must be between 72 and 600.",
+            return_code=2,
+            action_required="correct_command_arguments",
+        )
+    bundle = _canonical_bundle_path(args.work_bundle, cwd)
+    with _exclusive_bundle_lock(bundle) as locked_descriptors:
+        with _open_bundle_descriptors(
+            bundle, locked_descriptors=locked_descriptors
+        ) as descriptors:
+            operation_at = _isoformat(_moment(now))
+            _assert_bundle_descriptors_current(bundle, descriptors)
+            recovery_manifest = _read_json(
+                "manifest.json", dir_fd=descriptors["root"]
+            )
+            _assert_frozen_source_before_recovery(
+                descriptors=descriptors,
+                manifest=recovery_manifest,
+                work_bundle=str(bundle),
+            )
+            try:
+                history = bundle_module.read_history(state_fd=descriptors["state"])
+                pending_baseline = (
+                    history[-1]
+                    if history
+                    and history[-1].get("event") == "preflight_baseline_intent"
+                    else None
+                )
+                dependency_status = None
+                if pending_baseline is not None:
+                    dependency_status = preflight_module.check_dependencies(
+                        environ=environ, visual_capability=args.visual_capability
+                    )
+                    if dependency_status["missing"]:
+                        manifest = _read_json(
+                            "manifest.json", dir_fd=descriptors["root"]
+                        )
+                        private_state = _read_json(
+                            "private.json", dir_fd=descriptors["state"]
+                        )
+                        preflight_module.abort_pending_baseline(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=private_state,
+                            blocker={
+                                "code": "dependency_missing",
+                                "pages": [],
+                                "missing": dependency_status["missing"],
+                                "dependencies": dependency_status["dependencies"],
+                                "evidence": (
+                                    "Required preflight capabilities became unavailable "
+                                    "before baseline recovery."
+                                ),
+                            },
+                            at=operation_at,
+                            reason_code="dependency_missing",
+                        )
+                        updated_manifest = preflight_module.commit_dependency_missing(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=private_state,
+                            dependencies=dependency_status["dependencies"],
+                            missing=dependency_status["missing"],
+                            render_dpi=pending_baseline["render_dpi"],
+                            at=operation_at,
+                        )
+                        _assert_bundle_descriptors_current(bundle, descriptors)
+                        result = preflight_module.dependency_result(
+                            updated_manifest, work_bundle=str(bundle)
+                        )
+                        print(
+                            f"[pdf2markdown] dependency_missing for work bundle {bundle.name}",
+                            file=sys.stderr,
+                        )
+                        return result
+                    if dependency_status["dependencies"] != pending_baseline.get(
+                        "dependencies"
+                    ):
+                        raise WorkflowError(
+                            "dependency_drift",
+                            "Preflight dependencies changed during baseline recovery.",
+                            return_code=5,
+                            action_required="restore_preflight_dependencies",
+                            context={"work_bundle": str(bundle)},
+                        )
+                recovered_operation = preflight_module.recover_pending_operation(
+                    descriptors=descriptors, at=operation_at
+                )
+            except (bundle_module.BundleStateError, preflight_module.PreflightError) as exc:
+                blocker = (
+                    preflight_module.blocker_for_error(exc)
+                    if isinstance(exc, preflight_module.PreflightError)
+                    else None
+                )
+                if blocker is not None:
+                    try:
+                        history = bundle_module.read_history(
+                            state_fd=descriptors["state"]
+                        )
+                        intent = history[-1] if history else None
+                        if not isinstance(intent, dict) or intent.get("event") != (
+                            "preflight_baseline_intent"
+                        ):
+                            raise preflight_module.PreflightError(
+                                "integrity_violation",
+                                "A deterministic recovery failure has no pending baseline intent.",
+                            )
+                        manifest = _read_json(
+                            "manifest.json", dir_fd=descriptors["root"]
+                        )
+                        private_state = _read_json(
+                            "private.json", dir_fd=descriptors["state"]
+                        )
+                        updated_manifest = _commit_baseline_block(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=private_state,
+                            dependencies=intent["dependencies"],
+                            render_dpi=intent["render_dpi"],
+                            blocker=blocker,
+                            at=operation_at,
+                        )
+                    except (
+                        bundle_module.BundleStateError,
+                        preflight_module.PreflightError,
+                    ):
+                        pass
+                    else:
+                        _assert_bundle_descriptors_current(bundle, descriptors)
+                        result = preflight_module.result_from_manifest(
+                            updated_manifest,
+                            work_bundle=str(bundle),
+                            outcome="preflight_blocked",
+                        )
+                        print(
+                            f"[pdf2markdown] preflight_blocked for work bundle {bundle.name}",
+                            file=sys.stderr,
+                        )
+                        return result
+                code = getattr(exc, "code", "integrity_violation")
+                raise WorkflowError(
+                    code,
+                    "A pending preflight operation cannot be recovered safely.",
+                    return_code=4,
+                    action_required="repair_or_restore_work_bundle",
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            inspected = _inspect_open_bundle(bundle, descriptors)
+            if (
+                recovered_operation is not None
+                and recovered_operation["event"] == "preflight_baseline_intent"
+                and args.render_dpi != recovered_operation["intent"]["render_dpi"]
+            ):
+                raise WorkflowError(
+                    "recovered_request_mismatch",
+                    "A different baseline request was recovered; this request was not applied.",
+                    return_code=5,
+                    action_required="inspect_current_generation",
+                    context=inspected,
+                )
+            replayed_recovery = (
+                recovered_operation is not None
+                and args.expected_generation
+                == recovered_operation["expected_generation"]
+            )
+            if inspected["generation"] != args.expected_generation and not replayed_recovery:
+                raise WorkflowError(
+                    "generation_conflict",
+                    "Expected generation does not match the current work bundle state.",
+                    return_code=5,
+                    action_required="inspect_current_generation",
+                    context=inspected,
+                )
+            manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
+            if manifest["conversion_state"] == "preflight_pending":
+                result = preflight_module.result_from_manifest(
+                    manifest,
+                    work_bundle=str(bundle),
+                    outcome="awaiting_preflight",
+                )
+                print(
+                    f"[pdf2markdown] awaiting_preflight for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            stable_outcomes = {
+                "preflight_warning": "preflight_warning",
+                "preflight_blocked": "preflight_blocked",
+                "ready_to_submit": "ready_to_submit",
+                "terminal_error": "preflight_warning_declined",
+            }
+            if manifest["conversion_state"] in stable_outcomes:
+                outcome = stable_outcomes[manifest["conversion_state"]]
+                result = preflight_module.result_from_manifest(
+                    manifest, work_bundle=str(bundle), outcome=outcome
+                )
+                print(
+                    f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            recoverable_dependency = (
+                manifest["conversion_state"] == "recoverable_error"
+                and manifest.get("preflight", {}).get("reason_code")
+                == "dependency_missing"
+                and manifest.get("preflight", {}).get("resume_state") == "preparing"
+            )
+            if manifest["conversion_state"] != "preparing" and not recoverable_dependency:
+                raise WorkflowError(
+                    "invalid_state_transition",
+                    "The work bundle cannot build a page baseline from its current state.",
+                    return_code=5,
+                    action_required="inspect_current_generation",
+                    context=inspected,
+                )
+            if dependency_status is None:
+                dependency_status = preflight_module.check_dependencies(
+                    environ=environ, visual_capability=args.visual_capability
+                )
+            if dependency_status["missing"]:
+                if recoverable_dependency:
+                    recorded = manifest["preflight"]
+                    if (
+                        recorded.get("missing") != dependency_status["missing"]
+                        or recorded.get("dependencies")
+                        != dependency_status["dependencies"]
+                        or recorded.get("render_dpi") != args.render_dpi
+                    ):
+                        private_state = _read_json(
+                            "private.json", dir_fd=descriptors["state"]
+                        )
+                        manifest = preflight_module.commit_dependency_missing(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=private_state,
+                            dependencies=dependency_status["dependencies"],
+                            missing=dependency_status["missing"],
+                            render_dpi=args.render_dpi,
+                            at=operation_at,
+                        )
+                        _assert_bundle_descriptors_current(bundle, descriptors)
+                    result = preflight_module.dependency_result(
+                        manifest, work_bundle=str(bundle)
+                    )
+                    print(
+                        f"[pdf2markdown] dependency_missing for work bundle {bundle.name}",
+                        file=sys.stderr,
+                    )
+                    return result
+                private_state = _read_json(
+                    "private.json", dir_fd=descriptors["state"]
+                )
+                updated_manifest = preflight_module.commit_dependency_missing(
+                    descriptors=descriptors,
+                    manifest=manifest,
+                    private_state=private_state,
+                    dependencies=dependency_status["dependencies"],
+                    missing=dependency_status["missing"],
+                    render_dpi=args.render_dpi,
+                    at=operation_at,
+                )
+                _assert_bundle_descriptors_current(bundle, descriptors)
+                result = preflight_module.dependency_result(
+                    updated_manifest, work_bundle=str(bundle)
+                )
+                print(
+                    f"[pdf2markdown] dependency_missing for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            private_state = _read_json(
+                "private.json", dir_fd=descriptors["state"]
+            )
+            try:
+                updated_manifest = preflight_module.build_baseline(
+                    descriptors=descriptors,
+                    manifest=manifest,
+                    private_state=private_state,
+                    dependencies=dependency_status["dependencies"],
+                    fitz=dependency_status["fitz"],
+                    render_dpi=args.render_dpi,
+                    at=operation_at,
+                )
+            except preflight_module.PreflightError as exc:
+                blocker = preflight_module.blocker_for_error(exc)
+                if blocker is not None:
+                    updated_manifest = _commit_baseline_block(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=private_state,
+                        dependencies=dependency_status["dependencies"],
+                        render_dpi=args.render_dpi,
+                        blocker=blocker,
+                        at=operation_at,
+                    )
+                    _assert_bundle_descriptors_current(bundle, descriptors)
+                    result = preflight_module.result_from_manifest(
+                        updated_manifest,
+                        work_bundle=str(bundle),
+                        outcome="preflight_blocked",
+                    )
+                    print(
+                        f"[pdf2markdown] preflight_blocked for work bundle {bundle.name}",
+                        file=sys.stderr,
+                    )
+                    return result
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=4,
+                    action_required="inspect_preflight_failure",
+                    context=inspected,
+                ) from None
+            _assert_bundle_descriptors_current(bundle, descriptors)
+            result = preflight_module.result_from_manifest(
+                updated_manifest,
+                work_bundle=str(bundle),
+                outcome="awaiting_preflight",
+            )
+            print(
+                f"[pdf2markdown] awaiting_preflight for work bundle {bundle.name}",
+                file=sys.stderr,
+            )
+            return result
+
+
+def _record(args, *, cwd: Path, now) -> dict:
+    bundle = _canonical_bundle_path(args.work_bundle, cwd)
+    with _exclusive_bundle_lock(bundle) as locked_descriptors:
+        with _open_bundle_descriptors(
+            bundle, locked_descriptors=locked_descriptors
+        ) as descriptors:
+            _assert_bundle_descriptors_current(bundle, descriptors)
+            recovery_manifest = _read_json(
+                "manifest.json", dir_fd=descriptors["root"]
+            )
+            _assert_frozen_source_before_recovery(
+                descriptors=descriptors,
+                manifest=recovery_manifest,
+                work_bundle=str(bundle),
+            )
+            try:
+                recovered_operation = preflight_module.recover_pending_operation(
+                    descriptors=descriptors, at=_isoformat(_moment(now))
+                )
+            except (bundle_module.BundleStateError, preflight_module.PreflightError) as exc:
+                code = getattr(exc, "code", "integrity_violation")
+                raise WorkflowError(
+                    code,
+                    "A pending preflight operation cannot be recovered safely.",
+                    return_code=4,
+                    action_required="repair_or_restore_work_bundle",
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            inspected = _inspect_open_bundle(bundle, descriptors)
+            replayed_recovery = (
+                recovered_operation is not None
+                and args.expected_generation
+                == recovered_operation["expected_generation"]
+            )
+            if replayed_recovery:
+                manifest = recovered_operation["manifest"]
+                try:
+                    replay_payload = (
+                        preflight_module.load_record_input(Path(args.input), cwd=cwd)
+                        if args.record_command == "preflight"
+                        else None
+                    )
+                except preflight_module.PreflightError:
+                    replay_payload = None
+                if not preflight_module.recovered_request_matches(
+                    descriptors=descriptors,
+                    intent=recovered_operation["intent"],
+                    record_command=args.record_command,
+                    action_id=args.action_id,
+                    evidence_hash=args.evidence_hash,
+                    payload=replay_payload,
+                    decision=getattr(args, "decision", None),
+                    basis=getattr(args, "basis", None),
+                ):
+                    raise WorkflowError(
+                        "recovered_request_mismatch",
+                        "A different preflight operation was recovered; this request was not applied.",
+                        return_code=5,
+                        action_required="inspect_current_generation",
+                        context=inspected,
+                    )
+                if recovered_operation["event"] == "preflight_decision_intent":
+                    outcome = (
+                        "preflight_warning_accepted"
+                        if manifest["conversion_state"] == "ready_to_submit"
+                        else "preflight_warning_declined"
+                    )
+                elif manifest["conversion_state"] == "preflight_warning":
+                    outcome = "preflight_warning"
+                elif manifest["conversion_state"] == "preflight_blocked":
+                    outcome = "preflight_blocked"
+                elif (
+                    manifest.get("preflight", {}).get("result", {}).get("status")
+                    == "warning"
+                ):
+                    outcome = "preflight_warning_auto_accepted"
+                else:
+                    outcome = "preflight_recorded"
+                result = preflight_module.result_from_manifest(
+                    manifest, work_bundle=str(bundle), outcome=outcome
+                )
+                print(
+                    f"[pdf2markdown] recovered {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if inspected["generation"] != args.expected_generation:
+                raise WorkflowError(
+                    "generation_conflict",
+                    "Expected generation does not match the current work bundle state.",
+                    return_code=5,
+                    action_required="inspect_current_generation",
+                    context=inspected,
+                )
+            try:
+                manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
+                private_state = _read_json(
+                    "private.json", dir_fd=descriptors["state"]
+                )
+                if args.record_command == "preflight":
+                    payload = preflight_module.load_record_input(
+                        Path(args.input), cwd=cwd
+                    )
+                    updated_manifest = preflight_module.commit_preflight_record(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=private_state,
+                        payload=payload,
+                        expected_generation=args.expected_generation,
+                        action_id=args.action_id,
+                        evidence_hash=args.evidence_hash,
+                        at=_isoformat(_moment(now)),
+                    )
+                else:
+                    updated_manifest = preflight_module.commit_preflight_decision(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=private_state,
+                        expected_generation=args.expected_generation,
+                        action_id=args.action_id,
+                        evidence_hash=args.evidence_hash,
+                        decision=args.decision,
+                        basis=args.basis,
+                        at=_isoformat(_moment(now)),
+                    )
+            except preflight_module.PreflightError as exc:
+                action_conflicts = {
+                    "preflight_action_mismatch",
+                    "evidence_hash_mismatch",
+                    "action_already_consumed",
+                }
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=(4 if exc.code == "integrity_violation" else 5 if exc.code in action_conflicts else 2),
+                    action_required=(
+                        "repair_or_restore_work_bundle"
+                        if exc.code == "integrity_violation"
+                        else "inspect_current_generation"
+                        if exc.code in action_conflicts
+                        else "correct_preflight_record"
+                    ),
+                    context=inspected,
+                ) from None
+            _assert_bundle_descriptors_current(bundle, descriptors)
+            if args.record_command == "decision":
+                outcome = (
+                    "preflight_warning_accepted"
+                    if updated_manifest["conversion_state"] == "ready_to_submit"
+                    else "preflight_warning_declined"
+                )
+            elif updated_manifest["conversion_state"] == "preflight_warning":
+                outcome = "preflight_warning"
+            elif updated_manifest["conversion_state"] == "preflight_blocked":
+                outcome = "preflight_blocked"
+            elif (
+                updated_manifest.get("preflight", {}).get("result", {}).get("status")
+                == "warning"
+                and updated_manifest.get("preflight", {}).get("decision", {}).get("source")
+                == "interaction_mode_auto"
+            ):
+                outcome = "preflight_warning_auto_accepted"
+            else:
+                outcome = "preflight_recorded"
+            result = preflight_module.result_from_manifest(
+                updated_manifest,
+                work_bundle=str(bundle),
+                outcome=outcome,
+            )
+            print(
+                f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
+                file=sys.stderr,
+            )
+            return result
 
 
 @contextmanager
@@ -1016,11 +1677,17 @@ def _resume(args, *, cwd: Path, now) -> dict:
     bundle = _canonical_bundle_path(args.work_bundle, cwd)
     with _exclusive_bundle_lock(bundle) as locked_descriptors:
         root_descriptor, state_descriptor, _lock_descriptor = locked_descriptors
+        resume_manifest = _read_json("manifest.json", dir_fd=root_descriptor)
         try:
             recovered_override = bundle_module.recover_pending_settings_override(
                 root_fd=root_descriptor,
                 state_fd=state_descriptor,
                 committed_at=_isoformat(_moment(now)),
+                prefix_state_resolver=(
+                    preflight_module.reduce_preflight_history
+                    if "preflight" in resume_manifest
+                    else None
+                ),
             )
         except bundle_module.BundleStateError:
             raise WorkflowError(
@@ -1089,6 +1756,11 @@ def _resume(args, *, cwd: Path, now) -> dict:
                     updated_snapshot=updated_snapshot,
                     overridden_fields=overridden_fields,
                     at=recorded_at,
+                    state_validator=(
+                        preflight_module.valid_preflight_history
+                        if "preflight" in manifest
+                        else None
+                    ),
                 )
             except bundle_module.BundleStateError:
                 raise WorkflowError(
@@ -1228,8 +1900,21 @@ def main(
             )
         elif args.command == "inspect":
             result = _inspect(args, cwd=invocation_cwd)
+        elif args.command == "advance":
+            result = _advance(
+                args, cwd=invocation_cwd, environ=environment, now=now
+            )
+        elif args.command == "record":
+            result = _record(args, cwd=invocation_cwd, now=now)
         elif args.command == "resume":
-            result = _resume(args, cwd=invocation_cwd, now=now)
+            if args.visual_capability is not None and not any(
+                value is not None for value in _settings_cli(args).values()
+            ):
+                result = _advance(
+                    args, cwd=invocation_cwd, environ=environment, now=now
+                )
+            else:
+                result = _resume(args, cwd=invocation_cwd, now=now)
         else:
             result = _settings(
                 args,

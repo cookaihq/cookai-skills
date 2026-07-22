@@ -13,7 +13,7 @@ import strict_json
 
 
 SCHEMA_VERSION = 1
-MAX_STATE_BYTES = 8 * 1024 * 1024
+MAX_STATE_BYTES = 64 * 1024 * 1024
 
 
 class BundleStateError(ValueError):
@@ -37,8 +37,7 @@ def _json_bytes(value: dict) -> bytes:
     ).encode("utf-8")
 
 
-def atomic_write_json(name: str, value: dict, *, dir_fd: int) -> None:
-    data = _json_bytes(value)
+def _atomic_write_bytes(name: str, data: bytes, *, dir_fd: int) -> None:
     descriptor = None
     temporary_name = None
     for counter in range(1000):
@@ -79,6 +78,10 @@ def atomic_write_json(name: str, value: dict, *, dir_fd: int) -> None:
                 os.unlink(temporary_name, dir_fd=dir_fd)
             except FileNotFoundError:
                 pass
+
+
+def atomic_write_json(name: str, value: dict, *, dir_fd: int) -> None:
+    _atomic_write_bytes(name, _json_bytes(value), dir_fd=dir_fd)
 
 
 def _open_private_file(name: str, *, dir_fd: int, writable: bool = False) -> int:
@@ -149,24 +152,13 @@ def read_history(*, state_fd: int) -> list[dict]:
 
 def append_history(event: dict, *, state_fd: int) -> None:
     data = _json_bytes(event)
-    descriptor = _open_private_file(
-        "history.ndjson", dir_fd=state_fd, writable=True
-    )
-    try:
-        if os.fstat(descriptor).st_size + len(data) > MAX_STATE_BYTES:
-            raise BundleStateError("bundle history exceeds its size limit")
-        os.lseek(descriptor, 0, os.SEEK_END)
-        offset = 0
-        while offset < len(data):
-            offset += os.write(descriptor, data[offset:])
-        os.fsync(descriptor)
-        current = os.stat("history.ndjson", dir_fd=state_fd, follow_symlinks=False)
-        final = os.fstat(descriptor)
-        if (current.st_dev, current.st_ino) != (final.st_dev, final.st_ino):
-            raise BundleStateError("bundle history identity changed during append")
-        os.fsync(state_fd)
-    finally:
-        os.close(descriptor)
+    previous = _read_private_file("history.ndjson", dir_fd=state_fd)
+    if not previous.endswith(b"\n"):
+        raise BundleStateError("bundle history has an incomplete final event")
+    updated = previous + data
+    if len(updated) > MAX_STATE_BYTES:
+        raise BundleStateError("bundle history exceeds its size limit")
+    _atomic_write_bytes("history.ndjson", updated, dir_fd=state_fd)
 
 
 def publication_state(snapshot: dict) -> str:
@@ -396,6 +388,71 @@ def _valid_override_events(
     )
 
 
+def _manifest_after_settings_override(
+    manifest: dict, *, generation: int, settings_snapshot: dict
+) -> dict:
+    updated = dict(manifest)
+    updated["generation"] = generation
+    updated["settings_snapshot"] = settings_snapshot
+    updated["publication_state"] = publication_state(settings_snapshot)
+    preflight = manifest.get("preflight")
+    if isinstance(preflight, dict):
+        updated_preflight = dict(preflight)
+        pending_action = preflight.get("pending_action")
+        if isinstance(pending_action, dict):
+            updated_pending = dict(pending_action)
+            updated_pending["generation"] = generation
+            updated_preflight["pending_action"] = updated_pending
+        updated["preflight"] = updated_preflight
+    return updated
+
+
+def apply_settings_override_events(
+    current_manifest: dict,
+    current_private: dict,
+    intent: dict,
+    prepared: dict,
+    committed: dict,
+) -> tuple[dict, dict] | None:
+    if not isinstance(current_manifest, dict) or not _valid_private_state(current_private):
+        return None
+    generation = current_manifest.get("generation")
+    current_snapshot = current_manifest.get("settings_snapshot")
+    overridden_fields = intent.get("overridden_fields") if isinstance(intent, dict) else None
+    updated_snapshot = intent.get("settings_snapshot") if isinstance(intent, dict) else None
+    if type(generation) is not int or current_private.get("generation") != generation:
+        return None
+    try:
+        settings.validate_snapshot(current_snapshot)
+        settings.validate_snapshot_transition(
+            current_snapshot, updated_snapshot, overridden_fields
+        )
+        previous_hash = settings.snapshot_hash(current_snapshot)
+        updated_hash = settings.snapshot_hash(updated_snapshot)
+    except settings.SettingsError:
+        return None
+    if not _valid_override_events(
+        intent,
+        prepared,
+        committed,
+        operation_id=f"settings-override-{generation + 1}",
+        generation=generation,
+        previous_hash=previous_hash,
+        updated_hash=updated_hash,
+        updated_snapshot=updated_snapshot,
+        overridden_fields=overridden_fields,
+    ):
+        return None
+    updated_manifest = _manifest_after_settings_override(
+        current_manifest,
+        generation=generation + 1,
+        settings_snapshot=updated_snapshot,
+    )
+    updated_private = dict(current_private)
+    updated_private["generation"] = generation + 1
+    return updated_manifest, updated_private
+
+
 def _source_identity(*, root_fd: int) -> tuple[str, int]:
     directory_flags = (
         os.O_RDONLY
@@ -426,11 +483,16 @@ def _source_identity(*, root_fd: int) -> tuple[str, int]:
         digest = hashlib.sha256()
         size = 0
         while True:
-            chunk = os.read(source_file, 1024 * 1024)
+            chunk = os.read(
+                source_file,
+                min(1024 * 1024, opened.st_size + 1 - size),
+            )
             if not chunk:
                 break
             digest.update(chunk)
             size += len(chunk)
+            if size > opened.st_size:
+                raise BundleStateError("saved source changed while it was read")
         final = os.fstat(source_file)
         current = os.stat("source.pdf", dir_fd=source_dir, follow_symlinks=False)
         if (
@@ -457,11 +519,14 @@ def commit_settings_override(
     updated_snapshot: dict,
     overridden_fields: list[str],
     at: str,
+    state_validator=None,
 ) -> dict:
     manifest = read_json("manifest.json", dir_fd=root_fd)
     private_state = read_json("private.json", dir_fd=state_fd)
     history = read_history(state_fd=state_fd)
-    if not _valid_manifest_base(manifest) or not _valid_private_state(private_state):
+    if not _valid_private_state(private_state) or (
+        not _valid_manifest_base(manifest) if state_validator is None else False
+    ):
         raise BundleStateError("work bundle state schema is invalid")
     source = manifest.get("source")
     if not isinstance(source, dict):
@@ -478,7 +543,11 @@ def commit_settings_override(
         or type(source.get("size_bytes")) is not int
         or digest != source_hash
         or size != source.get("size_bytes")
-        or not valid_settings_history(history, manifest, source_hash)
+        or not (
+            valid_settings_history(history, manifest, source_hash)
+            if state_validator is None
+            else state_validator(history, manifest, private_state)
+        )
     ):
         raise BundleStateError("work bundle changed before settings override")
     try:
@@ -515,15 +584,18 @@ def commit_settings_override(
     }
     append_history(intent, state_fd=state_fd)
     append_history(prepared, state_fd=state_fd)
-    private_state["generation"] = new_generation
-    atomic_write_json("private.json", private_state, dir_fd=state_fd)
-    manifest["generation"] = new_generation
-    manifest["settings_snapshot"] = updated_snapshot
-    manifest["publication_state"] = publication_state(updated_snapshot)
-    atomic_write_json("manifest.json", manifest, dir_fd=root_fd)
+    updated_private = dict(private_state)
+    updated_private["generation"] = new_generation
+    atomic_write_json("private.json", updated_private, dir_fd=state_fd)
+    updated_manifest = _manifest_after_settings_override(
+        manifest,
+        generation=new_generation,
+        settings_snapshot=updated_snapshot,
+    )
+    atomic_write_json("manifest.json", updated_manifest, dir_fd=root_fd)
     committed = _committed_event(intent, at=at)
     append_history(committed, state_fd=state_fd)
-    return manifest
+    return updated_manifest
 
 
 def _committed_event(intent: dict, *, at: str) -> dict:
@@ -541,14 +613,22 @@ def _committed_event(intent: dict, *, at: str) -> dict:
 
 
 def recover_pending_settings_override(
-    *, root_fd: int, state_fd: int, committed_at: str
+    *,
+    root_fd: int,
+    state_fd: int,
+    committed_at: str,
+    prefix_state_resolver=None,
 ) -> dict | None:
     manifest = read_json("manifest.json", dir_fd=root_fd)
     private_state = read_json("private.json", dir_fd=state_fd)
     history = read_history(state_fd=state_fd)
-    if not _valid_manifest_base(manifest) or not _valid_private_state(private_state):
-        raise BundleStateError("pending work bundle state schema is invalid")
     final_event = history[-1].get("event")
+    if final_event not in {"settings_override_intent", "settings_override_prepared"}:
+        return None
+    if not _valid_private_state(private_state) or (
+        prefix_state_resolver is None and not _valid_manifest_base(manifest)
+    ):
+        raise BundleStateError("pending work bundle state schema is invalid")
     if final_event == "settings_override_intent":
         prefix = history[:-1]
         intent = history[-1]
@@ -580,47 +660,61 @@ def recover_pending_settings_override(
         or not prefix
     ):
         raise BundleStateError("pending settings override is inconsistent")
-    previous_snapshot = prefix[-1].get("settings_snapshot")
+    if prefix_state_resolver is None:
+        previous_snapshot = prefix[-1].get("settings_snapshot")
+        previous_manifest = dict(manifest)
+        previous_manifest["generation"] = expected_generation
+        previous_manifest["settings_snapshot"] = previous_snapshot
+        previous_manifest["publication_state"] = publication_state(previous_snapshot)
+        previous_private = dict(private_state)
+        previous_private["generation"] = expected_generation
+        source = previous_manifest.get("source")
+        source_hash = source.get("sha256") if isinstance(source, dict) else None
+        prefix_valid = valid_settings_history(
+            prefix, previous_manifest, source_hash
+        )
+    else:
+        resolved_prefix = prefix_state_resolver(prefix)
+        if resolved_prefix is None:
+            raise BundleStateError("pending settings prefix is invalid")
+        previous_manifest, previous_private = resolved_prefix
+        previous_snapshot = previous_manifest.get("settings_snapshot")
+        source = previous_manifest.get("source")
+        source_hash = source.get("sha256") if isinstance(source, dict) else None
+        prefix_valid = True
     try:
         settings.validate_snapshot(previous_snapshot)
         settings.validate_snapshot(updated_snapshot)
     except settings.SettingsError as exc:
         raise BundleStateError("pending settings snapshot is invalid") from exc
-    source = manifest.get("source")
     if not isinstance(source, dict):
         raise BundleStateError("work bundle source is invalid")
-    source_hash = source.get("sha256")
     if (
-        type(manifest.get("generation")) is not int
+        not prefix_valid
+        or previous_manifest.get("generation") != expected_generation
+        or previous_private.get("generation") != expected_generation
+        or type(manifest.get("generation")) is not int
         or manifest["generation"] not in {expected_generation, new_generation}
         or not isinstance(source_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None
         or type(source.get("size_bytes")) is not int
     ):
         raise BundleStateError("pending work bundle state is invalid")
-    previous_manifest = dict(manifest)
-    previous_manifest["generation"] = expected_generation
-    previous_manifest["settings_snapshot"] = previous_snapshot
-    previous_manifest["publication_state"] = publication_state(previous_snapshot)
-    desired_manifest = dict(manifest)
-    desired_manifest["generation"] = new_generation
-    desired_manifest["settings_snapshot"] = updated_snapshot
-    desired_manifest["publication_state"] = publication_state(updated_snapshot)
     committed = _committed_event(intent, at=committed_at)
+    transition = apply_settings_override_events(
+        previous_manifest,
+        previous_private,
+        intent,
+        prepared,
+        committed,
+    )
+    if transition is None:
+        raise BundleStateError("pending settings override events are invalid")
+    desired_manifest, desired_private = transition
     if (
-        not valid_settings_history(prefix, previous_manifest, source_hash)
-        or not valid_settings_history(
-            [*prefix, intent, prepared, committed], desired_manifest, source_hash
-        )
-        or (manifest != previous_manifest and manifest != desired_manifest)
-        or private_state["generation"] not in {
-            expected_generation,
-            new_generation,
-        }
-        or (
-            manifest == desired_manifest
-            and private_state.get("generation") != new_generation
-        )
+        (manifest != previous_manifest and manifest != desired_manifest)
+        or (private_state != previous_private and private_state != desired_private)
+        or (manifest == desired_manifest and private_state != desired_private)
     ):
         raise BundleStateError("pending settings override cannot be recovered safely")
     digest, size = _source_identity(root_fd=root_fd)
@@ -628,9 +722,8 @@ def recover_pending_settings_override(
         raise BundleStateError("saved source does not match pending settings override")
     if not prepared_was_saved:
         append_history(prepared, state_fd=state_fd)
-    if private_state["generation"] != new_generation:
-        private_state["generation"] = new_generation
-        atomic_write_json("private.json", private_state, dir_fd=state_fd)
+    if private_state != desired_private:
+        atomic_write_json("private.json", desired_private, dir_fd=state_fd)
     if manifest != desired_manifest:
         atomic_write_json("manifest.json", desired_manifest, dir_fd=root_fd)
     append_history(committed, state_fd=state_fd)
