@@ -19,6 +19,8 @@ from pathlib import Path
 import aihub_upload
 import bundle as bundle_module
 import config as config_module
+import conversion_attempt as conversion_attempt_module
+import doc2x as doc2x_module
 import pdf_source
 import preflight as preflight_module
 import settings as settings_module
@@ -35,6 +37,10 @@ SUPPORTED_CONVERSION_STATES = frozenset(
         "preflight_warning",
         "preflight_blocked",
         "ready_to_submit",
+        "submitting",
+        "submitted",
+        "result_downloading",
+        "submission_unknown",
         "awaiting_user",
         "recoverable_error",
         "terminal_error",
@@ -128,6 +134,15 @@ def _parser() -> argparse.ArgumentParser:
     record_staging.add_argument("--evidence-hash", required=True)
     record_staging.add_argument("--decision", choices=("retry", "wait"), required=True)
     record_staging.add_argument("--basis", required=True)
+    record_conversion = record_commands.add_parser("conversion", add_help=False)
+    record_conversion.add_argument(
+        "--work-bundle", "--bundle", dest="work_bundle", required=True
+    )
+    record_conversion.add_argument("--expected-generation", required=True, type=int)
+    record_conversion.add_argument("--action-id", required=True)
+    record_conversion.add_argument("--evidence-hash", required=True)
+    record_conversion.add_argument("--decision", choices=("retry",), required=True)
+    record_conversion.add_argument("--basis", required=True)
     resume = subcommands.add_parser("resume", add_help=False)
     resume.add_argument("--work-bundle", "--bundle", dest="work_bundle", required=True)
     resume.add_argument("--expected-generation", required=True, type=int)
@@ -867,7 +882,7 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
         or type(source.get("size_bytes")) is not int
         or source["size_bytes"] < 0
-        or manifest.get("conversion_attempts") != []
+        or not isinstance(manifest.get("conversion_attempts"), list)
         or manifest.get("final_markdown") is not None
         or not isinstance(manifest.get("artifacts"), dict)
         or manifest["artifacts"].get("source_pdf") != "01-source/source.pdf"
@@ -915,6 +930,7 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             context=state_context,
         ) from None
     has_source_staging = "source_staging" in manifest
+    has_conversion_attempt = bool(manifest.get("conversion_attempts"))
     if (
         type(private_state.get("schema_version")) is not int
         or private_state["schema_version"] != SCHEMA_VERSION
@@ -922,13 +938,23 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         != {"schema_version", "generation", "source_uploads", "result_urls"}
         or type(private_state.get("generation")) is not int
         or private_state["generation"] != manifest["generation"]
-        or private_state.get("result_urls") != []
+        or (
+            not has_conversion_attempt
+            and private_state.get("result_urls") != []
+        )
         or (
             not has_source_staging
             and private_state.get("source_uploads") != []
         )
         or (
+            has_conversion_attempt
+            and not conversion_attempt_module.valid_private_state(
+                private_state, manifest
+            )
+        )
+        or (
             has_source_staging
+            and not has_conversion_attempt
             and not source_staging_module.valid_private_state(
                 private_state, manifest
             )
@@ -942,7 +968,9 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             context=state_context,
         )
     valid_history = (
-        source_staging_module.valid_history(history, manifest, private_state)
+        conversion_attempt_module.valid_history(history, manifest, private_state)
+        if has_conversion_attempt
+        else source_staging_module.valid_history(history, manifest, private_state)
         if has_source_staging
         else (
             bundle_module.valid_settings_history(
@@ -994,6 +1022,10 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             ) from None
     _assert_bundle_descriptors_current(bundle, descriptors)
     print(f"[pdf2markdown] inspected work bundle {bundle.name}", file=sys.stderr)
+    if has_conversion_attempt:
+        return conversion_attempt_module.result_from_manifest(
+            manifest, work_bundle=str(bundle), outcome="inspected"
+        )
     if has_source_staging:
         return source_staging_module.result_from_manifest(
             manifest, work_bundle=str(bundle), outcome="inspected"
@@ -1140,6 +1172,47 @@ def _advance(
                 manifest=recovery_manifest,
                 work_bundle=str(bundle),
             )
+            try:
+                recovered_conversion = (
+                    conversion_attempt_module.recover_interrupted_attempt(
+                        descriptors=descriptors,
+                        manifest=recovery_manifest,
+                        private_state=_read_json(
+                            "private.json", dir_fd=descriptors["state"]
+                        ),
+                        at=operation_at,
+                        expected_generation=args.expected_generation,
+                    )
+                )
+            except conversion_attempt_module.ConversionAttemptError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=(5 if exc.code == "generation_conflict" else 4),
+                    action_required=(
+                        "inspect_current_generation"
+                        if exc.code == "generation_conflict"
+                        else "repair_or_restore_work_bundle"
+                    ),
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            if recovered_conversion is not None:
+                recovered_manifest, _recovered_private = recovered_conversion
+                recovered_outcome = (
+                    "conversion_submitted"
+                    if recovered_manifest["conversion_state"] == "submitted"
+                    else recovered_manifest["conversion_state"]
+                )
+                result = conversion_attempt_module.result_from_manifest(
+                    recovered_manifest,
+                    work_bundle=str(bundle),
+                    outcome=recovered_outcome,
+                )
+                print(
+                    f"[pdf2markdown] recovered {result['outcome']} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
             try:
                 recovered_staging = source_staging_module.recover_interrupted_attempt(
                     descriptors=descriptors,
@@ -1334,6 +1407,194 @@ def _advance(
                     context=inspected,
                 )
             manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
+            if manifest["conversion_state"] == "submission_unknown":
+                result = conversion_attempt_module.result_from_manifest(
+                    manifest,
+                    work_bundle=str(bundle),
+                    outcome="submission_unknown",
+                )
+                print(
+                    f"[pdf2markdown] submission_unknown for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if manifest["conversion_state"] == "result_downloading" and manifest.get(
+                "conversion_attempts"
+            ):
+                result = conversion_attempt_module.result_from_manifest(
+                    manifest,
+                    work_bundle=str(bundle),
+                    outcome="result_ready",
+                )
+                print(
+                    f"[pdf2markdown] result_ready for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if manifest["conversion_state"] == "terminal_error" and manifest.get(
+                "conversion_attempts"
+            ):
+                active_state = manifest["conversion_attempts"][-1]["state"]
+                if active_state != "unsafe_result_url":
+                    result = conversion_attempt_module.result_from_manifest(
+                        manifest,
+                        work_bundle=str(bundle),
+                        outcome=active_state,
+                    )
+                    print(
+                        f"[pdf2markdown] {active_state} for work bundle {bundle.name}",
+                        file=sys.stderr,
+                    )
+                    return result
+            if manifest["conversion_state"] == "awaiting_user" and manifest.get(
+                "conversion_attempts"
+            ):
+                active_state = manifest["conversion_attempts"][-1]["state"]
+                outcome = "task_failed" if active_state == "failed" else active_state
+                result = conversion_attempt_module.result_from_manifest(
+                    manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
+                print(
+                    f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if manifest.get("conversion_attempts") and (
+                manifest["conversion_state"] == "submitted"
+                or (
+                    manifest["conversion_state"] == "terminal_error"
+                    and manifest["conversion_attempts"][-1]["state"]
+                    == "unsafe_result_url"
+                )
+                or (
+                    manifest["conversion_state"] == "recoverable_error"
+                    and manifest["conversion_attempts"][-1]["state"]
+                    in {
+                        "credential_source_missing",
+                        "credential_source_changed",
+                        "poll_unauthorized",
+                        "task_unavailable",
+                        "poll_transient",
+                        "poll_timeout",
+                        "result_pending_timeout",
+                    }
+                )
+            ):
+                active_attempt = manifest["conversion_attempts"][-1]
+                poll_at = _isoformat(_moment(now))
+                try:
+                    poll_result = conversion_attempt_module.timeout_before_poll(
+                        active_attempt, at=poll_at
+                    )
+                    waiting_for_backoff = (
+                        poll_result is None
+                        and conversion_attempt_module.waiting_for_poll_backoff(
+                            active_attempt, at=poll_at
+                        )
+                    )
+                except conversion_attempt_module.ConversionAttemptError as exc:
+                    raise WorkflowError(
+                        exc.code,
+                        exc.message,
+                        return_code=4,
+                        action_required="repair_or_restore_work_bundle",
+                        context=inspected,
+                    ) from None
+                if waiting_for_backoff:
+                    result = conversion_attempt_module.result_from_manifest(
+                        manifest,
+                        work_bundle=str(bundle),
+                        outcome="poll_backoff",
+                    )
+                    print(
+                        f"[pdf2markdown] poll_backoff for work bundle {bundle.name}",
+                        file=sys.stderr,
+                    )
+                    return result
+                if poll_result is None:
+                    try:
+                        credential = config_module.read_exact_api_key(
+                            active_attempt["credential"],
+                            environ=environ,
+                            config_home=config_home,
+                            use_local_key=getattr(args, "use_local_key", False),
+                        )
+                    except config_module.ConfigError as exc:
+                        if exc.code not in {
+                            "credential_source_missing",
+                            "credential_source_changed",
+                        }:
+                            raise WorkflowError(
+                                "configuration_invalid",
+                                "The recorded Doc2X credential locator is invalid.",
+                                return_code=6,
+                                action_required="repair_or_restore_work_bundle",
+                                context=inspected,
+                            ) from None
+                        poll_result = doc2x_module.PollResult(
+                            exc.code, None, exc.code, None, None
+                        )
+                    else:
+                        poll_result = doc2x_module.poll_task(
+                            task_id=active_attempt["task_id"],
+                            api_key=credential.value,
+                            transport=transport,
+                        )
+                try:
+                    updated_manifest, _updated_private = (
+                        conversion_attempt_module.commit_poll_result(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=_read_json(
+                                "private.json", dir_fd=descriptors["state"]
+                            ),
+                            result=poll_result,
+                            at=poll_at,
+                        )
+                    )
+                except conversion_attempt_module.ConversionAttemptError as exc:
+                    raise WorkflowError(
+                        exc.code,
+                        exc.message,
+                        return_code=4,
+                        action_required="repair_or_restore_work_bundle",
+                        context=inspected,
+                    ) from None
+                outcome = (
+                    "result_ready"
+                    if poll_result.state == "result_ready"
+                    else "result_pending"
+                    if poll_result.state == "result_pending"
+                    else poll_result.state
+                    if poll_result.state
+                    in {"unsafe_result_url", "unexpected_result_count"}
+                    else "task_failed"
+                    if poll_result.state == "failed"
+                    else poll_result.state
+                    if poll_result.state
+                    in {"credential_source_missing", "credential_source_changed"}
+                    else poll_result.state
+                    if poll_result.state in {"poll_unauthorized", "task_unavailable"}
+                    else "poll_transient"
+                    if poll_result.state == "poll_transient"
+                    else "poll_timeout"
+                    if poll_result.state == "poll_timeout"
+                    else "result_pending_timeout"
+                    if poll_result.state == "result_pending_timeout"
+                    else f"conversion_{poll_result.state}"
+                )
+                result = conversion_attempt_module.result_from_manifest(
+                    updated_manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
+                print(
+                    f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
             source_staging = manifest.get("source_staging")
             if (
                 isinstance(source_staging, dict)
@@ -1513,13 +1774,89 @@ def _advance(
                             )
                             return result
                     else:
-                        result = source_staging_module.result_from_manifest(
-                            manifest,
+                        active_upload = ready_private["source_uploads"][-1]
+                        try:
+                            credential = config_module.read_exact_api_key(
+                                active_upload["credential"],
+                                environ=environ,
+                                config_home=config_home,
+                                use_local_key=getattr(args, "use_local_key", False),
+                            )
+                        except config_module.ConfigError:
+                            result = source_staging_module.result_from_manifest(
+                                manifest,
+                                work_bundle=str(bundle),
+                                outcome="source_upload_ready",
+                            )
+                            print(
+                                f"[pdf2markdown] {result['outcome']} for work bundle {bundle.name}",
+                                file=sys.stderr,
+                            )
+                            return result
+                        try:
+                            preflight_record = bundle_module.read_json(
+                                "preflight.json", dir_fd=descriptors["review"]
+                            )
+                        except bundle_module.BundleStateError:
+                            raise WorkflowError(
+                                "integrity_violation",
+                                "The saved preflight evidence cannot be read.",
+                                return_code=4,
+                                action_required="repair_or_restore_work_bundle",
+                                context=inspected,
+                            ) from None
+                        request, request_summary = conversion_attempt_module.build_request(
+                            manifest=manifest,
+                            source_url=active_upload["url"],
+                            preflight_record=preflight_record,
+                        )
+                        submitted_at = _isoformat(_moment(now))
+                        try:
+                            submitting_manifest, submitting_private, _attempt = (
+                                conversion_attempt_module.begin_attempt(
+                                    descriptors=descriptors,
+                                    manifest=manifest,
+                                    private_state=ready_private,
+                                    credential=credential.public_identity,
+                                    request=request,
+                                    request_summary=request_summary,
+                                    at=submitted_at,
+                                )
+                            )
+                            create_result = doc2x_module.create_task(
+                                request=request,
+                                api_key=credential.value,
+                                transport=transport,
+                            )
+                            updated_manifest, _updated_private = (
+                                conversion_attempt_module.finish_submission(
+                                    descriptors=descriptors,
+                                    manifest=submitting_manifest,
+                                    private_state=submitting_private,
+                                    result=create_result,
+                                    at=_isoformat(_moment(now)),
+                                )
+                            )
+                        except conversion_attempt_module.ConversionAttemptError as exc:
+                            raise WorkflowError(
+                                exc.code,
+                                exc.message,
+                                return_code=4,
+                                action_required="repair_or_restore_work_bundle",
+                                context=inspected,
+                            ) from None
+                        outcome = (
+                            "conversion_submitted"
+                            if create_result.state == "submitted"
+                            else "submission_unknown"
+                        )
+                        result = conversion_attempt_module.result_from_manifest(
+                            updated_manifest,
                             work_bundle=str(bundle),
-                            outcome="source_upload_ready",
+                            outcome=outcome,
                         )
                         print(
-                            f"[pdf2markdown] {result['outcome']} for work bundle {bundle.name}",
+                            f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
                             file=sys.stderr,
                         )
                         return result
@@ -1743,6 +2080,52 @@ def _record(args, *, cwd: Path, now) -> dict:
                 work_bundle=str(bundle),
             )
             try:
+                recovered_conversion = (
+                    conversion_attempt_module.recover_interrupted_attempt(
+                        descriptors=descriptors,
+                        manifest=recovery_manifest,
+                        private_state=_read_json(
+                            "private.json", dir_fd=descriptors["state"]
+                        ),
+                        at=_isoformat(_moment(now)),
+                        expected_generation=args.expected_generation,
+                    )
+                )
+            except conversion_attempt_module.ConversionAttemptError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=(5 if exc.code == "generation_conflict" else 4),
+                    action_required=(
+                        "inspect_current_generation"
+                        if exc.code == "generation_conflict"
+                        else "repair_or_restore_work_bundle"
+                    ),
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            if recovered_conversion is not None:
+                recovered_manifest, _recovered_private = recovered_conversion
+                recovered_state = recovered_manifest["conversion_attempts"][-1][
+                    "state"
+                ]
+                recovered_outcome = (
+                    "conversion_retry_authorized"
+                    if recovered_state == "not_started"
+                    else "conversion_submitted"
+                    if recovered_state == "submitted"
+                    else recovered_state
+                )
+                result = conversion_attempt_module.result_from_manifest(
+                    recovered_manifest,
+                    work_bundle=str(bundle),
+                    outcome=recovered_outcome,
+                )
+                print(
+                    f"[pdf2markdown] recovered {recovered_outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            try:
                 recovered_staging = source_staging_module.recover_interrupted_attempt(
                     descriptors=descriptors,
                     manifest=recovery_manifest,
@@ -1865,7 +2248,20 @@ def _record(args, *, cwd: Path, now) -> dict:
                 private_state = _read_json(
                     "private.json", dir_fd=descriptors["state"]
                 )
-                if args.record_command == "source-staging":
+                if args.record_command == "conversion":
+                    updated_manifest = (
+                        conversion_attempt_module.commit_retry_decision(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=private_state,
+                            expected_generation=args.expected_generation,
+                            action_id=args.action_id,
+                            evidence_hash=args.evidence_hash,
+                            basis=args.basis,
+                            at=_isoformat(_moment(now)),
+                        )
+                    )
+                elif args.record_command == "source-staging":
                     updated_manifest = source_staging_module.commit_decision(
                         descriptors=descriptors,
                         manifest=manifest,
@@ -1903,6 +2299,14 @@ def _record(args, *, cwd: Path, now) -> dict:
                         basis=args.basis,
                         at=_isoformat(_moment(now)),
                     )
+            except conversion_attempt_module.ConversionAttemptError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=5,
+                    action_required="inspect_current_generation",
+                    context=inspected,
+                ) from None
             except source_staging_module.SourceStagingError as exc:
                 raise WorkflowError(
                     exc.code,
@@ -1931,7 +2335,9 @@ def _record(args, *, cwd: Path, now) -> dict:
                     context=inspected,
                 ) from None
             _assert_bundle_descriptors_current(bundle, descriptors)
-            if args.record_command == "source-staging":
+            if args.record_command == "conversion":
+                outcome = "conversion_retry_authorized"
+            elif args.record_command == "source-staging":
                 outcome = (
                     "source_upload_retry_authorized"
                     if args.decision == "retry"
@@ -1957,6 +2363,13 @@ def _record(args, *, cwd: Path, now) -> dict:
             else:
                 outcome = "preflight_recorded"
             result = (
+                conversion_attempt_module.result_from_manifest(
+                    updated_manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
+                if updated_manifest.get("conversion_attempts")
+                else
                 source_staging_module.result_from_manifest(
                     updated_manifest,
                     work_bundle=str(bundle),
@@ -2089,6 +2502,43 @@ def _resume(
         root_descriptor, state_descriptor, _lock_descriptor = locked_descriptors
         resume_manifest = _read_json("manifest.json", dir_fd=root_descriptor)
         resume_private = _read_json("private.json", dir_fd=state_descriptor)
+        try:
+            recovered_conversion = conversion_attempt_module.recover_interrupted_attempt(
+                descriptors={"root": root_descriptor, "state": state_descriptor},
+                manifest=resume_manifest,
+                private_state=resume_private,
+                at=_isoformat(_moment(now)),
+                expected_generation=args.expected_generation,
+            )
+        except conversion_attempt_module.ConversionAttemptError as exc:
+            raise WorkflowError(
+                exc.code,
+                exc.message,
+                return_code=(5 if exc.code == "generation_conflict" else 4),
+                action_required=(
+                    "inspect_current_generation"
+                    if exc.code == "generation_conflict"
+                    else "repair_or_restore_work_bundle"
+                ),
+                context={"work_bundle": str(bundle)},
+            ) from None
+        if recovered_conversion is not None:
+            recovered_manifest, _recovered_private = recovered_conversion
+            recovered_outcome = (
+                "conversion_submitted"
+                if recovered_manifest["conversion_state"] == "submitted"
+                else recovered_manifest["conversion_state"]
+            )
+            result = conversion_attempt_module.result_from_manifest(
+                recovered_manifest,
+                work_bundle=str(bundle),
+                outcome=recovered_outcome,
+            )
+            print(
+                f"[pdf2markdown] recovered {result['outcome']} for work bundle {bundle.name}",
+                file=sys.stderr,
+            )
+            return result
         try:
             recovered_staging = source_staging_module.recover_interrupted_attempt(
                 descriptors={"root": root_descriptor, "state": state_descriptor},

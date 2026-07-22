@@ -13,7 +13,9 @@ KEY_NAME = "AIHUB_API_KEY"
 
 
 class ConfigError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str = "configuration_invalid"):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,64 @@ def resolve_api_key(
             locator=locator,
         )
     raise ConfigError("AIHUB_API_KEY is not configured")
+
+
+def read_exact_api_key(
+    identity: dict,
+    *,
+    environ: dict[str, str],
+    config_home: Path,
+    use_local_key: bool,
+) -> Credential:
+    if not isinstance(identity, dict) or set(identity) != {
+        "source_id",
+        "fingerprint",
+        "locator",
+    }:
+        raise ConfigError("recorded AIHub credential identity is invalid")
+    locator = identity.get("locator")
+    if not isinstance(locator, dict) or locator.get("name") != KEY_NAME:
+        raise ConfigError("recorded AIHub credential locator is invalid")
+    if locator.get("kind") == "process_environment" and set(locator) == {
+        "kind",
+        "name",
+    }:
+        value = environ.get(KEY_NAME)
+    elif locator.get("kind") == "dotenv" and set(locator) == {
+        "kind",
+        "path",
+        "name",
+    }:
+        path_value = locator.get("path")
+        if not isinstance(path_value, str) or not os.path.isabs(path_value):
+            raise ConfigError("recorded AIHub dotenv locator is invalid")
+        path = Path(path_value)
+        home_path = _lexical_absolute_path(config_home / ".env")
+        if _lexical_absolute_path(path) == home_path and not use_local_key:
+            raise ConfigError(
+                "recorded home AIHub credential is not authorized",
+                code="credential_source_missing",
+            )
+        value = _read_bounded_dotenv(path).get(KEY_NAME)
+    else:
+        raise ConfigError("recorded AIHub credential locator is invalid")
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            "recorded AIHub credential source is missing",
+            code="credential_source_missing",
+        )
+    credential = Credential(
+        value=value.strip(),
+        source_id=identity["source_id"],
+        fingerprint=f"sha256:{hashlib.sha256(value.strip().encode('utf-8')).hexdigest()}",
+        locator=dict(locator),
+    )
+    if credential.public_identity != identity:
+        raise ConfigError(
+            "recorded AIHub credential fingerprint changed",
+            code="credential_source_changed",
+        )
+    return credential
 
 
 def mask_key(value: str) -> str:

@@ -1,11 +1,11 @@
 ---
 name: pdf2markdown
-description: Create, preflight, and temporarily stage a private, recoverable PDF-to-Markdown work bundle with frozen settings, a source inventory, and full-page reference images. Use when a user asks to begin or resume a verifiable workflow from one local PDF or public HTTPS PDF URL, inspect every source page before conversion, or prepare the frozen PDF for Doc2X without an external uploader.
+description: Create, preflight, stage, and submit a private, recoverable PDF-to-Markdown work bundle, then resume the same Doc2X task to one safe result reference. Use when a user asks to begin or resume a verifiable workflow from one local PDF or public HTTPS PDF URL, inspect every source page, or create and track a conversion without an external source uploader.
 ---
 
 # PDF to Markdown
 
-Establish a durable work bundle, complete its preflight gate, and use the built-in AIHub source-staging upload before any paid conversion. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
+Establish a durable work bundle, complete its preflight gate, use the built-in AIHub source-staging upload, and create and poll one recoverable Doc2X conversion attempt. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
 
 ## Manage Settings
 
@@ -123,7 +123,7 @@ python3 scripts/workflow.py resume \
 
 Staging sends one non-retried, non-redirected POST to the fixed AIHub stream endpoint. It streams the same `source.pdf` bytes, sends `auto_cleanup=false`, and never calls `upload-for-url`, `s3-upload`, or another uploader. Read [references/api-guide.md](references/api-guide.md) for the verified upstream contract and conservative result classification.
 
-`source_upload_ready` keeps the temporary URL and locally derived 72-hour expiry only in `.state/private.json`. Before expiry, later `advance` or `resume` calls reuse it without reading a key or sending another POST. Expiry preserves the old attempt and URL evidence. Confirm mode returns a bound retry action; auto mode appends a new attempt and performs one replacement upload without an intermediate question.
+`source_upload_ready` keeps the temporary URL and locally derived 72-hour expiry only in `.state/private.json`. Before expiry, the next `advance` or `resume` reuses it without sending another upload POST. Conversion starts only when the staging attempt's exact credential locator still yields the same fingerprint. Expiry preserves the old attempt and URL evidence. Confirm mode returns a bound retry action; auto mode appends a new attempt and performs one replacement upload without an intermediate question.
 
 HTTP 403 is `source_upload_rejected` for this fixed `auto_cleanup=false` request. Repair storage capacity, then apply the returned retry action. Network interruption, redirects, 401, 413, 429, 5xx, abnormal 2xx, and invalid URLs are `source_upload_unknown` and are never replayed automatically.
 
@@ -140,6 +140,39 @@ python3 scripts/workflow.py record source-staging \
 ```
 
 Use `retry` only after accepting the disclosed possibility that an unknown attempt left a remote file, or after repairing a rejected/expired attempt. It appends a new attempt; it never overwrites history. `wait` is valid only for unknown results. It waits through a conservative 72-hour window, does not claim remote deletion, and issues a fresh bound decision action when the window elapses. Auto mode keeps unknown and rejected results stopped.
+
+## Create And Resume The Doc2X Attempt
+
+After `source_upload_ready`, run `resume` with the latest generation and the exact `AIHUB_API_KEY` source used by staging:
+
+```bash
+python3 scripts/workflow.py resume \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  [--use-local-key]
+```
+
+The create request is fixed to `doc2x-v3`, `convert_mode=md`, `formula_mode=dollar`, the locally verified page count, and `document-{source-sha256-8}`. `merge_cross_page_forms` is true only when the saved preflight contains `cross_page_table` evidence. The workflow durably appends a `submitting` attempt before its single non-retried, non-redirected POST. Only HTTP 200 with a strict JSON object and a bounded safe `id` becomes `submitted`; every response or interruption without such an ID becomes `submission_unknown`.
+
+Confirm mode returns `resolve_submission_unknown` after an unknown create result, or `resolve_task_failed` after an explicit upstream failure. Accept the possible duplicate conversion charge by applying the bound action:
+
+```bash
+python3 scripts/workflow.py record conversion \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  --action-id <action-id> \
+  --evidence-hash <sha256-evidence> \
+  --decision retry \
+  --basis <non-empty-reason>
+```
+
+This command appends a new `not_started` attempt and leaves every older attempt unchanged. A later `resume` sends that new attempt once. Auto mode keeps `submission_unknown` and failed tasks stopped without an action or an implicit second charge.
+
+Once submitted, each `resume` rereads only the recorded credential locator and polls only the recorded task ID at the fixed AIHub endpoint. It never searches lower-priority keys or another account. Missing and changed credential sources, poll 401, poll 404, and transient network/429/5xx/JSON failures have distinct recoverable evidence. Poll 404 and transient failures persist an exponential retry schedule starting at 8 seconds; a `resume` before `next_poll_at` performs no request. Pending and processing tasks use a persisted 720-second polling window; a completed task with no results uses a separate persisted 720-second result window. A later command may continue querying the same task after either timeout.
+
+`completed` is usable only when `results` contains exactly one distinct absolute HTTPS URL. Exact duplicate values are deduplicated. A missing or empty URL entry, malformed URL, or multiple distinct URLs stops without guessing. The complete result URL is stored only in `.state/private.json`; stdout, `manifest.json`, and history contain its SHA-256 and non-secret timing evidence. The upstream says result URLs last 24 hours but does not define the start instant, so the workflow records `expires_at: null` rather than inventing a deadline.
+
+`outcome: result_ready` with `conversion_state: result_downloading` is the Ticket 06 handoff. Repeated `inspect` or `resume` returns the same state without a network request. Do not download the URL or claim Markdown exists in this implementation.
 
 ## Inspect Saved State
 
@@ -168,13 +201,13 @@ python3 scripts/workflow.py resume \
   [--use-local-key]
 ```
 
-Resume without an explicit setting override from the saved work-bundle snapshot; ignore later non-secret environment, dotenv, home, and persistent-settings drift. A valid explicit override creates the next generation and appends its evidence without changing the old history. `--use-local-key` authorizes only the current invocation. Source staging resolves a key only when a new attempt is about to start; ready and unknown recovery never silently chooses another key.
+Resume without an explicit setting override from the saved work-bundle snapshot; ignore later non-secret environment, dotenv, home, and persistent-settings drift. A valid explicit override creates the next generation and appends its evidence without changing the old history. `--use-local-key` authorizes only the current invocation. Source staging resolves a key only when a new upload attempt is about to start. Conversion creation and polling reread the exact saved locator and fingerprint; they never silently choose another key.
 
 Handle `generation_conflict` by inspecting again before retrying. Handle `bundle_locked` by waiting for the active writer to finish. Before preflight is ready, a resume without overrides returns `outcome: no_progress`. Supplying `--visual-capability` makes `resume` use the same deterministic preflight progression as `advance`; once preflight is ready, resume can stage or recover the source without rerunning visual work.
 
 ## Interpret Results
 
-- Exit `0`: the command completed; inspect `outcome`, `conversion_state`, `action_required`, and `errors` to distinguish creation, dependency recovery, pending preflight, warning, blocking, and readiness.
+- Exit `0`: the command completed; inspect `outcome`, `conversion_state`, `conversion_attempt_state`, `action_required`, and `errors` to distinguish creation, preflight, source staging, submission, polling, recoverable stops, and result readiness.
 - Exit `2`: correct the command arguments.
 - Exit `3`: provide a parseable local PDF or an unauthenticated public HTTPS PDF that satisfies the source safety contract.
 - Exit `4`: stop and repair or restore the work bundle; do not bypass integrity or schema failures.
@@ -185,4 +218,4 @@ Expect exactly one versioned JSON object on stdout for every supported command a
 
 ## Scope Boundary
 
-Use these commands to manage settings, freeze the source PDF, generate the page baseline, complete the preflight gate, and temporarily stage the frozen source for Doc2X. Do not claim that Markdown was generated. This implementation does not yet create or poll Doc2X tasks, download result archives, perform content review, create publication plans, or publish images. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
+Use these commands to manage settings, freeze the source PDF, generate the page baseline, complete the preflight gate, temporarily stage the frozen source, create one-at-a-time Doc2X conversion attempts, and resume the same task to one safe result reference. Do not claim that Markdown was generated. This implementation does not yet download or extract the result ZIP, adopt an original conversion, perform content review, create publication plans, or publish images. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
