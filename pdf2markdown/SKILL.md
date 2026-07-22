@@ -1,11 +1,11 @@
 ---
 name: pdf2markdown
-description: Create and manage a private, recoverable PDF-to-Markdown work bundle with snapshotted interaction and publication settings. Use when a user asks to begin a verifiable workflow from one local PDF, configure confirm or auto behavior, inspect saved state, or resume without inheriting later configuration drift.
+description: Create and manage a private, recoverable PDF-to-Markdown work bundle with snapshotted interaction and publication settings. Use when a user asks to begin a verifiable workflow from one local PDF or public HTTPS PDF URL, configure confirm or auto behavior, inspect saved state, or resume without inheriting later configuration drift.
 ---
 
 # PDF to Markdown
 
-Establish a durable work bundle before performing any later PDF conversion work. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
+Establish a durable work bundle before performing any later PDF conversion work. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
 
 ## Manage Settings
 
@@ -32,7 +32,7 @@ Run:
 
 ```bash
 python3 scripts/workflow.py start \
-  --source <local-pdf> \
+  --source <local-pdf-or-public-https-url> \
   [--output-dir <directory>] \
   [--interaction-mode confirm|auto] \
   [--publish-mode skip|upload] \
@@ -41,7 +41,11 @@ python3 scripts/workflow.py start \
   [--use-local-key]
 ```
 
-Use a local regular file. Do not pass a symlink, directory, special file, or URL.
+For a local source, use a readable regular file. Do not pass a symlink, directory, or special file. For a URL source, use an unauthenticated public HTTPS URL; do not add userinfo, cookies, browser state, or request headers.
+
+Treat every URL query and fragment as sensitive. The workflow sends the query only to the validated HTTPS target, never sends the fragment, and persists only query-free URLs plus the SHA-256 of the complete original input URL. Do not put the complete URL in logs or user-facing reports.
+
+The workflow validates every redirect, all resolved A/AAAA endpoints, the connected TLS peer, response limits, `application/pdf` content type, the `%PDF-` signature, and PyMuPDF parser identity before committing the work bundle. It never sends `AIHUB_API_KEY`, Cookie, proxy credentials, or browser authentication to a source URL. Read [references/security-limits.md](references/security-limits.md) when diagnosing a rejected URL or reviewing the source-download boundary.
 
 Resolve the output root in this order:
 
@@ -84,7 +88,7 @@ Handle `generation_conflict` by inspecting again before retrying. Handle `bundle
 
 - Exit `0`: the command completed; inspect `outcome` for `settings_initialized`, `settings_unchanged`, `settings_status`, `settings_updated`, `created`, `inspected`, `settings_overridden`, or `no_progress`.
 - Exit `2`: correct the command arguments.
-- Exit `3`: provide a readable, regular local PDF with PDF bytes.
+- Exit `3`: provide a parseable local PDF or an unauthenticated public HTTPS PDF that satisfies the source safety contract.
 - Exit `4`: stop and repair or restore the work bundle; do not bypass integrity or schema failures.
 - Exit `5`: resolve a stale generation or concurrent writer before retrying.
 - Exit `6`: repair invalid persistent settings or correct an invalid explicit override.
@@ -93,4 +97,4 @@ Expect exactly one versioned JSON object on stdout for every supported command a
 
 ## Scope Boundary
 
-Use these commands only to manage settings and create or validate the local source work bundle. Do not claim that Markdown was generated. This implementation does not yet support URL sources, PDF preflight, AIHub or Doc2X calls, result archives, content review, publication plans, or image publication. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
+Use these commands only to manage settings and create or validate the frozen source work bundle. Do not claim that Markdown was generated. This implementation does not yet support PDF preflight, AIHub or Doc2X calls, result archives, content review, publication plans, or image publication. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.

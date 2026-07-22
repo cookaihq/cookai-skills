@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import bundle as bundle_module
+import pdf_source
 import settings as settings_module
 
 
@@ -334,6 +335,7 @@ def _start(
     environ: dict[str, str],
     cwd: Path,
     config_home: Path,
+    transport,
     now,
 ) -> dict:
     resolved_status = _resolve_settings_status(
@@ -345,7 +347,8 @@ def _start(
     output_root = _absolute(output_value, cwd)
     output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     output_root = output_root.resolve(strict=True)
-    source_path = _absolute(args.source, cwd)
+    url_source = pdf_source.is_url_input(args.source)
+    source_path = None if url_source else _absolute(args.source, cwd)
     staging = Path(tempfile.mkdtemp(prefix=".pdf2markdown-", dir=str(output_root)))
     staging.chmod(0o700)
     try:
@@ -363,18 +366,48 @@ def _start(
         state_dir = staging / ".state"
         source_dir = staging / "01-source"
         _create_private_file(state_dir / "lock")
-        source_hash, source_size = _copy_source(source_path, source_dir / "source.pdf")
+        if url_source:
+            try:
+                downloaded = pdf_source.download_https_pdf(
+                    args.source,
+                    source_dir / "source.pdf",
+                    transport=transport,
+                )
+            except pdf_source.PdfSourceError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=3,
+                    action_required="provide_public_https_pdf",
+                ) from None
+            source_hash = downloaded.sha256
+            source_size = downloaded.size_bytes
+            source_name = downloaded.original_name
+            source_origin = downloaded.origin
+        else:
+            source_hash, source_size = _copy_source(source_path, source_dir / "source.pdf")
+            try:
+                pdf_source.validate_pdf_identity(source_dir / "source.pdf")
+            except pdf_source.PdfSourceError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=3,
+                    action_required="provide_valid_local_pdf",
+                ) from None
+            source_name = source_path.name
+            source_origin = {"kind": "local", "path": str(source_path)}
         started_at = _moment(now)
         timestamp = started_at.strftime("%Y%m%d-%H%M%S")
-        base_name = f"{timestamp}-{_slug(source_path.name)}-{source_hash[:8]}"
+        base_name = f"{timestamp}-{_slug(source_name)}-{source_hash[:8]}"
         manifest = {
             "schema_version": SCHEMA_VERSION,
             "generation": 1,
             "conversion_state": "preparing",
             "publication_state": publication_state,
             "source": {
-                "original_name": source_path.name,
-                "origin": {"kind": "local", "path": str(source_path)},
+                "original_name": source_name,
+                "origin": source_origin,
                 "physical_path": "01-source/source.pdf",
                 "sha256": source_hash,
                 "size_bytes": source_size,
@@ -753,11 +786,7 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         != {"original_name", "origin", "physical_path", "sha256", "size_bytes"}
         or not isinstance(source.get("original_name"), str)
         or not source["original_name"]
-        or not isinstance(origin, dict)
-        or set(origin) != {"kind", "path"}
-        or origin.get("kind") != "local"
-        or not isinstance(origin.get("path"), str)
-        or not origin["path"]
+        or not pdf_source.valid_origin(origin)
         or source.get("physical_path") != "01-source/source.pdf"
         or not isinstance(source.get("sha256"), str)
         or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
@@ -1169,7 +1198,6 @@ def main(
     transport=None,
     now=None,
 ) -> int:
-    del transport
     try:
         args = _parser().parse_args(argv)
         environment = dict(os.environ if environ is None else environ)
@@ -1195,6 +1223,7 @@ def main(
                 environ=environment,
                 cwd=invocation_cwd,
                 config_home=settings_home,
+                transport=transport,
                 now=now,
             )
         elif args.command == "inspect":

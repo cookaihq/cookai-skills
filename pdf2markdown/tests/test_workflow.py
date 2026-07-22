@@ -1533,7 +1533,9 @@ def test_inspect_preserves_posix_symlink_dotdot_resolution(tmp_path, capsys):
     first_source = tmp_path / "first.pdf"
     first_source.write_bytes(PDF_BYTES)
     second_source = tmp_path / "second.pdf"
-    second_source.write_bytes(b"%PDF-1.4\nright-side bundle\n%%EOF\n")
+    second_source.write_bytes(
+        PDF_BYTES.replace(b"%%EOF", b"% right-side bundle\n%%EOF")
+    )
     _rc, first, _stderr = invoke(
         capsys,
         ["start", "--source", str(first_source), "--output-dir", str(left)],
@@ -1567,7 +1569,9 @@ def test_resume_rejects_a_bundle_replaced_after_its_lock_is_acquired(
     first_source = tmp_path / "first.pdf"
     first_source.write_bytes(PDF_BYTES)
     second_source = tmp_path / "second.pdf"
-    second_source.write_bytes(b"%PDF-1.4\nreplacement bundle\n%%EOF\n")
+    second_source.write_bytes(
+        PDF_BYTES.replace(b"%%EOF", b"% replacement bundle\n%%EOF")
+    )
     output_root = tmp_path / "bundles"
     _rc, first, _stderr = invoke(
         capsys,
@@ -1622,7 +1626,9 @@ def test_resume_reads_from_the_locked_bundle_during_an_aba_path_swap(
     first_source = tmp_path / "first.pdf"
     first_source.write_bytes(PDF_BYTES)
     second_source = tmp_path / "second.pdf"
-    second_source.write_bytes(b"%PDF-1.4\ntemporary replacement\n%%EOF\n")
+    second_source.write_bytes(
+        PDF_BYTES.replace(b"%%EOF", b"% temporary replacement\n%%EOF")
+    )
     output_root = tmp_path / "bundles"
     _rc, first, _stderr = invoke(
         capsys,

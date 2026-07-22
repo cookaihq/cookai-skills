@@ -8,6 +8,7 @@ import stat
 from datetime import datetime
 
 import settings
+import pdf_source
 import strict_json
 
 
@@ -204,11 +205,7 @@ def _valid_manifest_base(manifest) -> bool:
         == {"original_name", "origin", "physical_path", "sha256", "size_bytes"}
         and isinstance(source.get("original_name"), str)
         and bool(source["original_name"])
-        and isinstance(origin, dict)
-        and set(origin) == {"kind", "path"}
-        and origin.get("kind") == "local"
-        and isinstance(origin.get("path"), str)
-        and bool(origin["path"])
+        and pdf_source.valid_origin(origin)
         and source.get("physical_path") == "01-source/source.pdf"
         and isinstance(source.get("sha256"), str)
         and re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is not None
