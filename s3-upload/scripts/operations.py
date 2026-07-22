@@ -4,7 +4,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from artifacts import (
     ArtifactError, CheckpointStore, ReferenceOutputSnapshot, build_object_reference,
@@ -29,6 +29,9 @@ class OperationError(RuntimeError):
     pass
 
 
+ClockInput = Optional[Union[datetime, Callable[[], datetime]]]
+
+
 @dataclass
 class OperationOutcome:
     result: Dict[str, Any]
@@ -46,6 +49,24 @@ class OperationOutcome:
 
 def _timestamp(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _moment(now: ClockInput) -> datetime:
+    value = now() if callable(now) else now
+    return (value or datetime.now(timezone.utc)).astimezone(timezone.utc)
+
+
+def _signed_moment(resolved: ResolvedTarget, now: ClockInput) -> datetime:
+    moment = _moment(now)
+    credential = resolved.credential
+    if credential is None:
+        raise OperationError("Credential Profile is unavailable")
+    remaining = credential.remaining_seconds(moment)
+    if remaining is not None and remaining <= 60:
+        raise OperationError(
+            "temporary Credential Profile must have more than 60 whole seconds remaining"
+        )
+    return moment
 
 
 def connection_for(resolved: ResolvedTarget) -> Connection:
@@ -109,13 +130,13 @@ def _new_uuid(factory: Callable[[], uuid.UUID], *excluded: str) -> str:
 
 def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                        transport: Callable[..., Response], project_root: str,
-                       config_home: str, now: Optional[datetime],
+                       config_home: str, now: ClockInput,
                        checkpoint_notice: Callable[[str], None],
                        source: VerifiedSource,
                        uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4) -> OperationOutcome:
     if not plan["executable"] or plan["upload_mode"] != "single-put":
         raise OperationError("single Put execution requires an executable single-Put plan")
-    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    moment = _moment(now)
     target = resolved.target
     connection = connection_for(resolved)
     collision = plan["collision"]
@@ -153,6 +174,7 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                 config_home=config_home,
                 source_identity=(source.snapshot.device, source.snapshot.inode),
             )
+        request_moment = _signed_moment(resolved, now)
         checkpoint = {
             "schema_version": 1,
             "checkpoint_id": checkpoint_id,
@@ -196,7 +218,7 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
         notice_sent = False
         version = None
         while True:
-            checkpoint = _set_state(checkpoint, "put_in_flight", moment)
+            checkpoint = _set_state(checkpoint, "put_in_flight", request_moment)
             store.replace(checkpoint)
             if not notice_sent:
                 checkpoint_notice(checkpoint_id)
@@ -227,7 +249,7 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                     key=actual_key,
                     body=body,
                     headers=tuple(request_headers),
-                    now=moment,
+                    now=request_moment,
                 )
             else:
                 signed = build_candidate_put_request(
@@ -237,7 +259,7 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                     body=body,
                     content_type=checkpoint["upload_plan"]["content_type"],
                     extra_headers=tuple(request_headers[2:]),
-                    now=moment,
+                    now=request_moment,
                 )
             try:
                 response = transport(signed.method, signed.url, signed.headers, signed.body)
@@ -279,12 +301,13 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                 checkpoint = _set_state(
                     checkpoint,
                     "prepared",
-                    moment,
+                    request_moment,
                     operation_id=operation_id,
                     object_reference_draft=reference,
                     collision=updated_collision,
                 )
                 store.replace(checkpoint)
+                request_moment = _signed_moment(resolved, now)
                 continue
             if parsed.classification != "success":
                 try:
@@ -302,7 +325,9 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
         version_id=version,
         credentials=active_credentials,
     )
-    checkpoint = _set_state(checkpoint, "complete", moment, object_reference_draft=reference)
+    checkpoint = _set_state(
+        checkpoint, "complete", request_moment, object_reference_draft=reference
+    )
     store.replace(checkpoint)
     try:
         if target.access.mode == "public":
@@ -312,19 +337,28 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
             url_kind = "public"
             expires_at = None
         else:
-            effective = plan["access"]["presign_effective_seconds"]
+            presign_moment = _signed_moment(resolved, now)
+            requested = checkpoint["upload_plan"]["presign_expires_seconds"]
+            effective = resolved.presign_effective_seconds(
+                requested, presign_moment
+            )
             if not isinstance(effective, int) or effective <= 0:
                 raise OperationError("presigned URL duration is unavailable")
-            url = presign_get(connection, reference["location"]["key"], effective, moment)
+            url = presign_get(
+                connection, reference["location"]["key"], effective, presign_moment
+            )
             url_kind = "presigned"
-            expires_at = _timestamp(moment + timedelta(seconds=effective))
+            expires_at = _timestamp(
+                presign_moment + timedelta(seconds=effective)
+            )
     except Exception:
         result = build_result(
             "upload", "partial_success", object_written=True,
             object_reference=reference, url_kind=("public" if target.access.mode == "public" else "presigned"),
             retention=target.retention.result(),
+            checkpoint_id=checkpoint_id,
         )
-        return OperationOutcome(result, store, checkpoint_id, False)
+        return OperationOutcome(result, store, checkpoint_id, True)
     if reference_snapshot is not None:
         try:
             write_reference_output(reference_snapshot, reference)
@@ -345,12 +379,11 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
 
 
 def generate_object_url(*, resolved: ResolvedTarget, reference: Dict[str, Any],
-                        presign_expires: Optional[int], now: Optional[datetime]) -> Dict[str, Any]:
+                        presign_expires: Optional[int], now: ClockInput) -> Dict[str, Any]:
     if reference["target_fingerprint"] != resolved.target_fingerprint:
         raise OperationError("Object Reference Target fingerprint does not match the selected Target")
     if resolved.credential is None:
         raise OperationError("Credential Profile is unavailable")
-    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     access = reference["access"]
     if access["mode"] == "public":
         if presign_expires is not None:
@@ -359,6 +392,7 @@ def generate_object_url(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         url_kind = "public"
         expires_at = None
     else:
+        moment = _signed_moment(resolved, now)
         requested = access["presign_expires_seconds"] if presign_expires is None else presign_expires
         if not isinstance(requested, int) or isinstance(requested, bool) or not 1 <= requested <= 604800:
             raise OperationError("presign expiry must be from 1 to 604800 seconds")
@@ -393,14 +427,14 @@ def _delete_terminal_result(operation: str, status: str, checkpoint: Dict[str, A
 
 def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
                    plan: Dict[str, Any], transport: Callable[..., Response],
-                   project_root: str, now: Optional[datetime],
+                   project_root: str, now: ClockInput,
                    checkpoint_notice: Callable[[str], None],
                    uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4) -> OperationOutcome:
     if not plan["executable"] or plan["delete_scope"] not in {"current-key", "exact-version"}:
         raise OperationError("Delete execution requires an executable scoped plan")
     if reference["target_fingerprint"] != resolved.target_fingerprint:
         raise OperationError("Object Reference Target fingerprint does not match the selected Target")
-    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    moment = _moment(now)
     checkpoint_id = _new_uuid(uuid_factory)
     operation_id = _new_uuid(uuid_factory, checkpoint_id)
     checkpoint = {
@@ -421,9 +455,10 @@ def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         "multipart": None,
         "delete_scope": plan["delete_scope"],
     }
+    request_moment = _signed_moment(resolved, now)
     store = CheckpointStore(project_root)
     store.create(checkpoint)
-    checkpoint = _set_state(checkpoint, "delete_in_flight", moment)
+    checkpoint = _set_state(checkpoint, "delete_in_flight", request_moment)
     store.replace(checkpoint)
     checkpoint_notice(checkpoint_id)
     query = ()
@@ -437,7 +472,7 @@ def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         method="DELETE",
         key=reference["location"]["key"],
         query=query,
-        now=moment,
+        now=request_moment,
     )
     try:
         response = transport(signed.method, signed.url, signed.headers, signed.body)
@@ -454,7 +489,7 @@ def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         active_credentials=active_credentials,
     )
     if parsed is None or parsed.classification in {"unknown", "identifier_rejected"}:
-        checkpoint = _set_state(checkpoint, "delete_unknown", moment)
+        checkpoint = _set_state(checkpoint, "delete_unknown", request_moment)
         store.replace(checkpoint)
         result = build_result(
             "delete",
@@ -469,7 +504,7 @@ def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         except ArtifactError:
             pass
         raise OperationError("remote Delete returned a definitive no-delete response")
-    checkpoint = _set_state(checkpoint, "deleted", moment)
+    checkpoint = _set_state(checkpoint, "deleted", request_moment)
     store.replace(checkpoint)
     return OperationOutcome(
         _delete_terminal_result("delete", "deleted", checkpoint),
@@ -481,8 +516,8 @@ def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
 
 def reconcile_delete(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                      store: CheckpointStore, transport: Callable[..., Response],
-                     now: Optional[datetime]) -> OperationOutcome:
-    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+                     now: ClockInput) -> OperationOutcome:
+    moment = _moment(now)
     checkpoint_id = checkpoint["checkpoint_id"]
     state = checkpoint["state"]
     reference = checkpoint["object_reference_draft"]
@@ -517,23 +552,24 @@ def reconcile_delete(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
         query = ()
         if scope == "exact-version":
             query = (("versionId", reference["location"]["version_id"]),)
+        request_moment = _signed_moment(resolved, now)
         signed = build_signed_request(
             connection_for(resolved),
             method="HEAD",
             key=reference["location"]["key"],
             query=query,
-            now=moment,
+            now=request_moment,
         )
         try:
             response = transport(signed.method, signed.url, signed.headers, signed.body)
         except Exception:
             response = None
         if response is not None and response.status in {404, 410}:
-            checkpoint = _set_state(checkpoint, "deleted", moment)
+            checkpoint = _set_state(checkpoint, "deleted", request_moment)
             store.replace(checkpoint)
             state = "deleted"
         elif response is not None and 200 <= response.status < 300:
-            checkpoint = _set_state(checkpoint, "not_deleted", moment)
+            checkpoint = _set_state(checkpoint, "not_deleted", request_moment)
             store.replace(checkpoint)
             state = "not_deleted"
         else:
@@ -556,8 +592,8 @@ def reconcile_delete(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
 
 def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                   store: CheckpointStore, transport: Callable[..., Response],
-                  config_home: str, now: Optional[datetime]) -> OperationOutcome:
-    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+                  config_home: str, now: ClockInput) -> OperationOutcome:
+    moment = _moment(now)
     checkpoint_id = checkpoint["checkpoint_id"]
     reference = checkpoint["object_reference_draft"]
     retention = reference["retention"]
@@ -584,9 +620,10 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                 retention=retention, checkpoint_id=checkpoint_id,
             )
             return OperationOutcome(result, store, checkpoint_id, True)
+        request_moment = _signed_moment(resolved, now)
         signed = build_signed_request(
             connection_for(resolved), method="HEAD",
-            key=reference["location"]["key"], now=moment,
+            key=reference["location"]["key"], now=request_moment,
         )
         try:
             response = transport(signed.method, signed.url, signed.headers, signed.body)
@@ -601,7 +638,7 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                 and source_hash == checkpoint["source"]["sha256"]
                 and content_length == str(checkpoint["source"]["size"])
             ):
-                checkpoint = _set_state(checkpoint, "complete", moment)
+                checkpoint = _set_state(checkpoint, "complete", request_moment)
                 store.replace(checkpoint)
                 state = "complete"
         if state == "put_unknown":
@@ -614,7 +651,7 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
         try:
             generated = generate_object_url(
                 resolved=resolved, reference=checkpoint["object_reference_draft"],
-                presign_expires=None, now=moment,
+                presign_expires=None, now=now,
             )
         except Exception:
             result = build_result(

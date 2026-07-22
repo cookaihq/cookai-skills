@@ -6,6 +6,7 @@ from config import Connection
 from evidence import (
     EvidenceOperationContext,
     TrackedObject,
+    UnitTestResult,
     create_evidence_run_config,
     run_evidence_matrix,
 )
@@ -34,6 +35,20 @@ AUTHORIZED = frozenset(
         "ResponseParsing",
         "Reconciliation",
     }
+)
+
+
+UNIT_TESTS = UnitTestResult(
+    command=("python3", "-m", "pytest", "s3-upload/tests/unit"),
+    output=b"1 passed in 0.01s\n",
+    returncode=0,
+    total=1,
+    passed=1,
+    failed=0,
+    errors=0,
+    skipped=0,
+    python_version="3.12.4",
+    pytest_version="8.4.1",
 )
 
 
@@ -155,6 +170,7 @@ def run_adapter_matrix(tmp_path, provider, *, authorized_operations=AUTHORIZED):
         credential=credential,
         source_bytes=b"bounded-provider-evidence",
         adapter=S3EvidenceAdapter(candidate, connection, provider),
+        unit_tests=UNIT_TESTS,
         now=NOW,
     )
 
@@ -523,6 +539,7 @@ def test_authorized_adapter_runs_bounded_data_plane_and_cleans_every_resource(tm
         credential=credential,
         source_bytes=b"bounded-provider-evidence",
         adapter=S3EvidenceAdapter(candidate, connection, provider),
+        unit_tests=UNIT_TESTS,
         now=NOW,
     )
 

@@ -2,20 +2,24 @@
 from __future__ import annotations
 
 import argparse
+from importlib import metadata
 import json
 import os
+import platform
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Dict
+from xml.etree import ElementTree
 
 from config import Connection
-from evidence import create_evidence_run_config, run_evidence_matrix
+from dotenv_parser import DotenvError, parse_dotenv
+from evidence import UnitTestResult, create_evidence_run_config, run_evidence_matrix
 from live_adapter import S3EvidenceAdapter
 from provider_candidates import aliyun_oss_candidate, build_candidate_registry
-from resolver import ResolutionError, _parse_dotenv
 from safe_io import FileSecurityError, read_regular_file
 from s3 import http_request
 from v2_schema import parse_credential
@@ -57,10 +61,100 @@ REQUIRED_FIELDS = {
     "S3_UPLOAD_ENDPOINT",
     "S3_UPLOAD_ADDRESSING",
 }
+UNIT_TEST_ENVIRONMENT_DENYLIST = {
+    "PYTEST_ADDOPTS",
+    "S3_UPLOAD_LIVE_TEST",
+    "S3_UPLOAD_LIVE_TEST_TARGET",
+    "S3_UPLOAD_PROJECT_CREDENTIALS_JSON",
+    "S3_UPLOAD_GLOBAL_CREDENTIALS_JSON",
+    "S3_UPLOAD_ACCESS_KEY_ID",
+    "S3_UPLOAD_SECRET_ACCESS_KEY",
+    "S3_UPLOAD_SESSION_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+}
 
 
 class LiveFixtureError(ValueError):
     pass
+
+
+def _junit_counts(path: Path):
+    try:
+        root = ElementTree.parse(path).getroot()
+        suites = (
+            [root]
+            if root.tag.rsplit("}", 1)[-1] == "testsuite"
+            else [
+                item for item in root
+                if item.tag.rsplit("}", 1)[-1] == "testsuite"
+            ]
+        )
+        if not suites:
+            raise ValueError("JUnit report has no test suite")
+        total = sum(int(item.attrib["tests"]) for item in suites)
+        failed = sum(int(item.attrib.get("failures", "0")) for item in suites)
+        errors = sum(int(item.attrib.get("errors", "0")) for item in suites)
+        skipped = sum(int(item.attrib.get("skipped", "0")) for item in suites)
+        passed = total - failed - errors - skipped
+        if passed < 0:
+            raise ValueError("JUnit counts do not add up")
+        return total, passed, failed, errors, skipped
+    except (ElementTree.ParseError, KeyError, OSError, ValueError):
+        return 1, 0, 0, 1, 0
+
+
+def run_unit_tests(*, repository_root=None, subprocess_runner=subprocess.run):
+    root = Path(
+        repository_root or Path(__file__).resolve().parents[2]
+    ).resolve()
+    environment = dict(os.environ)
+    for name in UNIT_TEST_ENVIRONMENT_DENYLIST:
+        environment.pop(name, None)
+    with tempfile.TemporaryDirectory(prefix="s3-upload-unit-tests-") as directory:
+        junit_path = Path(directory) / "pytest-junit.xml"
+        command = (
+            sys.executable,
+            "-m",
+            "pytest",
+            "s3-upload/tests/unit",
+            "--junitxml",
+            str(junit_path),
+        )
+        completed = subprocess_runner(
+            command,
+            cwd=str(root),
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        output = completed.stdout
+        if isinstance(output, str):
+            output = output.encode("utf-8")
+        if not isinstance(output, bytes) or not output:
+            output = b"[s3-upload] pytest produced no output\n"
+            returncode = 1
+        else:
+            returncode = completed.returncode
+        total, passed, failed, errors, skipped = _junit_counts(junit_path)
+    try:
+        pytest_version = metadata.version("pytest")
+    except metadata.PackageNotFoundError:
+        pytest_version = "unavailable"
+    return UnitTestResult(
+        command=command,
+        output=output,
+        returncode=returncode,
+        total=total,
+        passed=passed,
+        failed=failed,
+        errors=errors,
+        skipped=skipped,
+        python_version=platform.python_version(),
+        pytest_version=pytest_version,
+    )
 
 
 def _git_fixture_gate(project_root: str, path: str) -> None:
@@ -108,8 +202,12 @@ def load_oss_fixture(project_root: str) -> Dict[str, str]:
     _git_fixture_gate(root, path)
     try:
         text = read_regular_file(path, max_bytes=1048576, secret=True, missing_ok=False)
-        values, _counts = _parse_dotenv(text, ".env.local")
-    except (FileSecurityError, OSError, ResolutionError) as exc:
+        values = parse_dotenv(
+            text,
+            allowed_keys=REQUIRED_FIELDS | {"S3_UPLOAD_SESSION_TOKEN"},
+            label=".env.local",
+        )
+    except (DotenvError, FileSecurityError, OSError) as exc:
         raise LiveFixtureError("project .env.local could not be parsed safely") from exc
     missing = sorted(name for name in REQUIRED_FIELDS if not values.get(name))
     if missing:
@@ -134,9 +232,13 @@ def parser() -> argparse.ArgumentParser:
     return value
 
 
-def main(argv=None, *, transport=http_request) -> int:
+def main(argv=None, *, transport=http_request, unit_test_runner=None) -> int:
     args = parser().parse_args(argv)
     try:
+        unit_tests = (unit_test_runner or run_unit_tests)()
+        if not isinstance(unit_tests, UnitTestResult) or not unit_tests.successful:
+            print("[s3-upload] unit_test_error", file=sys.stderr)
+            return 1
         fixture = load_oss_fixture(args.project_root)
         candidate = aliyun_oss_candidate(
             region=fixture["S3_UPLOAD_REGION"],
@@ -192,6 +294,7 @@ def main(argv=None, *, transport=http_request) -> int:
             credential=credential,
             source_bytes=b"s3-upload bounded OSS compatibility evidence\n",
             adapter=S3EvidenceAdapter(candidate, connection, transport),
+            unit_tests=unit_tests,
         )
         statuses = {
             row["operation"]: row["status"] for row in result.report["operations"]

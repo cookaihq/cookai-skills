@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -8,6 +8,7 @@ import planning
 import upload
 from artifacts import build_object_reference, serialize_object_reference
 from capabilities import Capability, CapabilityRegistry
+from resolver import resolve_target
 from s3 import Response
 from v2_schema import parse_target
 
@@ -43,7 +44,7 @@ def target(*, collision="replace"):
     }
 
 
-def configure(project, target_value):
+def configure(project, target_value, *, credential_expires_at=None):
     directory = project / ".s3-upload" / "targets"
     directory.mkdir(parents=True)
     (directory / "objects.json").write_text(json.dumps(target_value), encoding="utf-8")
@@ -51,8 +52,10 @@ def configure(project, target_value):
         "main-key": {
             "access_key_id": "PROJECTKEY1234",
             "secret_access_key": "project-secret-value",
-            "session_token": "",
-            "expires_at": None,
+            "session_token": (
+                "temporary-session-token" if credential_expires_at is not None else ""
+            ),
+            "expires_at": credential_expires_at,
         }
     }
     env_local = project / ".env.local"
@@ -156,6 +159,62 @@ def test_unique_single_put_changes_key_only_after_verified_collision(
     assert all(call[2]["if-none-match"] == "*" for call in calls)
 
 
+def test_unique_put_rechecks_temporary_credential_before_each_signed_attempt(
+    tmp_path, monkeypatch
+):
+    configured = target(collision="unique")
+    configure(
+        tmp_path,
+        configured,
+        credential_expires_at="2026-07-22T12:02:00Z",
+    )
+    source = tmp_path / "report.bin"
+    source.write_bytes(b"content")
+    enable(monkeypatch, "PutObject", "ConditionalPutObject", "PresignGetObject")
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:objects",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    dry_run = planning.build_upload_dry_run(
+        resolved=resolved,
+        file_path=str(source),
+        explicit_key=None,
+        content_type=None,
+        cache_control=None,
+        content_disposition=None,
+        presign_expires=None,
+        reference_out=None,
+        project_root=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        allow_insecure_http=False,
+        now=NOW,
+    )
+    times = iter((NOW, NOW + timedelta(seconds=30), NOW + timedelta(seconds=60)))
+    calls = []
+
+    with pytest.raises(
+        operations.OperationError,
+        match="more than 60 whole seconds",
+    ):
+        operations.execute_single_put(
+            resolved=resolved,
+            plan=dry_run.plan,
+            transport=lambda *args: (calls.append(args) or Response(412)),
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            now=lambda: next(times),
+            checkpoint_notice=lambda _value: None,
+            source=dry_run.source,
+        )
+
+    assert len(calls) == 1
+
+
 def test_unique_single_put_stops_at_configured_collision_bound(
     tmp_path, capsys, monkeypatch
 ):
@@ -231,6 +290,52 @@ def test_exact_version_delete_is_checkpointed_and_sends_version_once(
     assert list((tmp_path / ".s3-upload" / "checkpoints").glob("*.json")) == []
 
 
+def test_delete_rechecks_temporary_credential_before_signing(tmp_path, monkeypatch):
+    configured = target()
+    configure(
+        tmp_path,
+        configured,
+        credential_expires_at="2026-07-22T12:02:00Z",
+    )
+    _path, reference = reference_file(tmp_path, configured, version_id="version-7")
+    enable(monkeypatch, "DeleteObjectVersion", "ObserveDeleteVersion")
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:objects",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    dry_run = planning.build_delete_dry_run(
+        resolved=resolved,
+        reference=reference,
+        allow_insecure_http=False,
+        now=NOW,
+    )
+    times = iter((NOW, NOW + timedelta(seconds=60)))
+    calls = []
+
+    with pytest.raises(
+        operations.OperationError,
+        match="more than 60 whole seconds",
+    ):
+        operations.execute_delete(
+            resolved=resolved,
+            reference=reference,
+            plan=dry_run.plan,
+            transport=lambda *args: calls.append(args),
+            project_root=str(tmp_path),
+            now=lambda: next(times),
+            checkpoint_notice=lambda _value: None,
+        )
+
+    assert calls == []
+    checkpoint_dir = tmp_path / ".s3-upload" / "checkpoints"
+    assert not checkpoint_dir.exists() or list(checkpoint_dir.glob("*.json")) == []
+
+
 def test_unknown_current_key_delete_reconciles_with_head_and_never_redeletes(
     tmp_path, capsys, monkeypatch
 ):
@@ -277,6 +382,131 @@ def test_unknown_current_key_delete_reconciles_with_head_and_never_redeletes(
     assert recovered["delete_scope"] == "current-key"
     assert recovered["checkpoint_id"] is None
     assert [call[0] for call in calls] == ["DELETE", "HEAD"]
+
+
+def test_delete_reconcile_rechecks_temporary_credential_before_head(
+    tmp_path, monkeypatch
+):
+    configured = target()
+    configure(
+        tmp_path,
+        configured,
+        credential_expires_at="2026-07-22T12:02:00Z",
+    )
+    _path, reference = reference_file(tmp_path, configured, version_id=None)
+    enable(monkeypatch, "DeleteObjectCurrentKey", "ObserveDeleteCurrentKey")
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:objects",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    dry_run = planning.build_delete_dry_run(
+        resolved=resolved,
+        reference=reference,
+        allow_insecure_http=False,
+        now=NOW,
+    )
+    first = operations.execute_delete(
+        resolved=resolved,
+        reference=reference,
+        plan=dry_run.plan,
+        transport=lambda *args: (_ for _ in ()).throw(OSError("response lost")),
+        project_root=str(tmp_path),
+        now=NOW,
+        checkpoint_notice=lambda _value: None,
+    )
+    checkpoint = first.store.load(first.checkpoint_id)
+    calls = []
+
+    with pytest.raises(
+        operations.OperationError,
+        match="more than 60 whole seconds",
+    ):
+        operations.reconcile_delete(
+            resolved=resolved,
+            checkpoint=checkpoint,
+            store=first.store,
+            transport=lambda *args: calls.append(args),
+            now=lambda: NOW + timedelta(seconds=60),
+        )
+
+    assert calls == []
+    assert first.store.load(first.checkpoint_id)["state"] == "delete_unknown"
+
+
+def test_put_reconcile_rechecks_temporary_credential_before_head(
+    tmp_path, monkeypatch
+):
+    configured = target()
+    configure(
+        tmp_path,
+        configured,
+        credential_expires_at="2026-07-22T12:02:00Z",
+    )
+    source = tmp_path / "report.bin"
+    source.write_bytes(b"content")
+    enable(
+        monkeypatch,
+        "PutObject",
+        "PresignGetObject",
+        "HeadObject",
+        "ReservedMetadataRoundTrip",
+    )
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:objects",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    dry_run = planning.build_upload_dry_run(
+        resolved=resolved,
+        file_path=str(source),
+        explicit_key=None,
+        content_type=None,
+        cache_control=None,
+        content_disposition=None,
+        presign_expires=None,
+        reference_out=None,
+        project_root=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        allow_insecure_http=False,
+        now=NOW,
+    )
+    first = operations.execute_single_put(
+        resolved=resolved,
+        plan=dry_run.plan,
+        transport=lambda *args: (_ for _ in ()).throw(OSError("response lost")),
+        project_root=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        now=NOW,
+        checkpoint_notice=lambda _value: None,
+        source=dry_run.source,
+    )
+    checkpoint = first.store.load(first.checkpoint_id)
+    calls = []
+
+    with pytest.raises(
+        operations.OperationError,
+        match="more than 60 whole seconds",
+    ):
+        operations.reconcile_put(
+            resolved=resolved,
+            checkpoint=checkpoint,
+            store=first.store,
+            transport=lambda *args: calls.append(args),
+            config_home=str(tmp_path / "home"),
+            now=lambda: NOW + timedelta(seconds=60),
+        )
+
+    assert calls == []
+    assert first.store.load(first.checkpoint_id)["state"] == "put_unknown"
 
 
 @pytest.mark.parametrize(

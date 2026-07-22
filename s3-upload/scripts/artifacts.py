@@ -167,6 +167,17 @@ def _validate_reference(value: Any, credentials: Iterable[str] = ()) -> Dict[str
     validate_object_key(location["key"])
     if location["version_id"] is not None:
         validate_provider_identifier(location["version_id"], credentials)
+    fingerprint_material = {
+        key: location[key]
+        for key in ("provider", "endpoint", "addressing", "region", "bucket")
+    }
+    expected_fingerprint = (
+        "sha256:" + hashlib.sha256(canonicalize(fingerprint_material)).hexdigest()
+    )
+    if item["target_fingerprint"] != expected_fingerprint:
+        raise ArtifactError(
+            "Object Reference location does not match target_fingerprint"
+        )
     access = _object(item["access"], "Object Reference access")
     _exact(access, ("mode", "public_base_url", "presign_expires_seconds"), "Object Reference access")
     if access["mode"] == "private":

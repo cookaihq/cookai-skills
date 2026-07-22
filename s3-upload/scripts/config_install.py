@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from dotenv_parser import DotenvError, parse_dotenv
 from resolver import (
     GLOBAL_CREDENTIALS,
     PROJECT_CREDENTIALS,
@@ -373,32 +374,13 @@ def _capture_snapshot(path: Path, *, secret: bool, exact_mode: Optional[int] = N
         os.close(parent_fd)
 
 
-def _parse_dotenv(text: Optional[str]) -> Tuple[Dict[str, str], Tuple[str, ...]]:
-    values: Dict[str, str] = {}
-    assignments = []
-    if text is None:
-        return values, ()
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise InstallError(f"invalid dotenv line {number}")
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise InstallError(f"invalid dotenv key on line {number}")
-        if value[:1] in {"'", '"'}:
-            quote = value[0]
-            end = value.find(quote, 1)
-            if end < 0 or (value[end + 1:].strip() and not value[end + 1:].lstrip().startswith("#")):
-                raise InstallError(f"invalid quoted dotenv value on line {number}")
-            value = value[1:end]
-        elif " #" in value:
-            value = value.split(" #", 1)[0].rstrip()
-        values[key] = value
-        assignments.append(key)
-    return values, tuple(assignments)
+def _dotenv(text: Optional[str], variable: str) -> Dict[str, str]:
+    try:
+        return parse_dotenv(
+            text, allowed_keys={variable}, label="credential dotenv",
+        )
+    except DotenvError as exc:
+        raise InstallError(str(exc)) from exc
 
 
 def _existing_credential(plan_scope: str, name: str, spec: InstallSpec):
@@ -407,7 +389,7 @@ def _existing_credential(plan_scope: str, name: str, spec: InstallSpec):
         source = spec.environ.get(variable, "")
     else:
         path = Path(spec.project_root) / ".env.local" if plan_scope == "project" else Path(spec.config_home) / ".env"
-        values, _ = _parse_dotenv(_read_optional(path, secret=True))
+        values = _dotenv(_read_optional(path, secret=True), variable)
         source = values.get(variable, "")
     if not source:
         return None
@@ -964,7 +946,7 @@ def _credential_dotenv(plan: InstallPlan) -> bytes:
     variable = PROJECT_CREDENTIALS if plan.credential_ref.scope == "project" else GLOBAL_CREDENTIALS
     path = _credential_path(plan)
     original = _read_optional(path, secret=True) or ""
-    values, _ = _parse_dotenv(original)
+    values = _dotenv(original, variable)
     source = values.get(variable, "")
     if source:
         try:

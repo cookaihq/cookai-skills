@@ -103,6 +103,14 @@ def _require_credential_lifetime(resolved: ResolvedTarget, moment: datetime) -> 
         )
 
 
+def _validated_request_moment(
+    resolved: ResolvedTarget, now: ClockInput,
+) -> datetime:
+    moment = _moment(now)
+    _require_credential_lifetime(resolved, moment)
+    return moment
+
+
 def _authorize_upload(
     resolved: ResolvedTarget,
     collision: str,
@@ -170,8 +178,7 @@ def _request(
     transport: Callable[..., Response],
     request_builder: Callable[..., Any],
 ) -> Optional[Response]:
-    moment = _moment(now)
-    _require_credential_lifetime(resolved, moment)
+    moment = _validated_request_moment(resolved, now)
     signed = request_builder(
         connection_for(resolved),
         method=method,
@@ -278,7 +285,7 @@ def _complete_result(
     project_root: str,
     config_home: str,
     operation: str,
-    moment: datetime,
+    now: ClockInput,
 ) -> MultipartOutcome:
     checkpoint_id = checkpoint["checkpoint_id"]
     reference = checkpoint["object_reference_draft"]
@@ -287,7 +294,7 @@ def _complete_result(
             resolved=resolved,
             reference=reference,
             presign_expires=None,
-            now=moment,
+            now=now,
         )
         generated["operation"] = operation
         generated["object_written"] = True
@@ -300,11 +307,9 @@ def _complete_result(
             object_reference=reference,
             url_kind=("public" if reference["access"]["mode"] == "public" else "presigned"),
             retention=reference["retention"],
-            checkpoint_id=checkpoint_id if checkpoint["reference_out"] is not None else None,
+            checkpoint_id=checkpoint_id,
         )
-        return MultipartOutcome(
-            result, store, checkpoint_id, checkpoint["reference_out"] is not None
-        )
+        return MultipartOutcome(result, store, checkpoint_id, True)
     if checkpoint["reference_out"] is not None:
         snapshot = ReferenceOutputSnapshot(
             checkpoint["reference_out"], project_root, config_home,
@@ -421,12 +426,12 @@ def _finish_existing_session(
     project_root: str,
     config_home: str,
     operation: str,
-    moment: datetime,
     request_now: ClockInput,
     request_builder: Callable[..., Any],
 ) -> MultipartOutcome:
     plan = _checkpoint_plan(checkpoint)
-    checkpoint = _set_state(checkpoint, "completing", moment)
+    request_moment = _validated_request_moment(resolved, request_now)
+    checkpoint = _set_state(checkpoint, "completing", request_moment)
     store.replace(checkpoint)
     body = _completion_body(checkpoint["multipart"]["acknowledged_parts"])
     headers = [
@@ -443,7 +448,7 @@ def _finish_existing_session(
         query=(("uploadId", checkpoint["multipart"]["upload_id"]),),
         body=body,
         headers=tuple(headers),
-        now=request_now,
+        now=request_moment,
         transport=transport,
         request_builder=request_builder,
     )
@@ -454,7 +459,9 @@ def _finish_existing_session(
         conditional=conditional,
     )
     if parsed.classification == "precondition":
-        checkpoint = _set_state(checkpoint, "collision_detected", moment)
+        checkpoint = _set_state(
+            checkpoint, "collision_detected", request_moment
+        )
         store.replace(checkpoint)
         result = build_result(
             operation,
@@ -471,11 +478,13 @@ def _finish_existing_session(
         store.remove(checkpoint["checkpoint_id"])
         raise MultipartError("multipart session no longer exists")
     if parsed.classification == "definitive_failure":
-        checkpoint = _set_state(checkpoint, "uploading", moment)
+        checkpoint = _set_state(checkpoint, "uploading", request_moment)
         store.replace(checkpoint)
         return _partial(operation, checkpoint, store)
     if parsed.classification != "success":
-        checkpoint = _set_state(checkpoint, "completion_unknown", moment)
+        checkpoint = _set_state(
+            checkpoint, "completion_unknown", request_moment
+        )
         store.replace(checkpoint)
         return _ambiguous(operation, checkpoint, store)
     previous_reference = checkpoint["object_reference_draft"]
@@ -489,7 +498,7 @@ def _finish_existing_session(
     reference["access"] = previous_reference["access"]
     reference["retention"] = previous_reference["retention"]
     checkpoint = _set_state(
-        checkpoint, "complete", moment, object_reference_draft=reference
+        checkpoint, "complete", request_moment, object_reference_draft=reference
     )
     store.replace(checkpoint)
     return _complete_result(
@@ -499,7 +508,7 @@ def _finish_existing_session(
         project_root=project_root,
         config_home=config_home,
         operation=operation,
-        moment=moment,
+        now=request_now,
     )
 
 
@@ -552,7 +561,8 @@ def resume_multipart(
             )
         except SourceError as exc:
             raise SourceError("prepared multipart source is unavailable or changed") from exc
-        checkpoint = _set_state(checkpoint, "initiating", moment)
+        request_moment = _validated_request_moment(resolved, now)
+        checkpoint = _set_state(checkpoint, "initiating", request_moment)
         store.replace(checkpoint)
         plan = _checkpoint_plan(checkpoint)
         create_headers = list(_request_headers(plan, 0))
@@ -573,7 +583,7 @@ def resume_multipart(
             key=plan["object_key"],
             query=(("uploads", ""),),
             headers=tuple(create_headers),
-            now=now,
+            now=request_moment,
             transport=transport,
             request_builder=request_builder,
         )
@@ -584,10 +594,12 @@ def resume_multipart(
             store.remove(checkpoint["checkpoint_id"])
             raise MultipartError("remote multipart initiation definitively failed")
         if parsed.classification != "success":
-            checkpoint = _set_state(checkpoint, "initiation_unknown", moment)
+            checkpoint = _set_state(
+                checkpoint, "initiation_unknown", request_moment
+            )
             store.replace(checkpoint)
             return _ambiguous("resume", checkpoint, store)
-        checkpoint = _set_state(checkpoint, "initiated", moment)
+        checkpoint = _set_state(checkpoint, "initiated", request_moment)
         checkpoint["multipart"]["upload_id"] = parsed.identifiers["upload_id"]
         store.replace(checkpoint)
         return resume_multipart(
@@ -634,11 +646,15 @@ def resume_multipart(
                         raise SourceError("in-flight part no longer matches source")
                     if in_flight["attempt"] >= checkpoint["multipart"]["part_max_attempts"]:
                         return _partial("resume", checkpoint, store)
+                    request_moment = _validated_request_moment(resolved, now)
                     checkpoint = copy.deepcopy(checkpoint)
                     checkpoint["multipart"]["in_flight_part"]["attempt"] += 1
-                    checkpoint["updated_at"] = _timestamp(moment)
+                    checkpoint["updated_at"] = _timestamp(request_moment)
                 else:
-                    checkpoint = _set_state(checkpoint, "uploading", moment)
+                    request_moment = _validated_request_moment(resolved, now)
+                    checkpoint = _set_state(
+                        checkpoint, "uploading", request_moment
+                    )
                     next_part = part.as_checkpoint()
                     next_part["attempt"] = 1
                     checkpoint["multipart"]["in_flight_part"] = next_part
@@ -653,7 +669,7 @@ def resume_multipart(
                     ),
                     body=part.data,
                     headers=(("content-length", str(part.size)),),
-                    now=now,
+                    now=request_moment,
                     transport=transport,
                     request_builder=request_builder,
                 )
@@ -685,7 +701,6 @@ def resume_multipart(
         project_root=project_root,
         config_home=config_home,
         operation="resume",
-        moment=moment,
         request_now=now,
         request_builder=request_builder,
     )
@@ -749,7 +764,7 @@ def reconcile_multipart(
             project_root=project_root,
             config_home=config_home,
             operation="reconcile",
-            moment=moment,
+            now=now,
         )
     if state == "aborted":
         result = build_result("reconcile", "aborted")
@@ -811,7 +826,7 @@ def reconcile_multipart(
                 project_root=project_root,
                 config_home=config_home,
                 operation="reconcile",
-                moment=moment,
+                now=now,
             )
         return _ambiguous("reconcile", checkpoint, store)
     if state == "abort_unknown":
@@ -858,7 +873,7 @@ def reconcile_multipart(
                 project_root=project_root,
                 config_home=config_home,
                 operation="reconcile",
-                moment=moment,
+                now=now,
             )
         if observation == "inconclusive" or head is None or not (
             200 <= head.status < 300 or head.status == 404
@@ -948,7 +963,8 @@ def abort_multipart(
         live_test_interlock=live_test_interlock,
     ):
         raise MultipartError("AbortMultipartUpload capability is unavailable")
-    checkpoint = _set_state(checkpoint, "aborting", moment)
+    request_moment = _validated_request_moment(resolved, now)
+    checkpoint = _set_state(checkpoint, "aborting", request_moment)
     checkpoint["multipart"]["return_state"] = state
     store.replace(checkpoint)
     response = _request(
@@ -957,7 +973,7 @@ def abort_multipart(
         key=checkpoint["object_reference_draft"]["location"]["key"],
         query=(("uploadId", checkpoint["multipart"]["upload_id"]),),
         headers=(("content-length", "0"),),
-        now=now,
+        now=request_moment,
         transport=transport,
         request_builder=request_builder,
     )
@@ -965,14 +981,14 @@ def abort_multipart(
         response, operation="AbortMultipartUpload", resolved=resolved
     )
     if parsed.classification == "success":
-        checkpoint = _set_state(checkpoint, "aborted", moment)
+        checkpoint = _set_state(checkpoint, "aborted", request_moment)
         checkpoint["multipart"]["return_state"] = None
         checkpoint["multipart"]["in_flight_part"] = None
         store.replace(checkpoint)
         result = build_result("abort", "aborted")
         return MultipartOutcome(result, store, checkpoint["checkpoint_id"], False)
     if parsed.classification == "session_absent":
-        checkpoint = _set_state(checkpoint, "aborted", moment)
+        checkpoint = _set_state(checkpoint, "aborted", request_moment)
         checkpoint["multipart"]["return_state"] = None
         checkpoint["multipart"]["in_flight_part"] = None
         store.replace(checkpoint)
@@ -980,11 +996,11 @@ def abort_multipart(
         return MultipartOutcome(result, store, checkpoint["checkpoint_id"], False)
     if parsed.classification == "definitive_failure":
         return_state = checkpoint["multipart"]["return_state"]
-        checkpoint = _set_state(checkpoint, return_state, moment)
+        checkpoint = _set_state(checkpoint, return_state, request_moment)
         checkpoint["multipart"]["return_state"] = None
         store.replace(checkpoint)
         return _partial("abort", checkpoint, store)
-    checkpoint = _set_state(checkpoint, "abort_unknown", moment)
+    checkpoint = _set_state(checkpoint, "abort_unknown", request_moment)
     store.replace(checkpoint)
     return _ambiguous("abort", checkpoint, store)
 
@@ -1053,6 +1069,7 @@ def execute_multipart(
                 config_home=config_home,
                 source_identity=(source.snapshot.device, source.snapshot.inode),
             )
+        initiation_moment = _validated_request_moment(resolved, now)
         checkpoint_id = uuid_factory().hex
         operation_id = uuid_factory().hex
         if checkpoint_id == operation_id:
@@ -1094,7 +1111,7 @@ def execute_multipart(
         }
         store = CheckpointStore(project_root)
         store.create(checkpoint)
-        checkpoint = _set_state(checkpoint, "initiating", moment)
+        checkpoint = _set_state(checkpoint, "initiating", initiation_moment)
         store.replace(checkpoint)
         checkpoint_notice(checkpoint_id)
         create_headers = list(_request_headers(plan, 0))
@@ -1115,7 +1132,7 @@ def execute_multipart(
             key=plan["object_key"],
             query=(("uploads", ""),),
             headers=tuple(create_headers),
-            now=now,
+            now=initiation_moment,
             transport=transport,
             request_builder=request_builder,
         )
@@ -1126,10 +1143,12 @@ def execute_multipart(
             if parsed.classification == "definitive_failure":
                 store.remove(checkpoint_id)
                 raise MultipartError("remote multipart initiation definitively failed")
-            checkpoint = _set_state(checkpoint, "initiation_unknown", moment)
+            checkpoint = _set_state(
+                checkpoint, "initiation_unknown", initiation_moment
+            )
             store.replace(checkpoint)
             return _ambiguous("upload", checkpoint, store)
-        checkpoint = _set_state(checkpoint, "initiated", moment)
+        checkpoint = _set_state(checkpoint, "initiated", initiation_moment)
         checkpoint["multipart"]["upload_id"] = parsed.identifiers["upload_id"]
         store.replace(checkpoint)
 
@@ -1142,7 +1161,6 @@ def execute_multipart(
                     part=part,
                     store=store,
                     transport=transport,
-                    moment=moment,
                     request_now=now,
                     request_builder=request_builder,
                 )
@@ -1161,7 +1179,6 @@ def execute_multipart(
         project_root=project_root,
         config_home=config_home,
         operation="upload",
-        moment=moment,
         request_now=now,
         request_builder=request_builder,
     )
@@ -1175,13 +1192,13 @@ def _upload_fresh_part(
     part: SourcePart,
     store: CheckpointStore,
     transport: Callable[..., Response],
-    moment: datetime,
     request_now: ClockInput,
     request_builder: Callable[..., Any],
 ) -> tuple[Dict[str, Any], str]:
+    request_moment = _validated_request_moment(resolved, request_now)
     in_flight = part.as_checkpoint()
     in_flight["attempt"] = 1
-    checkpoint = _set_state(checkpoint, "uploading", moment)
+    checkpoint = _set_state(checkpoint, "uploading", request_moment)
     checkpoint["multipart"]["in_flight_part"] = in_flight
     store.replace(checkpoint)
     response = _request(
@@ -1194,7 +1211,7 @@ def _upload_fresh_part(
         ),
         body=part.data,
         headers=(("content-length", str(part.size)),),
-        now=request_now,
+        now=request_moment,
         transport=transport,
         request_builder=request_builder,
     )

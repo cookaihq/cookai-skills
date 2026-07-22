@@ -25,7 +25,7 @@ The candidate golden now freezes that dual-header profile. This was not an autom
 
 ## Final bounded run
 
-Post-audit verification used evidence id `aliyun-oss-8136b234ebc64699a3e3895256d3cc7c` against the exact endpoint `https://s3.oss-cn-beijing.aliyuncs.com`. The restricted report remains Git-ignored.
+Post-audit verification used evidence id `aliyun-oss-c5b5edf48c6243e6aabce356403a0327` against the exact endpoint `https://s3.oss-cn-beijing.aliyuncs.com`. The restricted report remains Git-ignored.
 
 The final run passed all authorized rows:
 

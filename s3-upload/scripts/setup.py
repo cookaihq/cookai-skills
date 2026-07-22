@@ -212,6 +212,7 @@ def main(
                     config_home=config_home,
                     environ=environ,
                     persisted=True,
+                    use_local_key=args.use_local_key,
                     authorized_action_types=tuple(authorized_action_types),
                 ),
             )
@@ -327,6 +328,7 @@ def main(
                         config_home=config_home,
                         environ=environ,
                         persisted=False,
+                        use_local_key=args.use_local_key,
                         authorized_action_types=tuple(authorized_action_types),
                     ),
                     login_done=True,

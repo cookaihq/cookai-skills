@@ -125,6 +125,63 @@ def test_explicit_project_target_loads_one_atomic_credential_map(tmp_path):
     assert resolved.target_fingerprint.startswith("sha256:")
 
 
+def test_project_credential_map_duplicate_assignment_uses_last_value(tmp_path):
+    write_project(
+        tmp_path,
+        targets={"website-images": target()},
+        credentials=None,
+    )
+    first = json.dumps(
+        {"images-key": credential("FIRSTKEY1234", "first-secret-value")},
+        separators=(",", ":"),
+    )
+    last = json.dumps(
+        {"images-key": credential("LASTKEY12345", "last-secret-value")},
+        separators=(",", ":"),
+    )
+    env_local = tmp_path / ".env.local"
+    env_local.write_text(
+        f"S3_UPLOAD_PROJECT_CREDENTIALS_JSON='{first}'\n"
+        f"S3_UPLOAD_PROJECT_CREDENTIALS_JSON='{last}'\n",
+        encoding="utf-8",
+    )
+    env_local.chmod(0o600)
+
+    resolved = resolve_target(
+        cwd=str(tmp_path), config_home=str(tmp_path / "home"), environ={},
+        cli_target="project:website-images", cli_caller=None,
+        use_local_key=False, now=NOW,
+    )
+
+    assert resolved.credential.access_key_id == "LASTKEY12345"
+
+
+@pytest.mark.parametrize(
+    "selector_line",
+    [
+        'S3_UPLOAD_TARGET = "project:website-images" # selected target',
+        "S3_UPLOAD_TARGET=project:website-images # selected target",
+    ],
+)
+def test_selector_dotenv_preserves_supported_inline_comment_forms(
+    tmp_path, selector_line,
+):
+    write_project(
+        tmp_path,
+        targets={"website-images": target()},
+        credentials={"images-key": credential()},
+    )
+    with (tmp_path / ".env.local").open("a", encoding="utf-8") as stream:
+        stream.write(selector_line + "\n")
+
+    resolved = resolve_target(
+        cwd=str(tmp_path), config_home=str(tmp_path / "home"), environ={},
+        cli_target=None, cli_caller=None, use_local_key=False, now=NOW,
+    )
+
+    assert resolved.ref.text == "project:website-images"
+
+
 def test_mapping_beats_default_and_cli_beats_mapping(tmp_path):
     write_project(
         tmp_path,
@@ -199,6 +256,38 @@ def test_explicit_process_global_selection_authorizes_home(tmp_path):
         cli_caller=None, use_local_key=False, now=NOW,
     )
     assert (resolved.source, resolved.credential_source) == ("process", "global-env")
+
+
+def test_global_credential_map_duplicate_assignment_uses_last_value(tmp_path):
+    config_home = tmp_path / "home"
+    write_home(
+        config_home,
+        targets={"shared": target(credential="global:archive-key")},
+        credentials={},
+    )
+    first = json.dumps(
+        {"archive-key": credential("FIRSTGLOBAL1", "first-global-secret")},
+        separators=(",", ":"),
+    )
+    last = json.dumps(
+        {"archive-key": credential("LASTGLOBAL12", "last-global-secret")},
+        separators=(",", ":"),
+    )
+    env_file = config_home / ".env"
+    env_file.write_text(
+        f"S3_UPLOAD_GLOBAL_CREDENTIALS_JSON='{first}'\n"
+        f"S3_UPLOAD_GLOBAL_CREDENTIALS_JSON='{last}'\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    resolved = resolve_target(
+        cwd=str(tmp_path), config_home=str(config_home), environ={},
+        cli_target="global:shared", cli_caller=None,
+        use_local_key=False, now=NOW,
+    )
+
+    assert resolved.credential.access_key_id == "LASTGLOBAL12"
 
 
 def test_project_target_never_reads_global_credential(tmp_path):

@@ -309,6 +309,57 @@ class EvidenceRunResult:
     evidence_dir: Optional[str]
 
 
+@dataclass(frozen=True)
+class UnitTestResult:
+    command: Tuple[str, ...]
+    output: bytes = field(repr=False)
+    returncode: int
+    total: int
+    passed: int
+    failed: int
+    errors: int
+    skipped: int
+    python_version: str
+    pytest_version: str
+
+    def __post_init__(self) -> None:
+        if not self.command or any(
+            not isinstance(item, str)
+            or not item
+            or any(ord(character) < 0x20 for character in item)
+            for item in self.command
+        ):
+            raise EvidenceError("unit test command is invalid")
+        if not isinstance(self.output, bytes) or not self.output:
+            raise EvidenceError("unit test output is required")
+        if len(self.output) > 32 * 1024 * 1024:
+            raise EvidenceError("unit test output exceeds the evidence limit")
+        if not isinstance(self.returncode, int) or isinstance(self.returncode, bool):
+            raise EvidenceError("unit test returncode is invalid")
+        counts = (self.total, self.passed, self.failed, self.errors, self.skipped)
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in counts
+        ):
+            raise EvidenceError("unit test counts are invalid")
+        if self.passed + self.failed + self.errors + self.skipped != self.total:
+            raise EvidenceError("unit test counts do not add up")
+        for label, value in (
+            ("Python", self.python_version),
+            ("pytest", self.pytest_version),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value
+                or any(ord(character) < 0x20 for character in value)
+            ):
+                raise EvidenceError(f"{label} version is invalid")
+
+    @property
+    def successful(self) -> bool:
+        return self.returncode == 0 and self.failed == 0 and self.errors == 0
+
+
 def create_evidence_run_config(
     *,
     target_ref: str,
@@ -495,33 +546,73 @@ def _require_ignored_if_in_worktree(path: str) -> None:
         raise EvidenceError("evidence directory must be Git ignored")
 
 
-def _markdown_report(report: Mapping[str, Any]) -> bytes:
+def _cell(value: Any) -> str:
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def _expected_operation(item: Mapping[str, Any]) -> str:
+    reasons = {
+        "capability_unavailable": "capability remains unavailable; zero requests",
+        "operation_authorization_missing": "operation remains unauthorized; zero requests",
+        "cleanup_authorization_missing": "mutation remains unauthorized; zero requests",
+        "credential_unavailable_or_expired": "operation remains untested; zero requests",
+    }
+    return reasons.get(
+        item["reason"],
+        "operation-specific response, byte, redirect, and resource checks pass",
+    )
+
+
+def _markdown_report(
+    report: Mapping[str, Any], unit_tests: UnitTestResult,
+) -> bytes:
     lines = [
         "# S3 provider evidence",
         "",
-        f"Evidence ID: `{report['evidence_id']}`",
-        f"Provider: `{report['provider']}`",
-        f"Endpoint: `{report['exact_endpoint']}`",
-        f"Target: `{report['target_ref']}`",
-        f"Privilege: `{report['privilege_verdict']}`",
-        f"Release eligible: `{str(report['release_eligible']).lower()}`",
+        "## 1. Test summary",
         "",
-        "## Operations",
+        f"- Date: `{report['started_at']}`",
+        f"- Scope: `{report['provider']}` at `{report['exact_endpoint']}`; "
+        f"{len(report['operations'])} bounded data-plane scenarios",
+        f"- Target: `{report['target_ref']}`",
+        f"- Environment: Python `{unit_tests.python_version}`; "
+        f"pytest `{unit_tests.pytest_version}`; standard-library runtime",
+        f"- Evidence ID: `{report['evidence_id']}`",
+        f"- Credential privilege: `{report['privilege_verdict']}`",
+        f"- Release eligible: `{str(report['release_eligible']).lower()}`",
         "",
-        "| Operation | Status | Reason | Requests | HTTP |",
-        "|---|---|---|---:|---:|",
+        "## 2. Unit test results",
+        "",
+        f"- Result: {unit_tests.passed} passed; {unit_tests.failed} failed; "
+        f"{unit_tests.errors} errors; {unit_tests.skipped} skipped",
+        f"- Exit code: `{unit_tests.returncode}`",
+        f"- Command: `{_cell(' '.join(unit_tests.command))}`",
+        "- Complete combined stdout/stderr: `test_output.log`",
+        "",
+        "## 3. Integration test results",
+        "",
+        "| Scenario | Expected | Actual | Outcome |",
+        "|---|---|---|---|",
     ]
     for item in report["operations"]:
-        lines.append(
-            "| {operation} | {status} | {reason} | {request_count} | {response_status} |".format(
-                operation=item["operation"],
-                status=item["status"],
-                reason=item["reason"] or "",
-                request_count=item["request_count"],
-                response_status=item["response_status"] or "",
-            )
+        reason = item["reason"] or "none"
+        actual = (
+            f"status={item['status']}; reason={reason}; "
+            f"requests={item['request_count']}; "
+            f"HTTP={item['response_status'] if item['response_status'] is not None else 'none'}"
         )
-    lines.extend(["", "## Cleanup", ""])
+        outcome = (
+            "passed"
+            if item["status"] == "passed"
+            else "not run"
+            if item["status"] in {"not-authorized", "not-supported", "not-tested"}
+            else "failed"
+        )
+        lines.append(
+            f"| `{_cell(item['operation'])}` | {_cell(_expected_operation(item))} | "
+            f"{_cell(actual)} | {outcome} |"
+        )
+    lines.extend(["", "### Cleanup", ""])
     if report["cleanup"]:
         for item in report["cleanup"]:
             lines.append(
@@ -529,12 +620,71 @@ def _markdown_report(report: Mapping[str, Any]) -> bytes:
             )
     else:
         lines.append("- No tracked resources.")
-    if report["residuals"]:
-        lines.extend(["", "## Manual cleanup", ""])
-        for item in report["residuals"]:
-            lines.append(
-                f"- `{item['resource_type']}` `{item['key']}`: {item['manual_cleanup']}"
-            )
+    passed_operations = [
+        item["operation"] for item in report["operations"]
+        if item["status"] == "passed"
+    ]
+    failed_operations = [
+        item for item in report["operations"] if item["status"] == "failed"
+    ]
+    all_operations_passed = len(passed_operations) == len(report["operations"])
+    assumption_status = (
+        "confirmed"
+        if all_operations_passed
+        else "partially confirmed"
+        if passed_operations
+        else "not confirmed"
+    )
+    cleanup_confirmed = bool(report["cleanup"]) and all(
+        item["status"] == "passed" for item in report["cleanup"]
+    ) and not report["residuals"]
+    lines.extend(
+        [
+            "",
+            "## 4. Assumption verification",
+            "",
+            f"- Exact endpoint and Contract Key behavior: **{assumption_status}** "
+            f"({len(passed_operations)}/{len(report['operations'])} scenarios passed).",
+            "- Credential least-privilege scope: **confirmed**."
+            if report["privilege_verdict"] == "least-privilege-confirmed"
+            else "- Credential least-privilege scope: **evidence not obtained**.",
+            "- Cleanup left no residual resources: **confirmed**."
+            if cleanup_confirmed
+            else "- Cleanup left no residual resources: **not confirmed**.",
+            "",
+            "## 5. Findings",
+            "",
+            "### Must fix",
+            "",
+        ]
+    )
+    must_fix = []
+    if report["privilege_verdict"] != "least-privilege-confirmed":
+        must_fix.append("Obtain and review the Credential least-privilege policy evidence.")
+    must_fix.extend(
+        f"`{item['operation']}` failed: `{item['reason'] or 'unspecified'}`."
+        for item in failed_operations
+    )
+    must_fix.extend(
+        f"Clean `{item['resource_type']}` `{item['key']}`: {item['manual_cleanup']}"
+        for item in report["residuals"]
+    )
+    lines.extend(f"- {item}" for item in must_fix)
+    if not must_fix:
+        lines.append("- None.")
+    deferred = [
+        item for item in report["operations"]
+        if item["status"] in {"not-authorized", "not-supported", "not-tested"}
+    ]
+    lines.extend(["", "### Optional improvements", ""])
+    if deferred:
+        lines.append(
+            "- Collect separately authorized evidence for deferred scenarios: "
+            + ", ".join(f"`{item['operation']}`" for item in deferred)
+            + "."
+        )
+    else:
+        lines.append("- None.")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -542,6 +692,8 @@ def _write_bundle(
     path: str,
     report: Mapping[str, Any],
     raw_responses: Sequence[Tuple[str, bytes]],
+    unit_tests: UnitTestResult,
+    test_output: bytes,
 ) -> str:
     absolute = os.path.abspath(os.path.expanduser(path))
     _require_ignored_if_in_worktree(absolute)
@@ -558,17 +710,13 @@ def _write_bundle(
     atomic_write(os.path.join(directory, "report.json"), serialized, mode=0o600, replace=False)
     atomic_write(
         os.path.join(directory, "report.md"),
-        _markdown_report(report),
+        _markdown_report(report, unit_tests),
         mode=0o600,
         replace=False,
     )
-    log_lines = [
-        f"{item['operation']} {item['status']} requests={item['request_count']}"
-        for item in report["operations"]
-    ]
     atomic_write(
         os.path.join(directory, "test_output.log"),
-        ("\n".join(log_lines) + "\n").encode("ascii"),
+        test_output,
         mode=0o600,
         replace=False,
     )
@@ -584,10 +732,15 @@ def run_evidence_matrix(
     credential: Optional[CredentialProfile],
     source_bytes: bytes,
     adapter: Any,
+    unit_tests: UnitTestResult,
     now: Optional[datetime] = None,
 ) -> EvidenceRunResult:
     if not isinstance(source_bytes, bytes) or not source_bytes:
         raise EvidenceError("live-test source bytes must be non-empty")
+    if not isinstance(unit_tests, UnitTestResult):
+        raise EvidenceError("unit test result is required before live evidence")
+    if not unit_tests.successful:
+        raise EvidenceError("unit tests must pass before live evidence")
     if contract_key.provider != config.provider:
         raise EvidenceError("contract provider does not match the live-test config")
     if urlsplit(config.exact_endpoint).scheme != contract_key.scheme:
@@ -917,7 +1070,10 @@ def run_evidence_matrix(
         "cleanup": cleanup_reports,
         "residuals": residuals,
     }
-    directory = _write_bundle(config.evidence_dir, report, raw_responses)
+    test_output = _redact(unit_tests.output, credentials)
+    directory = _write_bundle(
+        config.evidence_dir, report, raw_responses, unit_tests, test_output,
+    )
     return EvidenceRunResult(
         gate_status="authorized",
         persisted=True,

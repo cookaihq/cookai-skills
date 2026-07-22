@@ -861,5 +861,197 @@ def test_temporary_credential_lifetime_is_checked_before_every_request(tmp_path)
 
     assert len(transport_calls) == 1 and transport_calls[0][0] == "POST"
     checkpoint = checkpoint_snapshot(tmp_path)
-    assert checkpoint["state"] == "uploading"
-    assert checkpoint["multipart"]["in_flight_part"]["attempt"] == 1
+    assert checkpoint["state"] == "initiated"
+    assert checkpoint["multipart"]["in_flight_part"] is None
+
+
+def test_expired_before_first_multipart_signature_leaves_no_checkpoint(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"a" * PART_SIZE)
+    resolved = temporary_resolved_target()
+    times = iter((NOW, NOW + timedelta(seconds=90)))
+    transport_calls = []
+    notices = []
+
+    with pytest.raises(MultipartError, match="more than 60"):
+        execute_multipart(
+            resolved=resolved,
+            plan=upload_plan(source, resolved),
+            transport=lambda *args: transport_calls.append(args),
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            now=lambda: next(times),
+            checkpoint_notice=notices.append,
+            registry=multipart_registry(resolved),
+            execution_mode="test-only",
+            live_test_interlock=LiveTestInterlock(True, "project:images"),
+        )
+
+    assert transport_calls == []
+    assert notices == []
+    assert list((tmp_path / ".s3-upload" / "checkpoints").glob("*.json")) == []
+
+
+def test_expiry_before_resume_create_preserves_prepared_checkpoint(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"a" * PART_SIZE)
+    resolved = temporary_resolved_target()
+    first, checkpoint, _ = begin_with_unknown_part(tmp_path, source, resolved)
+    checkpoint["state"] = "prepared"
+    checkpoint["multipart"]["upload_id"] = None
+    checkpoint["multipart"]["in_flight_part"] = None
+    first.store.replace(checkpoint)
+    calls = []
+
+    with pytest.raises(MultipartError, match="more than 60"):
+        resume_multipart(
+            resolved=resolved,
+            checkpoint=checkpoint,
+            store=first.store,
+            transport=lambda *args: calls.append(args),
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            now=NOW + timedelta(seconds=90),
+            registry=multipart_registry(resolved),
+            execution_mode="test-only",
+            live_test_interlock=LiveTestInterlock(True, "project:images"),
+        )
+
+    assert calls == []
+    assert first.store.load(first.checkpoint_id)["state"] == "prepared"
+
+
+def test_expiry_before_resume_part_preserves_attempt_count(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"a" * PART_SIZE)
+    resolved = temporary_resolved_target()
+    first, checkpoint, _ = begin_with_unknown_part(tmp_path, source, resolved)
+    calls = []
+
+    with pytest.raises(MultipartError, match="more than 60"):
+        resume_multipart(
+            resolved=resolved,
+            checkpoint=checkpoint,
+            store=first.store,
+            transport=lambda *args: calls.append(args),
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            now=NOW + timedelta(seconds=90),
+            registry=multipart_registry(resolved),
+            execution_mode="test-only",
+            live_test_interlock=LiveTestInterlock(True, "project:images"),
+        )
+
+    retained = first.store.load(first.checkpoint_id)
+    assert calls == []
+    assert retained["state"] == "uploading"
+    assert retained["multipart"]["in_flight_part"]["attempt"] == 1
+
+
+def test_expiry_before_complete_preserves_uploading_checkpoint(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"a" * PART_SIZE)
+    resolved = temporary_resolved_target()
+    times = iter((NOW, NOW, NOW, NOW + timedelta(seconds=90)))
+    calls = []
+
+    def transport(method, url, headers, body):
+        calls.append((method, url, headers, body))
+        if len(calls) == 1:
+            return Response(
+                200,
+                b"<InitiateMultipartUploadResult><UploadId>temporary-upload</UploadId>"
+                b"</InitiateMultipartUploadResult>",
+            )
+        return Response(200, headers={"ETag": '"part-1"'})
+
+    with pytest.raises(MultipartError, match="more than 60"):
+        execute_multipart(
+            resolved=resolved,
+            plan=upload_plan(source, resolved),
+            transport=transport,
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            now=lambda: next(times),
+            checkpoint_notice=lambda checkpoint_id: None,
+            registry=multipart_registry(resolved),
+            execution_mode="test-only",
+            live_test_interlock=LiveTestInterlock(True, "project:images"),
+        )
+
+    retained = checkpoint_snapshot(tmp_path)
+    assert [call[0] for call in calls] == ["POST", "PUT"]
+    assert retained["state"] == "uploading"
+    assert retained["multipart"]["in_flight_part"] is None
+    assert len(retained["multipart"]["acknowledged_parts"]) == 1
+
+
+def test_expiry_before_abort_preserves_prior_checkpoint_state(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"a" * PART_SIZE)
+    resolved = temporary_resolved_target()
+    first, checkpoint, _ = begin_with_unknown_part(tmp_path, source, resolved)
+    calls = []
+
+    with pytest.raises(MultipartError, match="more than 60"):
+        abort_multipart(
+            resolved=resolved,
+            checkpoint=checkpoint,
+            store=first.store,
+            transport=lambda *args: calls.append(args),
+            confirm_abort=True,
+            now=NOW + timedelta(seconds=90),
+            registry=multipart_registry(resolved, "AbortMultipartUpload"),
+            execution_mode="test-only",
+            live_test_interlock=LiveTestInterlock(True, "project:images"),
+        )
+
+    retained = first.store.load(first.checkpoint_id)
+    assert calls == []
+    assert retained["state"] == "uploading"
+    assert retained["multipart"]["return_state"] is None
+
+
+def test_multipart_rechecks_temporary_credential_before_result_presign(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"a" * PART_SIZE)
+    resolved = temporary_resolved_target()
+    times = iter((NOW, NOW, NOW, NOW + timedelta(seconds=30), NOW + timedelta(seconds=60)))
+    calls = []
+
+    def transport(method, url, headers, body):
+        calls.append((method, url, headers, body))
+        if len(calls) == 1:
+            return Response(
+                200,
+                b"<InitiateMultipartUploadResult><UploadId>temporary-upload</UploadId>"
+                b"</InitiateMultipartUploadResult>",
+            )
+        if len(calls) == 2:
+            return Response(200, headers={"ETag": '"part-1"'})
+        return Response(
+            200,
+            b"<CompleteMultipartUploadResult><VersionId>version-1</VersionId>"
+            b"</CompleteMultipartUploadResult>",
+        )
+
+    outcome = execute_multipart(
+        resolved=resolved,
+        plan=upload_plan(source, resolved),
+        transport=transport,
+        project_root=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        now=lambda: next(times),
+        checkpoint_notice=lambda checkpoint_id: None,
+        registry=multipart_registry(resolved),
+        execution_mode="test-only",
+        live_test_interlock=LiveTestInterlock(True, "project:images"),
+    )
+
+    assert [call[0] for call in calls] == ["POST", "PUT", "POST"]
+    assert outcome.result["status"] == "partial_success"
+    assert outcome.result["object_written"] is True
+    assert outcome.result["url"] is None
+    assert outcome.result["checkpoint_id"] == outcome.checkpoint_id
+    assert outcome.retain_checkpoint is True
+    assert outcome.store.load(outcome.checkpoint_id)["state"] == "complete"

@@ -14,6 +14,7 @@ from evidence import (
     EvidenceError,
     EvidenceObservation,
     EvidenceRunConfig,
+    UnitTestResult,
     RequestObservation,
     TrackedObject,
     TrackedSession,
@@ -28,6 +29,11 @@ NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
 SOURCE = b"provider-evidence-source"
 SECRET = "provider-secret-value"
 TOKEN = "provider-session-token"
+PYTEST_OUTPUT = (
+    b"============================= test session starts ==============================\n"
+    b"collected 329 items\n\n"
+    b"============================= 329 passed in 4.20s ==============================\n"
+)
 
 
 def credential(*, temporary=False, expired=False):
@@ -72,6 +78,21 @@ def config(tmp_path, *, authorizations=None, privilege="least-privilege-confirme
         ),
         evidence_dir=str(tmp_path / "evidence"),
         run_id="123e4567e89b42d3a456426614174000",
+    )
+
+
+def unit_test_result(*, output=PYTEST_OUTPUT):
+    return UnitTestResult(
+        command=("python3", "-m", "pytest", "s3-upload/tests/unit"),
+        output=output,
+        returncode=0,
+        total=329,
+        passed=329,
+        failed=0,
+        errors=0,
+        skipped=0,
+        python_version="3.12.4",
+        pytest_version="8.4.1",
     )
 
 
@@ -189,7 +210,10 @@ class FakeAdapter:
         )
 
 
-def run(tmp_path, adapter, *, environ=None, run_config=None, credentials=None):
+def run(
+    tmp_path, adapter, *, environ=None, run_config=None, credentials=None,
+    unit_tests=None,
+):
     candidate, registry = candidate_and_registry()
     return run_evidence_matrix(
         config=run_config or config(tmp_path),
@@ -199,6 +223,7 @@ def run(tmp_path, adapter, *, environ=None, run_config=None, credentials=None):
         credential=credential() if credentials is None else credentials,
         source_bytes=SOURCE,
         adapter=adapter,
+        unit_tests=unit_test_result() if unit_tests is None else unit_tests,
         now=NOW,
     )
 
@@ -261,6 +286,7 @@ def test_unknown_capability_is_not_supported_and_sends_zero_requests(tmp_path):
         credential=credential(),
         source_bytes=SOURCE,
         adapter=adapter,
+        unit_tests=unit_test_result(),
         now=NOW,
     )
 
@@ -331,6 +357,29 @@ def test_fake_full_matrix_validates_get_bytes_cleans_resources_and_writes_restri
     assert SECRET.encode() not in persisted
     assert TOKEN.encode() not in persisted
     assert b"PROVIDERKEY1234" not in persisted
+
+
+def test_bundle_preserves_pytest_output_and_has_the_five_required_report_parts(tmp_path):
+    result = run(tmp_path, FakeAdapter())
+
+    evidence_dir = Path(result.evidence_dir)
+    assert (evidence_dir / "test_output.log").read_bytes() == PYTEST_OUTPUT
+    markdown = (evidence_dir / "report.md").read_text(encoding="utf-8")
+    for heading in (
+        "## 1. Test summary",
+        "## 2. Unit test results",
+        "## 3. Integration test results",
+        "## 4. Assumption verification",
+        "## 5. Findings",
+    ):
+        assert heading in markdown
+    assert "2026-07-22T12:00:00Z" in markdown
+    assert "Python `3.12.4`; pytest `8.4.1`" in markdown
+    assert "329 passed; 0 failed; 0 errors; 0 skipped" in markdown
+    assert "| Scenario | Expected | Actual | Outcome |" in markdown
+    persisted_report = json.loads((evidence_dir / "report.json").read_text())
+    assert persisted_report == result.report
+    assert "unit_tests" not in persisted_report
 
 
 def test_get_requires_complete_matching_bytes_not_only_2xx(tmp_path):

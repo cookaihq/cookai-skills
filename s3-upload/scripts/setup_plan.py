@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
 from urllib.parse import unquote_to_bytes
 
+from dotenv_parser import DotenvError, parse_dotenv
 from config_install import (
     InstallPlan, InstallSpec, SelectorChange, apply_install_plan,
     preflight_installation,
@@ -59,26 +60,13 @@ class PlanSinkSnapshot:
     digest: Optional[str]
 
 
-def _dotenv(text: Optional[str]) -> Dict[str, str]:
-    result: Dict[str, str] = {}
-    if text is None:
-        return result
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise SetupPlanError(f"invalid dotenv line {number}")
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if value[:1] in {"'", '"'}:
-            quote = value[0]
-            end = value.find(quote, 1)
-            if end < 0:
-                raise SetupPlanError(f"invalid dotenv line {number}")
-            value = value[1:end]
-        result[key] = value
-    return result
+def _dotenv(text: Optional[str], variable: str) -> Dict[str, str]:
+    try:
+        return parse_dotenv(
+            text, allowed_keys={variable}, label="credential dotenv",
+        )
+    except DotenvError as exc:
+        raise SetupPlanError(str(exc)) from exc
 
 
 def _read(path: Path, *, secret: bool) -> Optional[str]:
@@ -322,7 +310,7 @@ def _selected_persistent_credential(request: Dict[str, Any], context: PlanningCo
         if reference.scope == "project"
         else Path(context.config_home) / ".env"
     )
-    source = _dotenv(_read(path, secret=True)).get(variable, "")
+    source = _dotenv(_read(path, secret=True), variable).get(variable, "")
     if not source:
         raise SetupPlanError("persistent Credential Profile is unavailable")
     try:
@@ -373,7 +361,7 @@ def _persistent_credential_slot_is_absent(
         if reference.scope == "project"
         else Path(context.config_home) / ".env"
     )
-    source = _dotenv(_read(path, secret=True)).get(variable, "")
+    source = _dotenv(_read(path, secret=True), variable).get(variable, "")
     if not source:
         return True
     try:

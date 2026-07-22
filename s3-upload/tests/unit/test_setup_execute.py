@@ -15,7 +15,7 @@ from setup_executor import (
     CredentialHandleRegistry, CredentialSink, ExecutionContext, execute_setup_plan,
     guarded_mutation_call,
 )
-from setup_plan import build_setup_plan
+from setup_plan import PlanningContext, build_setup_plan
 from setup import main as setup_main
 from setup_contracts import validate_setup_result
 from strict_json import canonicalize
@@ -285,6 +285,68 @@ def test_execute_cli_with_injected_adapter_emits_one_canonical_result(tmp_path):
     result = json.loads(stdout.getvalue())
     assert validate_setup_result(result, plan=plan) == result
     assert result["status"] == "completed"
+
+
+def test_execute_global_plan_without_use_local_key_is_pre_adapter_stale(tmp_path):
+    config_home = tmp_path / "home"
+    config_home.mkdir()
+    global_credential = {
+        "access_key_id": "GLOBALKEY1234",
+        "secret_access_key": "global-secret-value",
+        "session_token": "",
+        "expires_at": None,
+    }
+    global_env = config_home / ".env"
+    global_env.write_text(
+        "S3_UPLOAD_GLOBAL_CREDENTIALS_JSON="
+        + json.dumps({"setup-key": global_credential}, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+    global_env.chmod(0o600)
+    request = setup_request(persistence="global")
+    request["target_ref"] = "global:setup-target"
+    request["credential_ref"] = "global:setup-key"
+    request["proposed_target"]["credential"] = "global:setup-key"
+    request["selector_change"]["after"] = "global:setup-target"
+    plan = build_setup_plan(
+        request,
+        setup_observation(),
+        context=PlanningContext(
+            project_root=str(tmp_path),
+            config_home=str(config_home),
+            environ={},
+            use_local_key=True,
+        ),
+        plan_id_factory=lambda: "123e4567-e89b-42d3-a456-426614174000",
+    )
+    plan_path = tmp_path / "plan.json"
+    confirmation_path = tmp_path / "confirmation.json"
+    plan_path.write_bytes(canonicalize(plan))
+    plan_path.chmod(0o600)
+    confirmation_path.write_text(json.dumps(confirmation(plan)), encoding="utf-8")
+    adapter = HappyAdapter()
+    stdout = io.BytesIO()
+
+    exit_code = setup_main(
+        [
+            "execute", "--plan-file", str(plan_path),
+            "--confirmation-file", str(confirmation_path),
+        ],
+        adapter=adapter,
+        environ={},
+        cwd=str(tmp_path),
+        config_home=str(config_home),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 3
+    result = json.loads(stdout.getvalue())
+    assert result["status"] == "plan_stale"
+    assert result["local_install_result"] == "configuration_changed"
+    assert adapter.calls == []
+    assert not (config_home / "targets" / "setup-target.json").exists()
 
 
 def test_execute_result_writer_failure_after_mutation_exits_runtime_without_retry(
@@ -929,6 +991,53 @@ def test_issuance_failure_paths_require_manual_revoke_without_secret_leakage(
             row["resource_id"] != "ISSUEDKEY1234"
             for row in result["created_resources"]
         )
+
+
+def test_issuance_after_observation_failure_preserves_safe_resource_id(tmp_path):
+    plan = planned_issuance_plan(tmp_path)
+
+    class AfterObservationLost(IssuanceAdapter):
+        def observe(self, query):
+            if query["action_id"] == "action-2" and query["phase"] == "after":
+                self.calls.append(("observe", "action-2", "after"))
+                raise OSError("post-issuance observation response lost")
+            return super().observe(query)
+
+    adapter = AfterObservationLost()
+
+    result, exit_code = execute_setup_plan(
+        plan,
+        confirmation(plan),
+        adapter=adapter,
+        context=ExecutionContext(
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            environ={},
+            persisted=True,
+        ),
+    )
+
+    assert exit_code == 1
+    assert result["status"] == "unknown"
+    assert result["action_results"][1]["status"] == "unknown"
+    assert result["created_resources"] == [
+        {
+            "action_id": "action-1",
+            "resource_type": "bucket",
+            "resource_id": "setup-bucket",
+        },
+        {
+            "action_id": "action-2",
+            "resource_type": "access-key-resource",
+            "resource_id": "credential-resource-1",
+        },
+    ]
+    assert "manual_revoke_and_reissue" in result["recovery_instructions"]
+    encoded = canonicalize(result)
+    assert b"credential-resource-1" in encoded
+    assert b"issued-secret-value" not in encoded
+    assert b"ISSUEDKEY1234" not in encoded
+    assert adapter.sink.live is False
 
 
 def test_final_local_drift_stops_before_credential_mutation(tmp_path):

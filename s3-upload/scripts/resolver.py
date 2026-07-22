@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
+from dotenv_parser import DotenvError, parse_dotenv
 from safe_io import FileSecurityError, read_regular_file, validate_directory
 from strict_json import StrictJSONError, loads
 from v2_schema import (
@@ -50,32 +51,11 @@ class ResolvedTarget:
         return requested if remaining is None else min(requested, remaining - 60)
 
 
-def _parse_dotenv(text: Optional[str], label: str) -> Tuple[Dict[str, str], Dict[str, int]]:
-    values: Dict[str, str] = {}
-    counts: Dict[str, int] = {}
-    if text is None:
-        return values, counts
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise ResolutionError(f"invalid {label} line {number}")
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise ResolutionError(f"invalid {label} key on line {number}")
-        if value[:1] in {"'", '"'}:
-            quote = value[0]
-            end = value.find(quote, 1)
-            if end < 0 or (value[end + 1:].strip() and not value[end + 1:].lstrip().startswith("#")):
-                raise ResolutionError(f"invalid quoted {label} value on line {number}")
-            value = value[1:end]
-        elif " #" in value:
-            value = value.split(" #", 1)[0].rstrip()
-        counts[key] = counts.get(key, 0) + 1
-        values[key] = value
-    return values, counts
+def _dotenv(text: Optional[str], label: str, allowed_keys) -> Dict[str, str]:
+    try:
+        return parse_dotenv(text, allowed_keys=allowed_keys, label=label)
+    except DotenvError as exc:
+        raise ResolutionError(str(exc)) from exc
 
 
 def _read(path: str, *, secret: bool, missing_ok: bool = True) -> Optional[str]:
@@ -113,8 +93,8 @@ def _select(*, cwd: str, environ: Dict[str, str], cli_target: Optional[str],
         return parse_reference(environ["S3_UPLOAD_TARGET"], "Target reference"), "process"
     env_local_text = _read(os.path.join(cwd, ".env.local"), secret=True)
     env_text = _read(os.path.join(cwd, ".env"), secret=False)
-    env_local, _ = _parse_dotenv(env_local_text, ".env.local")
-    env, _ = _parse_dotenv(env_text, ".env")
+    env_local = _dotenv(env_local_text, ".env.local", {"S3_UPLOAD_TARGET"})
+    env = _dotenv(env_text, ".env", {"S3_UPLOAD_TARGET"})
     if env_local.get("S3_UPLOAD_TARGET"):
         return parse_reference(env_local["S3_UPLOAD_TARGET"], "Target reference"), "project-env-local"
     if env.get("S3_UPLOAD_TARGET"):
@@ -161,16 +141,16 @@ def _credential_map(ref: ScopedReference, *, cwd: str, config_home: str,
                     environ: Dict[str, str]) -> Tuple[Dict[str, CredentialProfile], Optional[str]]:
     if ref.scope == "project":
         env_text = _read(os.path.join(cwd, ".env"), secret=False)
-        env_values, _ = _parse_dotenv(env_text, ".env")
+        env_values = _dotenv(env_text, ".env", {PROJECT_CREDENTIALS})
         if PROJECT_CREDENTIALS in env_values:
             raise ResolutionError(f"{PROJECT_CREDENTIALS} must not appear in .env")
         source = environ.get(PROJECT_CREDENTIALS, "")
         source_name = "process-project-credentials"
         if not source:
             local_text = _read(os.path.join(cwd, ".env.local"), secret=True)
-            local_values, local_counts = _parse_dotenv(local_text, ".env.local")
-            if local_counts.get(PROJECT_CREDENTIALS, 0) > 1:
-                raise ResolutionError(f"duplicate {PROJECT_CREDENTIALS} assignment")
+            local_values = _dotenv(
+                local_text, ".env.local", {PROJECT_CREDENTIALS},
+            )
             source = local_values.get(PROJECT_CREDENTIALS, "")
             source_name = "project-env-local"
     else:
@@ -178,9 +158,7 @@ def _credential_map(ref: ScopedReference, *, cwd: str, config_home: str,
         source_name = "process-global-credentials"
         if not source:
             home_text = _read(os.path.join(config_home, ".env"), secret=True)
-            home_values, home_counts = _parse_dotenv(home_text, "home .env")
-            if home_counts.get(GLOBAL_CREDENTIALS, 0) > 1:
-                raise ResolutionError(f"duplicate {GLOBAL_CREDENTIALS} assignment")
+            home_values = _dotenv(home_text, "home .env", {GLOBAL_CREDENTIALS})
             source = home_values.get(GLOBAL_CREDENTIALS, "")
             source_name = "global-env"
     if not source:

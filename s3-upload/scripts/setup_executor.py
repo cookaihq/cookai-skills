@@ -28,6 +28,7 @@ class ExecutionContext:
     config_home: str
     environ: Mapping[str, str] = field(default_factory=dict, repr=False)
     persisted: bool = True
+    use_local_key: bool = False
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     authorized_action_types: Tuple[str, ...] = ()
     install_fault: Optional[Any] = field(default=None, repr=False, compare=False)
@@ -393,6 +394,8 @@ def _execute_credential_issuance(
                         "not_started",
                         recovery,
                     ), 1
+                if resource is not None:
+                    created_resources.append(resource)
                 contract = registry.actions[action["action_type"]]
                 try:
                     after_value = registry.validate_payload_envelope(
@@ -428,8 +431,6 @@ def _execute_credential_issuance(
                         "not_started",
                         recovery,
                     ), 1
-                if resource is not None:
-                    created_resources.append(resource)
                 action_results.append({
                     "action_id": action["action_id"],
                     "status": "succeeded",
@@ -520,6 +521,18 @@ def execute_setup_plan(
     category = plan["authorization_scope"]["credential_source_category"]
     if context.persisted and category == "process-memory":
         return _result(plan, "plan_stale", _not_started(plan), [], "not_started"), 3
+    if (
+        context.persisted
+        and plan["authorization_scope"]["credential_persistence"] == "global"
+        and not context.use_local_key
+    ):
+        return _result(
+            plan,
+            "plan_stale",
+            _not_started(plan),
+            [],
+            "configuration_changed",
+        ), 3
     if category == "planned-issuance" and not _adapter_supports_credential_sink(adapter):
         return _result(plan, "blocked", _not_started(plan), [], "not_started"), 3
     if not live_gate_satisfied(plan, adapter, context):
@@ -545,7 +558,7 @@ def execute_setup_plan(
                 project_root=context.project_root,
                 config_home=context.config_home,
                 environ=context.environ,
-                use_local_key=True,
+                use_local_key=context.use_local_key,
                 now=context.now,
             ),
             credential=bound_credential,

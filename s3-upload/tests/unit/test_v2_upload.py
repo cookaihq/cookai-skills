@@ -1,9 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
+import pytest
+
 import operations
+import planning
 import upload
 from artifacts import build_object_reference, serialize_object_reference
+from resolver import resolve_target
 from s3 import Response
 from v2_schema import parse_target
 
@@ -31,7 +35,7 @@ def target():
     }
 
 
-def configure(project, target_value=None):
+def configure(project, target_value=None, *, credential_expires_at=None):
     directory = project / ".s3-upload" / "targets"
     directory.mkdir(parents=True)
     (directory / "images.json").write_text(json.dumps(target_value or target()), encoding="utf-8")
@@ -39,8 +43,10 @@ def configure(project, target_value=None):
         "main-key": {
             "access_key_id": "PROJECTKEY1234",
             "secret_access_key": "project-secret-value",
-            "session_token": "",
-            "expires_at": None,
+            "session_token": (
+                "temporary-session-token" if credential_expires_at is not None else ""
+            ),
+            "expires_at": credential_expires_at,
         }
     }
     env_local = project / ".env.local"
@@ -147,6 +153,156 @@ def test_private_single_put_creates_checkpoint_and_returns_object_reference(tmp_
     assert "project-secret-value" not in output.out + output.err
 
 
+def test_single_put_rechecks_temporary_credential_before_result_presign(tmp_path):
+    configure(tmp_path, credential_expires_at="2026-07-22T12:02:00Z")
+    source = tmp_path / "cover.png"
+    source.write_bytes(b"png-bytes")
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:images",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    dry_run = planning.build_upload_dry_run(
+        resolved=resolved,
+        file_path=str(source),
+        explicit_key=None,
+        content_type=None,
+        cache_control=None,
+        content_disposition=None,
+        presign_expires=None,
+        reference_out=None,
+        project_root=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        allow_insecure_http=False,
+        now=NOW,
+    )
+    times = iter((NOW, NOW + timedelta(seconds=30), NOW + timedelta(seconds=60)))
+    calls = []
+
+    outcome = operations.execute_single_put(
+        resolved=resolved,
+        plan=dry_run.plan,
+        transport=lambda *args: (calls.append(args) or Response(200)),
+        project_root=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        now=lambda: next(times),
+        checkpoint_notice=lambda _value: None,
+        source=dry_run.source,
+    )
+
+    assert len(calls) == 1
+    assert outcome.result["status"] == "partial_success"
+    assert outcome.result["object_written"] is True
+    assert outcome.result["url"] is None
+    assert outcome.result["checkpoint_id"] == outcome.checkpoint_id
+    assert outcome.retain_checkpoint is True
+    assert outcome.store.load(outcome.checkpoint_id)["state"] == "complete"
+
+
+def test_text_upload_presign_failure_reports_recoverable_checkpoint(
+    tmp_path, capsys, monkeypatch
+):
+    configure(tmp_path)
+    source = tmp_path / "cover.png"
+    source.write_bytes(b"png-bytes")
+    real_presign = operations.presign_get
+    calls = []
+
+    def fail_presign(*args, **kwargs):
+        raise operations.OperationError("injected presign failure")
+
+    monkeypatch.setattr(operations, "presign_get", fail_presign)
+    first_rc = upload.main(
+        ["upload", "--file", str(source), "--target", "project:images"],
+        environ={},
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        transport=lambda *args: (calls.append(args) or Response(200)),
+        now=NOW,
+    )
+
+    first_output = capsys.readouterr()
+    checkpoints = list((tmp_path / ".s3-upload" / "checkpoints").glob("*.json"))
+    assert first_rc == 1
+    assert first_output.out == ""
+    assert len(checkpoints) == 1
+    checkpoint_id = checkpoints[0].stem
+    assert f"partial_success checkpoint_id={checkpoint_id}" in first_output.err
+    assert "checkpoint_id=none" not in first_output.err
+
+    monkeypatch.setattr(operations, "presign_get", real_presign)
+    recovered_rc = upload.main(
+        ["reconcile", "--checkpoint", checkpoint_id],
+        environ={},
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        transport=lambda *args: calls.append(args),
+        now=NOW,
+    )
+
+    recovered_output = capsys.readouterr()
+    assert recovered_rc == 0
+    assert recovered_output.out.startswith("https://")
+    assert len(calls) == 1
+    assert list((tmp_path / ".s3-upload" / "checkpoints").glob("*.json")) == []
+
+
+def test_single_put_expiry_before_first_signature_leaves_no_checkpoint_or_request(
+    tmp_path
+):
+    configure(tmp_path, credential_expires_at="2026-07-22T12:02:00Z")
+    source = tmp_path / "cover.png"
+    source.write_bytes(b"png-bytes")
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:images",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    dry_run = planning.build_upload_dry_run(
+        resolved=resolved,
+        file_path=str(source),
+        explicit_key=None,
+        content_type=None,
+        cache_control=None,
+        content_disposition=None,
+        presign_expires=None,
+        reference_out=None,
+        project_root=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        allow_insecure_http=False,
+        now=NOW,
+    )
+    times = iter((NOW, NOW + timedelta(seconds=60)))
+    calls = []
+
+    with pytest.raises(
+        operations.OperationError,
+        match="more than 60 whole seconds",
+    ):
+        operations.execute_single_put(
+            resolved=resolved,
+            plan=dry_run.plan,
+            transport=lambda *args: calls.append(args),
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            now=lambda: next(times),
+            checkpoint_notice=lambda _value: None,
+            source=dry_run.source,
+        )
+
+    assert calls == []
+    checkpoint_dir = tmp_path / ".s3-upload" / "checkpoints"
+    assert not checkpoint_dir.exists() or list(checkpoint_dir.glob("*.json")) == []
+
+
 def test_single_put_consumes_the_source_descriptor_opened_during_planning(
     tmp_path, capsys, monkeypatch
 ):
@@ -208,6 +364,66 @@ def test_url_from_object_reference_presigns_current_key_without_remote_request(t
     assert result["expires_at"] == "2026-07-22T12:02:00Z"
     assert calls == []
     assert not (tmp_path / ".s3-upload" / "checkpoints").exists()
+
+
+def test_url_presign_rechecks_temporary_credential_at_signing_time(tmp_path):
+    configure(tmp_path, credential_expires_at="2026-07-22T12:02:00Z")
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:images",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    reference = build_object_reference(
+        target_ref="project:images",
+        target=resolved.target,
+        key="website-images/cover.png",
+    )
+
+    with pytest.raises(
+        operations.OperationError,
+        match="more than 60 whole seconds",
+    ):
+        operations.generate_object_url(
+            resolved=resolved,
+            reference=reference,
+            presign_expires=None,
+            now=lambda: NOW + timedelta(seconds=60),
+        )
+
+
+def test_url_rejects_object_reference_whose_location_does_not_match_its_fingerprint(
+    tmp_path, capsys
+):
+    configure(tmp_path)
+    reference = build_object_reference(
+        target_ref="project:images",
+        target=parse_target(target(), expected_scope="project"),
+        key="website-images/cover.png",
+    )
+    reference["location"]["bucket"] = "forged-artifacts"
+    reference_file = tmp_path / "forged-reference.json"
+    reference_file.write_text(
+        json.dumps(reference, separators=(",", ":")), encoding="utf-8"
+    )
+    reference_file.chmod(0o600)
+    calls = []
+
+    rc = upload.main(
+        ["url", "--reference-file", str(reference_file), "--json"],
+        environ={},
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        transport=lambda *args: calls.append(args),
+        now=NOW,
+    )
+
+    output = capsys.readouterr()
+    assert rc == 2 and output.out == ""
+    assert calls == []
 
 
 def test_reference_identifier_is_revalidated_against_resolved_credentials(
