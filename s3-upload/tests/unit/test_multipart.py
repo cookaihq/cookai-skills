@@ -431,7 +431,7 @@ def test_completion_unknown_reconcile_uses_one_exact_head_and_never_repeats_comp
             "x-amz-meta-s3-upload-operation-id": checkpoint["operation_id"],
             "x-amz-meta-s3-upload-sha256": checkpoint["source"]["sha256"],
             "content-length": str(checkpoint["source"]["size"]),
-            "x-amz-version-id": "reconciled-version",
+            "x-cos-version-id": "reconciled-version",
         })
 
     outcome = reconcile_multipart(

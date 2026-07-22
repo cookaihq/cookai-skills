@@ -16,8 +16,8 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 TOKEN_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 RFC3339_UTC_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
-NORMAL_PROVIDERS = {"aws-s3", "cloudflare-r2", "custom"}
-CANDIDATE_PROVIDERS = {"aliyun-oss", "tencent-cos"}
+EXPERIMENTAL_PROVIDERS = {"aliyun-oss", "tencent-cos"}
+NORMAL_PROVIDERS = {"aws-s3", "cloudflare-r2", "custom"} | EXPERIMENTAL_PROVIDERS
 
 
 class SchemaError(ValueError):
@@ -344,7 +344,7 @@ def parse_target(value: Any, *, expected_scope: str, allow_candidates: bool = Fa
     if credential_ref.scope != expected_scope:
         raise SchemaError("Upload Target and Credential Profile must use the same scope")
     provider = item["provider"]
-    allowed = NORMAL_PROVIDERS | (CANDIDATE_PROVIDERS if allow_candidates else set())
+    allowed = NORMAL_PROVIDERS | (EXPERIMENTAL_PROVIDERS if allow_candidates else set())
     if provider not in allowed:
         raise SchemaError(f"unknown or unavailable provider: {provider}")
     region = _single_line(item["region"], "region")

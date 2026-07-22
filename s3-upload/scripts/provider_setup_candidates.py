@@ -537,7 +537,8 @@ class ProviderSetupContract:
                 raise ProviderSetupError("proposed Target bucket identity or scope mismatch")
         if payload["bucket_identity"] != payload["bucket"]:
             raise ProviderSetupError("observed bucket identity mismatch")
-        if target.get("addressing") != "virtual":
+        addressing = target.get("addressing") or "virtual"
+        if addressing != "virtual":
             raise ProviderSetupError("provider setup requires virtual-hosted addressing")
         access = target.get("access")
         if not isinstance(access, dict) or access.get("mode") != "public":
@@ -545,6 +546,12 @@ class ProviderSetupContract:
         if access.get("public_base_url") != payload["public_base_url"]:
             raise ProviderSetupError("Public Base URL does not match observed bucket identity")
         endpoint = target.get("endpoint")
+        if endpoint is None:
+            endpoint = (
+                f"https://s3.oss-{payload['region']}.aliyuncs.com"
+                if self.provider == "aliyun-oss"
+                else f"https://cos.{payload['region']}.myqcloud.com"
+            )
         if self.provider == "aliyun-oss":
             if payload["region"].startswith("cn-") and endpoint == (
                 f"https://s3.oss-{payload['region']}.aliyuncs.com"

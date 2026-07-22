@@ -3,14 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlsplit
 
 from artifacts import preflight_reference_output
 from capabilities import (
-    CapabilityRegistry, ContractKey, LiveTestInterlock, OperationShape,
+    Capability, CapabilityRegistry, ContractKey, LiveTestInterlock, OperationShape,
     build_v2_baseline_registry, plan_operation,
 )
 from headers import resolve_upload_headers
@@ -123,6 +123,26 @@ def registry_for_target(target: UploadTarget, key: ContractKey) -> CapabilityReg
     if key.provider == "cloudflare-r2" and key.endpoint_family == "cloudflare-r2-public":
         return build_v2_baseline_registry(preset_contracts=(key,))
     if key.provider == "custom":
+        if is_reserved_provider_endpoint(target):
+            return CapabilityRegistry(
+                (
+                    (
+                        key,
+                        (
+                            Capability(
+                                "PutObject",
+                                "disabled",
+                                "reserved-provider-endpoint",
+                            ),
+                            Capability(
+                                "PresignGetObject",
+                                "disabled",
+                                "reserved-provider-endpoint",
+                            ),
+                        ),
+                    ),
+                )
+            )
         return build_v2_baseline_registry(asserted_custom_contracts=(key,))
     return CapabilityRegistry(())
 
@@ -130,26 +150,59 @@ def registry_for_target(target: UploadTarget, key: ContractKey) -> CapabilityReg
 def provider_candidate_for_target(target: UploadTarget) -> Optional[ProviderCandidate]:
     try:
         if target.provider == "aliyun-oss":
-            return aliyun_oss_candidate(
+            candidate = aliyun_oss_candidate(
                 region=target.region,
                 bucket=target.bucket,
                 endpoint=target.endpoint,
             )
-        if target.provider == "tencent-cos":
-            return tencent_cos_candidate(
+        elif target.provider == "tencent-cos":
+            candidate = tencent_cos_candidate(
                 region=target.region,
                 bucket=target.bucket,
                 endpoint=target.endpoint,
                 addressing=target.addressing,
             )
+        else:
+            return None
     except CandidateError as exc:
         raise PlanError(str(exc)) from exc
-    return None
+    if target.addressing != candidate.addressing:
+        raise PlanError("addressing does not match the provider preset contract")
+    if not (target.endpoint_explicit or target.addressing_explicit):
+        return candidate
+    original = candidate.contract_key
+    endpoint = urlsplit(target.endpoint)
+    return replace(
+        candidate,
+        contract_key=ContractKey(
+            schema_version=original.schema_version,
+            provider=original.provider,
+            scheme=original.scheme,
+            endpoint_family=_exact_hash(
+                {"host": endpoint.hostname or "", "port": endpoint.port}
+            ),
+            region_class=_exact_hash({"region": target.region}),
+            network_class="explicit",
+            addressing=original.addressing,
+            signing_profile=original.signing_profile,
+            payload_profile=original.payload_profile,
+        ),
+        normal_mode="test-only",
+    )
 
 
-def is_mainland_oss_default_public(target: UploadTarget) -> bool:
+def is_reserved_provider_endpoint(target: UploadTarget) -> bool:
+    if target.provider != "custom":
+        return False
     host = urlsplit(target.endpoint).hostname or ""
-    return bool(re.fullmatch(r"s3\.oss-cn-[a-z0-9-]+\.aliyuncs\.com", host))
+    provider_hosts = (
+        r"(?:[a-z0-9][a-z0-9.-]*\.)?s3\.oss-[a-z0-9-]+"
+        r"(?:-internal)?\.aliyuncs\.com",
+        r"(?:[a-z0-9][a-z0-9.-]*\.)?oss-[a-z0-9-]+"
+        r"(?:-internal)?\.aliyuncs\.com",
+        r"(?:[a-z0-9][a-z0-9.-]*\.)?cos\.[a-z0-9-]+\.myqcloud\.com",
+    )
+    return any(re.fullmatch(pattern, host) for pattern in provider_hosts)
 
 
 def _source(path: str, maximum: int) -> VerifiedSource:
@@ -218,11 +271,6 @@ def build_upload_dry_run(*, resolved: ResolvedTarget, file_path: str,
         if execution_mode == "test-only" and not target.setup.integration_test:
             if "live_interlock_missing" not in blocking:
                 blocking.insert(0, "live_interlock_missing")
-        if is_mainland_oss_default_public(target) and (
-            execution_mode == "normal" or target.provider != "aliyun-oss"
-        ):
-            if "capability_disabled" not in blocking:
-                blocking.append("capability_disabled")
         reference_plan = None
         if reference_out is not None:
             reference_snapshot = preflight_reference_output(

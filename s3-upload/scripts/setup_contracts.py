@@ -224,8 +224,8 @@ def normalize_target(value: Any, *, expected_scope: str) -> Dict[str, Any]:
         "credential": target.credential.text,
         "provider": target.provider,
         "region": target.region,
-        "endpoint": target.endpoint,
-        "addressing": target.addressing,
+        "endpoint": target.endpoint if target.endpoint_explicit else None,
+        "addressing": target.addressing if target.addressing_explicit else None,
         "bucket": target.bucket,
         "prefix": target.prefix,
         "access": {

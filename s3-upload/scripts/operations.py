@@ -10,6 +10,7 @@ from artifacts import (
     ArtifactError, CheckpointStore, ReferenceOutputSnapshot, build_object_reference,
     preflight_reference_output, write_reference_output,
 )
+from capabilities import EXECUTABLE_CAPABILITY_STATES
 from config import Connection
 from planning import (
     derive_contract_key, provider_candidate_for_target, registry_for_target,
@@ -384,6 +385,8 @@ def generate_object_url(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         raise OperationError("Object Reference Target fingerprint does not match the selected Target")
     if resolved.credential is None:
         raise OperationError("Credential Profile is unavailable")
+    contract_key = derive_contract_key(resolved.target)
+    registry = registry_for_target(resolved.target, contract_key)
     access = reference["access"]
     if access["mode"] == "public":
         if presign_expires is not None:
@@ -392,6 +395,9 @@ def generate_object_url(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         url_kind = "public"
         expires_at = None
     else:
+        presign_capability = registry.lookup(contract_key, "PresignGetObject")
+        if presign_capability.state not in EXECUTABLE_CAPABILITY_STATES:
+            raise OperationError("PresignGetObject capability is unavailable")
         moment = _signed_moment(resolved, now)
         requested = access["presign_expires_seconds"] if presign_expires is None else presign_expires
         if not isinstance(requested, int) or isinstance(requested, bool) or not 1 <= requested <= 604800:

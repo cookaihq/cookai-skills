@@ -240,7 +240,7 @@ def _head_completion_observation(
     if response is None or not 200 <= response.status < 300:
         return "not-complete", None
     version_values = []
-    for name in ("x-amz-version-id", "x-oss-version-id"):
+    for name in ("x-amz-version-id", "x-oss-version-id", "x-cos-version-id"):
         value = _header(response, name)
         if value is not None:
             version_values.append(value)

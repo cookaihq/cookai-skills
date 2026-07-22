@@ -74,6 +74,38 @@ S3_UPLOAD_PROJECT_CREDENTIALS_JSON='{"aws-main":{"access_key_id":"...","secret_a
 
 `.env` 不能包含该 Secret map。它和 `.env.local` 都只从当前 `$PWD` 读取，不向父目录递归。
 
+## OSS/COS experimental preset
+
+两种 preset 沿用上面的完整 Target schema，只替换 provider-specific 字段。阿里云 OSS：
+
+```json
+{
+  "provider": "aliyun-oss",
+  "region": "cn-hangzhou",
+  "endpoint": null,
+  "addressing": null,
+  "bucket": "project-artifacts"
+}
+```
+
+它解析为 `https://s3.oss-cn-hangzhou.aliyuncs.com` + virtual addressing。中国内地默认公网 endpoint 是否可用还受账号开通时间与云端策略影响，preset 不会绕过 `PublicEndpointForbidden`。
+
+腾讯云 COS：
+
+```json
+{
+  "provider": "tencent-cos",
+  "region": "ap-guangzhou",
+  "endpoint": null,
+  "addressing": null,
+  "bucket": "project-artifacts-1250000000"
+}
+```
+
+它解析为 `https://cos.ap-guangzhou.myqcloud.com` + virtual addressing。`bucket` 必须包含完整 `BucketName-APPID`。以上片段只展示需要替换的字段，不是可单独保存的不完整 Target；Access、Retention、limits 等仍必须完整存在。
+
+两种 preset 当前 capability state 为 `experimental`：先执行 `upload --dry-run --json` 并核对状态。只有 `endpoint=null`、`addressing=null` 继承 preset 合同；显式 endpoint/addressing 是独立 test-only 合同。高级 operation 与 assisted setup 仍不可用。
+
 ## 全局配置
 
 ```text

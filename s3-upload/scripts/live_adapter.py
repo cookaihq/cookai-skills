@@ -95,7 +95,14 @@ class S3EvidenceAdapter:
     def _presigned(
         self, *, key: str, context: EvidenceOperationContext
     ) -> Tuple[Response, RequestObservation]:
-        url = presign_get(self.connection, key, 300, context.now)
+        if not 1 <= context.presign_expires_seconds <= 604800:
+            raise LiveAdapterError("live presign expiry is unavailable")
+        url = presign_get(
+            self.connection,
+            key,
+            context.presign_expires_seconds,
+            context.now,
+        )
         response = self.transport("GET", url, {}, b"")
         if not isinstance(response, Response):
             raise LiveAdapterError("transport returned an invalid response")

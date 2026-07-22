@@ -7,6 +7,13 @@ from xml.etree import ElementTree
 from s3 import Response, parse_provider_identifier
 
 
+VERSION_HEADERS = (
+    "x-amz-version-id",
+    "x-oss-version-id",
+    "x-cos-version-id",
+)
+
+
 @dataclass(frozen=True)
 class OperationResponse:
     classification: str
@@ -50,6 +57,23 @@ def _rejected() -> OperationResponse:
     return OperationResponse("identifier_rejected", {})
 
 
+def _version_value(
+    response: Response,
+    embedded: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    values = [embedded] if embedded is not None else []
+    values.extend(
+        value
+        for name in VERSION_HEADERS
+        if (value := _header(response, name)) is not None
+    )
+    if not values:
+        return "absent", None
+    if len(set(values)) != 1:
+        return "conflict", None
+    return "present", values[0]
+
+
 def parse_operation_response(response: Response, *, operation: str,
                              active_credentials: Sequence[str],
                              conditional: bool = False) -> OperationResponse:
@@ -73,10 +97,10 @@ def parse_operation_response(response: Response, *, operation: str,
         return OperationResponse("definitive_failure", {})
     identifiers: Dict[str, Any] = {}
     if operation == "PutObject":
-        version = _header(response, "x-amz-version-id")
-        if version is None:
-            version = _header(response, "x-oss-version-id")
-        if version is not None:
+        version_state, version = _version_value(response)
+        if version_state == "conflict":
+            return OperationResponse("unknown", {})
+        if version_state == "present":
             parsed = _identifier(version, active_credentials)
             if parsed is None:
                 return _rejected()
@@ -109,10 +133,13 @@ def parse_operation_response(response: Response, *, operation: str,
             return OperationResponse("unknown", {})
         if _child_text(root, "Error") is not None:
             return OperationResponse("definitive_failure", {})
-        version = _child_text(root, "VersionId")
-        if version is None:
-            version = _header(response, "x-amz-version-id") or _header(response, "x-oss-version-id")
-        if version is not None:
+        version_state, version = _version_value(
+            response,
+            _child_text(root, "VersionId"),
+        )
+        if version_state == "conflict":
+            return OperationResponse("unknown", {})
+        if version_state == "present":
             parsed = _identifier(version, active_credentials)
             if parsed is None:
                 return _rejected()

@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 
+import upload
 from config_install import (
     ConfigurationChanged,
     ConfigurationConflict,
@@ -108,6 +109,79 @@ def test_new_project_configuration_installs_as_a_resolvable_graph(tmp_path):
     assert resolved.ref.text == "project:website-images"
     assert resolved.credential.access_key_id == "PROJECTKEY1234"
     assert (tmp_path / ".env.local").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "provider,region,bucket,endpoint",
+    (
+        (
+            "aliyun-oss",
+            "us-west-1",
+            "project-artifacts",
+            "https://s3.oss-us-west-1.aliyuncs.com",
+        ),
+        (
+            "tencent-cos",
+            "ap-guangzhou",
+            "project-artifacts-1250000000",
+            "https://cos.ap-guangzhou.myqcloud.com",
+        ),
+    ),
+)
+def test_install_preserves_experimental_preset_defaults(
+    tmp_path,
+    capsys,
+    provider,
+    region,
+    bucket,
+    endpoint,
+):
+    preset = target()
+    preset.update(
+        {
+            "provider": provider,
+            "region": region,
+            "endpoint": None,
+            "addressing": None,
+            "bucket": bucket,
+        }
+    )
+    result = apply_install_plan(
+        preflight_installation(install_spec(tmp_path, target=preset))
+    )
+
+    target_path = tmp_path / ".s3-upload" / "targets" / "website-images.json"
+    stored = json.loads(target_path.read_text(encoding="utf-8"))
+    assert stored["endpoint"] is None
+    assert stored["addressing"] is None
+
+    source = tmp_path / "artifact.txt"
+    source.write_bytes(b"installed-preset")
+    calls = []
+    rc = upload.main(
+        [
+            "upload",
+            "--file",
+            str(source),
+            "--target",
+            "project:website-images",
+            "--dry-run",
+            "--json",
+        ],
+        environ=result.environ,
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        transport=lambda *args: calls.append(args),
+        now=NOW,
+    )
+
+    output = capsys.readouterr()
+    plan = json.loads(output.out)["plan"]
+    assert rc == 0
+    assert plan["endpoint"] == endpoint
+    assert plan["addressing"] == "virtual"
+    assert {item["state"] for item in plan["capabilities"]} == {"experimental"}
+    assert calls == []
 
 
 def test_equal_records_are_idempotent_without_rewriting_files(tmp_path):

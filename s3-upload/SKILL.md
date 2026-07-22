@@ -9,7 +9,7 @@ description: Use when the user explicitly wants to persist one local file in the
 
 把一个本地文件写入用户自己的 S3-compatible bucket。v2 使用完整、带作用域的 Upload Target 和 Credential Profile；对象引用是持久身份，URL 只是访问结果。
 
-普通模式当前只启用经过现有证据覆盖的 AWS S3、Cloudflare R2 和用户明确断言兼容的 custom endpoint 的单次 PutObject 与 private presigned GET。Public URL 只按用户声明的 HTTPS Public Base URL 本地构造。
+普通模式为 AWS S3、Cloudflare R2 和用户明确断言兼容的 custom endpoint 提供已有 baseline；也提供基于官方 endpoint/SDK 文档和离线向量实现、尚无完整 release evidence 的 `aliyun-oss` / `tencent-cos` experimental preset。OSS 只有单账号永久凭证的 bounded run，COS 尚无 live credential。两类 preset 当前都只执行单次 PutObject 与 private current-key presign；Public URL 只按用户声明的 HTTPS Public Base URL 本地构造。
 
 ## When to Use
 
@@ -27,13 +27,14 @@ description: Use when the user explicitly wants to persist one local file in the
 - Object Reference 中的 version id 只用于 exact-version delete 选择；所有 URL 都指向 current key。
 - Global Target 的间接选择必须显式 `--use-local-key`。Object Reference/checkpoint 本身不授权读取 home 配置。
 - stdout 在非 JSON 的成功 upload/url/resume 中只输出一个 URL；Secret、Authorization 和签名 URL 不进入 stderr、checkpoint 或 Object Reference。
-- `aliyun-oss`、`tencent-cos` normal preset 与 assisted setup 仍不可用，不得改成 custom 来绕过 provider gate。
+- `aliyun-oss`、`tencent-cos` 的 required capability 在 dry-run 中显示为 `experimental`，不是 `enabled` 或 live-verified。必须先检查 exact endpoint、bucket、payload profile 和 capability state；不要改成 `custom` 绕过 provider contract。
+- OSS/COS assisted setup 仍不可用；experimental 数据面 preset 不授权建桶、身份、公开策略、生命周期或 CORS 变更。
 
 ## Workflow
 
 1. 保持 `$PWD` 为原项目根目录；本地文件可以位于其他目录。
 2. 解析显式 `--target`、caller mapping 或项目 default，确认 dry-run 的 bucket、Object Key、Access、Retention 和 capability blockers。
-3. 用户已授权该写入后执行 upload；返回 URL，并在需要持久引用时使用 `--reference-out`。
+3. 若 capability 为 `experimental`，向用户说明尚未完成 provider live 验证；用户已授权该写入后执行 upload。返回 URL，并在需要持久引用时使用 `--reference-out`。
 4. 对 durable partial/ambiguous 结果按 checkpoint 恢复，不重新发起整个生成或上传流程。
 
 ```bash
@@ -64,7 +65,7 @@ python3 /path/to/s3-upload/scripts/upload.py upload \
 
 ## Capability-Gated Commands
 
-CLI 保留 `delete`、`resume`、`reconcile` 和 `abort` 的稳定 parser surface，但 AWS/R2/custom normal baseline 没有启用 Delete、multipart 或 HEAD reconciliation 的远端合同。dry-run 会返回完整 blocked plan；不得把“命令可解析”描述为“provider 已支持”。
+CLI 保留 `delete`、`resume`、`reconcile` 和 `abort` 的稳定 parser surface，但所有 normal baseline（包括 OSS/COS experimental preset）都没有启用 Delete、multipart、conditional write 或 HEAD reconciliation 的远端合同。dry-run 会返回完整 blocked plan；不得把“命令可解析”描述为“provider 已支持”。
 
 ## Configuration
 
@@ -77,4 +78,5 @@ CLI 保留 `delete`、`resume`、`reconcile` 和 `abort` 的稳定 parser surfac
 - [ ] `collision=replace` 的覆盖语义已说明
 - [ ] partial/ambiguous mutation 未被自动重放
 - [ ] Secret 未进入输出或持久 artifact
-- [ ] 未把 OSS/COS candidate 或 assisted setup 表述为 normal-supported
+- [ ] OSS/COS capability 已准确表述为 `experimental`，未写成 `enabled` / live-verified
+- [ ] 未把 OSS/COS assisted setup 表述为可用

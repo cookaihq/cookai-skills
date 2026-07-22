@@ -36,12 +36,15 @@ PYTEST_OUTPUT = (
 )
 
 
-def credential(*, temporary=False, expired=False):
+def credential(*, temporary=False, expired=False, expires_in_seconds=None):
     expiry = None
     token = ""
     if temporary:
         token = TOKEN
-        expiry = NOW + (-timedelta(minutes=1) if expired else timedelta(hours=1))
+        if expires_in_seconds is not None:
+            expiry = NOW + timedelta(seconds=expires_in_seconds)
+        else:
+            expiry = NOW + (-timedelta(minutes=1) if expired else timedelta(hours=1))
     return CredentialProfile(
         access_key_id="PROVIDERKEY1234",
         secret_access_key=SECRET,
@@ -309,7 +312,30 @@ def test_expired_temporary_credential_records_not_tested_without_requests(tmp_pa
         "kind": "temporary",
         "expires_at": "2026-07-22T11:59:00Z",
         "unexpired": False,
+        "presign_effective_seconds": 0,
     }
+
+
+def test_temporary_credential_with_only_sixty_seconds_remaining_sends_no_requests(
+    tmp_path,
+):
+    adapter = FakeAdapter()
+
+    result = run(
+        tmp_path,
+        adapter,
+        credentials=credential(temporary=True, expires_in_seconds=60),
+    )
+
+    assert {item["status"] for item in result.report["operations"]} == {
+        "not-tested"
+    }
+    assert {
+        item["reason"] for item in result.report["operations"]
+    } == {"credential_unavailable_expired_or_too_short"}
+    assert adapter.calls == []
+    assert result.report["credential"]["unexpired"] is True
+    assert result.report["credential"]["presign_effective_seconds"] == 0
 
 
 def test_fake_full_matrix_validates_get_bytes_cleans_resources_and_writes_restricted_bundle(tmp_path):
@@ -352,6 +378,7 @@ def test_fake_full_matrix_validates_get_bytes_cleans_resources_and_writes_restri
         "kind": "permanent",
         "expires_at": None,
         "unexpired": True,
+        "presign_effective_seconds": 300,
     }
     persisted = all_persisted_bytes(evidence_dir)
     assert SECRET.encode() not in persisted

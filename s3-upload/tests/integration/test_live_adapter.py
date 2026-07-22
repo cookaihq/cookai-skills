@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, unquote, urlsplit
 from xml.etree import ElementTree
 
@@ -131,11 +131,17 @@ class FakeProvider:
         return Response(400)
 
 
-def run_adapter_matrix(tmp_path, provider, *, authorized_operations=AUTHORIZED):
+def run_adapter_matrix(
+    tmp_path,
+    provider,
+    *,
+    authorized_operations=AUTHORIZED,
+    credential=None,
+):
     candidate = aliyun_oss_candidate(
         region="cn-hangzhou", bucket="candidate-bucket"
     )
-    credential = CredentialProfile(
+    credential = credential or CredentialProfile(
         "ALIYUNKEY1234", "aliyun-secret-value", "", None
     )
     connection = Connection(
@@ -173,6 +179,36 @@ def run_adapter_matrix(tmp_path, provider, *, authorized_operations=AUTHORIZED):
         unit_tests=UNIT_TESTS,
         now=NOW,
     )
+
+
+def test_temporary_credential_caps_live_presign_to_remaining_lifetime(tmp_path):
+    provider = FakeProvider()
+    temporary = CredentialProfile(
+        "ALIYUNKEY1234",
+        "aliyun-secret-value",
+        "aliyun-session-token",
+        NOW + timedelta(seconds=180),
+    )
+
+    result = run_adapter_matrix(
+        tmp_path,
+        provider,
+        credential=temporary,
+    )
+
+    presign = next(
+        row
+        for row in result.report["operations"]
+        if row["operation"] == "PresignGetObject"
+    )
+    assert presign["status"] == "passed"
+    assert result.report["credential"]["presign_effective_seconds"] == 120
+    presigned_url = next(
+        url
+        for method, url, _headers, _body_size in provider.calls
+        if method == "GET" and "X-Amz-Signature=" in url
+    )
+    assert parse_qs(urlsplit(presigned_url).query)["X-Amz-Expires"] == ["120"]
 
 
 def test_metadata_object_is_cleaned_when_followup_response_is_lost(tmp_path):

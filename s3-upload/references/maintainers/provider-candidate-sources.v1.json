@@ -21,13 +21,21 @@
       "observed_last_modified": "2026-06-04"
     },
     {
+      "id": "aliyun-oss-s3-api-compatibility",
+      "publisher": "Alibaba Cloud",
+      "url": "https://help.aliyun.com/zh/oss/developer-reference/compatibility-with-amazon-s3",
+      "section": "Supported S3 APIs; request styles",
+      "retrieved_at": "2026-07-22",
+      "applicability": "OSS S3-compatible API names and virtual-hosted request-style boundary"
+    },
+    {
       "id": "tencent-cos-s3-compatibility-guide",
       "publisher": "Tencent Cloud",
       "url": "https://cloud.tencent.com/document/product/436/41284",
       "section": "Using third-party applications compatible with AWS S3; service address, bucket, signature, and access-style notes",
       "retrieved_at": "2026-07-22",
       "applicability": "Third-party S3-compatible applications using a selected COS region; document warns that COS does not guarantee complete S3 compatibility",
-      "retrieval_note": "The official page returned an anti-automation challenge to the command-line fetch on the retrieval date; claim text and section identity were retained from the reviewed official source in the approved project spec and must be rechecked during provider evidence review."
+      "retrieval_note": "The official page was re-opened in a browser on the retrieval date; it must be rechecked again before experimental capabilities are promoted to enabled."
     },
     {
       "id": "tencent-cos-bucket-overview",
@@ -37,6 +45,14 @@
       "retrieved_at": "2026-07-22",
       "applicability": "COS bucket identity; bucket name and APPID are joined with a hyphen as BucketName-APPID",
       "retrieval_note": "Official international documentation page; exact identity is also enforced by the pinned official SDK source below."
+    },
+    {
+      "id": "tencent-cos-aws-sdk-guide",
+      "publisher": "Tencent Cloud",
+      "url": "https://cloud.tencent.com/document/product/436/37421",
+      "section": "AWS SDK endpoint examples; STS credentials; Go v2 PutObject and x-amz-trailer constraint",
+      "retrieved_at": "2026-07-22",
+      "applicability": "AWS S3 SDK compatibility surface; does not prove exact generic-signer canonicalization or query presign"
     },
     {
       "id": "tencent-cos-java-sdk-endpoint-source",
@@ -128,15 +144,15 @@
       "statement": "For affected newer accounts, Chinese-mainland default public endpoints reject data API calls with PublicEndpointForbidden; official solutions are an eligible internal endpoint or a bucket-bound custom domain.",
       "evidence": "docs-derived",
       "source_ids": ["aliyun-oss-public-endpoint-policy"],
-      "conditions": "Account activation date is evidence context, not a normal-mode bypass; the candidate keeps the recognizable mainland public family disabled."
+      "conditions": "Account activation date is evidence context, not a configuration bypass; the explicit preset is experimental and known OSS hosts cannot inherit the custom baseline."
     },
     {
       "id": "oss-remote-operation-compatibility",
       "provider": "aliyun-oss",
-      "statement": "Put, HEAD, all GET modes, conditional write, both delete scopes and observers, metadata, response parsing, reconciliation, and multipart compatibility remain unverified for the exact contract.",
+      "statement": "The official matrix lists Put, HEAD, GET, Delete and core multipart API names. One bounded permanent-credential run confirmed the exact cn-beijing dual-header Put and query presign profile, but no release-qualified permanent/temporary matrix exists; conditional writes, metadata, observers and broader applicability remain unverified.",
       "evidence": "not-tested",
-      "source_ids": ["aliyun-oss-aws-sdk-guide"],
-      "conditions": "Each operation is registered only as a test-only hypothesis pending authorized live evidence."
+      "source_ids": ["aliyun-oss-aws-sdk-guide", "aliyun-oss-s3-api-compatibility"],
+      "conditions": "Normal Put/presign are explicitly experimental; the bounded run was privilege-unknown and release-ineligible, and advanced operations remain test-only pending authorized release evidence."
     },
     {
       "id": "cos-third-party-service-address",
@@ -197,10 +213,10 @@
     {
       "id": "cos-remote-operation-compatibility",
       "provider": "tencent-cos",
-      "statement": "Put, HEAD, all GET modes, conditional write, both delete scopes and observers, metadata, response parsing, reconciliation, and multipart compatibility remain unverified for the exact contract.",
+      "statement": "The official AWS SDK guide demonstrates PutObject and STS and requires disabling x-amz-trailer, but exact payload hashing, query presign and all other operations remain unverified for this implementation.",
       "evidence": "not-tested",
-      "source_ids": ["tencent-cos-s3-compatibility-guide"],
-      "conditions": "No COS credential was available; every remote operation remains a test-only hypothesis."
+      "source_ids": ["tencent-cos-s3-compatibility-guide", "tencent-cos-aws-sdk-guide"],
+      "conditions": "Normal Put/presign are explicitly experimental; advanced operations remain test-only and no COS credential was available."
     }
   ]
 }

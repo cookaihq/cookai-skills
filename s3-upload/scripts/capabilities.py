@@ -7,6 +7,7 @@ from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 
 REGISTRY_IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+EXECUTABLE_CAPABILITY_STATES = {"enabled", "experimental"}
 
 BASELINE_DISABLED_OPERATIONS = (
     "GetObject",
@@ -88,7 +89,9 @@ class Capability:
             r"[A-Za-z][A-Za-z0-9]{0,127}", self.operation
         ):
             raise CapabilityContractError("invalid capability operation")
-        if self.state not in {"enabled", "test-only", "disabled", "unknown"}:
+        if self.state not in {
+            "enabled", "experimental", "test-only", "disabled", "unknown"
+        }:
             raise CapabilityContractError("invalid capability state")
         if self.state == "unknown":
             if self.evidence_id is not None:
@@ -235,6 +238,16 @@ def plan_operation(
     if contract_key.scheme == "http" and not allow_insecure_http:
         blocking.append("insecure_http_opt_in_required")
     for capability in capabilities:
+        if capability.state == "experimental":
+            if execution_mode == "test-only" and not (
+                live_test_interlock is not None
+                and live_test_interlock.enabled
+                and target_ref is not None
+                and live_test_interlock.target_ref == target_ref
+            ):
+                if "live_interlock_missing" not in blocking:
+                    blocking.append("live_interlock_missing")
+            continue
         if capability.state == "test-only":
             if execution_mode == "normal":
                 if "capability_disabled" not in blocking:
@@ -255,7 +268,7 @@ def plan_operation(
                 "DeleteObjectVersion",
                 "ObserveDeleteVersion",
             }
-            and capability.state != "enabled"
+            and capability.state not in EXECUTABLE_CAPABILITY_STATES
         ):
             if "delete_capability_missing" not in blocking:
                 blocking.append("delete_capability_missing")
@@ -266,7 +279,7 @@ def plan_operation(
                 "UploadPart",
                 "CompleteMultipartUpload",
             }
-            and capability.state != "enabled"
+            and capability.state not in EXECUTABLE_CAPABILITY_STATES
         ):
             if "multipart_capability_missing" not in blocking:
                 blocking.append("multipart_capability_missing")
@@ -276,14 +289,17 @@ def plan_operation(
                 "ConditionalPutObject",
                 "ConditionalCompleteMultipartUpload",
             }
-            and capability.state != "enabled"
+            and capability.state not in EXECUTABLE_CAPABILITY_STATES
         ):
             if "collision_capability_missing" not in blocking:
                 blocking.append("collision_capability_missing")
             continue
         if capability.state == "unknown" and "capability_unknown" not in blocking:
             blocking.append("capability_unknown")
-        elif capability.state != "enabled" and "capability_disabled" not in blocking:
+        elif (
+            capability.state not in EXECUTABLE_CAPABILITY_STATES
+            and "capability_disabled" not in blocking
+        ):
             blocking.append("capability_disabled")
     return OperationPlan(
         executable=not blocking,

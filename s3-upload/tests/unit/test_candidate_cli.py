@@ -57,7 +57,7 @@ def configure_candidate(project):
     env_local.chmod(0o600)
 
 
-def test_candidate_dry_run_requires_process_switch_and_exact_target_allowlist(
+def test_docs_baseline_is_normal_and_live_test_still_requires_exact_target_allowlist(
     tmp_path, capsys
 ):
     configure_candidate(tmp_path)
@@ -78,7 +78,12 @@ def test_candidate_dry_run_requires_process_switch_and_exact_target_allowlist(
         now=NOW,
     )
     normal = capsys.readouterr()
-    assert normal_rc == 2 and normal.out == ""
+    normal_result = json.loads(normal.out)
+    assert normal_rc == 0
+    assert normal_result["plan"]["executable"] is True
+    assert {
+        item["state"] for item in normal_result["plan"]["capabilities"]
+    } == {"experimental"}
 
     blocked_rc = upload.main(
         argv,
@@ -112,7 +117,9 @@ def test_candidate_dry_run_requires_process_switch_and_exact_target_allowlist(
     assert enabled["plan"]["executable"] is True
     assert enabled["plan"]["contract_key"]["provider"] == "aliyun-oss"
     assert enabled["plan"]["contract_key"]["payload_profile"] == "oss-unsigned-fixed-length"
-    assert {item["state"] for item in enabled["plan"]["capabilities"]} == {"test-only"}
+    assert {
+        item["state"] for item in enabled["plan"]["capabilities"]
+    } == {"experimental"}
     assert calls == []
     assert not (tmp_path / ".s3-upload" / "checkpoints").exists()
 

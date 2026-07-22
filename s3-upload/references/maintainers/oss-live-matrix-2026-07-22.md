@@ -39,4 +39,4 @@ Both GET bodies matched the complete source size and SHA-256. Final cleanup conf
 
 ## Classification
 
-Classification remains `evidence-not-obtained` for release because credential privilege is `unknown`. The run also provides no temporary credential, public unsigned GET, conditional collision, version-delete or other-account evidence. All OSS operations remain test-only hypotheses in the registry, and the recognizable Chinese-mainland default-public family remains disabled in normal mode pending Tickets 37, 39, 41 and the human-reviewed ADR gate.
+Classification remains `evidence-not-obtained` for release because credential privilege is `unknown`. The run also provides no temporary credential, public unsigned GET, conditional collision, version-delete or other-account evidence. The default preset's PutObject/current-key presign rows are now explicitly `experimental`, informed by official inputs plus this bounded observation but not promoted by it; all advanced OSS rows remain test-only, and the Chinese-mainland default-public family can still fail with `PublicEndpointForbidden`. Promotion to `enabled` remains gated by Ticket 37 evidence and Ticket 41 review.

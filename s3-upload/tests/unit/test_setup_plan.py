@@ -377,11 +377,6 @@ def test_builds_provider_owned_candidate_setup_plan_without_generic_schema_fallb
         if contract.provider == "tencent-cos"
         else "website-assets"
     )
-    endpoint = (
-        f"https://cos.{region}.myqcloud.com"
-        if contract.provider == "tencent-cos"
-        else f"https://s3.oss-{region}.aliyuncs.com"
-    )
     public_base_url = (
         f"https://{bucket}.cos.{region}.myqcloud.com"
         if contract.provider == "tencent-cos"
@@ -394,8 +389,8 @@ def test_builds_provider_owned_candidate_setup_plan_without_generic_schema_fallb
         **request["proposed_target"],
         "provider": contract.provider,
         "region": region,
-        "endpoint": endpoint,
-        "addressing": "virtual",
+        "endpoint": None,
+        "addressing": None,
         "bucket": bucket,
         "prefix": "assets/",
         "access": {
@@ -455,6 +450,8 @@ def test_builds_provider_owned_candidate_setup_plan_without_generic_schema_fallb
         contract.actions["apply-prefix-public-read"]["mutation_schema"],
     )
     assert plan["actions"][0]["mutation"]["schema"]["id"] != "generic.mutation"
+    assert plan["local_install"]["payload"]["proposed_target"]["endpoint"] is None
+    assert plan["local_install"]["payload"]["proposed_target"]["addressing"] is None
     assert validate_setup_plan(plan) == plan
 
 

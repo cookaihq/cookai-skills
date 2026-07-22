@@ -38,6 +38,7 @@ CANDIDATE_OPERATIONS = (
     "ResponseParsing",
     "Reconciliation",
 )
+EXPERIMENTAL_BASELINE_OPERATIONS = ("PutObject", "PresignGetObject")
 
 _REGION_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
@@ -179,7 +180,14 @@ def aliyun_oss_candidate(
         addressing=addressing,
         contract_key=contract,
         operation_evidence=operation_evidence,
-        normal_mode="disabled",
+        normal_mode=(
+            "experimental"
+            if (
+                network_class == "public"
+                and payload_profile == OSS_UNSIGNED_FIXED_LENGTH_PROFILE
+            )
+            else "test-only"
+        ),
         remote_evidence="not-tested",
         source_manifest_version=1,
         payload_evidence=(
@@ -232,7 +240,7 @@ def tencent_cos_candidate(
         addressing="virtual",
         contract_key=contract,
         operation_evidence=_operation_evidence("tencent-cos", "public"),
-        normal_mode="disabled",
+        normal_mode="experimental",
         remote_evidence="not-tested",
         source_manifest_version=1,
         payload_evidence="hypothesis",
@@ -248,7 +256,25 @@ def build_candidate_registry(
         (
             candidate.contract_key,
             tuple(
-                Capability(operation, "test-only", evidence_id)
+                Capability(
+                    operation,
+                    (
+                        "experimental"
+                        if (
+                            candidate.normal_mode == "experimental"
+                            and operation in EXPERIMENTAL_BASELINE_OPERATIONS
+                        )
+                        else "test-only"
+                    ),
+                    (
+                        f"{candidate.provider}-experimental-v1-{operation}"
+                        if (
+                            candidate.normal_mode == "experimental"
+                            and operation in EXPERIMENTAL_BASELINE_OPERATIONS
+                        )
+                        else evidence_id
+                    ),
+                )
                 for operation, evidence_id in candidate.operation_evidence
             ),
         )
@@ -285,13 +311,15 @@ def build_candidate_request(
     checked_headers = []
     for name, value in headers:
         lowered = name.lower()
-        if lowered == "transfer-encoding" or (
+        if lowered in {"transfer-encoding", "x-amz-trailer"} or (
             lowered == "content-encoding" and "aws-chunked" in value.lower()
         ) or (
             lowered in {"x-amz-content-sha256", "x-oss-content-sha256"}
             and value.startswith("STREAMING-")
         ):
-            raise CandidateError("chunked or streaming candidate requests are forbidden")
+            raise CandidateError(
+                "chunked, trailer, or streaming candidate requests are forbidden"
+            )
         checked_headers.append((name, value))
     if candidate.contract_key.payload_profile == OSS_UNSIGNED_FIXED_LENGTH_PROFILE:
         request = build_signed_request(

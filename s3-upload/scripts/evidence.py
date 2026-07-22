@@ -21,6 +21,7 @@ from v2_schema import CredentialProfile
 
 
 MATRIX_OPERATIONS = CANDIDATE_OPERATIONS
+EVIDENCE_PRESIGN_EXPIRES_SECONDS = 300
 GET_EVIDENCE_OPERATIONS = frozenset(
     {"GetObject", "PublicGetObject", "PresignGetObject"}
 )
@@ -299,6 +300,7 @@ class EvidenceOperationContext:
     source_size: int
     source_sha256: str
     now: datetime
+    presign_expires_seconds: int = EVIDENCE_PRESIGN_EXPIRES_SECONDS
 
 
 @dataclass(frozen=True)
@@ -474,16 +476,34 @@ def _gate_reason(
 def _credential_report(
     credential: Optional[CredentialProfile],
     now: datetime,
-) -> Tuple[Mapping[str, Any], bool]:
+) -> Tuple[Mapping[str, Any], bool, int]:
     if credential is None:
-        return {"kind": None, "expires_at": None, "unexpired": False}, False
+        return (
+            {
+                "kind": None,
+                "expires_at": None,
+                "unexpired": False,
+                "presign_effective_seconds": 0,
+            },
+            False,
+            0,
+        )
     expiry = credential.expires_at
-    unexpired = expiry is None or expiry > now
+    remaining = credential.remaining_seconds(now)
+    unexpired = remaining is None or remaining > 0
+    usable = remaining is None or remaining > 60
+    if remaining is None:
+        effective = EVIDENCE_PRESIGN_EXPIRES_SECONDS
+    elif usable:
+        effective = min(EVIDENCE_PRESIGN_EXPIRES_SECONDS, remaining - 60)
+    else:
+        effective = 0
     return {
         "kind": credential.kind,
         "expires_at": None if expiry is None else _timestamp(expiry),
         "unexpired": unexpired,
-    }, unexpired
+        "presign_effective_seconds": effective,
+    }, usable, effective
 
 
 def _private_directory(path: str) -> str:
@@ -555,7 +575,9 @@ def _expected_operation(item: Mapping[str, Any]) -> str:
         "capability_unavailable": "capability remains unavailable; zero requests",
         "operation_authorization_missing": "operation remains unauthorized; zero requests",
         "cleanup_authorization_missing": "mutation remains unauthorized; zero requests",
-        "credential_unavailable_or_expired": "operation remains untested; zero requests",
+        "credential_unavailable_expired_or_too_short": (
+            "operation remains untested; zero requests"
+        ),
     }
     return reasons.get(
         item["reason"],
@@ -759,7 +781,11 @@ def run_evidence_matrix(
     applicability = config.account_applicability.encode("utf-8")
     if _contains_sensitive(applicability, credentials):
         raise EvidenceError("account applicability contains credential material")
-    credential_summary, credential_unexpired = _credential_report(credential, moment)
+    (
+        credential_summary,
+        credential_usable,
+        presign_expires_seconds,
+    ) = _credential_report(credential, moment)
     run_prefix = f"s3-upload-live-test/{config.run_id}/"
     context = EvidenceOperationContext(
         target_ref=config.target_ref,
@@ -771,6 +797,7 @@ def run_evidence_matrix(
         source_size=len(source_bytes),
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
         now=moment,
+        presign_expires_seconds=presign_expires_seconds,
     )
     operation_reports = []
     raw_responses = []
@@ -795,7 +822,9 @@ def run_evidence_matrix(
             "persisted_response_hash": None,
             "raw_response_path": None,
         }
-        if capability.state not in {"enabled", "test-only"}:
+        if capability.state not in {
+            "enabled", "experimental", "test-only"
+        }:
             item["status"] = "not-supported"
             item["reason"] = "capability_unavailable"
             operation_reports.append(item)
@@ -813,9 +842,9 @@ def run_evidence_matrix(
             item["reason"] = "cleanup_authorization_missing"
             operation_reports.append(item)
             continue
-        if not credential_unexpired:
+        if not credential_usable:
             item["status"] = "not-tested"
-            item["reason"] = "credential_unavailable_or_expired"
+            item["reason"] = "credential_unavailable_expired_or_too_short"
             operation_reports.append(item)
             continue
         try:

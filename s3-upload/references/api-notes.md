@@ -49,7 +49,7 @@ Every mutating Put/Delete/multipart operation persists a Secret-free checkpoint 
 - `not_started`: checkpoint proves no request was issued.
 - terminal checkpoint replay rebuilds output without another mutation, then cleans up after output flush.
 
-AWS/R2/custom normal baseline currently lacks Delete, multipart and HEAD reconciliation capabilities, so those command paths remain blocked before checkpoint/network. Their parser presence is a stable interface, not a support claim.
+All normal baselines currently lack Delete, conditional write, multipart and HEAD reconciliation capabilities, so those command paths remain blocked before checkpoint/network. Their parser presence is a stable interface, not a support claim.
 
 ## Object Reference and URL
 
@@ -62,6 +62,16 @@ Public Base URL is a user declaration and is not probed. Private presigned expir
 ## Dry-run plan
 
 Dry-run performs configuration, source/reference and capability validation but creates no checkpoint, signs no request and performs no network I/O. Its strict `plan` includes resolved Target provenance, exact Contract Key, ordered remote operations, required capability states/evidence, headers, Access/Retention, collision policy and blocker codes.
+
+Capability states are:
+
+- `enabled`: executable and backed by the reviewed evidence id;
+- `experimental`: executable, based on official provider constraints plus offline vectors, but not backed by complete reviewed release evidence for the exact declared contract; bounded non-release observations may exist;
+- `test-only`: executable only through the exact maintainer live-test interlock/evidence path;
+- `disabled`: deliberately unavailable;
+- `unknown`: no matching exact contract entry.
+
+Entering maintainer test-only mode still requires the process-only exact Target interlock for `experimental` rows. This prevents a normal capability from weakening live-test authorization.
 
 ## Secret boundaries
 

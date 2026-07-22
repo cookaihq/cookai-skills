@@ -8,6 +8,7 @@ from capabilities import LiveTestInterlock, OperationShape, plan_operation
 from config import Connection
 from provider_candidates import (
     CANDIDATE_OPERATIONS,
+    EXPERIMENTAL_BASELINE_OPERATIONS,
     OSS_ORDINARY_HASH_PROFILE,
     OSS_UNSIGNED_FIXED_LENGTH_PROFILE,
     CandidateError,
@@ -68,7 +69,7 @@ def test_oss_candidate_uses_exact_official_service_endpoint_and_virtual_host():
         "signing_profile": "sigv4-s3",
         "payload_profile": "oss-unsigned-fixed-length",
     }
-    assert candidate.normal_mode == "disabled"
+    assert candidate.normal_mode == "experimental"
     assert candidate.remote_evidence == "not-tested"
 
 
@@ -108,13 +109,32 @@ def test_oss_internal_and_cname_are_separate_noninheriting_contracts():
     )
     assert internal.contract_key.network_class == "eligible-vpc"
     assert internal.operation_evidence
+    internal_registry = build_candidate_registry((internal,))
+    assert all(
+        internal_registry.lookup(internal.contract_key, operation).state == "test-only"
+        for operation in EXPERIMENTAL_BASELINE_OPERATIONS
+    )
     assert cname.addressing == "bucket-bound"
     assert cname.object_endpoint == "https://objects.example.test"
     assert cname.contract_key.endpoint_family == "aliyun-oss-cname"
     assert cname.operation_evidence == ()
 
 
-def test_candidate_operations_are_test_only_and_require_exact_target_interlock():
+def test_oss_ordinary_hash_profile_does_not_inherit_experimental_baseline():
+    candidate = aliyun_oss_candidate(
+        region="eu-central-1",
+        bucket="candidate-bucket",
+        payload_profile=OSS_ORDINARY_HASH_PROFILE,
+    )
+    registry = build_candidate_registry((candidate,))
+
+    assert all(
+        registry.lookup(candidate.contract_key, operation).state == "test-only"
+        for operation in EXPERIMENTAL_BASELINE_OPERATIONS
+    )
+
+
+def test_docs_baseline_is_normal_while_live_test_mode_requires_exact_interlock():
     candidate = aliyun_oss_candidate(
         region="eu-central-1",
         bucket="candidate-bucket",
@@ -157,18 +177,25 @@ def test_candidate_operations_are_test_only_and_require_exact_target_interlock()
         ),
     )
 
-    assert normal.blocking_reasons == ("capability_disabled",)
+    assert normal.executable is True
+    assert normal.blocking_reasons == ()
     assert wrong_target.blocking_reasons == ("live_interlock_missing",)
     assert exact_target.executable is True
     assert all(
+        registry.lookup(candidate.contract_key, operation).state == "experimental"
+        for operation in EXPERIMENTAL_BASELINE_OPERATIONS
+    )
+    assert all(
         registry.lookup(candidate.contract_key, operation).state == "test-only"
         for operation in CANDIDATE_OPERATIONS
+        if operation not in EXPERIMENTAL_BASELINE_OPERATIONS
     )
     assert all(
         registry.lookup(candidate.contract_key, operation).evidence_id.startswith(
             "aliyun-oss-hypothesis-"
         )
         for operation in CANDIDATE_OPERATIONS
+        if operation not in EXPERIMENTAL_BASELINE_OPERATIONS
     )
 
 
@@ -368,6 +395,24 @@ def test_cos_offline_v4_vector_is_explicitly_hypothesis_not_remote_evidence():
     )
     assert request.headers["authorization"].startswith("AWS4-HMAC-SHA256 ")
     assert candidate.remote_evidence == "not-tested"
+
+
+def test_cos_candidate_rejects_aws_trailer_checksum_profile():
+    candidate = tencent_cos_candidate(
+        region="ap-guangzhou",
+        bucket="website-images-1250000000",
+    )
+
+    with pytest.raises(CandidateError, match="trailer|streaming"):
+        build_candidate_put_request(
+            candidate,
+            cos_connection(candidate),
+            key="matrix/cos.txt",
+            body=b"provider-vector",
+            content_type="text/plain",
+            extra_headers=(("x-amz-trailer", "x-amz-checksum-sha256"),),
+            now=NOW,
+        )
 
 
 def test_versioned_source_manifest_is_official_only_and_tracks_claim_boundaries():

@@ -37,7 +37,7 @@ from resolver import ResolutionError, resolve_target
 from results import build_result, exit_code_for_result
 from safe_io import FileSecurityError, read_regular_file
 from source_file import SourceError
-from v2_schema import CANDIDATE_PROVIDERS, SchemaError
+from v2_schema import EXPERIMENTAL_PROVIDERS, SchemaError
 from s3 import (
     build_signed_request, http_request,
 )
@@ -183,7 +183,15 @@ def _v2_url(args, *, environ, cwd, config_home, now) -> int:
         else:
             print(result["url"], flush=True)
         return 0
-    except (ArtifactError, FileSecurityError, OSError, ResolutionError, OperationError, SchemaError) as exc:
+    except (
+        ArtifactError,
+        FileSecurityError,
+        OSError,
+        OperationError,
+        PlanError,
+        ResolutionError,
+        SchemaError,
+    ) as exc:
         print(f"[s3-upload] config_error: {exc}", file=sys.stderr)
         return 2
 
@@ -231,7 +239,10 @@ def _v2_delete(args, *, environ, cwd, config_home, transport, now) -> int:
         if not dry_run.executable:
             print("[s3-upload] config_error: delete plan is blocked", file=sys.stderr)
             return 2
-        if resolved.target.provider in CANDIDATE_PROVIDERS:
+        if (
+            execution_mode == "test-only"
+            and resolved.target.provider in EXPERIMENTAL_PROVIDERS
+        ):
             raise PlanError("candidate execution requires the authorized evidence harness")
         outcome = execute_delete(
             resolved=resolved,
@@ -342,7 +353,10 @@ def _v2_resume(args, *, environ, cwd, config_home, transport, now) -> int:
             ) = _resolve_checkpoint(
                 args, environ=environ, cwd=cwd, config_home=config_home, now=now
             )
-            if resolved.target.provider in CANDIDATE_PROVIDERS:
+            if (
+                execution_mode == "test-only"
+                and resolved.target.provider in EXPERIMENTAL_PROVIDERS
+            ):
                 raise ResolutionError(
                     "candidate execution requires the authorized evidence harness"
                 )
@@ -389,7 +403,10 @@ def _v2_abort(args, *, environ, cwd, config_home, transport, now) -> int:
             ) = _resolve_checkpoint(
                 args, environ=environ, cwd=cwd, config_home=config_home, now=now
             )
-            if resolved.target.provider in CANDIDATE_PROVIDERS:
+            if (
+                execution_mode == "test-only"
+                and resolved.target.provider in EXPERIMENTAL_PROVIDERS
+            ):
                 raise ResolutionError(
                     "candidate execution requires the authorized evidence harness"
                 )
@@ -432,7 +449,10 @@ def _v2_reconcile(args, *, environ, cwd, config_home, transport, now) -> int:
             ) = _resolve_checkpoint(
                 args, environ=environ, cwd=cwd, config_home=config_home, now=now
             )
-            if resolved.target.provider in CANDIDATE_PROVIDERS:
+            if (
+                execution_mode == "test-only"
+                and resolved.target.provider in EXPERIMENTAL_PROVIDERS
+            ):
                 raise ResolutionError(
                     "candidate execution requires the authorized evidence harness"
                 )
@@ -549,7 +569,10 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
         if not dry_run.executable:
             print("[s3-upload] config_error: upload plan is blocked", file=sys.stderr)
             return 2
-        if resolved.target.provider in CANDIDATE_PROVIDERS:
+        if (
+            execution_mode == "test-only"
+            and resolved.target.provider in EXPERIMENTAL_PROVIDERS
+        ):
             raise PlanError("candidate execution requires the authorized evidence harness")
         if dry_run.plan["upload_mode"] == "multipart":
             outcome = execute_multipart(

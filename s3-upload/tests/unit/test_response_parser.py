@@ -24,6 +24,38 @@ def test_put_version_id_is_validated_before_return():
     assert "SECRET12345678" not in repr(rejected)
 
 
+@pytest.mark.parametrize(
+    "header",
+    ("x-amz-version-id", "x-oss-version-id", "x-cos-version-id"),
+)
+def test_put_accepts_each_provider_version_header_alias(header):
+    parsed = parse_operation_response(
+        Response(200, headers={header: "provider-version"}),
+        operation="PutObject",
+        active_credentials=CREDENTIALS,
+    )
+
+    assert parsed.classification == "success"
+    assert parsed.identifiers == {"version_id": "provider-version"}
+
+
+def test_conflicting_provider_version_aliases_are_inconclusive():
+    parsed = parse_operation_response(
+        Response(
+            200,
+            headers={
+                "x-amz-version-id": "aws-version",
+                "x-cos-version-id": "cos-version",
+            },
+        ),
+        operation="PutObject",
+        active_credentials=CREDENTIALS,
+    )
+
+    assert parsed.classification == "unknown"
+    assert parsed.identifiers == {}
+
+
 def test_create_multipart_parses_xml_entity_then_checks_reflection():
     accepted = parse_operation_response(
         Response(200, body=b"<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>"),
@@ -74,6 +106,21 @@ def test_complete_success_parses_optional_version_and_malformed_xml_is_unknown()
         operation="CompleteMultipartUpload", active_credentials=CREDENTIALS,
     )
     assert malformed.classification == "unknown"
+
+
+def test_complete_accepts_cos_version_header_when_xml_omits_version():
+    parsed = parse_operation_response(
+        Response(
+            200,
+            body=b"<CompleteMultipartUploadResult></CompleteMultipartUploadResult>",
+            headers={"x-cos-version-id": "cos-version"},
+        ),
+        operation="CompleteMultipartUpload",
+        active_credentials=CREDENTIALS,
+    )
+
+    assert parsed.classification == "success"
+    assert parsed.identifiers == {"version_id": "cos-version"}
 
 
 def test_status_classification_keeps_conditional_precondition_distinct():

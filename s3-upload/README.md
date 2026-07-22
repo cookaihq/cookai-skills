@@ -7,10 +7,12 @@
 - AWS S3 (`aws-s3`)：单次 PutObject、private presigned GET。
 - Cloudflare R2 (`cloudflare-r2`)：单次 PutObject、private presigned GET。
 - `custom`：用户明确断言 exact endpoint 兼容同一单次 Put/presign 合同。
+- 阿里云 OSS (`aliyun-oss`)：experimental 单次 PutObject、private current-key presign；`endpoint=null` 自动解析 `https://s3.oss-{region}.aliyuncs.com`，virtual addressing。
+- 腾讯云 COS (`tencent-cos`)：experimental 单次 PutObject、private current-key presign；`endpoint=null` 自动解析 `https://cos.{region}.myqcloud.com`，bucket 必须是完整 `BucketName-APPID`，virtual addressing。
 - Public Access：只从用户声明的 HTTPS Public Base URL 拼接，不修改 ACL/policy，不主动探测。
 - Retention：结果保存声明值；lifecycle 执行始终是 `external-unverified`。
 
-普通模式只执行 `collision=replace`。Delete、multipart、HEAD reconciliation 和 assisted setup 都是 capability-gated，当前 normal baseline 不可用。`aliyun-oss` / `tencent-cos` normal preset 尚未发布；不要用 `custom` 绕过该限制。
+普通模式只执行 `collision=replace`。Delete、multipart、conditional write、HEAD reconciliation 和 assisted setup 都是 capability-gated，当前 normal baseline 不可用。OSS/COS 的 `experimental` 表示代码依据官方 endpoint/SDK 资料和离线向量完成，但尚无足以晋级 `enabled` 的完整 release evidence；OSS 只有单账号永久凭证的 bounded run，COS 尚无 live credential。先 dry-run，不能描述成 `enabled`。
 
 ## 快速开始
 
@@ -85,4 +87,4 @@ python3 -m pytest s3-upload/tests -q
 python3 -m compileall -q s3-upload/scripts
 ```
 
-CI 不读取真实 Key、不发云请求。Provider 候选与真实 evidence 仅位于 maintainer/test surface，不属于用户 normal workflow。
+CI 不读取真实 Key、不发云请求。OSS/COS live evidence 仍位于 maintainer/test surface；普通用户只能使用公开文档列出的 experimental 基础能力。
