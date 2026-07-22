@@ -1,18 +1,44 @@
 ---
 name: pdf2markdown
-description: Create a private, recoverable work bundle from one local PDF and inspect or safely resume its saved state. Use when a user asks to begin a verifiable PDF-to-Markdown workflow from a local PDF, preserve the source bytes for later conversion, inspect an existing pdf2markdown work bundle, or resume one without repeating completed work.
+description: Create and manage a private, recoverable PDF-to-Markdown work bundle with snapshotted interaction and publication settings. Use when a user asks to begin a verifiable workflow from one local PDF, configure confirm or auto behavior, inspect saved state, or resume without inheriting later configuration drift.
 ---
 
 # PDF to Markdown
 
 Establish a durable work bundle before performing any later PDF conversion work. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
 
+## Manage Settings
+
+Initialize, inspect, or update the non-secret persistent settings file:
+
+```bash
+python3 scripts/workflow.py settings init
+python3 scripts/workflow.py settings status
+python3 scripts/workflow.py settings set-mode confirm
+python3 scripts/workflow.py settings set-mode auto
+python3 scripts/workflow.py settings set-publish-mode skip
+python3 scripts/workflow.py settings set-publish-mode upload
+```
+
+Use `--interaction-mode confirm|auto`, `--publish-mode skip|upload`, `--publish-with <skill:name|tool:name>`, and `--publish-target <opaque-name>` with `settings status` to inspect one-call overrides without persisting them. Add `--use-local-key` only when the current invocation may read `~/.config/pdf2markdown/.env`; this permission is never saved or inherited by a work bundle.
+
+Resolve each non-secret value independently in this order: command option, process environment, `$PWD/.env.local`, `$PWD/.env`, explicitly authorized home `.env`, `settings.json`, built-in default. Use `PDF2MARKDOWN_INTERACTION_MODE`, `PDF2MARKDOWN_PUBLISH_MODE`, `PDF2MARKDOWN_UPLOADER`, and `PDF2MARKDOWN_UPLOAD_TARGET` in environment or dotenv layers. Treat empty values as absent. Defaults are `interaction_mode=confirm` and `publishing.mode=skip`.
+
+Do not put API keys, credentials, signed URLs, or bearer URLs in `settings.json`. Treat `publishing.mode=upload` without a complete publisher binding as blocked; the current implementation never plans or performs publication.
+
 ## Start A Work Bundle
 
 Run:
 
 ```bash
-python3 scripts/workflow.py start --source <local-pdf> [--output-dir <directory>]
+python3 scripts/workflow.py start \
+  --source <local-pdf> \
+  [--output-dir <directory>] \
+  [--interaction-mode confirm|auto] \
+  [--publish-mode skip|upload] \
+  [--publish-with <skill:name|tool:name>] \
+  [--publish-target <opaque-name>] \
+  [--use-local-key]
 ```
 
 Use a local regular file. Do not pass a symlink, directory, special file, or URL.
@@ -23,7 +49,7 @@ Resolve the output root in this order:
 2. `PDF2MARKDOWN_OUTPUT_DIR`
 3. `$PWD/pdf2markdown-output`
 
-Read the single JSON object from stdout. Preserve `work_bundle`, `generation`, and `evidence_hash` for subsequent commands. Treat stderr as diagnostic logging only.
+Read the single JSON object from stdout. Preserve `work_bundle`, `generation`, and `evidence_hash` for subsequent commands. The manifest freezes effective settings, their sources, the canonical invocation cwd identity, and the persistent settings content hash. Treat stderr as diagnostic logging only.
 
 ## Inspect Saved State
 
@@ -42,21 +68,29 @@ Pass the generation most recently returned by `start` or `inspect`:
 ```bash
 python3 scripts/workflow.py resume \
   --work-bundle <directory> \
-  --expected-generation <generation>
+  --expected-generation <generation> \
+  [--interaction-mode confirm|auto] \
+  [--publish-mode skip|upload] \
+  [--publish-with <skill:name|tool:name>] \
+  [--publish-target <opaque-name>] \
+  [--use-local-key]
 ```
 
-Handle `generation_conflict` by inspecting again before retrying. Handle `bundle_locked` by waiting for the active writer to finish. In the current implementation, a valid resume returns `outcome: no_progress`; it does not begin preflight or conversion.
+Resume without an explicit setting override from the saved work-bundle snapshot; ignore later environment, dotenv, home, and persistent-settings drift. A valid explicit override creates the next generation and appends its evidence without changing the old history. `--use-local-key` authorizes only the current invocation and does not re-resolve snapshotted non-secret settings.
+
+Handle `generation_conflict` by inspecting again before retrying. Handle `bundle_locked` by waiting for the active writer to finish. A resume without overrides returns `outcome: no_progress`; it does not begin preflight or conversion.
 
 ## Interpret Results
 
-- Exit `0`: the command completed; inspect `outcome` for `created`, `inspected`, or `no_progress`.
+- Exit `0`: the command completed; inspect `outcome` for `settings_initialized`, `settings_unchanged`, `settings_status`, `settings_updated`, `created`, `inspected`, `settings_overridden`, or `no_progress`.
 - Exit `2`: correct the command arguments.
 - Exit `3`: provide a readable, regular local PDF with PDF bytes.
 - Exit `4`: stop and repair or restore the work bundle; do not bypass integrity or schema failures.
 - Exit `5`: resolve a stale generation or concurrent writer before retrying.
+- Exit `6`: repair invalid persistent settings or correct an invalid explicit override.
 
 Expect exactly one versioned JSON object on stdout for every supported command and structured entries in `errors` on failure. Never infer success from stderr text.
 
 ## Scope Boundary
 
-Use these commands only to create and validate the local source work bundle. Do not claim that Markdown was generated. This implementation does not yet support URL sources, PDF preflight, AIHub or Doc2X calls, result archives, content review, image publication, or settings management. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
+Use these commands only to manage settings and create or validate the local source work bundle. Do not claim that Markdown was generated. This implementation does not yet support URL sources, PDF preflight, AIHub or Doc2X calls, result archives, content review, publication plans, or image publication. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.

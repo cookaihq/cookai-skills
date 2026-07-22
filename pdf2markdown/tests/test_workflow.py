@@ -5,24 +5,39 @@ import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import workflow
 
 
 PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
 PDF_SHA256 = "d7dd0115be8b79ae057b3f6ca0fcee578085ba6919dcb70e8643a2aff537d9b5"
 NOW = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+DEFAULT_CONFIG_HOME = object()
 
 
 def no_network(*_args, **_kwargs):
     raise AssertionError("local bundle creation must not use the network")
 
 
-def invoke(capsys, argv, *, cwd, environ=None, now=NOW):
+def invoke(
+    capsys,
+    argv,
+    *,
+    cwd,
+    environ=None,
+    now=NOW,
+    config_home=DEFAULT_CONFIG_HOME,
+):
+    injected_config_home = (
+        str(Path(cwd) / "config-home")
+        if config_home is DEFAULT_CONFIG_HOME
+        else config_home
+    )
     rc = workflow.main(
         argv,
         environ={} if environ is None else environ,
         cwd=str(cwd),
-        config_home=str(Path(cwd) / "config-home"),
+        config_home=injected_config_home,
         transport=no_network,
         now=now,
     )
@@ -30,6 +45,898 @@ def invoke(capsys, argv, *, cwd, environ=None, now=NOW):
     lines = captured.out.splitlines()
     assert len(lines) == 1
     return rc, json.loads(lines[0]), captured.err
+
+
+def test_settings_commands_initialize_report_and_update_private_behavior_settings(
+    tmp_path, capsys
+):
+    config_home = tmp_path / "config-home"
+    settings_path = config_home / "settings.json"
+
+    status_rc, status, status_stderr = invoke(
+        capsys,
+        ["settings", "status"],
+        cwd=tmp_path,
+    )
+
+    assert status_rc == 0
+    assert status["outcome"] == "settings_status"
+    assert status["settings"] == {
+        "path": str(settings_path),
+        "exists": False,
+        "persisted": None,
+        "effective": {
+            "schema_version": 1,
+            "interaction_mode": "confirm",
+            "publishing": {
+                "mode": "skip",
+                "publisher_binding": None,
+            },
+            "sources": {
+                "interaction_mode": "built_in_default",
+                "publishing.mode": "built_in_default",
+            },
+        },
+        "content_hash": None,
+        "home_config_authorized": False,
+        "publication_execution": {
+            "executable": False,
+            "reason_code": "publication_skipped",
+        },
+    }
+    assert "settings_status" in status_stderr
+    assert not settings_path.exists()
+
+    previous_umask = os.umask(0)
+    try:
+        init_rc, initialized, init_stderr = invoke(
+            capsys,
+            ["settings", "init"],
+            cwd=tmp_path,
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert init_rc == 0
+    assert initialized["outcome"] == "settings_initialized"
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+    assert json.loads(settings_path.read_text()) == {
+        "schema_version": 1,
+        "interaction_mode": "confirm",
+        "publishing": {"mode": "skip", "publisher_binding": None},
+    }
+    assert "settings_initialized" in init_stderr
+
+    update_rc, updated, update_stderr = invoke(
+        capsys,
+        ["settings", "set-mode", "auto"],
+        cwd=tmp_path,
+    )
+
+    assert update_rc == 0
+    assert updated["outcome"] == "settings_updated"
+    assert updated["settings"]["persisted"]["interaction_mode"] == "auto"
+    assert updated["settings"]["effective"]["interaction_mode"] == "auto"
+    assert updated["settings"]["effective"]["sources"]["interaction_mode"] == (
+        "persistent_settings"
+    )
+    assert json.loads(settings_path.read_text()) == {
+        "schema_version": 1,
+        "interaction_mode": "auto",
+        "publishing": {"mode": "skip", "publisher_binding": None},
+    }
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+    assert "settings_updated" in update_stderr
+
+    publish_rc, publish_updated, publish_stderr = invoke(
+        capsys,
+        ["settings", "set-publish-mode", "upload"],
+        cwd=tmp_path,
+    )
+
+    assert publish_rc == 0
+    assert publish_updated["outcome"] == "settings_updated"
+    assert publish_updated["settings"]["persisted"]["publishing"] == {
+        "mode": "upload",
+        "publisher_binding": None,
+    }
+    assert publish_updated["settings"]["publication_execution"] == {
+        "executable": False,
+        "reason_code": "publisher_binding_missing",
+    }
+    assert "settings_updated" in publish_stderr
+
+
+def test_settings_reject_malformed_duplicate_unknown_and_invalid_schema_values(
+    tmp_path, capsys
+):
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    settings_path = config_home / "settings.json"
+    valid = {
+        "schema_version": 1,
+        "interaction_mode": "confirm",
+        "publishing": {"mode": "skip", "publisher_binding": None},
+    }
+    cases = [
+        "{",
+        '{"schema_version":1,"schema_version":1,"interaction_mode":"confirm",'
+        '"publishing":{"mode":"skip","publisher_binding":null}}',
+        '{"schema_version":1,"interaction_mode":"confirm","publishing":'
+        '{"mode":"skip","mode":"skip","publisher_binding":null}}',
+        json.dumps({**valid, "unexpected": True}),
+        json.dumps(
+            {
+                **valid,
+                "publishing": {
+                    **valid["publishing"],
+                    "unexpected": True,
+                },
+            }
+        ),
+        json.dumps({**valid, "schema_version": 2}),
+        json.dumps({**valid, "schema_version": True}),
+        json.dumps({**valid, "interaction_mode": 1}),
+        json.dumps({**valid, "interaction_mode": []}),
+        json.dumps({**valid, "interaction_mode": "AUTO"}),
+        json.dumps({**valid, "publishing": []}),
+        json.dumps(
+            {
+                **valid,
+                "publishing": {
+                    "mode": "publish",
+                    "publisher_binding": None,
+                },
+            }
+        ),
+        json.dumps(
+            {
+                **valid,
+                "publishing": {"mode": {}, "publisher_binding": None},
+            }
+        ),
+        json.dumps(
+            {
+                **valid,
+                "publishing": {
+                    "mode": "upload",
+                    "publisher_binding": {"partial": True},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                **valid,
+                "publishing": {
+                    "mode": "upload",
+                    "target_ref": "https://storage.example/object?signature=secret",
+                    "publisher_binding": None,
+                },
+            }
+        ),
+    ]
+
+    for raw in cases:
+        settings_path.write_text(raw, encoding="utf-8")
+        before = settings_path.read_bytes()
+
+        rc, result, stderr = invoke(
+            capsys,
+            ["settings", "status"],
+            cwd=tmp_path,
+        )
+
+        assert rc == 6
+        assert result["outcome"] == "error"
+        assert result["action_required"] == "repair_settings"
+        assert result["errors"] == [
+            {
+                "code": "configuration_invalid",
+                "message": "Persistent settings are invalid.",
+            }
+        ]
+        assert "configuration_invalid" in stderr
+        assert settings_path.read_bytes() == before
+
+    settings_path.write_text(json.dumps(valid), encoding="utf-8")
+    secret_target = "https://storage.example/object?signature=must-not-leak"
+    secret_rc, secret_error, secret_stderr = invoke(
+        capsys,
+        ["settings", "status", "--publish-target", secret_target],
+        cwd=tmp_path,
+    )
+    assert secret_rc == 6
+    assert secret_error["errors"][0]["code"] == "configuration_invalid"
+    assert secret_target not in json.dumps(secret_error) + secret_stderr
+
+
+def test_settings_atomic_update_failure_preserves_the_previous_complete_document(
+    tmp_path, capsys, monkeypatch
+):
+    settings_path = tmp_path / "config-home" / "settings.json"
+    init_rc, _initialized, _stderr = invoke(
+        capsys,
+        ["settings", "init"],
+        cwd=tmp_path,
+    )
+    before = settings_path.read_bytes()
+    original_replace = workflow.settings_module.os.replace
+
+    def fail_replace(source, destination):
+        temporary = Path(source)
+        assert destination == settings_path
+        assert stat.S_IMODE(temporary.stat().st_mode) == 0o600
+        assert json.loads(temporary.read_text())["interaction_mode"] == "auto"
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(workflow.settings_module.os, "replace", fail_replace)
+    rc, result, stderr = invoke(
+        capsys,
+        ["settings", "set-mode", "auto"],
+        cwd=tmp_path,
+    )
+    monkeypatch.setattr(workflow.settings_module.os, "replace", original_replace)
+
+    assert init_rc == 0
+    assert rc == 6
+    assert result["outcome"] == "error"
+    assert result["action_required"] == "retry_settings_write"
+    assert result["errors"] == [
+        {
+            "code": "settings_write_failed",
+            "message": "Persistent settings could not be written atomically.",
+        }
+    ]
+    assert "settings_write_failed" in stderr
+    assert settings_path.read_bytes() == before
+    assert list(settings_path.parent.glob(".settings.json.*")) == []
+
+
+def test_settings_commands_validate_effective_layers_before_writing(tmp_path, capsys):
+    settings_path = tmp_path / "config-home" / "settings.json"
+
+    init_rc, init_error, _stderr = invoke(
+        capsys,
+        ["settings", "init"],
+        cwd=tmp_path,
+        environ={"PDF2MARKDOWN_INTERACTION_MODE": "invalid"},
+    )
+
+    assert init_rc == 6
+    assert init_error["errors"][0]["code"] == "configuration_invalid"
+    assert not settings_path.exists()
+
+    valid = {
+        "schema_version": 1,
+        "interaction_mode": "confirm",
+        "publishing": {"mode": "skip", "publisher_binding": None},
+    }
+    settings_path.parent.mkdir()
+    settings_path.write_text(json.dumps(valid), encoding="utf-8")
+    before = settings_path.read_bytes()
+
+    update_rc, update_error, _stderr = invoke(
+        capsys,
+        ["settings", "set-mode", "auto"],
+        cwd=tmp_path,
+        environ={"PDF2MARKDOWN_PUBLISH_MODE": "invalid"},
+    )
+
+    assert update_rc == 6
+    assert update_error["errors"][0]["code"] == "configuration_invalid"
+    assert settings_path.read_bytes() == before
+
+
+def test_settings_resolve_each_nonsecret_value_by_first_nonempty_source(
+    tmp_path, capsys
+):
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    settings_path = config_home / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "interaction_mode": "auto",
+                "publishing": {
+                    "mode": "upload",
+                    "uploader": "skill:persisted",
+                    "target_ref": "persisted-target",
+                    "publisher_binding": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "PDF2MARKDOWN_INTERACTION_MODE=confirm\n"
+        "PDF2MARKDOWN_PUBLISH_MODE=skip\n"
+        "PDF2MARKDOWN_UPLOADER=skill:dotenv\n"
+        "PDF2MARKDOWN_UPLOAD_TARGET=dotenv-target\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.local").write_text(
+        "PDF2MARKDOWN_INTERACTION_MODE=\n"
+        "PDF2MARKDOWN_PUBLISH_MODE=upload\n"
+        "PDF2MARKDOWN_UPLOADER=\n"
+        "PDF2MARKDOWN_UPLOAD_TARGET=local-target\n",
+        encoding="utf-8",
+    )
+
+    cli_rc, cli_result, _stderr = invoke(
+        capsys,
+        [
+            "settings",
+            "status",
+            "--interaction-mode",
+            "confirm",
+            "--publish-mode",
+            "skip",
+            "--publish-with",
+            "tool:cli",
+            "--publish-target",
+            "cli-target",
+        ],
+        cwd=tmp_path,
+        environ={
+            "PDF2MARKDOWN_INTERACTION_MODE": "auto",
+            "PDF2MARKDOWN_PUBLISH_MODE": "",
+            "PDF2MARKDOWN_UPLOADER": "tool:environment",
+            "PDF2MARKDOWN_UPLOAD_TARGET": "",
+        },
+    )
+    cli_effective = cli_result["settings"]["effective"]
+
+    layered_rc, layered_result, _stderr = invoke(
+        capsys,
+        ["settings", "status"],
+        cwd=tmp_path,
+        environ={
+            "PDF2MARKDOWN_INTERACTION_MODE": "auto",
+            "PDF2MARKDOWN_PUBLISH_MODE": "",
+            "PDF2MARKDOWN_UPLOADER": "tool:environment",
+            "PDF2MARKDOWN_UPLOAD_TARGET": "",
+        },
+    )
+    layered_effective = layered_result["settings"]["effective"]
+
+    dotenv_rc, dotenv_result, _stderr = invoke(
+        capsys,
+        ["settings", "status"],
+        cwd=tmp_path,
+        environ={},
+    )
+    dotenv_effective = dotenv_result["settings"]["effective"]
+
+    assert cli_rc == layered_rc == dotenv_rc == 0
+    assert cli_effective["interaction_mode"] == "confirm"
+    assert cli_effective["publishing"] == {
+        "mode": "skip",
+        "uploader": "tool:cli",
+        "target_ref": "cli-target",
+        "publisher_binding": None,
+    }
+    assert cli_effective["sources"] == {
+        "interaction_mode": "command_line",
+        "publishing.mode": "command_line",
+        "publishing.uploader": "command_line",
+        "publishing.target_ref": "command_line",
+    }
+    assert layered_effective["interaction_mode"] == "auto"
+    assert layered_effective["publishing"] == {
+        "mode": "upload",
+        "uploader": "tool:environment",
+        "target_ref": "local-target",
+        "publisher_binding": None,
+    }
+    assert layered_effective["sources"] == {
+        "interaction_mode": "process_environment",
+        "publishing.mode": "cwd_dotenv_local",
+        "publishing.uploader": "process_environment",
+        "publishing.target_ref": "cwd_dotenv_local",
+    }
+    assert layered_result["settings"]["publication_execution"] == {
+        "executable": False,
+        "reason_code": "publisher_binding_missing",
+    }
+    assert dotenv_effective["interaction_mode"] == "confirm"
+    assert dotenv_effective["publishing"] == {
+        "mode": "upload",
+        "uploader": "skill:dotenv",
+        "target_ref": "local-target",
+        "publisher_binding": None,
+    }
+    assert dotenv_effective["sources"] == {
+        "interaction_mode": "cwd_dotenv",
+        "publishing.mode": "cwd_dotenv_local",
+        "publishing.uploader": "cwd_dotenv",
+        "publishing.target_ref": "cwd_dotenv_local",
+    }
+
+    (tmp_path / ".env.local").unlink()
+    (tmp_path / ".env").unlink()
+    persistent_rc, persistent_result, _stderr = invoke(
+        capsys,
+        ["settings", "status"],
+        cwd=tmp_path,
+        environ={},
+    )
+    assert persistent_rc == 0
+    assert persistent_result["settings"]["effective"]["publishing"] == {
+        "mode": "upload",
+        "uploader": "skill:persisted",
+        "target_ref": "persisted-target",
+        "publisher_binding": None,
+    }
+    assert set(
+        persistent_result["settings"]["effective"]["sources"].values()
+    ) == {"persistent_settings"}
+
+
+def test_settings_dotenv_is_literal_last_wins_local_only_and_home_is_gated(
+    tmp_path, capsys
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    config_home = project / "config-home"
+    config_home.mkdir()
+    (tmp_path / ".env").write_text(
+        "PDF2MARKDOWN_PUBLISH_MODE=upload\n", encoding="utf-8"
+    )
+    (config_home / ".env").write_text(
+        "PDF2MARKDOWN_PUBLISH_MODE=upload\n", encoding="utf-8"
+    )
+    marker = project / "must-not-exist"
+    (project / ".env.local").write_text(
+        "IGNORED LINE WITHOUT EQUALS\n"
+        "PDF2MARKDOWN_INTERACTION_MODE=confirm\n"
+        "PDF2MARKDOWN_INTERACTION_MODE='auto'\n"
+        "PDF2MARKDOWN_UPLOAD_TARGET=local-target\n",
+        encoding="utf-8",
+    )
+
+    local_rc, local_result, _stderr = invoke(
+        capsys,
+        ["settings", "status"],
+        cwd=project,
+    )
+    home_rc, home_result, _stderr = invoke(
+        capsys,
+        ["settings", "status", "--use-local-key"],
+        cwd=project,
+    )
+
+    local_effective = local_result["settings"]["effective"]
+    home_effective = home_result["settings"]["effective"]
+    assert local_rc == home_rc == 0
+    assert local_effective["interaction_mode"] == "auto"
+    assert local_effective["publishing"]["mode"] == "skip"
+    assert local_effective["publishing"]["target_ref"] == "local-target"
+    assert local_effective["sources"] == {
+        "interaction_mode": "cwd_dotenv_local",
+        "publishing.mode": "built_in_default",
+        "publishing.target_ref": "cwd_dotenv_local",
+    }
+    assert local_result["settings"]["home_config_authorized"] is False
+    assert home_effective["interaction_mode"] == "auto"
+    assert home_effective["publishing"]["mode"] == "upload"
+    assert home_effective["sources"]["publishing.mode"] == "home_dotenv"
+    assert home_result["settings"]["home_config_authorized"] is True
+    assert not marker.exists()
+
+    (project / ".env.local").write_text(
+        "PDF2MARKDOWN_INTERACTION_MODE=${MODE}\n"
+        f"PDF2MARKDOWN_UPLOAD_TARGET=$(touch {marker})\n",
+        encoding="utf-8",
+    )
+    invalid_rc, invalid, _stderr = invoke(
+        capsys,
+        ["settings", "status"],
+        cwd=project,
+        environ={"MODE": "confirm"},
+    )
+    assert invalid_rc == 6
+    assert invalid["errors"][0]["code"] == "configuration_invalid"
+    assert not marker.exists()
+
+
+def test_settings_default_config_home_uses_xdg_then_home(tmp_path, capsys):
+    xdg_root = tmp_path / "xdg"
+    home_root = tmp_path / "home"
+
+    xdg_rc, xdg_result, _stderr = invoke(
+        capsys,
+        ["settings", "init"],
+        cwd=tmp_path,
+        environ={"XDG_CONFIG_HOME": str(xdg_root), "HOME": str(home_root)},
+        config_home=None,
+    )
+    home_rc, home_result, _stderr = invoke(
+        capsys,
+        ["settings", "init"],
+        cwd=tmp_path,
+        environ={"XDG_CONFIG_HOME": "", "HOME": str(home_root)},
+        config_home=None,
+    )
+
+    assert xdg_rc == home_rc == 0
+    assert xdg_result["settings"]["path"] == str(
+        xdg_root / "pdf2markdown" / "settings.json"
+    )
+    assert home_result["settings"]["path"] == str(
+        home_root / ".config" / "pdf2markdown" / "settings.json"
+    )
+
+
+def test_start_freezes_effective_settings_sources_cwd_identity_and_settings_hash(
+    tmp_path, capsys
+):
+    project = tmp_path / "real-project"
+    project.mkdir()
+    project_alias = tmp_path / "project-alias"
+    project_alias.symlink_to(project, target_is_directory=True)
+    source = project / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    settings_path = config_home / "settings.json"
+    settings_raw = (
+        '{"schema_version":1,"interaction_mode":"auto","publishing":'
+        '{"mode":"skip","publisher_binding":null}}\n'
+    )
+    settings_path.write_text(settings_raw, encoding="utf-8")
+    (project / ".env.local").write_text(
+        "PDF2MARKDOWN_PUBLISH_MODE=upload\n", encoding="utf-8"
+    )
+    (config_home / ".env").write_text(
+        "PDF2MARKDOWN_UPLOAD_TARGET=home-target\n", encoding="utf-8"
+    )
+    secret = "sk-secret-must-never-persist"
+
+    rc, result, stdout_log = invoke(
+        capsys,
+        [
+            "start",
+            "--source",
+            "source.pdf",
+            "--interaction-mode",
+            "confirm",
+            "--publish-with",
+            "tool:configured-uploader",
+            "--use-local-key",
+        ],
+        cwd=project_alias,
+        environ={
+            "PDF2MARKDOWN_UPLOADER": "tool:environment-uploader",
+            "AIHUB_API_KEY": secret,
+            "UNRELATED_SECRET": secret,
+        },
+        config_home=str(config_home),
+    )
+
+    bundle = Path(result["work_bundle"])
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    history_text = (bundle / ".state" / "history.ndjson").read_text()
+    cwd_info = project.stat()
+
+    assert rc == 0
+    assert result["publication_state"] == "blocked"
+    assert manifest["publication_state"] == "blocked"
+    assert manifest["settings_snapshot"] == {
+        "schema_version": 1,
+        "interaction_mode": "confirm",
+        "publishing": {
+            "mode": "upload",
+            "uploader": "tool:configured-uploader",
+            "target_ref": "home-target",
+            "publisher_binding": None,
+        },
+        "sources": {
+            "interaction_mode": "command_line",
+            "publishing.mode": "cwd_dotenv_local",
+            "publishing.uploader": "command_line",
+            "publishing.target_ref": "home_dotenv",
+        },
+        "invocation_cwd": {
+            "path": str(project),
+            "device": cwd_info.st_dev,
+            "inode": cwd_info.st_ino,
+        },
+        "settings_file": {
+            "path": str(settings_path),
+            "content_hash": (
+                "sha256:d85a314aa812f29d8f7386f7f0f17239cb2631e323ee85d3aadcea1d0a101886"
+            ),
+        },
+    }
+    persisted = (
+        (bundle / "manifest.json").read_text()
+        + history_text
+        + json.dumps(result)
+        + stdout_log
+    )
+    assert secret not in persisted
+    assert "use_local_key" not in persisted
+
+
+def test_start_rejects_invalid_settings_before_creating_a_work_bundle(
+    tmp_path, capsys
+):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    settings_path = config_home / "settings.json"
+    settings_path.write_text("{invalid", encoding="utf-8")
+
+    malformed_rc, malformed, malformed_stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "interaction_mode": "confirm",
+                "publishing": {"mode": "skip", "publisher_binding": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+    enum_rc, enum_error, enum_stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+        environ={"PDF2MARKDOWN_INTERACTION_MODE": "AUTO"},
+    )
+
+    assert malformed_rc == enum_rc == 6
+    assert malformed["work_bundle"] is enum_error["work_bundle"] is None
+    assert malformed["errors"][0]["code"] == "configuration_invalid"
+    assert enum_error["errors"][0]["code"] == "configuration_invalid"
+    assert "configuration_invalid" in malformed_stderr
+    assert "configuration_invalid" in enum_stderr
+    assert not (tmp_path / "pdf2markdown-output").exists()
+
+
+def test_resume_uses_snapshot_and_explicit_overrides_append_a_new_generation(
+    tmp_path, capsys
+):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    config_home = tmp_path / "config-home"
+    config_home.mkdir()
+    settings_path = config_home / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "interaction_mode": "auto",
+                "publishing": {"mode": "skip", "publisher_binding": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+    bundle = Path(started["work_bundle"])
+    original_manifest = json.loads((bundle / "manifest.json").read_text())
+    original_history = (bundle / ".state" / "history.ndjson").read_bytes()
+    secret = "changed-secret-must-not-persist"
+    settings_path.write_text("{invalid", encoding="utf-8")
+    (tmp_path / ".env.local").write_text(
+        "PDF2MARKDOWN_INTERACTION_MODE=confirm\n"
+        "PDF2MARKDOWN_PUBLISH_MODE=upload\n",
+        encoding="utf-8",
+    )
+    (config_home / ".env").write_text(
+        f"PDF2MARKDOWN_UPLOAD_TARGET={secret}\n", encoding="utf-8"
+    )
+
+    unchanged_rc, unchanged, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            "1",
+            "--use-local-key",
+        ],
+        cwd=tmp_path,
+        environ={
+            "PDF2MARKDOWN_INTERACTION_MODE": "confirm",
+            "PDF2MARKDOWN_PUBLISH_MODE": "upload",
+        },
+    )
+
+    assert unchanged_rc == 0
+    assert unchanged["outcome"] == "no_progress"
+    assert unchanged["generation"] == 1
+    assert json.loads((bundle / "manifest.json").read_text()) == original_manifest
+    assert (bundle / ".state" / "history.ndjson").read_bytes() == original_history
+
+    override_rc, overridden, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            "1",
+            "--interaction-mode",
+            "confirm",
+            "--publish-mode",
+            "upload",
+        ],
+        cwd=tmp_path,
+        environ={
+            "PDF2MARKDOWN_INTERACTION_MODE": "auto",
+            "PDF2MARKDOWN_PUBLISH_MODE": "skip",
+            "UNRELATED_SECRET": secret,
+        },
+    )
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    history_bytes = (bundle / ".state" / "history.ndjson").read_bytes()
+    history = [json.loads(line) for line in history_bytes.splitlines()]
+    assert override_rc == 0
+    assert overridden["outcome"] == "settings_overridden"
+    assert overridden["generation"] == 2
+    assert overridden["publication_state"] == "blocked"
+    assert manifest["generation"] == private_state["generation"] == 2
+    assert manifest["settings_snapshot"]["interaction_mode"] == "confirm"
+    assert manifest["settings_snapshot"]["publishing"]["mode"] == "upload"
+    assert manifest["settings_snapshot"]["sources"] == {
+        "interaction_mode": "resume_command_line",
+        "publishing.mode": "resume_command_line",
+    }
+    assert manifest["settings_snapshot"]["invocation_cwd"] == original_manifest[
+        "settings_snapshot"
+    ]["invocation_cwd"]
+    assert manifest["settings_snapshot"]["settings_file"] == original_manifest[
+        "settings_snapshot"
+    ]["settings_file"]
+    assert history_bytes.startswith(original_history)
+    assert history[0]["settings_snapshot"] == original_manifest["settings_snapshot"]
+    assert [event["event"] for event in history[-3:]] == [
+        "settings_override_intent",
+        "settings_override_prepared",
+        "settings_override_committed",
+    ]
+    assert history[-1]["generation"] == 2
+    assert history[-1]["settings_snapshot"] == manifest["settings_snapshot"]
+    assert secret not in history_bytes.decode("utf-8")
+
+    before_invalid = state_snapshot(bundle)
+    invalid_rc, invalid, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            "2",
+            "--publish-with",
+            "../../unsafe",
+        ],
+        cwd=tmp_path,
+    )
+    assert invalid_rc == 6
+    assert invalid["errors"][0]["code"] == "configuration_invalid"
+    assert state_snapshot(bundle) == before_invalid
+
+
+def test_resume_recovers_each_settings_override_commit_crash_point(
+    tmp_path, capsys, monkeypatch
+):
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    for crash_point in (
+        "after_intent",
+        "before_private",
+        "before_manifest",
+        "after_manifest",
+    ):
+        project = tmp_path / crash_point
+        project.mkdir()
+        source = project / "source.pdf"
+        source.write_bytes(PDF_BYTES)
+        _rc, started, _stderr = invoke(
+            capsys,
+            ["start", "--source", str(source)],
+            cwd=project,
+        )
+        bundle = Path(started["work_bundle"])
+        original_replace = workflow.os.replace
+        original_fsync = workflow.os.fsync
+        directory_fsync_crashed = False
+
+        def crash_replace(source_name, destination_name, *args, **kwargs):
+            destination = os.fspath(destination_name)
+            should_crash = (
+                crash_point == "before_private" and destination == "private.json"
+            ) or (
+                crash_point in {"before_manifest", "after_manifest"}
+                and destination == "manifest.json"
+            )
+            if not should_crash:
+                return original_replace(source_name, destination_name, *args, **kwargs)
+            if crash_point == "after_manifest":
+                original_replace(source_name, destination_name, *args, **kwargs)
+            raise SimulatedProcessCrash()
+
+        def crash_after_history_directory_fsync(descriptor):
+            nonlocal directory_fsync_crashed
+            result = original_fsync(descriptor)
+            if (
+                not directory_fsync_crashed
+                and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            ):
+                directory_fsync_crashed = True
+                raise SimulatedProcessCrash()
+            return result
+
+        resume_argv = [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            "1",
+            "--interaction-mode",
+            "auto",
+        ]
+        with monkeypatch.context() as patch_context:
+            if crash_point == "after_intent":
+                patch_context.setattr(
+                    workflow.os, "fsync", crash_after_history_directory_fsync
+                )
+            else:
+                patch_context.setattr(workflow.os, "replace", crash_replace)
+            with pytest.raises(SimulatedProcessCrash):
+                workflow.main(
+                    resume_argv,
+                    environ={},
+                    cwd=str(project),
+                    config_home=str(project / "config-home"),
+                    transport=no_network,
+                    now=NOW,
+                )
+        capsys.readouterr()
+
+        recovered_rc, recovered, _stderr = invoke(
+            capsys,
+            resume_argv,
+            cwd=project,
+        )
+        manifest = json.loads((bundle / "manifest.json").read_text())
+        private_state = json.loads((bundle / ".state" / "private.json").read_text())
+        history = [
+            json.loads(line)
+            for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
+        ]
+
+        assert recovered_rc == 0
+        assert recovered["outcome"] == "settings_overridden"
+        assert recovered["generation"] == 2
+        assert manifest["generation"] == private_state["generation"] == 2
+        assert manifest["settings_snapshot"]["interaction_mode"] == "auto"
+        assert [event["event"] for event in history].count(
+            "settings_override_intent"
+        ) == 1
+        assert [event["event"] for event in history].count(
+            "settings_override_prepared"
+        ) == 1
+        assert [event["event"] for event in history].count(
+            "settings_override_committed"
+        ) == 1
 
 
 def state_snapshot(bundle):
@@ -137,6 +1044,15 @@ def test_start_persists_a_private_recoverable_initial_state(tmp_path, capsys):
             "interaction_mode": "built_in_default",
             "publishing.mode": "built_in_default",
         },
+        "invocation_cwd": {
+            "path": str(tmp_path.resolve()),
+            "device": tmp_path.stat().st_dev,
+            "inode": tmp_path.stat().st_ino,
+        },
+        "settings_file": {
+            "path": str(tmp_path / "config-home" / "settings.json"),
+            "content_hash": None,
+        },
     }
     assert private_state == {
         "schema_version": 1,
@@ -148,11 +1064,12 @@ def test_start_persists_a_private_recoverable_initial_state(tmp_path, capsys):
         {
             "schema_version": 1,
             "event": "bundle_started",
-            "generation": 1,
-            "at": "2024-01-02T03:04:05Z",
-            "source_sha256": PDF_SHA256,
-        }
-    ]
+                "generation": 1,
+                "at": "2024-01-02T03:04:05Z",
+                "source_sha256": PDF_SHA256,
+                "settings_snapshot": manifest["settings_snapshot"],
+            }
+        ]
     assert manifest["conversion_state"] == "preparing"
     assert manifest["publication_state"] == "not_requested"
     assert secret not in persisted_text
@@ -464,6 +1381,52 @@ def test_inspect_rejects_impossible_ticket_one_authoritative_state(tmp_path, cap
             history_event = json.loads(history_path.read_text())
             history_event["at"] = "not-a-timestamp"
             history_path.write_text(json.dumps(history_event) + "\n")
+
+        rc, result, stderr = invoke(
+            capsys,
+            ["inspect", "--work-bundle", str(bundle)],
+            cwd=tmp_path,
+        )
+
+        assert rc == 4
+        assert result["outcome"] == "error"
+        assert result["errors"][0]["code"] == "invalid_bundle"
+        assert "invalid_bundle" in stderr
+
+
+def test_inspect_rejects_duplicate_keys_in_every_authoritative_json_stream(
+    tmp_path, capsys
+):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+
+    for location in ("manifest", "private", "history"):
+        _rc, started, _stderr = invoke(
+            capsys,
+            ["start", "--source", str(source)],
+            cwd=tmp_path,
+        )
+        bundle = Path(started["work_bundle"])
+        if location == "manifest":
+            path = bundle / "manifest.json"
+            raw = path.read_text().replace(
+                '"interaction_mode":"confirm"',
+                '"interaction_mode":"auto","interaction_mode":"confirm"',
+                1,
+            )
+        elif location == "private":
+            path = bundle / ".state" / "private.json"
+            raw = path.read_text().replace(
+                '"generation":1', '"generation":2,"generation":1', 1
+            )
+        else:
+            path = bundle / ".state" / "history.ndjson"
+            raw = path.read_text().replace(
+                '"interaction_mode":"confirm"',
+                '"interaction_mode":"auto","interaction_mode":"confirm"',
+                1,
+            )
+        path.write_text(raw, encoding="utf-8")
 
         rc, result, stderr = invoke(
             capsys,
@@ -793,6 +1756,7 @@ def test_invalid_command_arguments_still_return_one_json_object(tmp_path, capsys
         ["start"],
         ["start", "--help"],
         ["resume", "--work-bundle", "missing", "--expected-generation", "not-an-int"],
+        ["settings", "set-publish-mode", "publish"],
     ]
 
     for argv in cases:
