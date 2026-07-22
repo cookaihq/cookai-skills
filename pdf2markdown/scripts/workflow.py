@@ -23,6 +23,7 @@ import conversion_attempt as conversion_attempt_module
 import doc2x as doc2x_module
 import pdf_source
 import preflight as preflight_module
+import raw_conversion as raw_conversion_module
 import settings as settings_module
 import source_staging as source_staging_module
 
@@ -40,6 +41,7 @@ SUPPORTED_CONVERSION_STATES = frozenset(
         "submitting",
         "submitted",
         "result_downloading",
+        "converted",
         "submission_unknown",
         "awaiting_user",
         "recoverable_error",
@@ -866,6 +868,15 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             frozenset(required),
             frozenset({*required, "preflight"}),
             frozenset({*required, "preflight", "source_staging"}),
+            frozenset(
+                {
+                    *required,
+                    "preflight",
+                    "source_staging",
+                    "raw_conversion",
+                    "raw_conversions",
+                }
+            ),
         }
         or type(manifest.get("generation")) is not int
         or manifest["generation"] < 1
@@ -931,6 +942,7 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         ) from None
     has_source_staging = "source_staging" in manifest
     has_conversion_attempt = bool(manifest.get("conversion_attempts"))
+    has_raw_conversion = "raw_conversion" in manifest
     if (
         type(private_state.get("schema_version")) is not int
         or private_state["schema_version"] != SCHEMA_VERSION
@@ -947,7 +959,14 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             and private_state.get("source_uploads") != []
         )
         or (
+            has_raw_conversion
+            and not raw_conversion_module.valid_private_state(
+                private_state, manifest
+            )
+        )
+        or (
             has_conversion_attempt
+            and not has_raw_conversion
             and not conversion_attempt_module.valid_private_state(
                 private_state, manifest
             )
@@ -968,7 +987,9 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             context=state_context,
         )
     valid_history = (
-        conversion_attempt_module.valid_history(history, manifest, private_state)
+        raw_conversion_module.valid_history(history, manifest, private_state)
+        if has_raw_conversion
+        else conversion_attempt_module.valid_history(history, manifest, private_state)
         if has_conversion_attempt
         else source_staging_module.valid_history(history, manifest, private_state)
         if has_source_staging
@@ -1020,8 +1041,25 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
                 action_required="repair_or_restore_work_bundle",
                 context=state_context,
             ) from None
+    if has_raw_conversion:
+        try:
+            raw_conversion_module.validate_committed_artifacts(
+                descriptors=descriptors, manifest=manifest
+            )
+        except raw_conversion_module.RawConversionError as exc:
+            raise WorkflowError(
+                exc.code,
+                exc.message,
+                return_code=4,
+                action_required="repair_or_restore_work_bundle",
+                context=state_context,
+            ) from None
     _assert_bundle_descriptors_current(bundle, descriptors)
     print(f"[pdf2markdown] inspected work bundle {bundle.name}", file=sys.stderr)
+    if has_raw_conversion:
+        return raw_conversion_module.result_from_manifest(
+            manifest, work_bundle=str(bundle), outcome="inspected"
+        )
     if has_conversion_attempt:
         return conversion_attempt_module.result_from_manifest(
             manifest, work_bundle=str(bundle), outcome="inspected"
@@ -1137,6 +1175,23 @@ def _assert_frozen_source_before_recovery(
             action_required="repair_or_restore_work_bundle",
             context=context,
         )
+    preflight_state = manifest.get("preflight")
+    if isinstance(preflight_state, dict) and (
+        isinstance(preflight_state.get("inventory_sha256"), str)
+        or preflight_state.get("status") == "deterministic_blocked"
+    ):
+        try:
+            preflight_module.validate_baseline_artifacts(
+                descriptors=descriptors, manifest=manifest
+            )
+        except preflight_module.PreflightError as exc:
+            raise WorkflowError(
+                exc.code,
+                exc.message,
+                return_code=4,
+                action_required="repair_or_restore_work_bundle",
+                context=context,
+            ) from None
 
 
 def _advance(
@@ -1172,6 +1227,44 @@ def _advance(
                 manifest=recovery_manifest,
                 work_bundle=str(bundle),
             )
+            try:
+                recovered_raw = raw_conversion_module.recover_interrupted_adoption(
+                    descriptors=descriptors,
+                    manifest=recovery_manifest,
+                    private_state=_read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    ),
+                    at=operation_at,
+                    expected_generation=args.expected_generation,
+                    transport=transport,
+                )
+            except raw_conversion_module.RawConversionError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=(5 if exc.code == "generation_conflict" else 4),
+                    action_required=(
+                        "inspect_current_generation"
+                        if exc.code == "generation_conflict"
+                        else "resume_same_conversion_result"
+                    ),
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            if recovered_raw is not None:
+                recovered_manifest, _recovered_private = recovered_raw
+                outcome = (
+                    "raw_conversion_adopted"
+                    if recovered_manifest["conversion_state"] == "converted"
+                    else recovered_manifest["raw_conversion"]["reason_code"]
+                )
+                result = raw_conversion_module.result_from_manifest(
+                    recovered_manifest, work_bundle=str(bundle), outcome=outcome
+                )
+                print(
+                    f"[pdf2markdown] recovered {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
             try:
                 recovered_conversion = (
                     conversion_attempt_module.recover_interrupted_attempt(
@@ -1407,6 +1500,34 @@ def _advance(
                     context=inspected,
                 )
             manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
+            if manifest["conversion_state"] == "converted":
+                result = raw_conversion_module.result_from_manifest(
+                    manifest,
+                    work_bundle=str(bundle),
+                    outcome="converted",
+                )
+                print(
+                    f"[pdf2markdown] converted work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if manifest["conversion_state"] == "terminal_error" and isinstance(
+                manifest.get("raw_conversion"), dict
+            ) and (
+                manifest.get("conversion_attempts")
+                and manifest["conversion_attempts"][-1].get("state") == "result_ready"
+            ):
+                outcome = manifest["raw_conversion"]["reason_code"]
+                result = raw_conversion_module.result_from_manifest(
+                    manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
+                print(
+                    f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
             if manifest["conversion_state"] == "submission_unknown":
                 result = conversion_attempt_module.result_from_manifest(
                     manifest,
@@ -1421,13 +1542,36 @@ def _advance(
             if manifest["conversion_state"] == "result_downloading" and manifest.get(
                 "conversion_attempts"
             ):
-                result = conversion_attempt_module.result_from_manifest(
-                    manifest,
-                    work_bundle=str(bundle),
-                    outcome="result_ready",
+                try:
+                    updated_manifest, _updated_private = (
+                        raw_conversion_module.adopt_ready_result(
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=_read_json(
+                                "private.json", dir_fd=descriptors["state"]
+                            ),
+                            at=operation_at,
+                            transport=transport,
+                        )
+                    )
+                except raw_conversion_module.RawConversionError as exc:
+                    raise WorkflowError(
+                        exc.code,
+                        exc.message,
+                        return_code=4,
+                        action_required="resume_same_conversion_result",
+                        context=inspected,
+                    ) from None
+                outcome = (
+                    "raw_conversion_adopted"
+                    if updated_manifest["conversion_state"] == "converted"
+                    else updated_manifest["raw_conversion"]["reason_code"]
+                )
+                result = raw_conversion_module.result_from_manifest(
+                    updated_manifest, work_bundle=str(bundle), outcome=outcome
                 )
                 print(
-                    f"[pdf2markdown] result_ready for work bundle {bundle.name}",
+                    f"[pdf2markdown] {outcome} for work bundle {bundle.name}",
                     file=sys.stderr,
                 )
                 return result
@@ -1480,6 +1624,13 @@ def _advance(
                         "poll_timeout",
                         "result_pending_timeout",
                     }
+                )
+                or (
+                    manifest["conversion_state"] == "recoverable_error"
+                    and manifest["conversion_attempts"][-1]["state"]
+                    == "result_ready"
+                    and manifest.get("raw_conversion", {}).get("reason_code")
+                    == "result_url_unavailable"
                 )
             ):
                 active_attempt = manifest["conversion_attempts"][-1]
@@ -2503,6 +2654,54 @@ def _resume(
         resume_manifest = _read_json("manifest.json", dir_fd=root_descriptor)
         resume_private = _read_json("private.json", dir_fd=state_descriptor)
         try:
+            with _open_bundle_descriptors(
+                bundle, locked_descriptors=locked_descriptors
+            ) as recovery_descriptors:
+                if (
+                    resume_manifest.get("conversion_state") == "result_downloading"
+                    or "raw_conversion" in resume_manifest
+                ):
+                    _assert_frozen_source_before_recovery(
+                        descriptors=recovery_descriptors,
+                        manifest=resume_manifest,
+                        work_bundle=str(bundle),
+                    )
+                recovered_raw = raw_conversion_module.recover_interrupted_adoption(
+                    descriptors=recovery_descriptors,
+                    manifest=resume_manifest,
+                    private_state=resume_private,
+                    at=_isoformat(_moment(now)),
+                    expected_generation=args.expected_generation,
+                    transport=transport,
+                )
+        except raw_conversion_module.RawConversionError as exc:
+            raise WorkflowError(
+                exc.code,
+                exc.message,
+                return_code=(5 if exc.code == "generation_conflict" else 4),
+                action_required=(
+                    "inspect_current_generation"
+                    if exc.code == "generation_conflict"
+                    else "resume_same_conversion_result"
+                ),
+                context={"work_bundle": str(bundle)},
+            ) from None
+        if recovered_raw is not None:
+            recovered_manifest, _recovered_private = recovered_raw
+            outcome = (
+                "raw_conversion_adopted"
+                if recovered_manifest["conversion_state"] == "converted"
+                else recovered_manifest["raw_conversion"]["reason_code"]
+            )
+            result = raw_conversion_module.result_from_manifest(
+                recovered_manifest, work_bundle=str(bundle), outcome=outcome
+            )
+            print(
+                f"[pdf2markdown] recovered {outcome} for work bundle {bundle.name}",
+                file=sys.stderr,
+            )
+            return result
+        try:
             recovered_conversion = conversion_attempt_module.recover_interrupted_attempt(
                 descriptors={"root": root_descriptor, "state": state_descriptor},
                 manifest=resume_manifest,
@@ -2572,7 +2771,14 @@ def _resume(
                 file=sys.stderr,
             )
             return result
-        if "source_staging" in resume_manifest:
+        if "raw_conversion" in resume_manifest:
+            prefix_state_resolver = lambda history: raw_conversion_module.resolve_history_state(
+                history,
+                manifest_template=resume_manifest,
+                private_template=resume_private,
+            )
+            manifest_transform = raw_conversion_module.apply_settings_override_transition
+        elif "source_staging" in resume_manifest:
             prefix_state_resolver = lambda history: source_staging_module.resolve_history_state(
                 history,
                 manifest_template=resume_manifest,
@@ -2661,14 +2867,18 @@ def _resume(
                     overridden_fields=overridden_fields,
                     at=recorded_at,
                     state_validator=(
-                        source_staging_module.valid_history
+                        raw_conversion_module.valid_history
+                        if "raw_conversion" in manifest
+                        else source_staging_module.valid_history
                         if "source_staging" in manifest
                         else preflight_module.valid_preflight_history
                         if "preflight" in manifest
                         else None
                     ),
                     manifest_transform=(
-                        source_staging_module.apply_settings_override_transition
+                        raw_conversion_module.apply_settings_override_transition
+                        if "raw_conversion" in manifest
+                        else source_staging_module.apply_settings_override_transition
                         if "source_staging" in manifest
                         else None
                     ),
@@ -2681,9 +2891,16 @@ def _resume(
                     action_required="inspect_current_generation",
                     context=result,
                 ) from None
-            result["generation"] = committed_manifest["generation"]
-            result["publication_state"] = committed_manifest["publication_state"]
-            result["outcome"] = "settings_overridden"
+            if "raw_conversion" in committed_manifest:
+                result = raw_conversion_module.result_from_manifest(
+                    committed_manifest,
+                    work_bundle=str(bundle),
+                    outcome="settings_overridden",
+                )
+            else:
+                result["generation"] = committed_manifest["generation"]
+                result["publication_state"] = committed_manifest["publication_state"]
+                result["outcome"] = "settings_overridden"
             print(
                 f"[pdf2markdown] settings_overridden for work bundle {bundle.name}",
                 file=sys.stderr,

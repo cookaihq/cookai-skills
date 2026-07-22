@@ -1,4 +1,4 @@
 interface:
   display_name: "PDF to Markdown"
-  short_description: "为 PDF 创建、预检并恢复同一 Doc2X 转换任务"
-  default_prompt: "使用 $pdf2markdown 固化这个 PDF，完成逐页预检和内置临时暂存，创建一次可恢复的 Doc2X 转换尝试，并只轮询同一任务直到取得安全结果引用。"
+  short_description: "为 PDF 创建、预检并采用可恢复的原始 Markdown"
+  default_prompt: "使用 $pdf2markdown 固化这个 PDF，完成逐页预检和内置临时暂存，只恢复同一 Doc2X 转换任务，并安全校验、原子采用其原始 Markdown 与资源。"

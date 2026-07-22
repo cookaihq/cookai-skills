@@ -102,7 +102,7 @@ conversion attempt can send it at most once.
 Polling rereads the exact credential locator and fingerprint saved by create.
 It never reruns first-found-wins or searches another account. Local source
 missing, local fingerprint drift, HTTP 401, and HTTP 404 are separate
-recoverable reasons. Network errors, 429, 5xx, invalid JSON, and unknown task
+recoverable reasons. HTTP 403, network errors, 429, 5xx, invalid JSON, and unknown task
 shapes are `poll_transient`; a later command can only poll the same task.
 
 The upstream guidance recommends exponential backoff but does not prescribe a
@@ -131,3 +131,61 @@ The full staged URL and result URL exist only in `.state/private.json` with mode
 `0600`. Public state and history keep hashes and non-secret identity evidence.
 For result URLs, `observed_at` and `validity_window_hours: 24` are recorded, but
 `expires_at` stays null because the upstream validity-window start is undefined.
+
+## Local Result Adoption Contract
+
+The verified upstream contract establishes that a document result is a ZIP
+reference, but it does not define archive byte limits, member-count limits,
+compression methods, internal tree layout, main-Markdown naming, redirect
+behavior, or extraction safety. The workflow therefore treats `result_ready`
+as an intermediate state and applies a separate conservative local contract.
+Those limits and their sources are recorded in
+[`security-limits.md`](security-limits.md); they are not upstream quotas.
+
+Before the result `GET`, the workflow verifies that a random staging name, its
+sibling owner-marker name, and the final attempt name are all absent, then
+durably binds a reservation to the existing conversion attempt ID, task ID,
+result URL SHA-256, and complete limits record. It creates and fsyncs an
+exclusive `0600` marker containing the reservation hash before creating and
+fsyncing the `0700` staging directory. The next durable intent binds that
+directory's device/inode identity; only then is the marker removed and the
+parent fsynced again. Reservation-only recovery may recreate the marker only
+while both marker and staging are absent. Once staging exists, the exact marker
+must match and the directory must be empty. Unreserved, preseeded, foreign, or
+replaced paths are never adopted. The workflow reads the full URL only from
+`.state/private.json`. The GET
+uses public-address and TLS-peer pinning on every hop and carries no AIHub
+Bearer credential, Cookie, Referer, proxy credential, or browser state.
+
+Only a completely parsed and streamed ZIP becomes a candidate raw conversion.
+The workflow accepts ordinary files and directories using stored or deflated
+compression, creates all output through no-follow directory descriptors, and
+verifies CRC, declared and actual size, EOF, per-file hashes, and a tree hash
+that includes explicit and implicit directories. Unsupported types,
+non-canonical `.` or `..` components, unsafe paths, conflicting explicit or
+implicit NFC/casefold namespace entries, encryption, malformed structure, and
+resource-limit violations are saved as deterministic rejection reasons without
+creating a formal final attempt directory.
+
+The ZIP and raw tree are prepared together. The workflow fsyncs the archive,
+all files, all explicit and implicit directories, the raw root, and the attempt
+root before the prepared event. The whole attempt directory is then renamed
+once, and the attempts parent is fsynced before manifest/private commit,
+including recovery from a rename boundary. A complete local ZIP is revalidated
+and locally extracted even if the signed URL is no longer usable. Without a
+complete ZIP, result HTTP 401/403/404 closes that raw operation as recoverable;
+a later resume polls only the same task with its bound credential and stores a
+replacement URL only in private state. Prepared recovery accepts exactly one
+identity- and hash-matching staging or final path.
+
+Main Markdown selection is a local deterministic policy pending live Doc2X
+layout validation. Exactly one recursive basename matching
+`<request-filename>.md` wins. Without an exact match, the whole tree must have
+exactly one lowercase `.md` member. Ambiguous or absent candidates produce
+`unexpected_result_layout`; the verified ZIP and tree remain adopted for
+diagnosis, but no main-Markdown artifact is claimed. Confirm mode exposes a
+bound decision that must explicitly accept a new conversion charge before a
+new attempt is appended; auto mode stops. Raw operation history is append-only,
+so every earlier attempt ZIP/tree remains independently addressable. A
+successful adoption produces `conversion_state: converted`, which is an
+immutable upstream baseline rather than a completed content-semantic review.

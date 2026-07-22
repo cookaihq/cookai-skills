@@ -802,18 +802,16 @@ def test_completed_task_with_one_https_result_keeps_the_full_url_private(
     resumed_rc, resumed, _stderr = invoke(
         capsys,
         [
-            "resume",
+            "inspect",
             "--work-bundle",
             str(bundle),
-            "--expected-generation",
-            str(ready["generation"]),
         ],
         cwd=tmp_path,
         environ={**dependencies, "AIHUB_API_KEY": key},
         transport=NeverNetwork(),
     )
     assert resumed_rc == 0, json.dumps(resumed, sort_keys=True)
-    assert resumed["outcome"] == "result_ready"
+    assert resumed["outcome"] == "inspected"
     assert resumed["generation"] == ready["generation"]
 
 

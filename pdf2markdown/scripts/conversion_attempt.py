@@ -1364,6 +1364,7 @@ def _poll_transition(
             "poll_timeout",
             "result_pending_timeout",
             "unsafe_result_url",
+            "result_ready",
         }
         or not isinstance(active.get("task_id"), str)
         or not active["task_id"]
@@ -1442,6 +1443,20 @@ def _poll_transition(
             or active.get("result_pending_deadline_at") is None
             else active["result_pending_deadline_at"]
         )
+    if result.state == "result_ready":
+        if not isinstance(result.url, str):
+            raise ConversionAttemptError(
+                "invalid_state_transition", "The Doc2X result URL is missing."
+            )
+        updated_attempt["result_url_sha256"] = (
+            "sha256:" + hashlib.sha256(result.url.encode("utf-8")).hexdigest()
+        )
+        updated_attempt["result_observed_at"] = at
+        updated_attempt["result_validity_hours"] = 24
+    elif active.get("state") == "result_ready":
+        updated_attempt["result_url_sha256"] = None
+        updated_attempt["result_observed_at"] = None
+        updated_attempt["result_validity_hours"] = None
     pending_action_kind = {
         "failed": "resolve_task_failed",
         "unexpected_result_count": "resolve_unexpected_result_count",
@@ -1455,16 +1470,6 @@ def _poll_transition(
             "generation": manifest["generation"] + 1,
             "evidence_hash": object_hash(updated_attempt),
         }
-    if result.state == "result_ready":
-        if not isinstance(result.url, str):
-            raise ConversionAttemptError(
-                "invalid_state_transition", "The Doc2X result URL is missing."
-            )
-        updated_attempt["result_url_sha256"] = (
-            "sha256:" + hashlib.sha256(result.url.encode("utf-8")).hexdigest()
-        )
-        updated_attempt["result_observed_at"] = at
-        updated_attempt["result_validity_hours"] = 24
     expected_generation = manifest["generation"]
     new_generation = expected_generation + 1
     updated_manifest = deepcopy(manifest)
@@ -1560,7 +1565,12 @@ def commit_retry_decision(
 ) -> dict:
     attempts = manifest.get("conversion_attempts")
     active = attempts[-1] if isinstance(attempts, list) and attempts else None
-    pending = active.get("pending_action") if isinstance(active, dict) else None
+    attempt_pending = active.get("pending_action") if isinstance(active, dict) else None
+    raw_record = manifest.get("raw_conversion")
+    raw_pending = (
+        raw_record.get("pending_action") if isinstance(raw_record, dict) else None
+    )
+    pending = attempt_pending if isinstance(attempt_pending, dict) else raw_pending
     if (
         (
             manifest.get("conversion_state"),
@@ -1578,6 +1588,11 @@ def commit_retry_decision(
                 "terminal_error",
                 "unexpected_result_count",
                 "resolve_unexpected_result_count",
+            ),
+            (
+                "terminal_error",
+                "result_ready",
+                "resolve_unexpected_result_layout",
             ),
         }
         or manifest.get("generation") != expected_generation
@@ -1770,7 +1785,12 @@ def _retry_state_from_intent(
     placeholder = intent.get("attempt")
     attempts = manifest.get("conversion_attempts")
     active = attempts[-1] if isinstance(attempts, list) and attempts else None
-    pending = active.get("pending_action") if isinstance(active, dict) else None
+    attempt_pending = active.get("pending_action") if isinstance(active, dict) else None
+    raw_record = manifest.get("raw_conversion")
+    raw_pending = (
+        raw_record.get("pending_action") if isinstance(raw_record, dict) else None
+    )
+    pending = attempt_pending if isinstance(attempt_pending, dict) else raw_pending
     authorization = (
         placeholder.get("authorization") if isinstance(placeholder, dict) else None
     )
@@ -1850,33 +1870,20 @@ def _valid_committed_event(
     )
 
 
-def _reduce_history(
-    history: list[dict], *, private_template: dict
+def apply_committed_operations(
+    history: list[dict],
+    *,
+    manifest: dict,
+    private_state: dict,
+    private_template: dict,
 ) -> tuple[dict, dict] | None:
     try:
-        first = next(
-            (
-                index
-                for index, event in enumerate(history)
-                if isinstance(event, dict)
-                and event.get("event") == "conversion_submit_intent"
-            ),
-            None,
-        )
-        if first is None or not isinstance(private_template, dict):
-            return None
-        prefix_private = deepcopy(private_template)
-        prefix_private["result_urls"] = []
-        reduced_prefix = source_staging.resolve_history_state(
-            history[:first], manifest_template={}, private_template=prefix_private
-        )
-        if reduced_prefix is None:
-            return None
-        current_manifest, current_private = reduced_prefix
         template_results = private_template.get("result_urls")
         if not isinstance(template_results, list):
             return None
-        offset = first
+        current_manifest = deepcopy(manifest)
+        current_private = deepcopy(private_state)
+        offset = 0
         operation_ids = set()
         while offset < len(history):
             intent = history[offset]
@@ -1964,6 +1971,38 @@ def _reduce_history(
         return None
 
 
+def _reduce_history(
+    history: list[dict], *, private_template: dict
+) -> tuple[dict, dict] | None:
+    try:
+        first = next(
+            (
+                index
+                for index, event in enumerate(history)
+                if isinstance(event, dict)
+                and event.get("event") == "conversion_submit_intent"
+            ),
+            None,
+        )
+        if first is None or not isinstance(private_template, dict):
+            return None
+        prefix_private = deepcopy(private_template)
+        prefix_private["result_urls"] = []
+        reduced_prefix = source_staging.resolve_history_state(
+            history[:first], manifest_template={}, private_template=prefix_private
+        )
+        if reduced_prefix is None:
+            return None
+        return apply_committed_operations(
+            history[first:],
+            manifest=reduced_prefix[0],
+            private_state=reduced_prefix[1],
+            private_template=private_template,
+        )
+    except (KeyError, IndexError, TypeError, ValueError, ConversionAttemptError):
+        return None
+
+
 def valid_private_state(private_state: dict, manifest: dict) -> bool:
     try:
         attempts = manifest.get("conversion_attempts")
@@ -2027,13 +2066,26 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
                     return False
             else:
                 previous_pending = attempts[index - 2].get("pending_action")
+                raw_record = manifest.get("raw_conversion")
+                raw_pending = (
+                    raw_record.get("pending_action")
+                    if isinstance(raw_record, dict)
+                    and raw_record.get("attempt_id")
+                    == attempts[index - 2].get("attempt_id")
+                    else None
+                )
+                authorization_source = (
+                    previous_pending
+                    if isinstance(previous_pending, dict)
+                    else raw_pending
+                )
                 if (
                     not isinstance(authorization, dict)
-                    or not isinstance(previous_pending, dict)
+                    or not isinstance(authorization_source, dict)
                     or authorization.get("action_id")
-                    != previous_pending.get("action_id")
+                    != authorization_source.get("action_id")
                     or authorization.get("evidence_hash")
-                    != previous_pending.get("evidence_hash")
+                    != authorization_source.get("evidence_hash")
                 ):
                     return False
             task_id = attempt.get("task_id")
@@ -2151,6 +2203,13 @@ def valid_history(history: list[dict], manifest: dict, private_state: dict) -> b
         manifest,
         private_state,
     )
+
+
+def resolve_history_state(
+    history: list[dict], *, manifest_template: dict, private_template: dict
+) -> tuple[dict, dict] | None:
+    del manifest_template
+    return _reduce_history(history, private_template=private_template)
 
 
 def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> dict:

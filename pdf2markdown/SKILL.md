@@ -1,11 +1,11 @@
 ---
 name: pdf2markdown
-description: Create, preflight, stage, and submit a private, recoverable PDF-to-Markdown work bundle, then resume the same Doc2X task to one safe result reference. Use when a user asks to begin or resume a verifiable workflow from one local PDF or public HTTPS PDF URL, inspect every source page, or create and track a conversion without an external source uploader.
+description: Create, preflight, convert, and safely adopt an immutable raw Markdown work bundle from one PDF. Use when a user asks to begin or resume a verifiable PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL without an external source uploader.
 ---
 
 # PDF to Markdown
 
-Establish a durable work bundle, complete its preflight gate, use the built-in AIHub source-staging upload, and create and poll one recoverable Doc2X conversion attempt. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
+Establish a durable work bundle, complete its preflight gate, use the built-in AIHub source-staging upload, create and poll one Doc2X conversion attempt at a time, and atomically adopt each validated ZIP as an immutable raw conversion. A new paid attempt requires an explicit bound decision whenever the preceding attempt has an uncertain submission, explicit failure, result-count error, or unusable result layout. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
 
 ## Manage Settings
 
@@ -168,11 +168,29 @@ python3 scripts/workflow.py record conversion \
 
 This command appends a new `not_started` attempt and leaves every older attempt unchanged. A later `resume` sends that new attempt once. Auto mode keeps `submission_unknown` and failed tasks stopped without an action or an implicit second charge.
 
-Once submitted, each `resume` rereads only the recorded credential locator and polls only the recorded task ID at the fixed AIHub endpoint. It never searches lower-priority keys or another account. Missing and changed credential sources, poll 401, poll 404, and transient network/429/5xx/JSON failures have distinct recoverable evidence. Poll 404 and transient failures persist an exponential retry schedule starting at 8 seconds; a `resume` before `next_poll_at` performs no request. Pending and processing tasks use a persisted 720-second polling window; a completed task with no results uses a separate persisted 720-second result window. A later command may continue querying the same task after either timeout.
+Once submitted, each `resume` rereads only the recorded credential locator and polls only the recorded task ID at the fixed AIHub endpoint. It never searches lower-priority keys or another account. Missing and changed credential sources, poll 401, poll 404, and transient HTTP 403, network, 429, 5xx, or JSON failures have distinct recoverable evidence. Poll 404 and transient failures persist an exponential retry schedule starting at 8 seconds; a `resume` before `next_poll_at` performs no request. Pending and processing tasks use a persisted 720-second polling window; a completed task with no results uses a separate persisted 720-second result window. A later command may continue querying the same task after either timeout.
 
 `completed` is usable only when `results` contains exactly one distinct absolute HTTPS URL. Exact duplicate values are deduplicated. A missing or empty URL entry, malformed URL, or multiple distinct URLs stops without guessing. The complete result URL is stored only in `.state/private.json`; stdout, `manifest.json`, and history contain its SHA-256 and non-secret timing evidence. The upstream says result URLs last 24 hours but does not define the start instant, so the workflow records `expires_at: null` rather than inventing a deadline.
 
-`outcome: result_ready` with `conversion_state: result_downloading` is the Ticket 06 handoff. Repeated `inspect` or `resume` returns the same state without a network request. Do not download the URL or claim Markdown exists in this implementation.
+`outcome: result_ready` with `conversion_state: result_downloading` is an intermediate handoff. `inspect` reports that state without consuming the URL. The next `resume` durably records one raw-adoption reservation and its identity-bound intent before downloading the same private result reference.
+
+## Adopt The Raw Conversion
+
+Run `resume` with the `result_ready` generation. The result download uses the same public-HTTPS protections as source download: every redirect and all resolved addresses are validated, the connected TLS peer must match the selected public endpoint, and the body is streamed in 64 KiB chunks with fixed time and byte limits. It sends no AIHub Authorization header, Cookie, Referer, proxy credentials, browser state, or ambient authentication. The signed URL remains only in `.state/private.json`; the intent binds its SHA-256, task ID, attempt ID, unique staging identity, and all active limits before `GET`.
+
+The downloaded archive is saved as an exclusive `0600` `result.zip`. Only ordinary files and directories using ZIP stored or deflated compression are accepted. Encrypted entries, symlinks, devices, special members, absolute or escaping paths, backslashes, drive paths, NUL names, duplicates, Unicode/casefold collisions, and file/directory prefix conflicts are rejected. The workflow enforces archive, member-count, member-size, raw and canonical path/component, path-depth, total-path-component, total compressed, total uncompressed, and staging-disk limits before and while extracting. It never calls `extractall`; directories and files are created through no-follow directory descriptors with modes `0700` and `0600`, then CRC, declared size, EOF, file hashes, and the complete tree hash are verified.
+
+Before any result `GET`, the operation verifies that its random staging name, sibling owner-marker name, and final attempt name are absent, then durably records a reservation. It exclusively creates a `0600` owner marker containing the reservation hash and fsyncs it and the attempts parent before exclusively creating and fsyncing the `0700` staging directory. The identity-bound intent is made durable before the marker is removed and the parent is fsynced again. Reservation-only recovery may recreate the marker when both marker and staging are still absent; once staging exists, the exact marker must match and the directory must be empty. An unreserved orphan, foreign payload, preseeded final path, changed marker, or replaced identity is never adopted.
+
+The operation prepares both ZIP and raw-tree evidence under that reservation. It fsyncs `result.zip`, every extracted file, every explicit and implicit directory, the raw root, and the attempt root before writing the prepared record. It then renames the whole directory exactly once to `03-converted/attempts/conversion-attempt-NNNN/`, fsyncs the attempts parent again before manifest/private commit, and finally records the committed event. `converted` means this immutable raw baseline exists; it does not mean the later content-semantic review is complete.
+
+Main Markdown selection is deterministic and case-sensitive. Prefer exactly one recursive member whose basename is `<request-filename>.md`. If none matches exactly, accept only when the entire tree contains exactly one lowercase `.md` file. Zero, multiple, or multiple exact matches produce `unexpected_result_layout`: the already paid-for, safely validated ZIP and raw tree are still adopted, but no `raw_markdown` artifact is claimed. Confirm mode returns `resolve_unexpected_result_layout`; only a matching `record conversion --decision retry` may authorize a new paid attempt. Auto mode stops without an action or another charge.
+
+Recovery never creates another Doc2X task implicitly. A complete local ZIP is revalidated and locally re-extracted without network access, including when the URL is no longer usable. If no complete ZIP exists and result `GET` returns 401, 403, or 404, the failed raw operation is durably closed as `result_url_unavailable`; the next `resume` rereads the attempt's exact credential locator and polls the same task ID for a replacement result URL. The replacement URL remains private, and a new raw operation adopts it without creating a conversion attempt. Missing/changed credentials, poll 401/404, and transient refresh failures remain recoverable on the same task.
+
+A prepared operation accepts exactly one matching part or final directory; missing, duplicate, replaced, type-drifted, or hash-drifted paths are integrity failures. A crash after rename, parent fsync, private-state write, manifest write, or before the final history event only completes the same adoption. Deterministic unsafe-archive rejection is saved as `terminal_error` with its precise reason and is not replayed by later `inspect` or `resume`. Every conversion attempt and every result-URL refresh has an append-only raw operation record; earlier ZIPs and trees remain at their attempt paths when a later explicitly authorized attempt succeeds.
+
+Read [references/security-limits.md](references/security-limits.md) for the fixed local limits and [references/api-guide.md](references/api-guide.md) for the boundary between verified upstream facts and local conservative policy.
 
 ## Inspect Saved State
 
@@ -207,7 +225,7 @@ Handle `generation_conflict` by inspecting again before retrying. Handle `bundle
 
 ## Interpret Results
 
-- Exit `0`: the command completed; inspect `outcome`, `conversion_state`, `conversion_attempt_state`, `action_required`, and `errors` to distinguish creation, preflight, source staging, submission, polling, recoverable stops, and result readiness.
+- Exit `0`: the command completed; inspect `outcome`, `conversion_state`, `conversion_attempt_state`, `raw_conversion_state`, `action_required`, and `errors` to distinguish creation, preflight, source staging, submission, polling, result readiness, raw adoption, layout failure, and durable rejection.
 - Exit `2`: correct the command arguments.
 - Exit `3`: provide a parseable local PDF or an unauthenticated public HTTPS PDF that satisfies the source safety contract.
 - Exit `4`: stop and repair or restore the work bundle; do not bypass integrity or schema failures.
@@ -218,4 +236,4 @@ Expect exactly one versioned JSON object on stdout for every supported command a
 
 ## Scope Boundary
 
-Use these commands to manage settings, freeze the source PDF, generate the page baseline, complete the preflight gate, temporarily stage the frozen source, create one-at-a-time Doc2X conversion attempts, and resume the same task to one safe result reference. Do not claim that Markdown was generated. This implementation does not yet download or extract the result ZIP, adopt an original conversion, perform content review, create publication plans, or publish images. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
+Use these commands to manage settings, freeze the source PDF, generate the page baseline, complete the preflight gate, temporarily stage the frozen source, create one-at-a-time Doc2X conversion attempts, and atomically adopt an immutable raw conversion for each attempt that returns a usable ZIP. Do not claim content-semantic fidelity or a reviewed local final Markdown yet. This implementation does not yet perform content review, create a corrected Markdown, select a reviewed local final pointer, create publication plans, or publish images. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
