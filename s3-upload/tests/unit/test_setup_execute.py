@@ -923,7 +923,8 @@ class IssuanceFailureAdapter(IssuanceAdapter):
                 **delivery,
                 "session_token": "forbidden-session-token",
             })
-        credential_sink.deliver(delivery)
+        if self.behavior != "accepted-without-delivery":
+            credential_sink.deliver(delivery)
         if self.behavior == "duplicate":
             credential_sink.deliver(delivery)
         if self.behavior == "unknown":
@@ -955,6 +956,7 @@ class IssuanceFailureAdapter(IssuanceAdapter):
     [
         ("definite", "partial", "definite_failure"),
         ("unknown", "unknown", "unknown"),
+        ("accepted-without-delivery", "unknown", "unknown"),
         ("sts", "unknown", "unknown"),
         ("duplicate", "unknown", "unknown"),
         ("reflected-resource", "unknown", "unknown"),

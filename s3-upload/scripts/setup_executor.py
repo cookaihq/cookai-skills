@@ -362,9 +362,10 @@ def _execute_credential_issuance(
                     outcome = {**outcome, "status": "unknown"}
                 if outcome["status"] != "accepted" or not sink.delivered:
                     row_status = (
-                        "unknown"
-                        if outcome["status"] == "unknown" or sink.delivered
-                        else "definite_failure"
+                        "definite_failure"
+                        if outcome["status"] == "definite_failure"
+                        and not sink.delivered
+                        else "unknown"
                     )
                     current = {
                         "action_id": action["action_id"],

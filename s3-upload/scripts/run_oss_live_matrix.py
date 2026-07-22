@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stderr, redirect_stdout
 from importlib import metadata
+import io
 import json
 import os
 import platform
@@ -22,6 +24,7 @@ from live_adapter import S3EvidenceAdapter
 from provider_candidates import aliyun_oss_candidate, build_candidate_registry
 from safe_io import FileSecurityError, read_regular_file
 from s3 import http_request
+from upload import main as upload_main
 from v2_schema import parse_credential
 
 
@@ -223,6 +226,111 @@ def load_oss_fixture(project_root: str) -> Dict[str, str]:
     return selected
 
 
+def verify_custom_disguise_rejected(fixture: Dict[str, str]) -> Dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="s3-upload-custom-disguise-") as directory:
+        root = Path(directory).resolve()
+        target_dir = root / ".s3-upload" / "targets"
+        target_dir.mkdir(parents=True)
+        target = {
+            "schema_version": 1,
+            "credential": "project:oss-live-key",
+            "provider": "custom",
+            "region": fixture["S3_UPLOAD_REGION"],
+            "endpoint": fixture["S3_UPLOAD_ENDPOINT"],
+            "addressing": fixture["S3_UPLOAD_ADDRESSING"],
+            "bucket": fixture["S3_UPLOAD_BUCKET"],
+            "prefix": "s3-upload-live-test/custom-disguise/",
+            "access": {
+                "mode": "private",
+                "public_base_url": None,
+                "presign_expires_seconds": 300,
+            },
+            "retention": {"mode": "retain", "days": None},
+            "collision": "replace",
+            "object_headers": {
+                "cache_control": None,
+                "content_disposition": None,
+            },
+            "limits": {
+                "soft_max_bytes": 1048576,
+                "multipart_threshold_bytes": None,
+                "part_size_bytes": None,
+            },
+            "retry": {"part_max_attempts": 3, "collision_max_attempts": 3},
+            "setup": {
+                "exclusive_prefix": True,
+                "integration_test": False,
+                "cors": None,
+            },
+        }
+        (target_dir / "custom-disguise.json").write_text(
+            json.dumps(target, separators=(",", ":")), encoding="utf-8",
+        )
+        source = root / "guard.txt"
+        source.write_bytes(b"custom disguise guard\n")
+        credential_map = {
+            "oss-live-key": {
+                "access_key_id": fixture["S3_UPLOAD_ACCESS_KEY_ID"],
+                "secret_access_key": fixture["S3_UPLOAD_SECRET_ACCESS_KEY"],
+                "session_token": "",
+                "expires_at": None,
+            }
+        }
+        transport_calls = []
+
+        def fail_transport(*args):
+            transport_calls.append(args)
+            raise AssertionError("custom disguise guard must not use transport")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = upload_main(
+                [
+                    "upload", "--file", str(source),
+                    "--target", "project:custom-disguise", "--dry-run", "--json",
+                ],
+                environ={
+                    "S3_UPLOAD_PROJECT_CREDENTIALS_JSON": json.dumps(
+                        credential_map, separators=(",", ":"),
+                    ),
+                },
+                cwd=str(root),
+                config_home=str(root / "home"),
+                transport=fail_transport,
+            )
+        try:
+            result = json.loads(stdout.getvalue())
+            plan = result["plan"]
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise LiveFixtureError("custom disguise guard returned invalid output") from exc
+        protected = (
+            fixture["S3_UPLOAD_ACCESS_KEY_ID"],
+            fixture["S3_UPLOAD_SECRET_ACCESS_KEY"],
+        )
+        if any(value in stdout.getvalue() or value in stderr.getvalue() for value in protected):
+            raise LiveFixtureError("custom disguise guard reflected a credential")
+        checkpoints = root / ".s3-upload" / "checkpoints"
+        if (
+            exit_code != 2
+            or result.get("status") != "dry_run"
+            or plan.get("provider") != "custom"
+            or plan.get("endpoint") != fixture["S3_UPLOAD_ENDPOINT"]
+            or plan.get("executable") is not False
+            or "capability_disabled" not in plan.get("blocking_reasons", [])
+            or transport_calls
+            or (checkpoints.exists() and any(checkpoints.iterdir()))
+        ):
+            raise LiveFixtureError("custom disguise guard did not fail closed")
+    return {
+        "status": "passed",
+        "provider": "custom",
+        "exact_endpoint": fixture["S3_UPLOAD_ENDPOINT"],
+        "blocking_reason": "capability_disabled",
+        "request_count": 0,
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(
         description="Run the maintainer-only bounded OSS data-plane evidence matrix"
@@ -232,7 +340,10 @@ def parser() -> argparse.ArgumentParser:
     return value
 
 
-def main(argv=None, *, transport=http_request, unit_test_runner=None) -> int:
+def main(
+    argv=None, *, transport=http_request, unit_test_runner=None,
+    custom_guard_runner=None,
+) -> int:
     args = parser().parse_args(argv)
     try:
         unit_tests = (unit_test_runner or run_unit_tests)()
@@ -240,6 +351,9 @@ def main(argv=None, *, transport=http_request, unit_test_runner=None) -> int:
             print("[s3-upload] unit_test_error", file=sys.stderr)
             return 1
         fixture = load_oss_fixture(args.project_root)
+        custom_disguise_guard = (
+            custom_guard_runner or verify_custom_disguise_rejected
+        )(fixture)
         candidate = aliyun_oss_candidate(
             region=fixture["S3_UPLOAD_REGION"],
             bucket=fixture["S3_UPLOAD_BUCKET"],
@@ -310,6 +424,7 @@ def main(argv=None, *, transport=http_request, unit_test_runner=None) -> int:
             "core_object_loop_passed": core_ok,
             "cleanup_passed": cleanup_ok,
             "residual_count": len(result.report["residuals"]),
+            "custom_disguise_guard": custom_disguise_guard,
             "evidence_id": result.report["evidence_id"],
             "evidence_dir": result.evidence_dir,
         }

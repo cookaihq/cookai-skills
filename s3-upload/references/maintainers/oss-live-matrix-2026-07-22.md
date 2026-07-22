@@ -8,6 +8,7 @@ This is an account-specific maintainer evidence summary, not a normal-mode prese
 - Credential file was an owned single-link `0600` regular file, untracked and effectively Git-ignored.
 - Every resource key used a unique `s3-upload-live-test/<uuid>/` prefix.
 - Authorized data-plane operations only: Put, HEAD, Authorization-header GET, presigned GET, current-key Delete/observer, multipart create/part/list/complete/abort/session observer, reserved metadata, response parsing and reconciliation.
+- Before any live request, the same exact endpoint was resolved as `provider=custom` in a normal public CLI dry-run; the command returned `capability_disabled` with zero transport calls and zero checkpoints.
 - Public unsigned GET, conditional write, version Delete, temporary credentials and every control-plane action were not authorized or not tested.
 - No IAM policy document was available. Credential privilege verdict is `unknown`, never least-privilege-confirmed.
 
@@ -25,7 +26,7 @@ The candidate golden now freezes that dual-header profile. This was not an autom
 
 ## Final bounded run
 
-Post-audit verification used evidence id `aliyun-oss-c5b5edf48c6243e6aabce356403a0327` against the exact endpoint `https://s3.oss-cn-beijing.aliyuncs.com`. The restricted report remains Git-ignored.
+Post-audit verification used evidence id `aliyun-oss-949a36ade2ce43c38038d5ca3bdbba9f` against the exact endpoint `https://s3.oss-cn-beijing.aliyuncs.com`. The restricted report remains Git-ignored.
 
 The final run passed all authorized rows:
 

@@ -1,8 +1,11 @@
 from pathlib import Path
 import subprocess
 
+import run_oss_live_matrix as runner
 from evidence import UnitTestResult
-from run_oss_live_matrix import main, run_unit_tests
+from run_oss_live_matrix import (
+    main, run_unit_tests, verify_custom_disguise_rejected,
+)
 
 
 def failed_unit_tests():
@@ -18,6 +21,71 @@ def failed_unit_tests():
         python_version="3.12.4",
         pytest_version="8.4.1",
     )
+
+
+def passed_unit_tests():
+    return UnitTestResult(
+        command=("python3", "-m", "pytest", "s3-upload/tests/unit"),
+        output=b"all unit tests passed\n",
+        returncode=0,
+        total=1,
+        passed=1,
+        failed=0,
+        errors=0,
+        skipped=0,
+        python_version="3.12.4",
+        pytest_version="8.4.1",
+    )
+
+
+def oss_fixture():
+    return {
+        "S3_UPLOAD_PROVIDER": "custom",
+        "S3_UPLOAD_ACCESS_KEY_ID": "OSSACCESS1234",
+        "S3_UPLOAD_SECRET_ACCESS_KEY": "oss-secret-value",
+        "S3_UPLOAD_SESSION_TOKEN": "",
+        "S3_UPLOAD_BUCKET": "candidate-bucket",
+        "S3_UPLOAD_REGION": "cn-beijing",
+        "S3_UPLOAD_ENDPOINT": "https://s3.oss-cn-beijing.aliyuncs.com",
+        "S3_UPLOAD_ADDRESSING": "virtual",
+    }
+
+
+def test_exact_mainland_endpoint_is_rejected_as_custom_normal_command():
+    result = verify_custom_disguise_rejected(oss_fixture())
+
+    assert result == {
+        "status": "passed",
+        "provider": "custom",
+        "exact_endpoint": "https://s3.oss-cn-beijing.aliyuncs.com",
+        "blocking_reason": "capability_disabled",
+        "request_count": 0,
+    }
+
+
+def test_custom_disguise_gate_runs_before_any_live_matrix_request(
+    tmp_path, monkeypatch, capsys,
+):
+    fixture = oss_fixture()
+    gate_calls = []
+    transport_calls = []
+    monkeypatch.setattr(runner, "load_oss_fixture", lambda _root: fixture)
+
+    def stop_after_gate(value):
+        gate_calls.append(value)
+        raise runner.LiveFixtureError("stop after custom guard")
+
+    exit_code = main(
+        ["--project-root", str(tmp_path)],
+        transport=lambda *args: transport_calls.append(args),
+        unit_test_runner=passed_unit_tests,
+        custom_guard_runner=stop_after_gate,
+    )
+
+    assert exit_code == 1
+    assert gate_calls == [fixture]
+    assert transport_calls == []
+    assert "live_test_error" in capsys.readouterr().err
 
 
 def test_unit_failure_stops_before_fixture_or_live_transport(tmp_path, capsys):
