@@ -9,12 +9,12 @@ import re
 import shutil
 import stat
 import struct
-import subprocess
 import uuid
 from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 import bundle
+import markdown_structure
 
 
 SCHEMA_VERSION = 1
@@ -71,7 +71,6 @@ RESOURCE_LIMITS = {
     "preflight_result_fixed_overhead_bytes": PREFLIGHT_RESULT_FIXED_OVERHEAD_BYTES,
     "png_container_overhead_bytes": PNG_CONTAINER_OVERHEAD_BYTES,
 }
-
 
 class PreflightError(ValueError):
     def __init__(self, code: str, message: str, *, context=None):
@@ -441,46 +440,24 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
             }
         )
 
-    pandoc_path = shutil.which("pandoc", path=environ.get("PATH"))
+    pandoc_path = shutil.which("pandoc", path=environ.get("PATH", os.defpath))
     pandoc_version = None
+    pandoc_identity = None
     pandoc_available = False
     pandoc_reason = "not_installed" if pandoc_path is None else "incompatible_api"
     if pandoc_path is not None:
         try:
-            completed = subprocess.run(
-                [pandoc_path, "--version"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
-                timeout=5,
-                text=True,
+            inspection = markdown_structure.inspect_pandoc(
+                pandoc_path, environ=environ
             )
-            first_line = completed.stdout.splitlines()[0].strip() if completed.stdout else ""
-            if completed.returncode == 0 and first_line:
-                pandoc_version = first_line
-                probe = subprocess.run(
-                    [pandoc_path, "--from=gfm", "--to=json"],
-                    input="",
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=5,
-                    text=True,
-                )
-                try:
-                    probe_document = json.loads(probe.stdout)
-                except (TypeError, ValueError):
-                    probe_document = None
-                if (
-                    probe.returncode == 0
-                    and isinstance(probe_document, dict)
-                    and isinstance(probe_document.get("blocks"), list)
-                ):
-                    pandoc_available = True
-                    pandoc_reason = None
-        except (OSError, subprocess.SubprocessError):
+        except markdown_structure.MarkdownStructureError:
             pandoc_available = False
+        else:
+            pandoc_path = inspection["executable"]
+            pandoc_version = inspection["version"]
+            pandoc_identity = inspection["executable_identity"]
+            pandoc_available = True
+            pandoc_reason = None
     if not pandoc_available:
         missing.append("pandoc")
     dependencies.append(
@@ -489,6 +466,7 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
             "available": pandoc_available,
             "version": pandoc_version,
             "executable": pandoc_path,
+            "executable_identity": pandoc_identity,
             "reason": pandoc_reason,
             "purpose": "GFM parsing and normalization",
         }

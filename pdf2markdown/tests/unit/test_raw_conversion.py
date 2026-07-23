@@ -280,19 +280,25 @@ def install_preflight_dependencies(tmp_path, monkeypatch):
     return {"PATH": str(bin_dir)}
 
 
-def ready_result_bundle(tmp_path, capsys, monkeypatch):
+def ready_result_bundle(
+    tmp_path, capsys, monkeypatch, *, page_count=1, interaction_mode="confirm"
+):
     source = tmp_path / "input.pdf"
     document = fitz.open()
-    page = document.new_page(width=72, height=72)
-    page.insert_text((8, 18), "Raw conversion")
+    for page_number in range(1, page_count + 1):
+        page = document.new_page(width=72, height=72)
+        page.insert_text((8, 18), f"Raw conversion page {page_number}")
     document.save(source)
     document.close()
     dependencies = install_preflight_dependencies(tmp_path, monkeypatch)
     key = "test-aihub-key-123456"
 
+    start_argv = ["start", "--source", str(source)]
+    if interaction_mode != "confirm":
+        start_argv.extend(["--interaction-mode", interaction_mode])
     rc, started, _stderr = invoke(
         capsys,
-        ["start", "--source", str(source)],
+        start_argv,
         cwd=tmp_path,
         environ=dependencies,
         transport=NeverNetwork(),
@@ -323,11 +329,12 @@ def ready_result_bundle(tmp_path, capsys, monkeypatch):
                 "summary": "pass",
                 "pages": [
                     {
-                        "page_number": 1,
+                        "page_number": page_number,
                         "classification": "content",
                         "risk_codes": [],
-                        "evidence": ["The page is readable."],
+                        "evidence": [f"Page {page_number} is readable."],
                     }
+                    for page_number in range(1, page_count + 1)
                 ],
             }
         )

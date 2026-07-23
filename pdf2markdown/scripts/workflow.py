@@ -24,6 +24,7 @@ import doc2x as doc2x_module
 import pdf_source
 import preflight as preflight_module
 import raw_conversion as raw_conversion_module
+import review as review_module
 import settings as settings_module
 import source_staging as source_staging_module
 
@@ -42,6 +43,8 @@ SUPPORTED_CONVERSION_STATES = frozenset(
         "submitted",
         "result_downloading",
         "converted",
+        "review_pending",
+        "local_complete",
         "submission_unknown",
         "awaiting_user",
         "recoverable_error",
@@ -145,6 +148,14 @@ def _parser() -> argparse.ArgumentParser:
     record_conversion.add_argument("--evidence-hash", required=True)
     record_conversion.add_argument("--decision", choices=("retry",), required=True)
     record_conversion.add_argument("--basis", required=True)
+    record_review = record_commands.add_parser("review", add_help=False)
+    record_review.add_argument(
+        "--work-bundle", "--bundle", dest="work_bundle", required=True
+    )
+    record_review.add_argument("--expected-generation", required=True, type=int)
+    record_review.add_argument("--action-id", required=True)
+    record_review.add_argument("--evidence-hash", required=True)
+    record_review.add_argument("--input", required=True)
     resume = subcommands.add_parser("resume", add_help=False)
     resume.add_argument("--work-bundle", "--bundle", dest="work_bundle", required=True)
     resume.add_argument("--expected-generation", required=True, type=int)
@@ -877,10 +888,24 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
                     "raw_conversions",
                 }
             ),
+            frozenset(
+                {
+                    *required,
+                    "preflight",
+                    "source_staging",
+                    "raw_conversion",
+                    "raw_conversions",
+                    "review",
+                }
+            ),
         }
         or type(manifest.get("generation")) is not int
         or manifest["generation"] < 1
         or manifest.get("conversion_state") not in SUPPORTED_CONVERSION_STATES
+        or (
+            manifest.get("conversion_state") in {"review_pending", "local_complete"}
+            and "review" not in manifest
+        )
         or manifest.get("publication_state") not in SUPPORTED_PUBLICATION_STATES
         or not isinstance(source, dict)
         or set(source)
@@ -894,7 +919,14 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         or type(source.get("size_bytes")) is not int
         or source["size_bytes"] < 0
         or not isinstance(manifest.get("conversion_attempts"), list)
-        or manifest.get("final_markdown") is not None
+        or (
+            "review" not in manifest
+            and manifest.get("final_markdown") is not None
+        )
+        or (
+            "review" in manifest
+            and not review_module.valid_manifest(manifest)
+        )
         or not isinstance(manifest.get("artifacts"), dict)
         or manifest["artifacts"].get("source_pdf") != "01-source/source.pdf"
     ):
@@ -943,6 +975,7 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     has_source_staging = "source_staging" in manifest
     has_conversion_attempt = bool(manifest.get("conversion_attempts"))
     has_raw_conversion = "raw_conversion" in manifest
+    has_review = "review" in manifest
     if (
         type(private_state.get("schema_version")) is not int
         or private_state["schema_version"] != SCHEMA_VERSION
@@ -987,7 +1020,9 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             context=state_context,
         )
     valid_history = (
-        raw_conversion_module.valid_history(history, manifest, private_state)
+        review_module.valid_history(history, manifest, private_state)
+        if has_review
+        else raw_conversion_module.valid_history(history, manifest, private_state)
         if has_raw_conversion
         else conversion_attempt_module.valid_history(history, manifest, private_state)
         if has_conversion_attempt
@@ -1054,8 +1089,25 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
                 action_required="repair_or_restore_work_bundle",
                 context=state_context,
             ) from None
+    if has_review:
+        try:
+            review_module.validate_committed_artifacts(
+                descriptors=descriptors, manifest=manifest
+            )
+        except review_module.ReviewError as exc:
+            raise WorkflowError(
+                exc.code,
+                exc.message,
+                return_code=4,
+                action_required="repair_or_restore_work_bundle",
+                context=state_context,
+            ) from None
     _assert_bundle_descriptors_current(bundle, descriptors)
     print(f"[pdf2markdown] inspected work bundle {bundle.name}", file=sys.stderr)
+    if has_review:
+        return review_module.result_from_manifest(
+            manifest, work_bundle=str(bundle), outcome="inspected"
+        )
     if has_raw_conversion:
         return raw_conversion_module.result_from_manifest(
             manifest, work_bundle=str(bundle), outcome="inspected"
@@ -1262,6 +1314,49 @@ def _advance(
                 )
                 print(
                     f"[pdf2markdown] recovered {outcome} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            try:
+                recovered_review = review_module.recover_pending_operation(
+                    descriptors=descriptors,
+                    manifest=recovery_manifest,
+                    private_state=_read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    ),
+                    expected_generation=args.expected_generation,
+                    at=operation_at,
+                )
+            except (bundle_module.BundleStateError, review_module.ReviewError) as exc:
+                code = getattr(exc, "code", "integrity_violation")
+                raise WorkflowError(
+                    code,
+                    "A pending review operation cannot be recovered safely.",
+                    return_code=(5 if code == "generation_conflict" else 4),
+                    action_required=(
+                        "inspect_current_generation"
+                        if code == "generation_conflict"
+                        else "repair_or_restore_work_bundle"
+                    ),
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            if recovered_review is not None:
+                recovered_manifest = recovered_review["manifest"]
+                result = review_module.result_from_manifest(
+                    recovered_manifest,
+                    work_bundle=str(bundle),
+                    outcome=recovered_manifest["review"]["status"],
+                )
+                if isinstance(recovered_review.get("intent"), dict):
+                    raise WorkflowError(
+                        "recovered_request_mismatch",
+                        "A pending review record was recovered; the advance request was not applied.",
+                        return_code=5,
+                        action_required="inspect_current_generation",
+                        context=result,
+                    )
+                print(
+                    f"[pdf2markdown] recovered {result['outcome']} for work bundle {bundle.name}",
                     file=sys.stderr,
                 )
                 return result
@@ -1500,14 +1595,79 @@ def _advance(
                     context=inspected,
                 )
             manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
-            if manifest["conversion_state"] == "converted":
-                result = raw_conversion_module.result_from_manifest(
+            review_can_open = manifest["conversion_state"] == "converted" or (
+                manifest["conversion_state"] == "awaiting_user"
+                and manifest.get("review", {}).get("status") == "review_incomplete"
+            )
+            if review_can_open:
+                if args.visual_capability is None:
+                    result = (
+                        review_module.result_from_manifest(
+                            manifest,
+                            work_bundle=str(bundle),
+                            outcome=manifest["review"]["status"],
+                        )
+                        if "review" in manifest
+                        else raw_conversion_module.result_from_manifest(
+                            manifest,
+                            work_bundle=str(bundle),
+                            outcome="converted",
+                        )
+                    )
+                    print(
+                        f"[pdf2markdown] {result['outcome']} work bundle {bundle.name}",
+                        file=sys.stderr,
+                    )
+                    return result
+                try:
+                    manifest = review_module.open_review(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=_read_json(
+                            "private.json", dir_fd=descriptors["state"]
+                        ),
+                        environ=environ,
+                        visual_capability=args.visual_capability,
+                        expected_generation=args.expected_generation,
+                        at=operation_at,
+                    )
+                except (
+                    raw_conversion_module.RawConversionError,
+                    review_module.ReviewError,
+                ) as exc:
+                    raise WorkflowError(
+                        exc.code,
+                        exc.message,
+                        return_code=(
+                            5 if exc.code == "generation_conflict" else 4
+                        ),
+                        action_required=(
+                            "inspect_current_generation"
+                            if exc.code == "generation_conflict"
+                            else "restore_review_dependencies"
+                            if exc.code in {"dependency_missing", "dependency_changed"}
+                            else "repair_or_restore_work_bundle"
+                        ),
+                        context=inspected,
+                    ) from None
+                result = review_module.result_from_manifest(
                     manifest,
                     work_bundle=str(bundle),
-                    outcome="converted",
+                    outcome="review_pending",
                 )
                 print(
-                    f"[pdf2markdown] converted work bundle {bundle.name}",
+                    f"[pdf2markdown] review_pending for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            if manifest["conversion_state"] in {"review_pending", "local_complete"}:
+                result = review_module.result_from_manifest(
+                    manifest,
+                    work_bundle=str(bundle),
+                    outcome=manifest["conversion_state"],
+                )
+                print(
+                    f"[pdf2markdown] {manifest['conversion_state']} for work bundle {bundle.name}",
                     file=sys.stderr,
                 )
                 return result
@@ -2231,6 +2391,66 @@ def _record(args, *, cwd: Path, now) -> dict:
                 work_bundle=str(bundle),
             )
             try:
+                recovered_review = review_module.recover_pending_operation(
+                    descriptors=descriptors,
+                    manifest=recovery_manifest,
+                    private_state=_read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    ),
+                    expected_generation=args.expected_generation,
+                    at=_isoformat(_moment(now)),
+                )
+            except (bundle_module.BundleStateError, review_module.ReviewError) as exc:
+                code = getattr(exc, "code", "integrity_violation")
+                raise WorkflowError(
+                    code,
+                    "A pending review operation cannot be recovered safely.",
+                    return_code=(5 if code == "generation_conflict" else 4),
+                    action_required=(
+                        "inspect_current_generation"
+                        if code == "generation_conflict"
+                        else "repair_or_restore_work_bundle"
+                    ),
+                    context={"work_bundle": str(bundle)},
+                ) from None
+            if recovered_review is not None:
+                recovered_manifest = recovered_review["manifest"]
+                result = review_module.result_from_manifest(
+                    recovered_manifest,
+                    work_bundle=str(bundle),
+                    outcome=recovered_manifest["review"]["status"],
+                )
+                intent = recovered_review.get("intent")
+                if isinstance(intent, dict):
+                    try:
+                        replay_payload = (
+                            review_module.load_record_input(
+                                Path(args.input), cwd=cwd
+                            )
+                            if args.record_command == "review"
+                            else None
+                        )
+                    except review_module.ReviewError:
+                        replay_payload = None
+                    if not (
+                        args.record_command == "review"
+                        and args.action_id == intent.get("action_id")
+                        and args.evidence_hash == intent.get("evidence_hash")
+                        and replay_payload == intent.get("payload")
+                    ):
+                        raise WorkflowError(
+                            "recovered_request_mismatch",
+                            "A different review operation was recovered; this request was not applied.",
+                            return_code=5,
+                            action_required="inspect_current_generation",
+                            context=result,
+                        )
+                print(
+                    f"[pdf2markdown] recovered {result['outcome']} for work bundle {bundle.name}",
+                    file=sys.stderr,
+                )
+                return result
+            try:
                 recovered_conversion = (
                     conversion_attempt_module.recover_interrupted_attempt(
                         descriptors=descriptors,
@@ -2399,7 +2619,21 @@ def _record(args, *, cwd: Path, now) -> dict:
                 private_state = _read_json(
                     "private.json", dir_fd=descriptors["state"]
                 )
-                if args.record_command == "conversion":
+                if args.record_command == "review":
+                    payload = review_module.load_record_input(
+                        Path(args.input), cwd=cwd
+                    )
+                    updated_manifest = review_module.commit_review_record(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=private_state,
+                        payload=payload,
+                        expected_generation=args.expected_generation,
+                        action_id=args.action_id,
+                        evidence_hash=args.evidence_hash,
+                        at=_isoformat(_moment(now)),
+                    )
+                elif args.record_command == "conversion":
                     updated_manifest = (
                         conversion_attempt_module.commit_retry_decision(
                             descriptors=descriptors,
@@ -2485,8 +2719,36 @@ def _record(args, *, cwd: Path, now) -> dict:
                     ),
                     context=inspected,
                 ) from None
+            except review_module.ReviewError as exc:
+                action_conflicts = {
+                    "generation_conflict",
+                    "review_action_mismatch",
+                    "evidence_hash_mismatch",
+                    "action_already_consumed",
+                }
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=(
+                        4
+                        if exc.code == "integrity_violation"
+                        else 5
+                        if exc.code in action_conflicts
+                        else 2
+                    ),
+                    action_required=(
+                        "repair_or_restore_work_bundle"
+                        if exc.code == "integrity_violation"
+                        else "inspect_current_generation"
+                        if exc.code in action_conflicts
+                        else "correct_review_record"
+                    ),
+                    context=inspected,
+                ) from None
             _assert_bundle_descriptors_current(bundle, descriptors)
-            if args.record_command == "conversion":
+            if args.record_command == "review":
+                outcome = updated_manifest["review"]["status"]
+            elif args.record_command == "conversion":
                 outcome = "conversion_retry_authorized"
             elif args.record_command == "source-staging":
                 outcome = (
@@ -2514,7 +2776,13 @@ def _record(args, *, cwd: Path, now) -> dict:
             else:
                 outcome = "preflight_recorded"
             result = (
-                conversion_attempt_module.result_from_manifest(
+                review_module.result_from_manifest(
+                    updated_manifest,
+                    work_bundle=str(bundle),
+                    outcome=outcome,
+                )
+                if "review" in updated_manifest
+                else conversion_attempt_module.result_from_manifest(
                     updated_manifest,
                     work_bundle=str(bundle),
                     outcome=outcome,
@@ -2656,6 +2924,48 @@ def _resume(
         try:
             with _open_bundle_descriptors(
                 bundle, locked_descriptors=locked_descriptors
+            ) as review_descriptors:
+                if "raw_conversion" in resume_manifest:
+                    _assert_frozen_source_before_recovery(
+                        descriptors=review_descriptors,
+                        manifest=resume_manifest,
+                        work_bundle=str(bundle),
+                    )
+                recovered_review = review_module.recover_pending_operation(
+                    descriptors=review_descriptors,
+                    manifest=resume_manifest,
+                    private_state=resume_private,
+                    expected_generation=args.expected_generation,
+                    at=_isoformat(_moment(now)),
+                )
+        except (bundle_module.BundleStateError, review_module.ReviewError) as exc:
+            code = getattr(exc, "code", "integrity_violation")
+            raise WorkflowError(
+                code,
+                "A pending review operation cannot be recovered safely.",
+                return_code=(5 if code == "generation_conflict" else 4),
+                action_required=(
+                    "inspect_current_generation"
+                    if code == "generation_conflict"
+                    else "repair_or_restore_work_bundle"
+                ),
+                context={"work_bundle": str(bundle)},
+            ) from None
+        if recovered_review is not None:
+            recovered_manifest = recovered_review["manifest"]
+            result = review_module.result_from_manifest(
+                recovered_manifest,
+                work_bundle=str(bundle),
+                outcome=recovered_manifest["review"]["status"],
+            )
+            print(
+                f"[pdf2markdown] recovered {result['outcome']} for work bundle {bundle.name}",
+                file=sys.stderr,
+            )
+            return result
+        try:
+            with _open_bundle_descriptors(
+                bundle, locked_descriptors=locked_descriptors
             ) as recovery_descriptors:
                 if (
                     resume_manifest.get("conversion_state") == "result_downloading"
@@ -2771,7 +3081,14 @@ def _resume(
                 file=sys.stderr,
             )
             return result
-        if "raw_conversion" in resume_manifest:
+        if "review" in resume_manifest:
+            prefix_state_resolver = lambda history: review_module.resolve_history_state(
+                history,
+                manifest_template=resume_manifest,
+                private_template=resume_private,
+            )
+            manifest_transform = review_module.apply_settings_override_transition
+        elif "raw_conversion" in resume_manifest:
             prefix_state_resolver = lambda history: raw_conversion_module.resolve_history_state(
                 history,
                 manifest_template=resume_manifest,
@@ -2867,7 +3184,9 @@ def _resume(
                     overridden_fields=overridden_fields,
                     at=recorded_at,
                     state_validator=(
-                        raw_conversion_module.valid_history
+                        review_module.valid_history
+                        if "review" in manifest
+                        else raw_conversion_module.valid_history
                         if "raw_conversion" in manifest
                         else source_staging_module.valid_history
                         if "source_staging" in manifest
@@ -2876,7 +3195,9 @@ def _resume(
                         else None
                     ),
                     manifest_transform=(
-                        raw_conversion_module.apply_settings_override_transition
+                        review_module.apply_settings_override_transition
+                        if "review" in manifest
+                        else raw_conversion_module.apply_settings_override_transition
                         if "raw_conversion" in manifest
                         else source_staging_module.apply_settings_override_transition
                         if "source_staging" in manifest
@@ -2891,7 +3212,13 @@ def _resume(
                     action_required="inspect_current_generation",
                     context=result,
                 ) from None
-            if "raw_conversion" in committed_manifest:
+            if "review" in committed_manifest:
+                result = review_module.result_from_manifest(
+                    committed_manifest,
+                    work_bundle=str(bundle),
+                    outcome="settings_overridden",
+                )
+            elif "raw_conversion" in committed_manifest:
                 result = raw_conversion_module.result_from_manifest(
                     committed_manifest,
                     work_bundle=str(bundle),
@@ -2909,6 +3236,11 @@ def _resume(
         if (
             result["conversion_state"] == "ready_to_submit"
             or result.get("source_upload_state") is not None
+            or (
+                result["conversion_state"] == "awaiting_user"
+                and result.get("review_status") == "review_incomplete"
+                and args.visual_capability == "available"
+            )
         ):
             advance_after_unlock = True
         else:
