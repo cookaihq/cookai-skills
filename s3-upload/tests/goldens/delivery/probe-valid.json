@@ -1,0 +1,1 @@
+{"artifact_type":"s3-upload.probe","caller":"pdf2markdown","cwd":"/tmp/project","executable":"/usr/bin/python3","readiness":"ready","schema_version":1,"state_root":"/tmp/project/.s3-upload"}
