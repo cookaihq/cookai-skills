@@ -3,8 +3,11 @@ import pytest
 from action_registry import (
     ACTIONS,
     AUTHORIZED_ACTIONS,
+    AUTHORIZED_ACTION_ORDER,
     ActionRegistryError,
     RECOVERY_STATES,
+    _RETRY_SAFE,
+    _TABLE,
     allowed_actions,
     retry_safe,
 )
@@ -71,9 +74,23 @@ def test_unregistered_action_is_never_authorized_or_allowed():
     assert "delete_object" not in AUTHORIZED_ACTIONS
     for state in RECOVERY_STATES:
         for capabilities_ok in (True, False):
-            assert "delete_object" not in allowed_actions(
-                state, capabilities_ok=capabilities_ok
-            )
+            for action in allowed_actions(state, capabilities_ok=capabilities_ok):
+                assert action in ACTIONS
+
+
+def test_tables_cover_exactly_the_declared_states():
+    assert tuple(_TABLE) == RECOVERY_STATES
+    assert tuple(_RETRY_SAFE) == RECOVERY_STATES
+
+
+def test_authorized_action_order_is_exactly():
+    assert AUTHORIZED_ACTION_ORDER == (
+        "publish",
+        "reconcile",
+        "verify_public",
+        "resume",
+        "abort",
+    )
 
 
 def test_inspect_is_always_allowed():
@@ -100,7 +117,7 @@ def test_in_flight_unknown_allows_read_only_reconcile_only():
 
 def test_multipart_resumable_allowed_actions_exactly():
     actions = allowed_actions("multipart_resumable", capabilities_ok=True)
-    assert actions == ("inspect", "reconcile", "resume", "abort")
+    assert actions == ("inspect", "resume", "abort")
 
 
 def test_terminal_unacknowledged_allows_only_read_and_ack():

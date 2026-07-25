@@ -31,13 +31,17 @@ AUTHORIZED_ACTIONS: "frozenset[str]" = frozenset(
     {"publish", "reconcile", "verify_public", "resume", "abort"}
 )
 
-READ_ONLY_ACTIONS: "frozenset[str]" = frozenset({"inspect", "ack"})
+AUTHORIZED_ACTION_ORDER: Tuple[str, ...] = tuple(
+    action for action in ACTIONS if action in AUTHORIZED_ACTIONS
+)
+
+NO_REMOTE_EFFECT_ACTIONS: "frozenset[str]" = frozenset({"inspect", "ack"})
 
 _TABLE: Dict[str, Tuple[str, ...]] = {
     "not_started": ("inspect", "publish"),
     "known_not_applied": ("inspect", "publish"),
     "in_flight_unknown": ("inspect", "reconcile"),
-    "multipart_resumable": ("inspect", "reconcile", "resume", "abort"),
+    "multipart_resumable": ("inspect", "resume", "abort"),
     "terminal_unacknowledged": ("inspect", "ack"),
     "terminal_acknowledged": ("inspect",),
     "blocked": ("inspect",),
@@ -55,15 +59,15 @@ _RETRY_SAFE: Dict[str, bool] = {
 
 
 def allowed_actions(state: str, *, capabilities_ok: bool) -> Tuple[str, ...]:
-    if state not in _TABLE:
+    if state not in RECOVERY_STATES:
         raise ActionRegistryError("unregistered recovery state")
     actions = _TABLE[state]
     if capabilities_ok:
         return actions
-    return tuple(action for action in actions if action in READ_ONLY_ACTIONS)
+    return tuple(action for action in actions if action in NO_REMOTE_EFFECT_ACTIONS)
 
 
 def retry_safe(state: str) -> bool:
-    if state not in _RETRY_SAFE:
+    if state not in RECOVERY_STATES:
         raise ActionRegistryError("unregistered recovery state")
     return _RETRY_SAFE[state]
