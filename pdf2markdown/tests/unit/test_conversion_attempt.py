@@ -2093,3 +2093,84 @@ def test_result_reference_expiry_is_derived_from_observed_at_plus_validity_hours
     assert conversion_attempt.result_reference_is_expired(
         attempt, at=fake_clock_past_expiry
     ) is True
+
+    # One second before the expiry point: not expired yet. Kills a "return
+    # True" stub and a sign-flipped comparison.
+    assert conversion_attempt.result_reference_is_expired(
+        attempt, at="2024-01-03T03:04:04Z"
+    ) is False
+    # Exactly at the expiry point: expired. Pins the ">=" boundary semantics.
+    assert conversion_attempt.result_reference_is_expired(
+        attempt, at="2024-01-03T03:04:05Z"
+    ) is True
+    # Changing result_validity_hours must move the expiry point. Kills an
+    # implementation that ignores result_validity_hours or mishandles its
+    # unit (e.g. treating hours as seconds).
+    assert conversion_attempt.result_reference_is_expired(
+        {**attempt, "result_validity_hours": 1}, at="2024-01-02T04:04:05Z"
+    ) is True
+    assert conversion_attempt.result_reference_is_expired(
+        {**attempt, "result_validity_hours": 1}, at="2024-01-02T04:04:04Z"
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        pytest.param(
+            {
+                "state": "submitting",
+                "result_observed_at": None,
+                "result_validity_hours": None,
+            },
+            id="non_result_ready_state",
+        ),
+        pytest.param(None, id="attempt_not_a_dict"),
+    ],
+)
+def test_result_reference_is_expired_returns_false_when_not_applicable(attempt):
+    # Mirrors waiting_for_poll_backoff's combined guard (conversion_attempt.py
+    # :201-205): `not isinstance(attempt, dict) or <state not applicable>`
+    # reports "not applicable" by returning False, it does not raise. A real
+    # non-result_ready attempt always carries result_observed_at/
+    # result_validity_hours as None (see conversion_attempt.py:645-646,
+    # :1465-1466), which is the signal this predicate's state guard uses in
+    # place of a literal state-set membership check.
+    assert conversion_attempt.result_reference_is_expired(
+        attempt, at="2024-01-02T03:04:05Z"
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        pytest.param(
+            {"result_observed_at": "2024-01-02T03:04:05Z"},
+            id="result_validity_hours_missing",
+        ),
+        pytest.param(
+            {"result_validity_hours": 24},
+            id="result_observed_at_missing",
+        ),
+        pytest.param(
+            {
+                "result_observed_at": "2024-01-02T03:04:05Z",
+                "result_validity_hours": "24",
+            },
+            id="result_validity_hours_wrong_type",
+        ),
+    ],
+)
+def test_result_reference_is_expired_rejects_malformed_attempt(attempt):
+    # Mirrors waiting_for_poll_backoff's field guard (conversion_attempt.py
+    # :206-210): once the predicate is in the applicable state, a missing or
+    # malformed required field raises ConversionAttemptError("integrity_
+    # violation", ...) instead of a native TypeError/KeyError, so callers
+    # never see result["errors"][0]["code"] == "internal_error"
+    # (test_malformed_conversion_state_is_rejected_without_internal_error
+    # pins the same contract for the wider CLI surface).
+    with pytest.raises(conversion_attempt.ConversionAttemptError) as excinfo:
+        conversion_attempt.result_reference_is_expired(
+            attempt, at="2024-01-02T03:04:05Z"
+        )
+    assert excinfo.value.code == "integrity_violation"

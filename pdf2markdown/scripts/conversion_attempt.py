@@ -212,9 +212,18 @@ def waiting_for_poll_backoff(attempt: dict, *, at: str) -> bool:
 
 
 def result_reference_is_expired(attempt: dict, *, at: str) -> bool:
-    expires_at = _shift_timestamp(
-        attempt["result_observed_at"], attempt["result_validity_hours"] * 3600
-    )
+    if not isinstance(attempt, dict) or (
+        attempt.get("result_observed_at") is None
+        and attempt.get("result_validity_hours") is None
+    ):
+        return False
+    result_observed_at = attempt.get("result_observed_at")
+    result_validity_hours = attempt.get("result_validity_hours")
+    if not isinstance(result_observed_at, str) or type(result_validity_hours) is not int:
+        raise ConversionAttemptError(
+            "integrity_violation", "The conversion result reference is missing."
+        )
+    expires_at = _shift_timestamp(result_observed_at, result_validity_hours * 3600)
     return _parse_timestamp(at) >= _parse_timestamp(expires_at)
 
 
