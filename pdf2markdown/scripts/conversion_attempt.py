@@ -227,6 +227,23 @@ def result_reference_is_expired(attempt: dict, *, at: str) -> bool:
     return _parse_timestamp(at) >= _parse_timestamp(expires_at)
 
 
+def _recorded_result_url(private_state: dict, *, attempt_id, task_id, url):
+    records = (
+        private_state.get("result_urls") if isinstance(private_state, dict) else None
+    )
+    if not isinstance(records, list):
+        return None
+    for record in records:
+        if (
+            isinstance(record, dict)
+            and record.get("attempt_id") == attempt_id
+            and record.get("task_id") == task_id
+            and record.get("url") == url
+        ):
+            return record
+    return None
+
+
 def _valid_timestamp(value) -> bool:
     if not isinstance(value, str) or not value:
         return False
@@ -1417,6 +1434,7 @@ def _poll_transition(
         reset_window = active.get("state") in {
             "poll_timeout",
             "result_pending_timeout",
+            "result_ready",
         }
         updated_attempt["poll_started_at"] = (
             at if reset_window else active.get("poll_started_at") or at
@@ -1459,15 +1477,24 @@ def _poll_transition(
             or active.get("result_pending_deadline_at") is None
             else active["result_pending_deadline_at"]
         )
+    recorded_result = None
     if result.state == "result_ready":
         if not isinstance(result.url, str):
             raise ConversionAttemptError(
                 "invalid_state_transition", "The Doc2X result URL is missing."
             )
+        recorded_result = _recorded_result_url(
+            private_state,
+            attempt_id=active["attempt_id"],
+            task_id=active["task_id"],
+            url=result.url,
+        )
         updated_attempt["result_url_sha256"] = (
             "sha256:" + hashlib.sha256(result.url.encode("utf-8")).hexdigest()
         )
-        updated_attempt["result_observed_at"] = at
+        updated_attempt["result_observed_at"] = (
+            at if recorded_result is None else recorded_result.get("observed_at")
+        )
         updated_attempt["result_validity_hours"] = 24
     elif active.get("state") == "result_ready":
         updated_attempt["result_url_sha256"] = None
@@ -1497,7 +1524,7 @@ def _poll_transition(
     ]
     updated_private = deepcopy(private_state)
     updated_private["generation"] = new_generation
-    if result.state == "result_ready":
+    if result.state == "result_ready" and recorded_result is None:
         updated_private["result_urls"] = [
             *deepcopy(private_state["result_urls"]),
             {
@@ -1776,10 +1803,19 @@ def _poll_state_from_intent(
             raise ConversionAttemptError(
                 "integrity_violation", "A conversion result URL payload is missing."
             )
-        desired_private["result_urls"] = [
-            *deepcopy(private_state.get("result_urls", [])),
-            deepcopy(private_payload),
-        ]
+        if (
+            _recorded_result_url(
+                private_state,
+                attempt_id=active.get("attempt_id"),
+                task_id=active.get("task_id"),
+                url=private_payload.get("url"),
+            )
+            is None
+        ):
+            desired_private["result_urls"] = [
+                *deepcopy(private_state.get("result_urls", [])),
+                deepcopy(private_payload),
+            ]
     elif private_payload is not None:
         raise ConversionAttemptError(
             "integrity_violation", "A conversion poll intent has an unexpected payload."

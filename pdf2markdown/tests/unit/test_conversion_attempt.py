@@ -901,6 +901,198 @@ def test_expired_result_reference_blocks_adoption_before_any_network(
     assert manifest["raw_conversion"]["reason_code"] == "result_url_unavailable"
 
 
+FIRST_RESULT_URL = "https://results.aihubmax.com/result.zip?token=first-private"
+SECOND_RESULT_URL = "https://results.aihubmax.com/result.zip?token=second-private"
+FIRST_EXPIRY = datetime(2024, 1, 3, 3, 4, 5, tzinfo=timezone.utc)
+SECOND_EXPIRY = datetime(2024, 1, 4, 3, 4, 5, tzinfo=timezone.utc)
+
+
+def renewed_expired_result_bundle(tmp_path, capsys, monkeypatch):
+    """Drive one attempt through ready, expiry, renewal, expiry, and repeat.
+
+    The same Doc2X task is polled again after each local expiry. The first
+    refresh answers with a different URL; the second answers with the exact
+    same URL that is already recorded and already expired.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+
+    def resume(expected_generation, *, transport, now=NOW):
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(expected_generation),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=transport,
+            now=now,
+        )
+        assert rc == 0, json.dumps(result, sort_keys=True)
+        return result
+
+    submitted = resume(
+        staged["generation"], transport=SuccessfulCreate("task-renewal")
+    )
+    ready = resume(
+        submitted["generation"],
+        transport=PollStatus(
+            "task-renewal", "completed", results=[{"url": FIRST_RESULT_URL}]
+        ),
+    )
+    first_expiry_network = CountingNeverNetwork()
+    first_expired = resume(
+        ready["generation"], transport=first_expiry_network, now=FIRST_EXPIRY
+    )
+    renewal_poll = PollStatus(
+        "task-renewal", "completed", results=[{"url": SECOND_RESULT_URL}]
+    )
+    renewed = resume(
+        first_expired["generation"], transport=renewal_poll, now=FIRST_EXPIRY
+    )
+    second_expiry_network = CountingNeverNetwork()
+    second_expired = resume(
+        renewed["generation"], transport=second_expiry_network, now=SECOND_EXPIRY
+    )
+    repeat_poll = PollStatus(
+        "task-renewal", "completed", results=[{"url": SECOND_RESULT_URL}]
+    )
+    repeated = resume(
+        second_expired["generation"], transport=repeat_poll, now=SECOND_EXPIRY
+    )
+    return {
+        "bundle": bundle,
+        "environ": environ,
+        "resume": resume,
+        "ready": ready,
+        "first_expired": first_expired,
+        "first_expiry_network": first_expiry_network,
+        "renewal_poll": renewal_poll,
+        "renewed": renewed,
+        "second_expired": second_expired,
+        "second_expiry_network": second_expiry_network,
+        "repeat_poll": repeat_poll,
+        "repeated": repeated,
+    }
+
+
+def test_locally_expired_reference_refreshes_same_task_and_same_url_does_not_extend(
+    tmp_path, capsys, monkeypatch
+):
+    driven = renewed_expired_result_bundle(tmp_path, capsys, monkeypatch)
+    bundle = driven["bundle"]
+    first_sha256 = (
+        "sha256:" + hashlib.sha256(FIRST_RESULT_URL.encode("utf-8")).hexdigest()
+    )
+    second_sha256 = (
+        "sha256:" + hashlib.sha256(SECOND_RESULT_URL.encode("utf-8")).hexdigest()
+    )
+
+    # Both local expiries are decided without touching the network.
+    assert driven["first_expiry_network"].calls == []
+    assert driven["second_expiry_network"].calls == []
+    assert driven["first_expired"]["outcome"] == "result_url_unavailable"
+    assert driven["second_expired"]["outcome"] == "result_url_unavailable"
+
+    # Branch one: a different URL renews the reference on the same task.
+    renewed = driven["renewed"]
+    assert renewed["outcome"] == "result_ready"
+    assert renewed["conversion_state"] == "result_downloading"
+    assert len(driven["renewal_poll"].calls) == 1
+    assert driven["renewal_poll"].calls[0][0] == "GET"
+    assert "task-renewal" in driven["renewal_poll"].calls[0][1]
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    renewed_attempt = manifest["conversion_attempts"][-1]
+    assert len(manifest["conversion_attempts"]) == 1
+    assert renewed_attempt["task_id"] == "task-renewal"
+    assert renewed_attempt["result_url_sha256"] == second_sha256
+    assert renewed_attempt["result_observed_at"] == "2024-01-03T03:04:05Z"
+    assert renewed_attempt["result_validity_hours"] == 24
+    assert [record["url"] for record in private_state["result_urls"]] == [
+        FIRST_RESULT_URL,
+        SECOND_RESULT_URL,
+    ]
+    assert private_state["result_urls"][0]["url_sha256"] == first_sha256
+    assert private_state["result_urls"][1]["url_sha256"] == second_sha256
+    assert private_state["result_urls"][1]["observed_at"] == "2024-01-03T03:04:05Z"
+    assert (
+        conversion_attempt.result_reference_is_expired(
+            renewed_attempt, at="2024-01-03T03:04:05Z"
+        )
+        is False
+    )
+
+    # Branch two: the identical URL neither extends nor appends a version.
+    repeated = driven["repeated"]
+    assert repeated["outcome"] == "result_ready"
+    assert repeated["conversion_state"] == "result_downloading"
+    assert len(driven["repeat_poll"].calls) == 1
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    repeated_attempt = manifest["conversion_attempts"][-1]
+    assert len(manifest["conversion_attempts"]) == 1
+    assert repeated_attempt["result_url_sha256"] == second_sha256
+    assert repeated_attempt["result_observed_at"] == "2024-01-03T03:04:05Z"
+    assert repeated_attempt["result_validity_hours"] == 24
+    assert [record["url"] for record in private_state["result_urls"]] == [
+        FIRST_RESULT_URL,
+        SECOND_RESULT_URL,
+    ]
+    assert (
+        conversion_attempt.result_reference_is_expired(
+            repeated_attempt, at="2024-01-04T03:04:05Z"
+        )
+        is True
+    )
+    public_state = (bundle / "manifest.json").read_text() + (
+        bundle / ".state" / "history.ndjson"
+    ).read_text()
+    assert FIRST_RESULT_URL not in public_state
+    assert SECOND_RESULT_URL not in public_state
+
+
+def test_unrenewed_result_reference_stops_refreshing_the_same_task(
+    tmp_path, capsys, monkeypatch
+):
+    driven = renewed_expired_result_bundle(tmp_path, capsys, monkeypatch)
+    bundle = driven["bundle"]
+    resume = driven["resume"]
+
+    # Every further resume must converge: the same task has already answered
+    # with the same, already expired URL, so there is nothing left to fetch.
+    never = CountingNeverNetwork()
+    generation = driven["repeated"]["generation"]
+    outcomes = []
+    generations = []
+    for _ in range(6):
+        result = resume(generation, transport=never, now=SECOND_EXPIRY)
+        outcomes.append(result["outcome"])
+        generation = result["generation"]
+        generations.append(generation)
+
+    assert never.calls == []
+    assert outcomes == ["result_url_not_renewed"] * 6
+    assert generations == [generations[0]] * 6
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_state"] == "terminal_error"
+    assert manifest["raw_conversion"]["reason_code"] == "result_url_not_renewed"
+    assert manifest["raw_conversion"]["state"] == "rejected"
+    assert [record["reason_code"] for record in manifest["raw_conversions"]] == [
+        "result_url_unavailable",
+        "result_url_unavailable",
+        "result_url_not_renewed",
+    ]
+    assert len(manifest["conversion_attempts"]) == 1
+    assert manifest["conversion_attempts"][-1]["state"] == "result_ready"
+
+
 def test_conversion_attempt_error_during_expiry_check_is_translated_with_context(
     tmp_path, capsys, monkeypatch
 ):

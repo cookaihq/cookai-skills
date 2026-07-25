@@ -40,6 +40,10 @@ DETERMINISTIC_ARCHIVE_REJECTIONS = frozenset(
     }
 )
 RECOVERABLE_ARCHIVE_REJECTIONS = frozenset({"result_url_unavailable"})
+# Rejections decided from the bundle ledger alone, without contacting the
+# result host. They close a result reference that the same Doc2X task has
+# already proven it cannot replace.
+LEDGER_RESULT_REJECTIONS = frozenset({"result_url_not_renewed"})
 
 
 class RawConversionError(ValueError):
@@ -768,6 +772,20 @@ def _finish_reservation_after_intent(
         _clear_owner_marker(attempts_fd, reservation)
 
 
+def _reference_already_unavailable(manifest: dict, attempt: dict) -> bool:
+    records = manifest.get("raw_conversions")
+    if not isinstance(records, list):
+        return False
+    return any(
+        isinstance(record, dict)
+        and record.get("reason_code") in RECOVERABLE_ARCHIVE_REJECTIONS
+        and record.get("attempt_id") == attempt.get("attempt_id")
+        and record.get("task_id") == attempt.get("task_id")
+        and record.get("result_url_sha256") == attempt.get("result_url_sha256")
+        for record in records
+    )
+
+
 def adopt_ready_result(
     *,
     descriptors: dict,
@@ -791,6 +809,15 @@ def adopt_ready_result(
     bundle.append_history(intent, state_fd=descriptors["state"])
     _finish_reservation_after_intent(attempts_fd, reservation, intent)
     active_attempt, private_result = _active_result(manifest, private_state)
+    if _reference_already_unavailable(manifest, active_attempt):
+        return _commit_rejection(
+            descriptors=descriptors,
+            manifest=manifest,
+            private_state=private_state,
+            intent=intent,
+            reason_code="result_url_not_renewed",
+            at=at,
+        )
     try:
         reference_expired = conversion_attempt.result_reference_is_expired(
             active_attempt, at=at
@@ -1342,7 +1369,11 @@ def _valid_rejection(record: dict, intent: dict) -> bool:
         and record.get("operation_id") == intent.get("operation_id")
         and record.get("state") == "rejected"
         and record.get("reason_code")
-        in (DETERMINISTIC_ARCHIVE_REJECTIONS | RECOVERABLE_ARCHIVE_REJECTIONS)
+        in (
+            DETERMINISTIC_ARCHIVE_REJECTIONS
+            | RECOVERABLE_ARCHIVE_REJECTIONS
+            | LEDGER_RESULT_REJECTIONS
+        )
         and record.get("attempt_id") == intent.get("attempt_id")
         and record.get("task_id") == intent.get("task_id")
         and record.get("result_url_sha256") == intent.get("result_url_sha256")
