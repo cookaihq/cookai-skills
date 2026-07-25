@@ -791,6 +791,15 @@ def adopt_ready_result(
     bundle.append_history(intent, state_fd=descriptors["state"])
     _finish_reservation_after_intent(attempts_fd, reservation, intent)
     _active, private_result = _active_result(manifest, private_state)
+    if conversion_attempt.result_reference_is_expired(_active, at=at):
+        return _commit_rejection(
+            descriptors=descriptors,
+            manifest=manifest,
+            private_state=private_state,
+            intent=intent,
+            reason_code="result_url_unavailable",
+            at=at,
+        )
     _assert_directory_identity(
         attempts_fd, intent["staging_name"], intent["staging_identity"]
     )

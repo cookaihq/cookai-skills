@@ -815,6 +815,73 @@ def test_completed_task_with_one_https_result_keeps_the_full_url_private(
     assert resumed["generation"] == ready["generation"]
 
 
+def test_expired_result_reference_blocks_adoption_before_any_network(
+    tmp_path, capsys, monkeypatch
+):
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    create = SuccessfulCreate("task-expired-result")
+    _create_rc, submitted, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=create,
+    )
+    result_url = "https://results.aihubmax.com/result.zip?token=signed-private"
+    poll = PollStatus(
+        "task-expired-result", "completed", results=[{"url": result_url}]
+    )
+    poll_rc, ready, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(submitted["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=poll,
+    )
+    assert poll_rc == 0
+    assert ready["outcome"] == "result_ready"
+    assert ready["conversion_state"] == "result_downloading"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_attempts"][-1]["result_observed_at"] == (
+        "2024-01-02T03:04:05Z"
+    )
+    assert manifest["conversion_attempts"][-1]["result_validity_hours"] == 24
+
+    expired_rc, expired, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=NeverNetwork(),
+        now=datetime(2024, 1, 3, 3, 4, 5, tzinfo=timezone.utc),
+    )
+    assert expired_rc == 0, expired
+    assert expired["outcome"] == "result_url_unavailable"
+    assert expired["conversion_state"] == "recoverable_error"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["raw_conversion"]["reason_code"] == "result_url_unavailable"
+
+
 def test_completed_task_without_a_nonempty_result_stays_pending_on_the_same_task(
     tmp_path, capsys, monkeypatch
 ):
