@@ -58,6 +58,11 @@ CUSTOM_BUCKET_BOUND_TARGET = TARGET | {
     "addressing": "bucket-bound",
 }
 
+MALFORMED_REGION_TARGET = TARGET | {
+    "region": "us-east-2:oops",
+    "endpoint": None,
+}
+
 
 class _NetworkGuardTripped(BaseException):
     pass
@@ -247,6 +252,19 @@ def test_probe_reports_credential_expiring(project):
     item = probe_for(project)
     assert item["readiness"] == "installed_unconfigured"
     assert item["blocking_reason"] == "credential_expiring"
+    assert item["target_ref"] == "project:images"
+    assert item["target_contract_hash"] is not None
+
+
+def test_probe_reports_internal_error_for_unclassified_exception(project):
+    (project / ".s3-upload" / "targets" / "images.json").write_text(
+        json.dumps(MALFORMED_REGION_TARGET)
+    )
+    item = probe_for(project)
+    assert item["readiness"] == "installed_unconfigured"
+    assert item["target_contract"] is None
+    assert item["target_contract_hash"] is None
+    assert item["blocking_reason"] == "internal_error"
 
 
 def test_probe_reports_provider_contract_mismatch_for_asserted_custom_contract(project):
@@ -275,17 +293,20 @@ def test_readiness_vocabulary_is_locked():
 
 def test_blocking_reason_vocabulary_is_locked():
     assert BLOCKING_REASONS == (
-        "target_unresolved", "provider_contract_mismatch", "credential_expiring",
+        "target_unresolved", "provider_contract_mismatch", "credential_expiring", "internal_error",
     )
 
 
 def test_probe_readiness_and_blocking_reason_are_always_in_vocabulary(project):
+    ready = probe_for(project)
+    assert ready["readiness"] in READINESS
+    assert ready["blocking_reason"] is None
+
     for item in (
-        probe_for(project),
         probe_for(project, cli_target=None, cwd=str(project.parent / "does-not-exist")),
     ):
         assert item["readiness"] in READINESS
-        assert item["blocking_reason"] is None or item["blocking_reason"] in BLOCKING_REASONS
+        assert item["blocking_reason"] in BLOCKING_REASONS
 
     (project / ".s3-upload" / "targets" / "images.json").write_text(
         json.dumps(MISMATCHED_ADDRESSING_TARGET)

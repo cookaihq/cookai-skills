@@ -24,7 +24,9 @@ class ResolutionError(ValueError):
 
 
 class CredentialExpiringError(ResolutionError):
-    pass
+    def __init__(self, message: str, *, resolved: "ResolvedTarget") -> None:
+        super().__init__(message)
+        self.resolved = resolved
 
 
 @dataclass(frozen=True)
@@ -197,5 +199,8 @@ def resolve_target(*, cwd: str, config_home: str, environ: Dict[str, str],
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     remaining = selected.remaining_seconds(moment)
     if remaining is not None and remaining <= 60:
-        raise CredentialExpiringError("temporary Credential Profile must have more than 60 whole seconds remaining")
+        raise CredentialExpiringError(
+            "temporary Credential Profile must have more than 60 whole seconds remaining",
+            resolved=ResolvedTarget(ref, source, target, None, credential_source, "credential_expiring"),
+        )
     return ResolvedTarget(ref, source, target, selected, credential_source, "available")

@@ -10,9 +10,11 @@ from resolver import CredentialExpiringError, ResolutionError, resolve_target
 from target_contract import CONTRACT_VERSION, contract_hash, contract_snapshot
 
 READINESS = ("ready", "installed_unconfigured")
-BLOCKING_REASONS = ("target_unresolved", "provider_contract_mismatch", "credential_expiring")
+BLOCKING_REASONS = (
+    "target_unresolved", "provider_contract_mismatch", "credential_expiring", "internal_error",
+)
 READY, INSTALLED_UNCONFIGURED = READINESS
-TARGET_UNRESOLVED, PROVIDER_CONTRACT_MISMATCH, CREDENTIAL_EXPIRING = BLOCKING_REASONS
+TARGET_UNRESOLVED, PROVIDER_CONTRACT_MISMATCH, CREDENTIAL_EXPIRING, INTERNAL_ERROR = BLOCKING_REASONS
 
 
 def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
@@ -32,10 +34,14 @@ def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
         "blocking_reason": None,
     }
     try:
-        resolved = resolve_target(
-            cwd=cwd, config_home=config_home, environ=environ, cli_target=cli_target,
-            cli_caller=cli_caller, use_local_key=use_local_key, allow_candidates=True,
-        )
+        try:
+            resolved = resolve_target(
+                cwd=cwd, config_home=config_home, environ=environ, cli_target=cli_target,
+                cli_caller=cli_caller, use_local_key=use_local_key, allow_candidates=True,
+            )
+        except CredentialExpiringError as exc:
+            resolved = exc.resolved
+            body["blocking_reason"] = CREDENTIAL_EXPIRING
         key = derive_contract_key(resolved.target)
         snapshot = contract_snapshot(
             target_ref=resolved.ref,
@@ -45,8 +51,10 @@ def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
             contract_key=key,
             registry=registry_for_target(resolved.target, key),
         )
-    except CredentialExpiringError:
-        body["blocking_reason"] = CREDENTIAL_EXPIRING
+        body["target_ref"] = resolved.ref.text
+        body["target_contract"] = snapshot
+        body["target_contract_hash"] = contract_hash(snapshot)
+        body["readiness"] = READY if resolved.credential_state == "available" else INSTALLED_UNCONFIGURED
         return envelope("s3-upload.probe", body)
     except ResolutionError:
         body["blocking_reason"] = TARGET_UNRESOLVED
@@ -54,9 +62,6 @@ def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
     except (PlanError, CapabilityContractError):
         body["blocking_reason"] = PROVIDER_CONTRACT_MISMATCH
         return envelope("s3-upload.probe", body)
-
-    body["target_ref"] = resolved.ref.text
-    body["target_contract"] = snapshot
-    body["target_contract_hash"] = contract_hash(snapshot)
-    body["readiness"] = READY if resolved.credential_state == "available" else INSTALLED_UNCONFIGURED
-    return envelope("s3-upload.probe", body)
+    except Exception:
+        body["blocking_reason"] = INTERNAL_ERROR
+        return envelope("s3-upload.probe", body)
