@@ -331,11 +331,12 @@ def test_temporary_credential_requires_more_than_sixty_seconds(tmp_path):
             )
         },
     )
-    with pytest.raises(ResolutionError, match="more than 60"):
+    with pytest.raises(ResolutionError, match="more than 60") as exc:
         resolve_target(
             cwd=str(tmp_path), config_home=str(tmp_path / "home"), environ={},
             cli_target="project:images", cli_caller=None, use_local_key=False, now=NOW,
         )
+    assert exc.value.resolved.credential is None
 
 
 def test_env_file_may_not_contain_project_secret_map(tmp_path):

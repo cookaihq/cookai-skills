@@ -4,7 +4,8 @@ import socket
 
 import pytest
 
-from delivery_schema import parse_artifact
+import probe
+from delivery_schema import parse_artifact, serialize_artifact
 from probe import BLOCKING_REASONS, READINESS, build_probe
 from target_contract import contract_hash, credential_binding_hash
 from v2_schema import ScopedReference
@@ -254,6 +255,21 @@ def test_probe_reports_credential_expiring(project):
     assert item["blocking_reason"] == "credential_expiring"
     assert item["target_ref"] == "project:images"
     assert item["target_contract_hash"] is not None
+    dumped = json.dumps(item)
+    assert FAKE_SECRET not in dumped
+
+
+def _raise_key_error(*args, **kwargs):
+    raise KeyError("mutation-check-non-value-error-escape")
+
+
+def test_probe_reports_internal_error_for_non_value_error_exception(project, monkeypatch):
+    monkeypatch.setattr(probe, "derive_contract_key", _raise_key_error)
+    item = probe_for(project)
+    parsed = parse_artifact(
+        serialize_artifact(item).decode("utf-8"), expected_type="s3-upload.probe"
+    )
+    assert parsed["blocking_reason"] == "internal_error"
 
 
 def test_probe_reports_internal_error_for_unclassified_exception(project):
@@ -276,6 +292,14 @@ def test_probe_reports_provider_contract_mismatch_for_asserted_custom_contract(p
     assert item["target_contract"] is None
     assert item["target_contract_hash"] is None
     assert item["blocking_reason"] == "provider_contract_mismatch"
+
+
+def test_probe_normalizes_lone_surrogate_caller_for_serialization(project):
+    item = probe_for(project, cli_caller="\udcff")
+    parsed = parse_artifact(
+        serialize_artifact(item).decode("utf-8"), expected_type="s3-upload.probe"
+    )
+    assert parsed["caller"] == "�"
 
 
 def test_probe_normalizes_cwd_for_contract_hash(project):
