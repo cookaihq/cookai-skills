@@ -32,8 +32,16 @@ class CountingNeverNetwork(NeverNetwork):
         self.calls = []
 
     def __call__(self, *args, **kwargs):
-        self.calls.append((args, kwargs))
+        self.calls.append(("__call__", args, kwargs))
         return super().__call__(*args, **kwargs)
+
+    def resolve(self, *args, **kwargs):
+        self.calls.append(("resolve", args, kwargs))
+        raise AssertionError("network access is not expected")
+
+    def connect_https(self, *args, **kwargs):
+        self.calls.append(("connect_https", args, kwargs))
+        raise AssertionError("network access is not expected")
 
 
 class SuccessfulUpload:
@@ -960,6 +968,7 @@ def test_conversion_attempt_error_during_expiry_check_is_translated_with_context
     )
 
     assert rc == 4, json.dumps(result, sort_keys=True)
+    assert result["errors"][0]["code"] == "integrity_violation"
     assert result["errors"][0]["code"] != "internal_error", json.dumps(
         result, sort_keys=True
     )
