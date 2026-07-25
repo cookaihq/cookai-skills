@@ -27,6 +27,15 @@ class NeverNetwork:
         raise AssertionError("network access is not expected")
 
 
+class CountingNeverNetwork(NeverNetwork):
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return super().__call__(*args, **kwargs)
+
+
 class SuccessfulUpload:
     def __init__(self, url):
         self.url = url
@@ -861,6 +870,7 @@ def test_expired_result_reference_blocks_adoption_before_any_network(
     )
     assert manifest["conversion_attempts"][-1]["result_validity_hours"] == 24
 
+    never = CountingNeverNetwork()
     expired_rc, expired, _stderr = invoke(
         capsys,
         [
@@ -872,14 +882,90 @@ def test_expired_result_reference_blocks_adoption_before_any_network(
         ],
         cwd=tmp_path,
         environ={**dependencies, "AIHUB_API_KEY": key},
-        transport=NeverNetwork(),
+        transport=never,
         now=datetime(2024, 1, 3, 3, 4, 5, tzinfo=timezone.utc),
     )
+    assert never.calls == []
     assert expired_rc == 0, expired
     assert expired["outcome"] == "result_url_unavailable"
     assert expired["conversion_state"] == "recoverable_error"
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert manifest["raw_conversion"]["reason_code"] == "result_url_unavailable"
+
+
+def test_conversion_attempt_error_during_expiry_check_is_translated_with_context(
+    tmp_path, capsys, monkeypatch
+):
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    create = SuccessfulCreate("task-malformed-validity-hours")
+    _create_rc, submitted, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=create,
+    )
+    result_url = "https://results.aihubmax.com/result.zip?token=signed-private"
+    poll = PollStatus(
+        "task-malformed-validity-hours", "completed", results=[{"url": result_url}]
+    )
+    poll_rc, ready, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(submitted["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=poll,
+    )
+    assert poll_rc == 0
+    assert ready["conversion_state"] == "result_downloading"
+
+    # A malformed-but-load-tolerant value: 24.0 passes every `== 24`
+    # equality check performed while loading/validating the bundle
+    # (including the history-replay comparison, since 24 == 24.0 in
+    # Python) but fails the stricter `type(...) is not int` guard inside
+    # conversion_attempt.result_reference_is_expired.
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["conversion_attempts"][-1]["result_validity_hours"] = 24.0
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    )
+
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=NeverNetwork(),
+    )
+
+    assert rc == 4, json.dumps(result, sort_keys=True)
+    assert result["errors"][0]["code"] != "internal_error", json.dumps(
+        result, sort_keys=True
+    )
+    assert result["work_bundle"] == str(bundle)
+    assert result["generation"] == ready["generation"]
+    assert result["conversion_state"] == "result_downloading"
 
 
 def test_completed_task_without_a_nonempty_result_stays_pending_on_the_same_task(

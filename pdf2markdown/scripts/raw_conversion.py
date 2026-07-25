@@ -790,8 +790,14 @@ def adopt_ready_result(
     intent = _intent(reservation, staging_identity=staging_identity)
     bundle.append_history(intent, state_fd=descriptors["state"])
     _finish_reservation_after_intent(attempts_fd, reservation, intent)
-    _active, private_result = _active_result(manifest, private_state)
-    if conversion_attempt.result_reference_is_expired(_active, at=at):
+    active_attempt, private_result = _active_result(manifest, private_state)
+    try:
+        reference_expired = conversion_attempt.result_reference_is_expired(
+            active_attempt, at=at
+        )
+    except conversion_attempt.ConversionAttemptError as exc:
+        raise RawConversionError(exc.code, exc.message) from exc
+    if reference_expired:
         return _commit_rejection(
             descriptors=descriptors,
             manifest=manifest,
