@@ -2081,3 +2081,15 @@ def test_malformed_conversion_state_is_rejected_without_internal_error(
     assert rc == 4, json.dumps(result, sort_keys=True)
     assert result["errors"][0]["code"] == "invalid_bundle"
     assert result["errors"][0]["code"] != "internal_error"
+
+
+def test_result_reference_expiry_is_derived_from_observed_at_plus_validity_hours():
+    attempt = {
+        "result_observed_at": "2024-01-02T03:04:05Z",
+        "result_validity_hours": 24,
+    }
+    fake_clock_past_expiry = "2024-01-03T03:04:06Z"
+
+    assert conversion_attempt.result_reference_is_expired(
+        attempt, at=fake_clock_past_expiry
+    ) is True

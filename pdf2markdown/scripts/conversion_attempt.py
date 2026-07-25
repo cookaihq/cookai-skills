@@ -211,6 +211,13 @@ def waiting_for_poll_backoff(attempt: dict, *, at: str) -> bool:
     return _parse_timestamp(at) < _parse_timestamp(next_poll_at)
 
 
+def result_reference_is_expired(attempt: dict, *, at: str) -> bool:
+    expires_at = _shift_timestamp(
+        attempt["result_observed_at"], attempt["result_validity_hours"] * 3600
+    )
+    return _parse_timestamp(at) >= _parse_timestamp(expires_at)
+
+
 def _valid_timestamp(value) -> bool:
     if not isinstance(value, str) or not value:
         return False
