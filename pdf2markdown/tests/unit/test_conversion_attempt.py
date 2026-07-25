@@ -8,6 +8,7 @@ from pathlib import Path
 import fitz
 import pytest
 import conversion_attempt
+import raw_conversion
 import workflow
 
 
@@ -1091,6 +1092,27 @@ def test_unrenewed_result_reference_stops_refreshing_the_same_task(
     ]
     assert len(manifest["conversion_attempts"]) == 1
     assert manifest["conversion_attempts"][-1]["state"] == "result_ready"
+
+
+def test_result_url_not_renewed_is_classified_only_as_a_ledger_rejection():
+    # result_url_not_renewed is deliberately kept out of the archive
+    # rejection sets and lives only in LEDGER_RESULT_REJECTIONS. If it were
+    # folded into RECOVERABLE_ARCHIVE_REJECTIONS,
+    # _reference_already_unavailable would self-match its own terminal
+    # record and the resume loop would never converge (the livelock this
+    # reason code exists to close). If it were folded into
+    # DETERMINISTIC_ARCHIVE_REJECTIONS, the archive-exception branches would
+    # be able to report this reason code even though it is never derived
+    # from a ResultArchiveError.
+    assert (
+        "result_url_not_renewed"
+        not in raw_conversion.RECOVERABLE_ARCHIVE_REJECTIONS
+    )
+    assert (
+        "result_url_not_renewed"
+        not in raw_conversion.DETERMINISTIC_ARCHIVE_REJECTIONS
+    )
+    assert "result_url_not_renewed" in raw_conversion.LEDGER_RESULT_REJECTIONS
 
 
 def test_conversion_attempt_error_during_expiry_check_is_translated_with_context(
