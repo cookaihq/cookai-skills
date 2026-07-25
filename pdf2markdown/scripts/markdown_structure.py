@@ -1358,6 +1358,7 @@ class _StrictHtmlParser(HTMLParser):
         self.issues = issues
         self.stack: List[_HtmlFrame] = []
         self.current_ranges: Tuple[str, ...] = ()
+        self.resource_references: List[dict] = []
 
     def feed_fragment(self, raw: str, source_ranges: Sequence[str]) -> None:
         self.current_ranges = tuple(source_ranges)
@@ -1462,6 +1463,10 @@ class _StrictHtmlParser(HTMLParser):
                 target_kind="link",
                 source_ranges=self.current_ranges,
             )
+            if tag == "a":
+                self.resource_references.append(
+                    {"kind": "html_link", "target": values["href"]}
+                )
         if isinstance(values.get("src"), str):
             _add_unsafe_url_issue(
                 self.issues,
@@ -1469,6 +1474,10 @@ class _StrictHtmlParser(HTMLParser):
                 target_kind="image",
                 source_ranges=self.current_ranges,
             )
+            if tag == "img":
+                self.resource_references.append(
+                    {"kind": "html_image", "target": values["src"]}
+                )
         return values
 
     def _validate_content_model(self, tag: str) -> None:
@@ -1657,8 +1666,9 @@ class _StrictHtmlParser(HTMLParser):
         self.stack.clear()
 
 
-def _ast_issues(blocks: Sequence[dict], issues: _IssueCollector) -> None:
+def _ast_issues(blocks: Sequence[dict], issues: _IssueCollector) -> List[dict]:
     html_parser = _StrictHtmlParser(issues)
+    resource_references = []
     for block in blocks:
         for node, source_ranges in _walk_nodes(block):
             node_type = node.get("t")
@@ -1672,6 +1682,13 @@ def _ast_issues(blocks: Sequence[dict], issues: _IssueCollector) -> None:
                     target_kind="image" if node_type == "Image" else "link",
                     source_ranges=source_ranges,
                 )
+                if isinstance(value, str):
+                    resource_references.append(
+                        {
+                            "kind": "image" if node_type == "Image" else "link",
+                            "target": value,
+                        }
+                    )
             if node_type in {"RawBlock", "RawInline"}:
                 if (
                     not isinstance(content, list)
@@ -1694,6 +1711,10 @@ def _ast_issues(blocks: Sequence[dict], issues: _IssueCollector) -> None:
                     html_parser.feed_fragment(content[1], source_ranges)
         html_parser.end_markdown_block()
     html_parser.finish()
+    return sorted(
+        [*resource_references, *html_parser.resource_references],
+        key=lambda item: (item["kind"], item["target"]),
+    )
 
 
 def _pandoc_version(
@@ -1853,6 +1874,7 @@ def analyze(
     environ: dict,
     expected_version=None,
     expected_executable_identity=None,
+    validated_local_targets: Sequence[str] = (),
 ) -> dict:
     if not isinstance(markdown, bytes):
         raise MarkdownStructureError(
@@ -1875,6 +1897,16 @@ def analyze(
     ):
         raise MarkdownStructureError(
             "invalid_environment", "The Pandoc environment is invalid."
+        )
+    if not isinstance(validated_local_targets, (list, tuple)) or not all(
+        isinstance(value, str)
+        and value
+        and len(value) <= MAX_URL_CHARACTERS
+        for value in validated_local_targets
+    ):
+        raise MarkdownStructureError(
+            "invalid_markdown",
+            "Validated local Markdown targets use an invalid contract.",
         )
     try:
         text = markdown.decode("utf-8")
@@ -1935,7 +1967,7 @@ def analyze(
             context={"stderr_sha256": diagnostics["stderr_sha256"]},
         )
     _lexical_issues(normalized_text, issue_collector)
-    _ast_issues(pandoc_blocks, issue_collector)
+    resource_references = _ast_issues(pandoc_blocks, issue_collector)
 
     blocks = []
     semantic_blocks = []
@@ -1986,7 +2018,20 @@ def analyze(
         "boundaries": boundaries,
     }
     content_index_sha256 = _object_hash(content_index)
-    issues = issue_collector.finish()
+    allowed_local_hashes = {
+        _bytes_hash(value.encode("utf-8")) for value in validated_local_targets
+    }
+    issues = [
+        issue
+        for issue in issue_collector.finish()
+        if not (
+            issue.get("code") == "unsafe_url"
+            and issue.get("context", {}).get("problem") == "unsafe_relative_path"
+            and issue.get("context", {}).get("value_sha256") in allowed_local_hashes
+        )
+    ]
+    for index, issue in enumerate(issues, start=1):
+        issue["issue_id"] = f"structure-issue-{index:06d}"
     structure_evidence = {
         "schema_version": SCHEMA_VERSION,
         "dialect": DIALECT,
@@ -1999,6 +2044,12 @@ def analyze(
         "semantic_hash": semantic_hash,
         "content_index_sha256": content_index_sha256,
         "issues": issues,
+        "resource_references_sha256": _object_hash(
+            {"references": resource_references}
+        ),
+        "validated_local_targets_sha256": _object_hash(
+            {"targets": sorted(set(validated_local_targets))}
+        ),
     }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2022,4 +2073,6 @@ def analyze(
         "blocks": blocks,
         "boundaries": boundaries,
         "issues": issues,
+        "validated_local_targets": sorted(set(validated_local_targets)),
+        "resource_references": resource_references,
     }

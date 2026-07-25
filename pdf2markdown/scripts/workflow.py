@@ -19,6 +19,7 @@ from pathlib import Path
 import aihub_upload
 import bundle as bundle_module
 import config as config_module
+import correction as correction_module
 import conversion_attempt as conversion_attempt_module
 import doc2x as doc2x_module
 import pdf_source
@@ -156,6 +157,26 @@ def _parser() -> argparse.ArgumentParser:
     record_review.add_argument("--action-id", required=True)
     record_review.add_argument("--evidence-hash", required=True)
     record_review.add_argument("--input", required=True)
+    record_review_decision = record_commands.add_parser(
+        "review-decision", add_help=False
+    )
+    record_review_decision.add_argument(
+        "--work-bundle", "--bundle", dest="work_bundle", required=True
+    )
+    record_review_decision.add_argument(
+        "--expected-generation", required=True, type=int
+    )
+    record_review_decision.add_argument("--action-id", required=True)
+    record_review_decision.add_argument("--evidence-hash", required=True)
+    record_review_decision.add_argument("--input", required=True)
+    record_correction = record_commands.add_parser("correction", add_help=False)
+    record_correction.add_argument(
+        "--work-bundle", "--bundle", dest="work_bundle", required=True
+    )
+    record_correction.add_argument("--expected-generation", required=True, type=int)
+    record_correction.add_argument("--action-id", required=True)
+    record_correction.add_argument("--evidence-hash", required=True)
+    record_correction.add_argument("--input", required=True)
     resume = subcommands.add_parser("resume", add_help=False)
     resume.add_argument("--work-bundle", "--bundle", dest="work_bundle", required=True)
     resume.add_argument("--expected-generation", required=True, type=int)
@@ -898,6 +919,17 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
                     "review",
                 }
             ),
+            frozenset(
+                {
+                    *required,
+                    "preflight",
+                    "source_staging",
+                    "raw_conversion",
+                    "raw_conversions",
+                    "review",
+                    "corrections",
+                }
+            ),
         }
         or type(manifest.get("generation")) is not int
         or manifest["generation"] < 1
@@ -1092,7 +1124,9 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     if has_review:
         try:
             review_module.validate_committed_artifacts(
-                descriptors=descriptors, manifest=manifest
+                descriptors=descriptors,
+                manifest=manifest,
+                bundle_root=bundle,
             )
         except review_module.ReviewError as exc:
             raise WorkflowError(
@@ -1324,6 +1358,7 @@ def _advance(
                     private_state=_read_json(
                         "private.json", dir_fd=descriptors["state"]
                     ),
+                    bundle_root=bundle,
                     expected_generation=args.expected_generation,
                     at=operation_at,
                 )
@@ -1626,6 +1661,7 @@ def _advance(
                         private_state=_read_json(
                             "private.json", dir_fd=descriptors["state"]
                         ),
+                        bundle_root=bundle,
                         environ=environ,
                         visual_capability=args.visual_capability,
                         expected_generation=args.expected_generation,
@@ -2375,7 +2411,31 @@ def _advance(
             return result
 
 
-def _record(args, *, cwd: Path, now) -> dict:
+def _recovered_review_outcome(recovered_review: dict) -> str:
+    intent = recovered_review.get("intent")
+    if isinstance(intent, dict):
+        if intent.get("event") == "correction_record_intent":
+            return "correction_applied"
+        if (
+            intent.get("event") == "review_record_intent"
+            and intent.get("request_kind") == "review_decision"
+        ):
+            return "review_ambiguity_resolved"
+    return recovered_review["manifest"]["review"]["status"]
+
+
+def _recovered_review_command(intent: dict) -> str | None:
+    if intent.get("event") == "correction_record_intent":
+        return "correction"
+    if intent.get("event") != "review_record_intent":
+        return None
+    return {
+        "review": "review",
+        "review_decision": "review-decision",
+    }.get(intent.get("request_kind", "review"))
+
+
+def _record(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
     bundle = _canonical_bundle_path(args.work_bundle, cwd)
     with _exclusive_bundle_lock(bundle) as locked_descriptors:
         with _open_bundle_descriptors(
@@ -2397,6 +2457,7 @@ def _record(args, *, cwd: Path, now) -> dict:
                     private_state=_read_json(
                         "private.json", dir_fd=descriptors["state"]
                     ),
+                    bundle_root=bundle,
                     expected_generation=args.expected_generation,
                     at=_isoformat(_moment(now)),
                 )
@@ -2415,25 +2476,29 @@ def _record(args, *, cwd: Path, now) -> dict:
                 ) from None
             if recovered_review is not None:
                 recovered_manifest = recovered_review["manifest"]
+                recovered_intent = recovered_review.get("intent")
                 result = review_module.result_from_manifest(
                     recovered_manifest,
                     work_bundle=str(bundle),
-                    outcome=recovered_manifest["review"]["status"],
+                    outcome=_recovered_review_outcome(recovered_review),
                 )
-                intent = recovered_review.get("intent")
+                intent = recovered_intent
                 if isinstance(intent, dict):
                     try:
                         replay_payload = (
-                            review_module.load_record_input(
+                            review_module.load_record_input(Path(args.input), cwd=cwd)
+                            if args.record_command in {"review", "review-decision"}
+                            else correction_module.load_record_input(
                                 Path(args.input), cwd=cwd
                             )
-                            if args.record_command == "review"
+                            if args.record_command == "correction"
                             else None
                         )
-                    except review_module.ReviewError:
+                    except (review_module.ReviewError, correction_module.CorrectionError):
                         replay_payload = None
                     if not (
-                        args.record_command == "review"
+                        args.record_command
+                        == _recovered_review_command(intent)
                         and args.action_id == intent.get("action_id")
                         and args.evidence_hash == intent.get("evidence_hash")
                         and replay_payload == intent.get("payload")
@@ -2627,7 +2692,39 @@ def _record(args, *, cwd: Path, now) -> dict:
                         descriptors=descriptors,
                         manifest=manifest,
                         private_state=private_state,
+                        bundle_root=bundle,
                         payload=payload,
+                        expected_generation=args.expected_generation,
+                        action_id=args.action_id,
+                        evidence_hash=args.evidence_hash,
+                        at=_isoformat(_moment(now)),
+                    )
+                elif args.record_command == "review-decision":
+                    payload = review_module.load_record_input(
+                        Path(args.input), cwd=cwd
+                    )
+                    updated_manifest = review_module.commit_review_decision(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=private_state,
+                        bundle_root=bundle,
+                        payload=payload,
+                        expected_generation=args.expected_generation,
+                        action_id=args.action_id,
+                        evidence_hash=args.evidence_hash,
+                        at=_isoformat(_moment(now)),
+                    )
+                elif args.record_command == "correction":
+                    payload = correction_module.load_record_input(
+                        Path(args.input), cwd=cwd
+                    )
+                    updated_manifest = review_module.commit_correction_record(
+                        descriptors=descriptors,
+                        manifest=manifest,
+                        private_state=private_state,
+                        payload=payload,
+                        bundle_root=bundle,
+                        environ=environ,
                         expected_generation=args.expected_generation,
                         action_id=args.action_id,
                         evidence_hash=args.evidence_hash,
@@ -2745,9 +2842,21 @@ def _record(args, *, cwd: Path, now) -> dict:
                     ),
                     context=inspected,
                 ) from None
+            except correction_module.CorrectionError as exc:
+                raise WorkflowError(
+                    exc.code,
+                    exc.message,
+                    return_code=2,
+                    action_required="correct_correction_record",
+                    context=inspected,
+                ) from None
             _assert_bundle_descriptors_current(bundle, descriptors)
             if args.record_command == "review":
                 outcome = updated_manifest["review"]["status"]
+            elif args.record_command == "review-decision":
+                outcome = "review_ambiguity_resolved"
+            elif args.record_command == "correction":
+                outcome = "correction_applied"
             elif args.record_command == "conversion":
                 outcome = "conversion_retry_authorized"
             elif args.record_command == "source-staging":
@@ -2935,6 +3044,7 @@ def _resume(
                     descriptors=review_descriptors,
                     manifest=resume_manifest,
                     private_state=resume_private,
+                    bundle_root=bundle,
                     expected_generation=args.expected_generation,
                     at=_isoformat(_moment(now)),
                 )
@@ -2956,7 +3066,7 @@ def _resume(
             result = review_module.result_from_manifest(
                 recovered_manifest,
                 work_bundle=str(bundle),
-                outcome=recovered_manifest["review"]["status"],
+                outcome=_recovered_review_outcome(recovered_review),
             )
             print(
                 f"[pdf2markdown] recovered {result['outcome']} for work bundle {bundle.name}",
@@ -3389,7 +3499,9 @@ def main(
                 now=now,
             )
         elif args.command == "record":
-            result = _record(args, cwd=invocation_cwd, now=now)
+            result = _record(
+                args, cwd=invocation_cwd, environ=environment, now=now
+            )
         elif args.command == "resume":
             has_resume_overrides = any(
                 value is not None for value in _settings_cli(args).values()

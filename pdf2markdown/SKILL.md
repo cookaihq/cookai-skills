@@ -1,11 +1,11 @@
 ---
 name: pdf2markdown
-description: Create, preflight, convert, and safely adopt an immutable raw Markdown work bundle from one PDF. Use when a user asks to begin or resume a verifiable PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL without an external source uploader.
+description: Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
 ---
 
 # PDF to Markdown
 
-Establish a durable work bundle, complete its preflight gate, use the built-in AIHub source-staging upload, create and poll one Doc2X conversion attempt at a time, and atomically adopt each validated ZIP as an immutable raw conversion. A new paid attempt requires an explicit bound decision whenever the preceding attempt has an uncertain submission, explicit failure, result-count error, or unusable result layout. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
+Establish a durable work bundle, complete its preflight gate, use the built-in AIHub source-staging upload, create and poll one Doc2X conversion attempt at a time, atomically adopt each validated ZIP as an immutable raw conversion, and review the entire result before selecting a local final Markdown. Apply only evidence-bound corrections, preserve the raw baseline, and use controlled HTML or lossless page crops only when simpler Markdown is insufficient. A new paid attempt requires an explicit bound decision whenever the preceding attempt has an uncertain submission, explicit failure, result-count error, or unusable result layout. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
 
 ## Manage Settings
 
@@ -192,6 +192,89 @@ A prepared operation accepts exactly one matching part or final directory; missi
 
 Read [references/security-limits.md](references/security-limits.md) for the fixed local limits and [references/api-guide.md](references/api-guide.md) for the boundary between verified upstream facts and local conservative policy.
 
+## Open The Full Review
+
+After raw adoption reaches `converted`, open a review round with the latest generation and an explicit native visual capability:
+
+```bash
+python3 scripts/workflow.py resume \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  --visual-capability available
+```
+
+Do not claim fidelity from `converted` alone. A successful open returns `conversion_state: review_pending`, `action_required: record_review`, a one-time `action_id`, an `evidence_hash`, and an `artifacts.review_evidence` path. Read that evidence file, the immutable target Markdown, every page reference image, and the source inventory. Use only its page, block, target, parser, and boundary identities; never invent page-to-Markdown mappings.
+
+Review every source page, every listed Markdown block, and every required adjacent segment boundary. Check text, hierarchy, reading order, tables, formulas, footnotes, links, captions, and images. Record page miscellany that was omitted, merged, relocated, or preserved with its semantic basis, and record verified absence where a category is genuinely absent. Read [references/review-contract.md](references/review-contract.md) before constructing any review, ambiguity-decision, or correction input.
+
+## Record A Review Round
+
+Submit the review through the workflow boundary; never edit `review.json`, the report, or the manifest directly:
+
+```bash
+python3 scripts/workflow.py record review \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  --action-id <action-id> \
+  --evidence-hash <sha256-evidence> \
+  --input <review-record.json>
+```
+
+Choose exactly one status supported by the evidence:
+
+- `local_complete`: require complete page, block, and boundary coverage, no findings, and a safe GFM structure. The workflow atomically selects the reviewed target as `final_markdown` without making a duplicate.
+- `correction_required`: require complete coverage and only explicit `difference` findings. Each finding must be bound to source pages, Markdown blocks, one category, evidence, and `correct_markdown`.
+- `review_ambiguity`: require complete coverage and only `ambiguity` findings. Do not choose among multiple reasonable source readings.
+- `review_incomplete`: require a real page, block, or boundary coverage gap and no findings. Preserve the completed work; when the missing capability or context is available, run `resume --visual-capability available` with the latest generation to open the next round.
+
+Do not mix difference and ambiguity findings in one record, downgrade a structural failure to `local_complete`, or use an incomplete record as sampled approval.
+
+## Resolve Review Ambiguity
+
+In `confirm` mode, `review_ambiguity` returns `action_required: resolve_review_ambiguity`. Obtain an actual user decision for every unresolved finding, then submit one bound decision per finding:
+
+```bash
+python3 scripts/workflow.py record review-decision \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  --action-id <action-id> \
+  --evidence-hash <sha256-evidence> \
+  --input <review-decisions.json>
+```
+
+Use `keep_current` only when the user accepts the current target; use `correct_markdown` with the exact selected content when the user resolves the ambiguity in favor of a change. Bind every decision to a non-empty user basis. If every decision keeps the current target, the workflow can select it as the local final. Any decision requiring a change produces `record_correction`.
+
+In `auto` mode, preserve `awaiting_user / review_ambiguity` without an action or final pointer. Do not guess. A later explicit `resume --interaction-mode confirm` records the mode override and issues a bound decision action; use the newly returned generation and hashes.
+
+## Apply Evidence-Bound Corrections
+
+When `action_required` is `record_correction`, submit exactly one correction item for every open difference:
+
+```bash
+python3 scripts/workflow.py record correction \
+  --work-bundle <directory> \
+  --expected-generation <generation> \
+  --action-id <action-id> \
+  --evidence-hash <sha256-evidence> \
+  --input <correction-record.json>
+```
+
+Bind each item to its finding, affected review segments and boundaries, exact UTF-8 byte anchor, original text hash, replacement basis, and representation. Reject stylistic rewriting, summarization, translation, formatting preference, unsupported completion, overlapping anchors, or any change without source evidence.
+
+Use the least powerful faithful representation in this order:
+
+1. `markdown`: use an ordinary Markdown replacement and `fallback: null`.
+2. `safe_html`: record why Markdown is insufficient and why the finite safe-HTML representation is sufficient. The workflow validates the HTML allowlist and all URLs.
+3. `lossless_crop`: record why both Markdown and HTML are insufficient, identify the visual object, and supply a page-bound `page-png-pixels-v1` integer bounding box plus useful alt text. The workflow creates and hashes the crop from the frozen page PNG; never create, redraw, hash, or name the output yourself. Do not crop editable body text, and use a whole-page crop only for an evidenced whole-page visual object.
+
+The workflow creates a separate corrected Markdown, diff, correction record, optional crop assets, and fresh review evidence under `04-review/`. It rebases existing local resource targets to the same files inside the work bundle; it does not copy the raw assets or modify the immutable conversion tree.
+
+## Re-Review And Finalize
+
+`correction_applied` is not completion. It returns a new `record_review` action bound to the corrected target and fresh coverage. Inspect the new evidence and review the corrected Markdown again, including all pages, blocks, boundaries, corrected regions, local resources, safe HTML, and generated crops. Submit another `record review`; repeat correction and review only when the new evidence requires it.
+
+Only `conversion_state: local_complete` with `review_status: local_complete` and a non-null `final_markdown` is the reviewed local completion state. The pointer identifies either the immutable raw conversion or the latest reviewed corrected Markdown and includes its hash, size, review hashes, dialect, and semantic hash. Report that exact pointer; do not copy, rename, overwrite, or infer a final file yourself. Publication remains a separate state and cannot revoke a completed local result.
+
 ## Inspect Saved State
 
 Run a read-only inspection when reporting status or checking a work bundle:
@@ -200,7 +283,7 @@ Run a read-only inspection when reporting status or checking a work bundle:
 python3 scripts/workflow.py inspect --work-bundle <directory>
 ```
 
-Use the returned `conversion_state`, `publication_state`, `outcome`, `artifacts`, and `errors`. Do not edit `manifest.json`, `.state/private.json`, or `.state/history.ndjson` directly.
+Use the returned `conversion_state`, `publication_state`, `outcome`, `artifacts`, `review_status`, `review_coverage`, `target_dialect`, `final_markdown`, and `errors`. Treat `artifacts.review_evidence` as the input evidence for the current review action and `final_markdown` as authoritative only when it is non-null. Do not edit `manifest.json`, `.state/private.json`, or `.state/history.ndjson` directly.
 
 ## Resume Safely
 
@@ -219,13 +302,13 @@ python3 scripts/workflow.py resume \
   [--use-local-key]
 ```
 
-Resume without an explicit setting override from the saved work-bundle snapshot; ignore later non-secret environment, dotenv, home, and persistent-settings drift. A valid explicit override creates the next generation and appends its evidence without changing the old history. `--use-local-key` authorizes only the current invocation. Source staging resolves a key only when a new upload attempt is about to start. Conversion creation and polling reread the exact saved locator and fingerprint; they never silently choose another key.
+Resume without an explicit setting override from the saved work-bundle snapshot; ignore later non-secret environment, dotenv, home, and persistent-settings drift. A valid explicit override creates the next generation and appends its evidence without changing the old history. `--use-local-key` authorizes only the current invocation. Source staging resolves a key only when a new upload attempt is about to start. Conversion creation and polling reread the exact saved locator and fingerprint; they never silently choose another key. After raw adoption, `--visual-capability available` opens the initial full review or continues saved incomplete coverage; a pending review, correction, or ambiguity action is never consumed by `resume`.
 
-Handle `generation_conflict` by inspecting again before retrying. Handle `bundle_locked` by waiting for the active writer to finish. Before preflight is ready, a resume without overrides returns `outcome: no_progress`. Supplying `--visual-capability` makes `resume` use the same deterministic preflight progression as `advance`; once preflight is ready, resume can stage or recover the source without rerunning visual work.
+Handle `generation_conflict` by inspecting again before retrying. Handle `bundle_locked` by waiting for the active writer to finish. Before preflight is ready, a resume without overrides returns `outcome: no_progress`. Supplying `--visual-capability` makes `resume` use the same deterministic preflight progression as `advance`; once preflight is ready, resume can stage or recover the source without rerunning visual work. During review, always use the generation, action ID, evidence hash, and evidence artifact from the latest command; correction and follow-up review replace those bindings.
 
 ## Interpret Results
 
-- Exit `0`: the command completed; inspect `outcome`, `conversion_state`, `conversion_attempt_state`, `raw_conversion_state`, `action_required`, and `errors` to distinguish creation, preflight, source staging, submission, polling, result readiness, raw adoption, layout failure, and durable rejection.
+- Exit `0`: the command completed; inspect `outcome`, `conversion_state`, `conversion_attempt_state`, `raw_conversion_state`, `review_status`, `review_coverage`, `action_required`, `final_markdown`, and `errors` to distinguish creation, preflight, source staging, submission, polling, result readiness, raw adoption, review, correction, ambiguity, local completion, layout failure, and durable rejection.
 - Exit `2`: correct the command arguments.
 - Exit `3`: provide a parseable local PDF or an unauthenticated public HTTPS PDF that satisfies the source safety contract.
 - Exit `4`: stop and repair or restore the work bundle; do not bypass integrity or schema failures.
@@ -236,4 +319,4 @@ Expect exactly one versioned JSON object on stdout for every supported command a
 
 ## Scope Boundary
 
-Use these commands to manage settings, freeze the source PDF, generate the page baseline, complete the preflight gate, temporarily stage the frozen source, create one-at-a-time Doc2X conversion attempts, and atomically adopt an immutable raw conversion for each attempt that returns a usable ZIP. Do not claim content-semantic fidelity or a reviewed local final Markdown yet. This implementation does not yet perform content review, create a corrected Markdown, select a reviewed local final pointer, create publication plans, or publish images. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.
+Use these commands to manage settings, freeze the source PDF, generate the page baseline, complete the preflight gate, temporarily stage the frozen source, create one-at-a-time Doc2X conversion attempts, atomically adopt an immutable raw conversion, perform full content-semantic review, create evidence-bound corrected Markdown and fidelity fallbacks, resolve ambiguity without guessing, and select a reviewed local final pointer. The current implementation still does not create publication plans, call an external image uploader, or create an online-asset Markdown. Do not invoke `pdf2md_docx`, `upload-for-url`, or `s3-upload` as a substitute inside this workflow.

@@ -10,6 +10,8 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
 import bundle
+import correction
+import markdown_assets
 import markdown_structure
 import raw_conversion
 
@@ -17,6 +19,7 @@ import raw_conversion
 SCHEMA_VERSION = 1
 MAX_MARKDOWN_BYTES = 64 * 1024 * 1024
 MAX_RECORD_BYTES = 16 * 1024 * 1024
+MAX_CORRECTION_ARTIFACT_BYTES = 128 * 1024 * 1024
 DIALECT = "gfm+github-dollar-math"
 CHECK_CATEGORIES = frozenset(
     {
@@ -47,12 +50,35 @@ def _json_bytes(value: dict) -> bytes:
     ).encode("utf-8")
 
 
+def _bounded_artifact_bytes(value: bytes, *, artifact: str) -> bytes:
+    if len(value) > MAX_RECORD_BYTES:
+        raise ReviewError(
+            "review_size_limit",
+            f"The serialized {artifact} exceeds the durable review artifact limit.",
+        )
+    return value
+
+
+def _bounded_json_bytes(value: dict, *, artifact: str) -> bytes:
+    return _bounded_artifact_bytes(_json_bytes(value), artifact=artifact)
+
+
+def _current_schema(value: dict) -> bool:
+    return type(value.get("schema_version")) is int and value["schema_version"] == SCHEMA_VERSION
+
+
 def object_hash(value: dict) -> str:
     return "sha256:" + hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
 def _bytes_hash(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _source_slug(manifest: dict) -> str:
+    stem = Path(manifest["source"]["original_name"]).stem.lower()
+    value = re.sub(r"[^a-z0-9]+", "-", stem).strip("-")
+    return (value or "document")[:200].rstrip("-")
 
 
 def _read_regular_file(
@@ -62,7 +88,12 @@ def _read_regular_file(
     max_bytes: int,
     error_code: str = "integrity_violation",
 ) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         descriptor = os.open(name, flags, dir_fd=dir_fd)
@@ -91,7 +122,10 @@ def _read_regular_file(
             if size > max_bytes:
                 raise ReviewError(error_code, "A review input exceeds its read limit.")
         final = os.fstat(descriptor)
-        current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        try:
+            current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ReviewError(error_code, "A review input changed while it was read.") from exc
         if (
             final.st_size != size
             or (final.st_dev, final.st_ino) != (current.st_dev, current.st_ino)
@@ -168,6 +202,7 @@ def _write_exclusive(name: str, data: bytes, *, dir_fd: int) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    os.fsync(dir_fd)
 
 
 def _promote(temporary_name: str, final_name: str, *, dir_fd: int) -> None:
@@ -212,7 +247,13 @@ def _pandoc_dependency(manifest: dict) -> dict:
     return matches[0]
 
 
-def _parse_markdown(markdown: bytes, *, manifest: dict, environ: dict[str, str]) -> dict:
+def _parse_markdown(
+    markdown: bytes,
+    *,
+    manifest: dict,
+    environ: dict[str, str],
+    validated_local_targets=(),
+) -> dict:
     dependency = _pandoc_dependency(manifest)
     try:
         return markdown_structure.analyze(
@@ -221,12 +262,15 @@ def _parse_markdown(markdown: bytes, *, manifest: dict, environ: dict[str, str])
             environ=environ,
             expected_version=dependency["version"],
             expected_executable_identity=dependency["executable_identity"],
+            validated_local_targets=validated_local_targets,
         )
     except markdown_structure.MarkdownStructureError as exc:
         raise ReviewError(exc.code, exc.message) from None
 
 
-def _target_descriptor(manifest: dict, markdown: bytes, structure: dict) -> dict:
+def _target_descriptor(
+    manifest: dict, markdown: bytes, structure: dict, *, local_resources: dict
+) -> dict:
     raw = manifest["raw_conversion"]
     return {
         "kind": "raw_conversion",
@@ -248,7 +292,113 @@ def _target_descriptor(manifest: dict, markdown: bytes, structure: dict) -> dict
         "parser_profile": structure["parser_profile"],
         "lexical_profile": structure["lexical_profile"],
         "html_profile": structure["html_profile"],
+        "validated_local_targets": deepcopy(
+            structure.get("validated_local_targets", [])
+        ),
+        "local_resources": deepcopy(local_resources),
     }
+
+
+def _corrected_target_descriptor(
+    manifest: dict,
+    markdown: bytes,
+    structure: dict,
+    *,
+    correction_id: str,
+    path: str,
+    source_target: dict,
+    local_resources: dict,
+) -> dict:
+    return {
+        "kind": "corrected_markdown",
+        "correction_id": correction_id,
+        "path": path,
+        "sha256": _bytes_hash(markdown),
+        "size_bytes": len(markdown),
+        "provenance": {
+            "source_sha256": manifest["source"]["sha256"],
+            "raw_markdown_sha256": manifest["raw_conversion"][
+                "main_markdown_sha256"
+            ],
+            "previous_target_sha256": source_target["sha256"],
+        },
+        "dialect": structure["dialect"],
+        "semantic_hash": structure["semantic_hash"],
+        "normalized_source_sha256": structure["normalized_source_sha256"],
+        "content_index_sha256": structure["content_index_sha256"],
+        "structure_evidence_sha256": structure["structure_evidence_sha256"],
+        "coordinate_space": structure["coordinate_space"],
+        "parser_profile": structure["parser_profile"],
+        "lexical_profile": structure["lexical_profile"],
+        "html_profile": structure["html_profile"],
+        "validated_local_targets": deepcopy(
+            structure.get("validated_local_targets", [])
+        ),
+        "local_resources": deepcopy(local_resources),
+    }
+
+
+def _review_evidence(
+    *,
+    manifest: dict,
+    target: dict,
+    structure: dict,
+    round_id: str,
+    prior_rounds: list[dict],
+    coverage_mode: str,
+    follow_up_requirements: dict,
+) -> dict:
+    baseline = _baseline_descriptor(manifest)
+    evidence = {
+        "schema_version": SCHEMA_VERSION,
+        "round_id": round_id,
+        "target": deepcopy(target),
+        "baseline": baseline,
+        "markdown_blocks": deepcopy(structure["blocks"]),
+        "markdown_block_boundaries": deepcopy(structure["boundaries"]),
+        "segment_boundary_policy": {
+            "kind": "ordered_adjacent_review_segments",
+            "identity_fields": ["before_segment_id", "after_segment_id"],
+            "ordering": [
+                "source_pages.start",
+                "source_pages.end",
+                "markdown_blocks.first_index",
+                "markdown_blocks.last_index",
+                "segment_id",
+            ],
+        },
+        "prior_rounds": deepcopy(prior_rounds),
+        "coverage_mode": coverage_mode,
+        "follow_up_requirements": deepcopy(follow_up_requirements),
+        "structural_validation": {
+            "status": "pass" if structure["status"] == "pass" else "blocked",
+            "dialect": structure["dialect"],
+            "parser_profile": target["parser_profile"],
+            "lexical_profile": target["lexical_profile"],
+            "html_profile": target["html_profile"],
+            "coordinate_space": structure["coordinate_space"],
+            "pandoc": deepcopy(structure["pandoc"]),
+            "structure_evidence_sha256": structure[
+                "structure_evidence_sha256"
+            ],
+            "issues": deepcopy(structure["issues"]),
+        },
+    }
+    evidence["coverage_basis_sha256"] = object_hash(
+        {
+            "pages": [item["page_number"] for item in baseline["page_references"]],
+            "blocks": [item["block_id"] for item in evidence["markdown_blocks"]],
+            "segment_boundary_policy": evidence["segment_boundary_policy"],
+            "coverage_mode": coverage_mode,
+            "follow_up_requirements": follow_up_requirements,
+            "prior_review_sha256": (
+                None
+                if not prior_rounds
+                else object_hash({"round": prior_rounds[-1]})
+            ),
+        }
+    )
+    return evidence
 
 
 def _baseline_descriptor(manifest: dict) -> dict:
@@ -290,6 +440,7 @@ def open_review(
     descriptors: dict,
     manifest: dict,
     private_state: dict,
+    bundle_root: Path,
     environ: dict[str, str],
     visual_capability: str,
     expected_generation: int,
@@ -319,7 +470,11 @@ def open_review(
     previous_summaries = []
     previous_coverage = None
     if continuing_review:
-        validate_committed_artifacts(descriptors=descriptors, manifest=manifest)
+        validate_committed_artifacts(
+            descriptors=descriptors,
+            manifest=manifest,
+            bundle_root=bundle_root,
+        )
         previous_path = manifest.get("artifacts", {}).get("review")
         if not isinstance(previous_path, str):
             raise ReviewError(
@@ -348,18 +503,95 @@ def open_review(
         previous_rounds = deepcopy(previous_document["rounds"])
         previous_summaries = deepcopy(previous_review["rounds"])
         previous_coverage = deepcopy(previous_review["coverage"])
-    raw = manifest["raw_conversion"]
+    expected_target = previous_review.get("target") if continuing_review else None
+    target_path = (
+        expected_target.get("path")
+        if isinstance(expected_target, dict)
+        else manifest["raw_conversion"]["main_markdown_path"]
+    )
+    if not isinstance(target_path, str):
+        raise ReviewError("integrity_violation", "The review target path is invalid.")
     markdown = _read_bundle_path(
-        raw["main_markdown_path"],
+        target_path,
         root_fd=descriptors["root"],
         max_bytes=MAX_MARKDOWN_BYTES,
     )
-    if _bytes_hash(markdown) != raw["main_markdown_sha256"]:
-        raise ReviewError(
-            "integrity_violation", "The raw conversion Markdown hash changed."
+    expected_sha256 = (
+        expected_target.get("sha256")
+        if isinstance(expected_target, dict)
+        else manifest["raw_conversion"]["main_markdown_sha256"]
+    )
+    if _bytes_hash(markdown) != expected_sha256:
+        raise ReviewError("integrity_violation", "The review target Markdown changed.")
+    structure = _parse_markdown(
+        markdown,
+        manifest=manifest,
+        environ=environ,
+        validated_local_targets=(
+            expected_target.get("validated_local_targets", [])
+            if isinstance(expected_target, dict)
+            else ()
+        ),
+    )
+    local_resources = None
+    if not continuing_review:
+        raw = manifest["raw_conversion"]
+        raw_root = f"03-converted/attempts/{raw['attempt_id']}/raw"
+        try:
+            inspected_resources = markdown_assets.rebase_local_references(
+                markdown,
+                bundle_root=bundle_root,
+                source_markdown_path=target_path,
+                destination_markdown_path=target_path,
+                expected_references=structure["resource_references"],
+                allowed_bundle_root=raw_root,
+            )
+        except markdown_assets.MarkdownAssetError as exc:
+            raise ReviewError(exc.code, exc.message) from None
+        local_resources = {
+            "schema_version": SCHEMA_VERSION,
+            "markdown_path": target_path,
+            "markdown_sha256": "sha256:" + _bytes_hash(markdown),
+            "oracle": deepcopy(structure["resource_references"]),
+            "reference_count": sum(
+                item["count"] for item in inspected_resources["references"]
+            ),
+            "references": deepcopy(inspected_resources["references"]),
+        }
+    if not continuing_review or expected_target.get("kind") == "raw_conversion":
+        target = _target_descriptor(
+            manifest,
+            markdown,
+            structure,
+            local_resources=(
+                expected_target["local_resources"]
+                if continuing_review
+                else local_resources
+            ),
         )
-    structure = _parse_markdown(markdown, manifest=manifest, environ=environ)
-    target = _target_descriptor(manifest, markdown, structure)
+    elif expected_target.get("kind") == "corrected_markdown":
+        matching_corrections = [
+            item
+            for item in manifest.get("corrections", [])
+            if isinstance(item, dict)
+            and item.get("correction_id") == expected_target.get("correction_id")
+            and item.get("corrected_markdown", {}).get("path") == target_path
+        ]
+        if len(matching_corrections) != 1:
+            raise ReviewError(
+                "integrity_violation", "The corrected review target is unavailable."
+            )
+        target = _corrected_target_descriptor(
+            manifest,
+            markdown,
+            structure,
+            correction_id=expected_target["correction_id"],
+            path=target_path,
+            source_target=matching_corrections[0]["source_target"],
+            local_resources=expected_target["local_resources"],
+        )
+    else:
+        raise ReviewError("integrity_violation", "The review target kind is invalid.")
     baseline = _baseline_descriptor(manifest)
     if continuing_review and (
         target != previous_review.get("target")
@@ -431,7 +663,7 @@ def open_review(
         },
         "boundaries": {"covered": 0, "required": 0, "complete": True},
     }
-    evidence_bytes = _json_bytes(evidence)
+    evidence_bytes = _bounded_json_bytes(evidence, artifact="review evidence")
     evidence_hash = "sha256:" + _bytes_hash(evidence_bytes)
     action_id = f"review-{uuid.uuid4().hex}"
     new_generation = expected_generation + 1
@@ -528,7 +760,9 @@ def _entry_kind(name: str, *, dir_fd: int) -> str | None:
     return "other"
 
 
-def _remove_owned_temporary(name: str, *, dir_fd: int) -> None:
+def _remove_owned_temporary(
+    name: str, *, dir_fd: int, max_bytes: int = MAX_RECORD_BYTES
+) -> None:
     kind = _entry_kind(name, dir_fd=dir_fd)
     if kind is None:
         return
@@ -536,10 +770,96 @@ def _remove_owned_temporary(name: str, *, dir_fd: int) -> None:
         raise ReviewError(
             "integrity_violation", "A pending review staging path is unsafe."
         )
-    data = _read_regular_file(name, dir_fd=dir_fd, max_bytes=MAX_RECORD_BYTES)
+    data = _read_regular_file(name, dir_fd=dir_fd, max_bytes=max_bytes)
     del data
     os.unlink(name, dir_fd=dir_fd)
     os.fsync(dir_fd)
+
+
+def _ensure_private_directory(name: str, *, dir_fd: int) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=dir_fd)
+        os.fsync(dir_fd)
+    except FileExistsError:
+        pass
+    return _open_directory(name, dir_fd=dir_fd)
+
+
+def _correction_artifact_path(value: str) -> PurePosixPath:
+    parsed = PurePosixPath(value) if isinstance(value, str) else None
+    if (
+        not isinstance(parsed, PurePosixPath)
+        or parsed.is_absolute()
+        or not parsed.parts
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+        or (len(parsed.parts) != 1 and parsed.parts[:-1] != ("assets",))
+        or (len(parsed.parts) == 2 and parsed.suffix != ".png")
+    ):
+        raise ReviewError(
+            "integrity_violation", "A correction artifact path is unsafe."
+        )
+    return parsed
+
+
+def _ensure_correction_artifact_parents(paths, *, review_fd: int) -> None:
+    if any(len(_correction_artifact_path(path).parts) == 2 for path in paths):
+        assets_fd = _ensure_private_directory("assets", dir_fd=review_fd)
+        os.close(assets_fd)
+
+
+def _correction_artifact_parent(path: str, *, review_fd: int) -> tuple[int, str]:
+    parsed = _correction_artifact_path(path)
+    if len(parsed.parts) == 1:
+        return os.dup(review_fd), parsed.name
+    return _open_directory("assets", dir_fd=review_fd), parsed.name
+
+
+def _correction_artifact_kind(path: str, *, review_fd: int) -> str | None:
+    parent_fd, name = _correction_artifact_parent(path, review_fd=review_fd)
+    try:
+        return _entry_kind(name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _read_correction_artifact(
+    path: str, *, review_fd: int, max_bytes: int
+) -> bytes:
+    parent_fd, name = _correction_artifact_parent(path, review_fd=review_fd)
+    try:
+        return _read_regular_file(name, dir_fd=parent_fd, max_bytes=max_bytes)
+    finally:
+        os.close(parent_fd)
+
+
+def _promote_correction_artifact(
+    temporary_name: str, final_path: str, *, review_fd: int
+) -> None:
+    parsed = _correction_artifact_path(final_path)
+    if len(parsed.parts) == 1:
+        _promote(temporary_name, parsed.name, dir_fd=review_fd)
+        return
+    assets_fd = _open_directory("assets", dir_fd=review_fd)
+    try:
+        if _entry_kind(parsed.name, dir_fd=assets_fd) is not None:
+            raise ReviewError(
+                "integrity_violation", "A correction artifact already exists."
+            )
+        try:
+            os.rename(
+                temporary_name,
+                parsed.name,
+                src_dir_fd=review_fd,
+                dst_dir_fd=assets_fd,
+            )
+        except OSError as exc:
+            raise ReviewError(
+                "integrity_violation", "A correction artifact could not be promoted."
+            ) from exc
+        os.fsync(assets_fd)
+        os.fsync(review_fd)
+    finally:
+        os.close(assets_fd)
 
 
 def _open_prefix_from_state(
@@ -630,7 +950,7 @@ def _valid_open_intent(intent: dict) -> bool:
     round_id = evidence.get("round_id") if isinstance(evidence, dict) else None
     return (
         isinstance(intent, dict)
-        and intent.get("schema_version") == SCHEMA_VERSION
+        and _current_schema(intent)
         and intent.get("event") == "review_open_intent"
         and isinstance(operation_id, str)
         and re.fullmatch(r"review-open-[0-9a-f]{32}", operation_id) is not None
@@ -665,7 +985,7 @@ def _valid_open_prepared(prepared: dict, intent: dict) -> bool:
     evidence_bytes = _json_bytes(intent["evidence"])
     return (
         isinstance(prepared, dict)
-        and prepared.get("schema_version") == SCHEMA_VERSION
+        and _current_schema(prepared)
         and prepared.get("event") == "review_open_prepared"
         and prepared.get("operation_id") == intent.get("operation_id")
         and prepared.get("expected_generation") == intent.get("expected_generation")
@@ -714,6 +1034,8 @@ def _record_desired_state(
     desired_manifest["artifacts"].update(
         {"review": review_path, "review_report": report_path}
     )
+    if intent.get("request_kind") == "review_decision":
+        desired_manifest["artifacts"]["review_decision"] = review_path
     if final is not None:
         desired_manifest["artifacts"]["final_markdown"] = final.get("path")
     else:
@@ -728,12 +1050,20 @@ def _record_prefix_from_state(
 ) -> tuple[dict, dict]:
     expected_generation = intent.get("expected_generation")
     new_generation = intent.get("new_generation")
+    request_kind = intent.get("request_kind", "review")
+    previous_review = intent.get("previous_review")
+    prefix_conversion_state = (
+        "awaiting_user" if request_kind == "review_decision" else "review_pending"
+    )
+    prefix_review_status = (
+        "review_ambiguity" if request_kind == "review_decision" else "review_pending"
+    )
     if type(expected_generation) is not int or new_generation != expected_generation + 1:
         raise ReviewError("integrity_violation", "A pending review record is invalid.")
     if (
         manifest.get("generation") == expected_generation
-        and manifest.get("conversion_state") == "review_pending"
-        and manifest.get("review", {}).get("status") == "review_pending"
+        and manifest.get("conversion_state") == prefix_conversion_state
+        and manifest.get("review") == previous_review
     ):
         prefix_manifest = deepcopy(manifest)
     elif manifest.get("generation") == new_generation:
@@ -755,12 +1085,11 @@ def _record_prefix_from_state(
             )
         prefix_manifest = deepcopy(manifest)
         prefix_manifest["generation"] = expected_generation
-        prefix_manifest["conversion_state"] = "review_pending"
+        prefix_manifest["conversion_state"] = prefix_conversion_state
         prefix_manifest["final_markdown"] = None
-        previous_review = intent.get("previous_review")
         if (
             not isinstance(previous_review, dict)
-            or previous_review.get("status") != "review_pending"
+            or previous_review.get("status") != prefix_review_status
             or previous_review.get("pending_action", {}).get("action_id")
             != intent.get("action_id")
             or previous_review.get("pending_action", {}).get("evidence_hash")
@@ -775,7 +1104,10 @@ def _record_prefix_from_state(
             raise ReviewError(
                 "integrity_violation", "A pending review prefix is invalid."
             )
-        for key in ("review", "review_report"):
+        for key in set(intent.get("previous_artifacts", {})) | {
+            "review",
+            "review_report",
+        }:
             previous_path = previous_artifacts.get(key)
             if previous_path is None:
                 prefix_manifest["artifacts"].pop(key, None)
@@ -822,12 +1154,14 @@ def _valid_record_intent(intent: dict) -> bool:
     report_path = intent.get("report_path") if isinstance(intent, dict) else None
     return (
         isinstance(intent, dict)
-        and intent.get("schema_version") == SCHEMA_VERSION
+        and _current_schema(intent)
         and intent.get("event") == "review_record_intent"
         and isinstance(operation_id, str)
         and re.fullmatch(r"review-record-[0-9a-f]{32}", operation_id) is not None
         and intent.get("new_generation") == intent.get("expected_generation") + 1
         and isinstance(intent.get("payload"), dict)
+        and intent.get("request_kind", "review")
+        in {"review", "review_decision"}
         and isinstance(intent.get("review"), dict)
         and isinstance(intent.get("previous_review"), dict)
         and isinstance(intent.get("previous_artifacts"), dict)
@@ -846,7 +1180,7 @@ def _valid_record_prepared(prepared: dict, intent: dict) -> bool:
     report_bytes = _report(intent["review_document"])
     return (
         isinstance(prepared, dict)
-        and prepared.get("schema_version") == SCHEMA_VERSION
+        and _current_schema(prepared)
         and prepared.get("event") == "review_record_prepared"
         and prepared.get("operation_id") == intent.get("operation_id")
         and prepared.get("expected_generation") == intent.get("expected_generation")
@@ -869,6 +1203,7 @@ def _recover_record_operation(
     index: int,
     manifest: dict,
     private_state: dict,
+    bundle_root: Path,
     expected_generation: int,
     at: str,
 ) -> dict:
@@ -989,6 +1324,11 @@ def _recover_record_operation(
         raise ReviewError(
             "integrity_violation", "A pending review result private state is invalid."
         )
+    validate_committed_artifacts(
+        descriptors=descriptors,
+        manifest=prefix_manifest,
+        bundle_root=bundle_root,
+    )
     if private_state == prefix_private:
         bundle.atomic_write_json(
             "private.json", desired_private, dir_fd=descriptors["state"]
@@ -1017,11 +1357,252 @@ def _recover_record_operation(
     }
 
 
+def _correction_prefix_from_state(
+    manifest: dict, private_state: dict, intent: dict
+) -> tuple[dict, dict]:
+    expected_generation = intent.get("expected_generation")
+    new_generation = intent.get("new_generation")
+    previous_review = intent.get("previous_review")
+    if (
+        manifest.get("generation") == expected_generation
+        and manifest.get("conversion_state") == "review_pending"
+        and manifest.get("review") == previous_review
+    ):
+        prefix_manifest = deepcopy(manifest)
+    elif (
+        manifest.get("generation") == new_generation
+        and manifest.get("conversion_state") == "review_pending"
+        and manifest.get("review") == intent.get("review")
+        and manifest.get("corrections", [])
+        == [*intent.get("previous_corrections", []), intent.get("correction")]
+    ):
+        prefix_manifest = deepcopy(manifest)
+        prefix_manifest["generation"] = expected_generation
+        prefix_manifest["review"] = deepcopy(previous_review)
+        previous_corrections = intent.get("previous_corrections", [])
+        if previous_corrections:
+            prefix_manifest["corrections"] = deepcopy(previous_corrections)
+        else:
+            prefix_manifest.pop("corrections", None)
+        for key, value in intent.get("previous_artifacts", {}).items():
+            if value is None:
+                prefix_manifest["artifacts"].pop(key, None)
+            else:
+                prefix_manifest["artifacts"][key] = value
+        prefix_manifest["final_markdown"] = None
+    else:
+        raise ReviewError(
+            "integrity_violation", "A pending correction manifest is inconsistent."
+        )
+    prefix_private = deepcopy(private_state)
+    if prefix_private.get("generation") not in {expected_generation, new_generation}:
+        raise ReviewError(
+            "integrity_violation", "A pending correction private state is inconsistent."
+        )
+    if (
+        manifest.get("generation") == new_generation
+        and private_state.get("generation") == expected_generation
+    ):
+        raise ReviewError(
+            "integrity_violation", "A pending correction commit is ordered unsafely."
+        )
+    prefix_private["generation"] = expected_generation
+    if (
+        object_hash(prefix_manifest) != intent.get("previous_manifest_hash")
+        or object_hash(prefix_private) != intent.get("previous_private_hash")
+    ):
+        raise ReviewError(
+            "integrity_violation", "A pending correction prefix hash is invalid."
+        )
+    return prefix_manifest, prefix_private
+
+
+def _recover_correction_operation(
+    *,
+    descriptors: dict,
+    history: list[dict],
+    index: int,
+    manifest: dict,
+    private_state: dict,
+    bundle_root: Path,
+    expected_generation: int,
+    at: str,
+) -> dict:
+    intent = history[index]
+    suffix = history[index:]
+    if not _valid_correction_intent(intent):
+        raise ReviewError(
+            "integrity_violation", "A pending correction intent is invalid."
+        )
+    if expected_generation not in {
+        intent.get("expected_generation"),
+        intent.get("new_generation"),
+    }:
+        raise ReviewError(
+            "generation_conflict", "Expected generation does not match the correction."
+        )
+    prefix_manifest, prefix_private = _correction_prefix_from_state(
+        manifest, private_state, intent
+    )
+    resolved_prefix = resolve_history_state(
+        history[:index],
+        manifest_template=prefix_manifest,
+        private_template=prefix_private,
+    )
+    if resolved_prefix != (prefix_manifest, prefix_private):
+        raise ReviewError(
+            "integrity_violation", "The correction history prefix is invalid."
+        )
+    temporary_names = intent["temporary_names"]
+    _ensure_correction_artifact_parents(
+        intent["artifact_manifest"], review_fd=descriptors["review"]
+    )
+    if len(suffix) == 1:
+        source_markdown = _read_bundle_path(
+            intent["source_target"]["path"],
+            root_fd=descriptors["root"],
+            max_bytes=MAX_MARKDOWN_BYTES,
+        )
+        if _bytes_hash(source_markdown) != intent["source_target"].get("sha256"):
+            raise ReviewError("integrity_violation", "The correction target changed.")
+        artifacts = _correction_artifacts(
+            intent,
+            source_markdown=source_markdown,
+            review_document=intent["source_review_document"],
+            bundle_root=bundle_root,
+        )
+        if _artifact_manifest(artifacts) != intent.get("artifact_manifest"):
+            raise ReviewError(
+                "integrity_violation", "The pending correction artifacts changed."
+            )
+        for final_name, temporary_name in sorted(temporary_names.items()):
+            _remove_owned_temporary(
+                temporary_name,
+                dir_fd=descriptors["review"],
+                max_bytes=intent["artifact_manifest"][final_name]["size_bytes"],
+            )
+            if (
+                _correction_artifact_kind(
+                    final_name, review_fd=descriptors["review"]
+                )
+                is not None
+            ):
+                raise ReviewError(
+                    "integrity_violation", "An unprepared correction already exists."
+                )
+            _write_exclusive(
+                temporary_name,
+                artifacts[final_name],
+                dir_fd=descriptors["review"],
+            )
+        prepared = {
+            "schema_version": SCHEMA_VERSION,
+            "event": "correction_record_prepared",
+            "operation_id": intent["operation_id"],
+            "expected_generation": intent["expected_generation"],
+            "new_generation": intent["new_generation"],
+            "at": intent["at"],
+            "intent_hash": object_hash(intent),
+            "artifact_manifest": intent["artifact_manifest"],
+            "tree_hash": object_hash({"artifacts": intent["artifact_manifest"]}),
+        }
+        bundle.append_history(prepared, state_fd=descriptors["state"])
+    elif len(suffix) == 2 and _valid_correction_prepared(suffix[1], intent):
+        prepared = suffix[1]
+    else:
+        raise ReviewError(
+            "integrity_violation", "A pending correction suffix is invalid."
+        )
+    for final_name, temporary_name in sorted(temporary_names.items()):
+        temporary_kind = _entry_kind(temporary_name, dir_fd=descriptors["review"])
+        final_kind = _correction_artifact_kind(
+            final_name, review_fd=descriptors["review"]
+        )
+        expected_artifact = intent["artifact_manifest"][final_name]
+        if temporary_kind == "file" and final_kind is None:
+            data = _read_regular_file(
+                temporary_name,
+                dir_fd=descriptors["review"],
+                max_bytes=expected_artifact["size_bytes"],
+            )
+            if (
+                "sha256:" + _bytes_hash(data) != expected_artifact["sha256"]
+                or len(data) != expected_artifact["size_bytes"]
+            ):
+                raise ReviewError(
+                    "integrity_violation", "A pending correction artifact changed."
+                )
+            _promote_correction_artifact(
+                temporary_name,
+                final_name,
+                review_fd=descriptors["review"],
+            )
+        elif temporary_kind is None and final_kind == "file":
+            data = _read_correction_artifact(
+                final_name,
+                review_fd=descriptors["review"],
+                max_bytes=expected_artifact["size_bytes"],
+            )
+            if (
+                "sha256:" + _bytes_hash(data) != expected_artifact["sha256"]
+                or len(data) != expected_artifact["size_bytes"]
+            ):
+                raise ReviewError(
+                    "integrity_violation", "A committed correction artifact changed."
+                )
+        else:
+            raise ReviewError(
+                "integrity_violation", "A pending correction artifact is unsafe."
+            )
+    desired = _correction_desired_state(prefix_manifest, prefix_private, intent)
+    if desired is None:
+        raise ReviewError(
+            "integrity_violation", "The pending correction state is invalid."
+        )
+    desired_manifest, desired_private = desired
+    if manifest != prefix_manifest and manifest != desired_manifest:
+        raise ReviewError(
+            "integrity_violation", "The pending correction manifest is invalid."
+        )
+    if private_state != prefix_private and private_state != desired_private:
+        raise ReviewError(
+            "integrity_violation", "The pending correction private state is invalid."
+        )
+    if private_state == prefix_private:
+        bundle.atomic_write_json(
+            "private.json", desired_private, dir_fd=descriptors["state"]
+        )
+    if manifest == prefix_manifest:
+        bundle.atomic_write_json(
+            "manifest.json", desired_manifest, dir_fd=descriptors["root"]
+        )
+    committed = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "correction_record_committed",
+        "operation_id": intent["operation_id"],
+        "previous_generation": intent["expected_generation"],
+        "generation": intent["new_generation"],
+        "at": at,
+        "manifest_hash": object_hash(desired_manifest),
+        "private_hash": object_hash(desired_private),
+        "tree_hash": prepared["tree_hash"],
+    }
+    bundle.append_history(committed, state_fd=descriptors["state"])
+    return {
+        "event": intent["event"],
+        "expected_generation": intent["expected_generation"],
+        "manifest": desired_manifest,
+        "private_state": desired_private,
+        "intent": intent,
+    }
+
+
 def recover_pending_operation(
     *,
     descriptors: dict,
     manifest: dict,
     private_state: dict,
+    bundle_root: Path,
     expected_generation: int,
     at: str,
 ) -> dict | None:
@@ -1030,7 +1611,8 @@ def recover_pending_operation(
         index
         for index, event in enumerate(history)
         if isinstance(event, dict)
-        and event.get("event") in {"review_open_intent", "review_record_intent"}
+        and event.get("event")
+        in {"review_open_intent", "review_record_intent", "correction_record_intent"}
     ]
     if not intent_indexes:
         return None
@@ -1041,9 +1623,19 @@ def recover_pending_operation(
         len(suffix) >= 3
         and isinstance(suffix[2], dict)
         and suffix[2].get("event")
-        in {"review_open_committed", "review_record_committed"}
+        in {
+            "review_open_committed",
+            "review_record_committed",
+            "correction_record_committed",
+        }
     ):
         return None
+    if isinstance(manifest.get("review"), dict):
+        validate_committed_artifacts(
+            descriptors=descriptors,
+            manifest=manifest,
+            bundle_root=bundle_root,
+        )
     if intent.get("event") == "review_record_intent":
         return _recover_record_operation(
             descriptors=descriptors,
@@ -1051,6 +1643,18 @@ def recover_pending_operation(
             index=index,
             manifest=manifest,
             private_state=private_state,
+            bundle_root=bundle_root,
+            expected_generation=expected_generation,
+            at=at,
+        )
+    if intent.get("event") == "correction_record_intent":
+        return _recover_correction_operation(
+            descriptors=descriptors,
+            history=history,
+            index=index,
+            manifest=manifest,
+            private_state=private_state,
+            bundle_root=bundle_root,
             expected_generation=expected_generation,
             at=at,
         )
@@ -1183,7 +1787,12 @@ def recover_pending_operation(
 
 def load_record_input(path: Path, *, cwd: Path) -> dict:
     candidate = path if path.is_absolute() else cwd / path
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         before = os.stat(candidate, follow_symlinks=False)
         descriptor = os.open(candidate, flags)
@@ -1213,7 +1822,12 @@ def load_record_input(path: Path, *, cwd: Path) -> dict:
                     "invalid_review_record", "The review record exceeds its size limit."
                 )
         final = os.fstat(descriptor)
-        current = os.stat(candidate, follow_symlinks=False)
+        try:
+            current = os.stat(candidate, follow_symlinks=False)
+        except OSError as exc:
+            raise ReviewError(
+                "invalid_review_record", "The review record changed while it was read."
+            ) from exc
         if (
             final.st_size != size
             or (final.st_dev, final.st_ino) != (current.st_dev, current.st_ino)
@@ -1256,6 +1870,22 @@ def _validate_checks(checks) -> bool:
     return categories == CHECK_CATEGORIES
 
 
+def _bounded_page_range(value, *, required_pages: set[int]) -> set[int] | None:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"start", "end"}
+        or type(value.get("start")) is not int
+        or type(value.get("end")) is not int
+        or not required_pages
+        or value["start"] < 1
+        or value["end"] < value["start"]
+        or value["end"] > max(required_pages)
+    ):
+        return None
+    pages = set(range(value["start"], value["end"] + 1))
+    return pages if pages <= required_pages else None
+
+
 def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     if (
         not isinstance(payload, dict)
@@ -1269,7 +1899,7 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
             "page_misc",
             "absence_basis",
         }
-        or payload.get("schema_version") != SCHEMA_VERSION
+        or not _current_schema(payload)
         or payload.get("status")
         not in {
             "local_complete",
@@ -1300,7 +1930,13 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     }
     prior_segments = []
     prior_boundaries = []
-    for prior_round in evidence["prior_rounds"]:
+    coverage_mode = evidence.get("coverage_mode", "cumulative")
+    if coverage_mode not in {"cumulative", "fresh"}:
+        raise ReviewError(
+            "integrity_violation", "The review coverage mode is invalid."
+        )
+    coverage_rounds = evidence["prior_rounds"] if coverage_mode == "cumulative" else []
+    for prior_round in coverage_rounds:
         if (
             not isinstance(prior_round, dict)
             or not isinstance(prior_round.get("segments"), list)
@@ -1320,6 +1956,9 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     for prior_segment in prior_segments:
         segment_id = prior_segment.get("segment_id")
         source_pages = prior_segment.get("source_pages")
+        page_range = _bounded_page_range(
+            source_pages, required_pages=required_pages
+        )
         markdown_blocks = prior_segment.get("markdown_blocks")
         block_indexes = (
             [block_positions.get(block_id) for block_id in markdown_blocks]
@@ -1329,7 +1968,7 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
         if (
             not isinstance(segment_id, str)
             or segment_id in segment_ids
-            or not isinstance(source_pages, dict)
+            or page_range is None
             or not isinstance(markdown_blocks, list)
             or not markdown_blocks
             or any(index is None for index in block_indexes)
@@ -1348,7 +1987,7 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
                 segment_id,
             )
         )
-        covered_pages.update(range(source_pages["start"], source_pages["end"] + 1))
+        covered_pages.update(page_range)
         covered_blocks.update(markdown_blocks)
     for segment in payload["segments"]:
         source_pages = segment.get("source_pages") if isinstance(segment, dict) else None
@@ -1358,13 +1997,8 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
             if isinstance(markdown_blocks, list)
             else []
         )
-        page_range = (
-            set(range(source_pages["start"], source_pages["end"] + 1))
-            if isinstance(source_pages, dict)
-            and type(source_pages.get("start")) is int
-            and type(source_pages.get("end")) is int
-            and source_pages["end"] >= source_pages["start"]
-            else set()
+        page_range = _bounded_page_range(
+            source_pages, required_pages=required_pages
         )
         if (
             not isinstance(segment, dict)
@@ -1373,13 +2007,7 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
             or not isinstance(segment.get("segment_id"), str)
             or not segment["segment_id"]
             or segment["segment_id"] in segment_ids
-            or not isinstance(source_pages, dict)
-            or set(source_pages) != {"start", "end"}
-            or type(source_pages.get("start")) is not int
-            or type(source_pages.get("end")) is not int
-            or source_pages["start"] < 1
-            or source_pages["end"] < source_pages["start"]
-            or not page_range <= required_pages
+            or page_range is None
             or not isinstance(markdown_blocks, list)
             or not markdown_blocks
             or not all(isinstance(item, str) and item for item in markdown_blocks)
@@ -1410,6 +2038,9 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     misc_ids = set()
     for item in payload["page_misc"]:
         source_pages = item.get("source_pages") if isinstance(item, dict) else None
+        page_range = _bounded_page_range(
+            source_pages, required_pages=required_pages
+        )
         if (
             not isinstance(item, dict)
             or set(item)
@@ -1428,14 +2059,7 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
             or not item["kind"]
             or item.get("treatment")
             not in {"omitted", "merged", "relocated", "preserved"}
-            or not isinstance(source_pages, dict)
-            or set(source_pages) != {"start", "end"}
-            or type(source_pages.get("start")) is not int
-            or type(source_pages.get("end")) is not int
-            or source_pages["start"] < 1
-            or source_pages["end"] < source_pages["start"]
-            or not set(range(source_pages["start"], source_pages["end"] + 1))
-            <= required_pages
+            or page_range is None
             or not isinstance(item.get("semantic_basis"), list)
             or not item["semantic_basis"]
             or not all(
@@ -1450,6 +2074,9 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     absence_ids = set()
     for item in payload["absence_basis"]:
         source_pages = item.get("source_pages") if isinstance(item, dict) else None
+        page_range = _bounded_page_range(
+            source_pages, required_pages=required_pages
+        )
         if (
             not isinstance(item, dict)
             or set(item)
@@ -1464,14 +2091,7 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
             or not item["absence_id"]
             or item["absence_id"] in absence_ids
             or item.get("category") not in CHECK_CATEGORIES
-            or not isinstance(source_pages, dict)
-            or set(source_pages) != {"start", "end"}
-            or type(source_pages.get("start")) is not int
-            or type(source_pages.get("end")) is not int
-            or source_pages["start"] < 1
-            or source_pages["end"] < source_pages["start"]
-            or not set(range(source_pages["start"], source_pages["end"] + 1))
-            <= required_pages
+            or page_range is None
             or not isinstance(item.get("basis"), list)
             or not item["basis"]
             or not all(isinstance(value, str) and value for value in item["basis"])
@@ -1485,6 +2105,9 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     finding_kinds = set()
     for finding in payload["findings"]:
         source_pages = finding.get("source_pages") if isinstance(finding, dict) else None
+        page_range = _bounded_page_range(
+            source_pages, required_pages=required_pages
+        )
         markdown_blocks = (
             finding.get("markdown_blocks") if isinstance(finding, dict) else None
         )
@@ -1507,14 +2130,7 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
             or finding["finding_id"] in finding_ids
             or finding.get("kind") not in {"difference", "ambiguity"}
             or finding.get("category") not in CHECK_CATEGORIES
-            or not isinstance(source_pages, dict)
-            or set(source_pages) != {"start", "end"}
-            or type(source_pages.get("start")) is not int
-            or type(source_pages.get("end")) is not int
-            or source_pages["start"] < 1
-            or source_pages["end"] < source_pages["start"]
-            or not set(range(source_pages["start"], source_pages["end"] + 1))
-            <= required_pages
+            or page_range is None
             or not isinstance(markdown_blocks, list)
             or not markdown_blocks
             or not set(markdown_blocks) <= required_blocks
@@ -1543,6 +2159,9 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
         finding_kinds.add(finding["kind"])
     finding_kind_by_id = {
         finding["finding_id"]: finding["kind"] for finding in payload["findings"]
+    }
+    finding_by_id = {
+        finding["finding_id"]: finding for finding in payload["findings"]
     }
     prior_covered_boundaries = set()
     for prior_boundary in prior_boundaries:
@@ -1595,6 +2214,56 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     covered_boundaries = (
         prior_covered_boundaries | submitted_boundaries
     ) & required_boundaries
+    follow_up = evidence.get("follow_up_requirements")
+    if follow_up is not None:
+        required_follow_up_segments = (
+            set(follow_up.get("segment_ids", [])) if isinstance(follow_up, dict) else set()
+        )
+        follow_up_boundaries = (
+            follow_up.get("boundaries") if isinstance(follow_up, dict) else None
+        )
+        required_follow_up_boundaries = (
+            {
+                (item.get("before_segment_id"), item.get("after_segment_id"))
+                for item in follow_up_boundaries
+                if isinstance(item, dict)
+                and set(item) == {"before_segment_id", "after_segment_id"}
+                and all(isinstance(value, str) and value for value in item.values())
+            }
+            if isinstance(follow_up_boundaries, list)
+            else set()
+        )
+        submitted_segment_ids = {
+            segment["segment_id"] for segment in payload["segments"]
+        }
+        prior_rounds_for_follow_up = evidence.get("prior_rounds", [])
+        if (
+            not isinstance(follow_up, dict)
+            or set(follow_up) != {"source_round_id", "segment_ids", "boundaries"}
+            or coverage_mode != "fresh"
+            or not prior_rounds_for_follow_up
+            or follow_up.get("source_round_id")
+            != prior_rounds_for_follow_up[-1].get("round_id")
+            or not isinstance(follow_up.get("segment_ids"), list)
+            or not required_follow_up_segments
+            or len(required_follow_up_segments) != len(follow_up["segment_ids"])
+            or not all(
+                isinstance(value, str) and value for value in follow_up["segment_ids"]
+            )
+            or not isinstance(follow_up_boundaries, list)
+            or len(required_follow_up_boundaries) != len(follow_up_boundaries)
+        ):
+            raise ReviewError(
+                "integrity_violation", "The correction follow-up requirements are invalid."
+            )
+        if payload["status"] != "review_incomplete" and (
+            not required_follow_up_segments <= submitted_segment_ids
+            or not required_follow_up_boundaries <= submitted_boundaries
+        ):
+            raise ReviewError(
+                "invalid_review_record",
+                "The correction follow-up omits an affected segment or boundary.",
+            )
     expected_finding_kind = {
         "local_complete": None,
         "review_incomplete": None,
@@ -1618,6 +2287,47 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
         for boundary in payload["boundaries"]
         if boundary["status"] != "pass"
     )
+    segment_by_id = {
+        segment["segment_id"]: segment
+        for segment in [*prior_segments, *payload["segments"]]
+    }
+    segment_findings_are_bound = all(
+        all(
+            finding_by_id.get(finding_id, {}).get("category") == check["category"]
+            and finding_by_id[finding_id]["source_pages"]["start"]
+            >= segment["source_pages"]["start"]
+            and finding_by_id[finding_id]["source_pages"]["end"]
+            <= segment["source_pages"]["end"]
+            and set(finding_by_id[finding_id]["markdown_blocks"])
+            <= set(segment["markdown_blocks"])
+            for finding_id in check["finding_ids"]
+        )
+        for segment in payload["segments"]
+        for check in segment["checks"]
+    )
+    boundary_findings_are_bound = True
+    for boundary in payload["boundaries"]:
+        before = segment_by_id.get(boundary["before_segment_id"])
+        after = segment_by_id.get(boundary["after_segment_id"])
+        if before is None or after is None:
+            boundary_findings_are_bound = False
+            break
+        minimum_page = min(
+            before["source_pages"]["start"], after["source_pages"]["start"]
+        )
+        maximum_page = max(
+            before["source_pages"]["end"], after["source_pages"]["end"]
+        )
+        boundary_blocks = set(before["markdown_blocks"]) | set(after["markdown_blocks"])
+        if not all(
+            finding_by_id.get(finding_id, {}).get("source_pages", {}).get("start", 0)
+            >= minimum_page
+            and finding_by_id[finding_id]["source_pages"]["end"] <= maximum_page
+            and set(finding_by_id[finding_id]["markdown_blocks"]) <= boundary_blocks
+            for finding_id in boundary["finding_ids"]
+        ):
+            boundary_findings_are_bound = False
+            break
     if (
         not covered_pages <= required_pages
         or not covered_blocks <= required_blocks
@@ -1629,6 +2339,8 @@ def _normalize_record(payload: dict, *, evidence: dict) -> tuple[dict, dict]:
     if (
         referenced_findings != finding_ids
         or not statuses_match_findings
+        or not segment_findings_are_bound
+        or not boundary_findings_are_bound
         or (expected_finding_kind is None and finding_ids)
         or (
             expected_finding_kind is not None
@@ -1703,11 +2415,827 @@ def _report(review: dict) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
+def _is_utf8_text(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _normalize_review_decisions(payload: dict, review_document: dict) -> tuple[dict, dict]:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "decisions"}
+        or not _current_schema(payload)
+        or not isinstance(payload.get("decisions"), list)
+        or not payload["decisions"]
+        or not isinstance(review_document, dict)
+        or review_document.get("status") != "review_ambiguity"
+        or not isinstance(review_document.get("rounds"), list)
+        or not review_document["rounds"]
+    ):
+        raise ReviewError(
+            "invalid_review_decision", "The review decision uses an invalid schema."
+        )
+    last_round = review_document["rounds"][-1]
+    findings = {
+        item.get("finding_id"): item
+        for item in last_round.get("findings", [])
+        if isinstance(item, dict)
+        and item.get("kind") == "ambiguity"
+        and item.get("status") == "unresolved"
+    }
+    if not findings or len(findings) != len(last_round.get("findings", [])):
+        raise ReviewError(
+            "integrity_violation", "The unresolved review findings are invalid."
+        )
+    normalized = []
+    seen = set()
+    for item in payload["decisions"]:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {"finding_id", "resolution", "selected_content", "basis"}
+            or not isinstance(item.get("finding_id"), str)
+            or item["finding_id"] not in findings
+            or item["finding_id"] in seen
+            or item.get("resolution") not in {"keep_current", "correct_markdown"}
+            or (
+                item["resolution"] == "keep_current"
+                and item.get("selected_content") is not None
+            )
+            or (
+                item["resolution"] == "correct_markdown"
+                and (
+                    not _is_utf8_text(item.get("selected_content"))
+                    or not item["selected_content"]
+                )
+            )
+            or not isinstance(item.get("basis"), list)
+            or not item["basis"]
+            or not all(isinstance(value, str) and value for value in item["basis"])
+        ):
+            raise ReviewError(
+                "invalid_review_decision",
+                "Each ambiguity decision must bind one unresolved finding and user basis.",
+            )
+        seen.add(item["finding_id"])
+        normalized.append(deepcopy(item))
+    if seen != set(findings):
+        raise ReviewError(
+            "invalid_review_decision",
+            "Every unresolved ambiguity must receive exactly one decision.",
+        )
+
+    decision_by_id = {item["finding_id"]: item for item in normalized}
+    corrected_findings = []
+    for finding_id, finding in findings.items():
+        decision = decision_by_id[finding_id]
+        if decision["resolution"] == "correct_markdown":
+            corrected = deepcopy(finding)
+            corrected["kind"] = "difference"
+            corrected["action"] = "correct_markdown"
+            corrected["status"] = "open"
+            corrected["selected_content"] = decision["selected_content"]
+            corrected["decision_basis"] = deepcopy(decision["basis"])
+            corrected_findings.append(corrected)
+    corrected_ids = {item["finding_id"] for item in corrected_findings}
+    decision_document = deepcopy(review_document)
+    decision_document["decisions"] = normalized
+    decision_document["status"] = (
+        "correction_required" if corrected_findings else "local_complete"
+    )
+    decision_document["reason_code"] = None
+    decision_round = decision_document["rounds"][-1]
+    decision_round["findings"] = corrected_findings
+    decision_round["status"] = decision_document["status"]
+    for segment in decision_round.get("segments", []):
+        for check in segment.get("checks", []):
+            check["finding_ids"] = [
+                finding_id
+                for finding_id in check["finding_ids"]
+                if finding_id in corrected_ids
+            ]
+            check["status"] = "difference" if check["finding_ids"] else "pass"
+    for boundary in decision_round.get("boundaries", []):
+        boundary["finding_ids"] = [
+            finding_id
+            for finding_id in boundary["finding_ids"]
+            if finding_id in corrected_ids
+        ]
+        boundary["status"] = "difference" if boundary["finding_ids"] else "pass"
+    return {"schema_version": SCHEMA_VERSION, "decisions": normalized}, decision_document
+
+
+def commit_review_decision(
+    *,
+    descriptors: dict,
+    manifest: dict,
+    private_state: dict,
+    bundle_root: Path,
+    payload: dict,
+    expected_generation: int,
+    action_id: str,
+    evidence_hash: str,
+    at: str,
+) -> dict:
+    if manifest.get("generation") != expected_generation:
+        raise ReviewError("generation_conflict", "The work bundle generation changed.")
+    state = manifest.get("review")
+    pending = state.get("pending_action") if isinstance(state, dict) else None
+    if (
+        manifest.get("conversion_state") != "awaiting_user"
+        or not isinstance(state, dict)
+        or state.get("status") != "review_ambiguity"
+        or not isinstance(pending, dict)
+    ):
+        raise ReviewError("action_already_consumed", "No review decision is pending.")
+    if pending.get("action_id") != action_id:
+        raise ReviewError(
+            "review_action_mismatch", "The review decision action ID does not match."
+        )
+    if pending.get("evidence_hash") != evidence_hash:
+        raise ReviewError(
+            "evidence_hash_mismatch", "The review decision evidence hash does not match."
+        )
+    validate_committed_artifacts(
+        descriptors=descriptors,
+        manifest=manifest,
+        bundle_root=bundle_root,
+    )
+    previous_summary = state["rounds"][-1]
+    previous_bytes = _read_bundle_path(
+        previous_summary["review_path"],
+        root_fd=descriptors["root"],
+        max_bytes=MAX_RECORD_BYTES,
+    )
+    if "sha256:" + _bytes_hash(previous_bytes) != previous_summary["review_sha256"]:
+        raise ReviewError("integrity_violation", "The ambiguity review changed.")
+    try:
+        previous_document = bundle.decode_json_object(previous_bytes)
+    except bundle.BundleStateError as exc:
+        raise ReviewError("integrity_violation", "The ambiguity review is invalid.") from exc
+    normalized, review_document = _normalize_review_decisions(
+        payload, previous_document
+    )
+    review_bytes = _bounded_json_bytes(
+        review_document, artifact="review decision"
+    )
+    review_sha256 = "sha256:" + _bytes_hash(review_bytes)
+    report_bytes = _bounded_artifact_bytes(
+        _report(review_document), artifact="review decision report"
+    )
+    report_sha256 = "sha256:" + _bytes_hash(report_bytes)
+    new_generation = expected_generation + 1
+    status = review_document["status"]
+    pending_action = None
+    if status == "correction_required":
+        pending_action = {
+            "kind": "record_correction",
+            "action_id": f"correction-{uuid.uuid4().hex}",
+            "generation": new_generation,
+            "evidence_hash": object_hash(
+                {
+                    "review_sha256": review_sha256,
+                    "target_sha256": state["target"]["sha256"],
+                    "finding_ids": [
+                        finding["finding_id"]
+                        for finding in review_document["rounds"][-1]["findings"]
+                    ],
+                }
+            ),
+        }
+    round_number = len(state["rounds"])
+    round_id = previous_summary.get("round_id")
+    if round_id != f"review-round-{round_number:04d}":
+        raise ReviewError(
+            "integrity_violation", "The ambiguity review round identity is invalid."
+        )
+    review_path = f"04-review/review-decision-{round_number:04d}.json"
+    report_path = f"04-review/review-decision-{round_number:04d}.md"
+    round_summary = {
+        "round_id": round_id,
+        "evidence_path": state["evidence"]["path"],
+        "evidence_sha256": state["evidence"]["sha256"],
+        "evidence_size_bytes": state["evidence"]["size_bytes"],
+        "review_path": review_path,
+        "review_sha256": review_sha256,
+        "review_size_bytes": len(review_bytes),
+        "report_path": report_path,
+        "report_sha256": report_sha256,
+        "report_size_bytes": len(report_bytes),
+        "recorded_at": at,
+    }
+    desired_review = {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "reason_code": None,
+        "target": deepcopy(state["target"]),
+        "evidence": deepcopy(state["evidence"]),
+        "coverage": deepcopy(state["coverage"]),
+        "rounds": [*deepcopy(state["rounds"][:-1]), round_summary],
+        "pending_action": pending_action,
+    }
+    final_markdown = None
+    if status == "local_complete":
+        target = state["target"]
+        final_markdown = {
+            "kind": target["kind"],
+            **(
+                {"attempt_id": target["attempt_id"]}
+                if target["kind"] == "raw_conversion"
+                else {"correction_id": target["correction_id"]}
+            ),
+            "path": target["path"],
+            "sha256": target["sha256"],
+            "size_bytes": target["size_bytes"],
+            "review_round_id": round_id,
+            "review_sha256": review_sha256,
+            "review_evidence_sha256": state["evidence"]["sha256"],
+            "dialect": DIALECT,
+            "semantic_hash": target["semantic_hash"],
+        }
+    desired_manifest = deepcopy(manifest)
+    desired_manifest["generation"] = new_generation
+    desired_manifest["conversion_state"] = (
+        "local_complete" if status == "local_complete" else "review_pending"
+    )
+    desired_manifest["review"] = desired_review
+    desired_manifest["final_markdown"] = final_markdown
+    desired_manifest["artifacts"].update(
+        {
+            "review": review_path,
+            "review_report": report_path,
+            "review_decision": review_path,
+        }
+    )
+    if final_markdown is not None:
+        desired_manifest["artifacts"]["final_markdown"] = final_markdown["path"]
+    desired_private = deepcopy(private_state)
+    desired_private["generation"] = new_generation
+    operation_id = f"review-record-{uuid.uuid4().hex}"
+    review_temporary_name = f".{operation_id}.review.part"
+    report_temporary_name = f".{operation_id}.report.part"
+    intent = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "review_record_intent",
+        "request_kind": "review_decision",
+        "operation_id": operation_id,
+        "expected_generation": expected_generation,
+        "new_generation": new_generation,
+        "at": at,
+        "action_id": action_id,
+        "evidence_hash": evidence_hash,
+        "payload": normalized,
+        "review": desired_review,
+        "previous_review": deepcopy(state),
+        "previous_artifacts": {
+            key: manifest.get("artifacts", {}).get(key)
+            for key in ("review", "review_report", "review_decision")
+        },
+        "final_markdown": final_markdown,
+        "review_document": review_document,
+        "review_path": review_path,
+        "report_path": report_path,
+        "review_temporary_name": review_temporary_name,
+        "report_temporary_name": report_temporary_name,
+        "previous_manifest_hash": object_hash(manifest),
+        "previous_private_hash": object_hash(private_state),
+    }
+    bundle.append_history(intent, state_fd=descriptors["state"])
+    _write_exclusive(review_temporary_name, review_bytes, dir_fd=descriptors["review"])
+    _write_exclusive(report_temporary_name, report_bytes, dir_fd=descriptors["review"])
+    prepared = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "review_record_prepared",
+        "operation_id": operation_id,
+        "expected_generation": expected_generation,
+        "new_generation": new_generation,
+        "at": at,
+        "intent_hash": object_hash(intent),
+        "review_sha256": review_sha256,
+        "review_size_bytes": len(review_bytes),
+        "report_sha256": report_sha256,
+        "report_size_bytes": len(report_bytes),
+    }
+    bundle.append_history(prepared, state_fd=descriptors["state"])
+    _promote(review_temporary_name, PurePosixPath(review_path).name, dir_fd=descriptors["review"])
+    _promote(report_temporary_name, PurePosixPath(report_path).name, dir_fd=descriptors["review"])
+    bundle.atomic_write_json("private.json", desired_private, dir_fd=descriptors["state"])
+    bundle.atomic_write_json("manifest.json", desired_manifest, dir_fd=descriptors["root"])
+    committed = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "review_record_committed",
+        "operation_id": operation_id,
+        "previous_generation": expected_generation,
+        "generation": new_generation,
+        "at": at,
+        "manifest_hash": object_hash(desired_manifest),
+        "private_hash": object_hash(desired_private),
+    }
+    bundle.append_history(committed, state_fd=descriptors["state"])
+    return desired_manifest
+
+
+def _correction_artifacts(
+    intent: dict,
+    *,
+    source_markdown: bytes,
+    review_document: dict,
+    bundle_root: Path,
+) -> dict[str, bytes]:
+    built = correction.apply_corrections(
+        intent["payload"],
+        review_document=review_document,
+        review_evidence=intent["source_review_evidence"],
+        source_markdown=source_markdown,
+        source_target=intent["source_target"],
+        correction_id=intent["correction_id"],
+        corrected_path=intent["correction"]["corrected_markdown"]["path"],
+        bundle_root=bundle_root,
+        at=intent["at"],
+        expected_references=intent["resource_reference_oracle"],
+    )
+    if built["record"] != intent.get("correction_document"):
+        raise ReviewError(
+            "integrity_violation", "The correction operation is not reproducible."
+        )
+    correction_summary = intent["correction"]
+    artifacts = {
+        PurePosixPath(correction_summary["corrected_markdown"]["path"])
+        .relative_to("04-review")
+        .as_posix(): built["corrected_markdown"],
+        PurePosixPath(correction_summary["diff"]["path"])
+        .relative_to("04-review")
+        .as_posix(): built["diff"],
+        PurePosixPath(correction_summary["record"]["path"])
+        .relative_to("04-review")
+        .as_posix(): built["record_bytes"],
+        PurePosixPath(correction_summary["review_evidence"]["path"])
+        .relative_to("04-review")
+        .as_posix(): _json_bytes(intent["review_evidence"]),
+    }
+    artifacts.update(built["artifacts"])
+    _validate_correction_artifact_budget(
+        artifacts, source_markdown=source_markdown
+    )
+    return artifacts
+
+
+def _validate_correction_artifact_budget(
+    artifacts: dict[str, bytes], *, source_markdown: bytes
+) -> None:
+    sizes = [len(source_markdown)]
+    for value in artifacts.values():
+        if not isinstance(value, bytes) or len(value) > MAX_CORRECTION_ARTIFACT_BYTES:
+            raise correction.CorrectionError(
+                "correction_size_limit",
+                "A generated correction artifact exceeds its byte limit.",
+            )
+        sizes.append(len(value))
+    if sum(sizes) > MAX_CORRECTION_ARTIFACT_BYTES:
+        raise correction.CorrectionError(
+            "correction_size_limit",
+            "The generated correction artifact set exceeds its aggregate byte limit.",
+        )
+
+
+def _validate_history_budget(events: list[dict], *, state_fd: int) -> None:
+    current = _read_regular_file(
+        "history.ndjson", dir_fd=state_fd, max_bytes=bundle.MAX_STATE_BYTES
+    )
+    if len(current) + sum(len(_json_bytes(event)) for event in events) > bundle.MAX_STATE_BYTES:
+        raise correction.CorrectionError(
+            "correction_size_limit",
+            "The correction journal events exceed the remaining history budget.",
+        )
+
+
+def _artifact_manifest(artifacts: dict[str, bytes]) -> dict:
+    return {
+        path: {
+            "sha256": "sha256:" + _bytes_hash(data),
+            "size_bytes": len(data),
+        }
+        for path, data in sorted(artifacts.items())
+    }
+
+
+def _correction_desired_state(
+    manifest: dict, private_state: dict, intent: dict
+) -> tuple[dict, dict] | None:
+    summary = intent.get("correction") if isinstance(intent, dict) else None
+    review_state = intent.get("review") if isinstance(intent, dict) else None
+    if (
+        not isinstance(summary, dict)
+        or not isinstance(review_state, dict)
+        or review_state.get("status") != "review_pending"
+        or review_state.get("pending_action", {}).get("kind") != "record_review"
+    ):
+        return None
+    corrections = manifest.get("corrections", [])
+    if not isinstance(corrections, list):
+        return None
+    desired_manifest = deepcopy(manifest)
+    desired_manifest["generation"] = intent["new_generation"]
+    desired_manifest["conversion_state"] = "review_pending"
+    desired_manifest["review"] = deepcopy(review_state)
+    desired_manifest["final_markdown"] = None
+    desired_manifest["corrections"] = [*deepcopy(corrections), deepcopy(summary)]
+    desired_manifest["artifacts"].update(
+        {
+            "corrected_markdown": summary["corrected_markdown"]["path"],
+            "corrections_diff": summary["diff"]["path"],
+            "correction_record": summary["record"]["path"],
+            "review_evidence": summary["review_evidence"]["path"],
+        }
+    )
+    desired_manifest["artifacts"].pop("final_markdown", None)
+    desired_private = deepcopy(private_state)
+    desired_private["generation"] = intent["new_generation"]
+    return desired_manifest, desired_private
+
+
+def commit_correction_record(
+    *,
+    descriptors: dict,
+    manifest: dict,
+    private_state: dict,
+    payload: dict,
+    bundle_root: Path,
+    environ: dict[str, str],
+    expected_generation: int,
+    action_id: str,
+    evidence_hash: str,
+    at: str,
+) -> dict:
+    if manifest.get("generation") != expected_generation:
+        raise ReviewError("generation_conflict", "The work bundle generation changed.")
+    state = manifest.get("review")
+    pending = state.get("pending_action") if isinstance(state, dict) else None
+    if (
+        manifest.get("conversion_state") != "review_pending"
+        or not isinstance(state, dict)
+        or state.get("status") != "correction_required"
+        or not isinstance(pending, dict)
+    ):
+        raise ReviewError("action_already_consumed", "No correction action is pending.")
+    if pending.get("action_id") != action_id:
+        raise ReviewError(
+            "review_action_mismatch", "The correction action ID does not match."
+        )
+    if pending.get("evidence_hash") != evidence_hash:
+        raise ReviewError(
+            "evidence_hash_mismatch", "The correction evidence hash does not match."
+        )
+    validate_committed_artifacts(
+        descriptors=descriptors,
+        manifest=manifest,
+        bundle_root=bundle_root,
+    )
+    summaries = state.get("rounds")
+    summary = summaries[-1] if isinstance(summaries, list) and summaries else None
+    if not isinstance(summary, dict):
+        raise ReviewError(
+            "integrity_violation", "The reviewed difference record is unavailable."
+        )
+    review_bytes = _read_bundle_path(
+        summary["review_path"],
+        root_fd=descriptors["root"],
+        max_bytes=MAX_RECORD_BYTES,
+    )
+    if "sha256:" + _bytes_hash(review_bytes) != summary.get("review_sha256"):
+        raise ReviewError(
+            "integrity_violation", "The reviewed difference record changed."
+        )
+    try:
+        review_document = bundle.decode_json_object(review_bytes)
+    except bundle.BundleStateError as exc:
+        raise ReviewError(
+            "integrity_violation", "The reviewed difference record is invalid."
+        ) from exc
+    source_evidence_bytes = _read_bundle_path(
+        state["evidence"]["path"],
+        root_fd=descriptors["root"],
+        max_bytes=MAX_RECORD_BYTES,
+    )
+    if "sha256:" + _bytes_hash(source_evidence_bytes) != state["evidence"].get(
+        "sha256"
+    ):
+        raise ReviewError(
+            "integrity_violation", "The correction source evidence changed."
+        )
+    try:
+        source_review_evidence = bundle.decode_json_object(source_evidence_bytes)
+    except bundle.BundleStateError as exc:
+        raise ReviewError(
+            "integrity_violation", "The correction source evidence is invalid."
+        ) from exc
+    source_target = state.get("target")
+    if not isinstance(source_target, dict) or source_target.get("kind") not in {
+        "raw_conversion",
+        "corrected_markdown",
+    }:
+        raise ReviewError(
+            "integrity_violation", "The correction target is invalid."
+        )
+    source_markdown = _read_bundle_path(
+        source_target["path"],
+        root_fd=descriptors["root"],
+        max_bytes=MAX_MARKDOWN_BYTES,
+    )
+    if _bytes_hash(source_markdown) != source_target.get("sha256"):
+        raise ReviewError("integrity_violation", "The correction target changed.")
+    correction_number = len(manifest.get("corrections", [])) + 1
+    correction_id = f"correction-{correction_number:04d}"
+    source_slug = _source_slug(manifest)
+    corrected_name = (
+        f"{source_slug}.corrected.md"
+        if correction_number == 1
+        else f"{source_slug}.corrected-{correction_number:04d}.md"
+    )
+    diff_name = (
+        "corrections.diff"
+        if correction_number == 1
+        else f"corrections-{correction_number:04d}.diff"
+    )
+    record_name = f"{correction_id}.json"
+    round_number = len(state.get("rounds", [])) + 1
+    round_id = f"review-round-{round_number:04d}"
+    evidence_name = f"review-evidence-round-{round_number:04d}.json"
+    corrected_path = f"04-review/{corrected_name}"
+    def reference_oracle(candidate: bytes) -> list[dict]:
+        oracle_structure = _parse_markdown(
+            candidate,
+            manifest=manifest,
+            environ=environ,
+            validated_local_targets=source_target.get("validated_local_targets", []),
+        )
+        return oracle_structure["resource_references"]
+
+    built = correction.apply_corrections(
+        payload,
+        review_document=review_document,
+        review_evidence=source_review_evidence,
+        source_markdown=source_markdown,
+        source_target=source_target,
+        correction_id=correction_id,
+        corrected_path=corrected_path,
+        bundle_root=bundle_root,
+        at=at,
+        reference_oracle=reference_oracle,
+    )
+    corrected = built["corrected_markdown"]
+    structure = _parse_markdown(
+        corrected,
+        manifest=manifest,
+        environ=environ,
+        validated_local_targets=[
+            item["rewritten_target"]
+            for item in built["record"]["resource_rewrites"]
+        ]
+        + [
+            PurePosixPath(item["output_relative_path"])
+            .relative_to("04-review")
+            .as_posix()
+            for item in built["record"]["crops"]
+        ],
+    )
+    if structure["status"] != "pass":
+        raise ReviewError(
+            "invalid_correction_record",
+            "The corrected Markdown does not satisfy the safe GFM structure contract.",
+        )
+    target = _corrected_target_descriptor(
+        manifest,
+        corrected,
+        structure,
+        correction_id=correction_id,
+        path=corrected_path,
+        source_target=source_target,
+        local_resources={
+            "schema_version": SCHEMA_VERSION,
+            "markdown_path": corrected_path,
+            "markdown_sha256": "sha256:" + _bytes_hash(corrected),
+            "oracle": deepcopy(structure["resource_references"]),
+            "reference_count": sum(
+                item["count"]
+                for item in built["record"]["resource_rewrites"]
+            ),
+            "references": deepcopy(built["record"]["resource_rewrites"]),
+        },
+    )
+    evidence = _review_evidence(
+        manifest=manifest,
+        target=target,
+        structure=structure,
+        round_id=round_id,
+        prior_rounds=review_document["rounds"],
+        coverage_mode="fresh",
+        follow_up_requirements={
+            "source_round_id": review_document["rounds"][-1]["round_id"],
+            "segment_ids": sorted(
+                {
+                    segment_id
+                    for item in built["payload"]["corrections"]
+                    for segment_id in item["review_segment_ids"]
+                }
+            ),
+            "boundaries": [
+                {
+                    "before_segment_id": before,
+                    "after_segment_id": after,
+                }
+                for before, after in sorted(
+                    {
+                        (
+                            boundary["before_segment_id"],
+                            boundary["after_segment_id"],
+                        )
+                        for item in built["payload"]["corrections"]
+                        for boundary in item["affected_boundaries"]
+                    }
+                )
+            ],
+        },
+    )
+    try:
+        evidence_bytes = _bounded_json_bytes(
+            evidence, artifact="follow-up review evidence"
+        )
+    except ReviewError as exc:
+        if exc.code != "review_size_limit":
+            raise
+        raise correction.CorrectionError("correction_size_limit", exc.message) from None
+    review_action = {
+        "kind": "record_review",
+        "action_id": f"review-{uuid.uuid4().hex}",
+        "generation": expected_generation + 1,
+        "evidence_hash": "sha256:" + _bytes_hash(evidence_bytes),
+    }
+    review_state = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "review_pending",
+        "reason_code": None,
+        "target": target,
+        "evidence": {
+            "path": f"04-review/{evidence_name}",
+            "sha256": review_action["evidence_hash"],
+            "size_bytes": len(evidence_bytes),
+            "coverage_basis_sha256": evidence["coverage_basis_sha256"],
+        },
+        "coverage": {
+            "source_pages": {
+                "covered": 0,
+                "required": len(evidence["baseline"]["page_references"]),
+                "complete": False,
+            },
+            "markdown_blocks": {
+                "covered": 0,
+                "required": len(evidence["markdown_blocks"]),
+                "complete": False,
+            },
+            "boundaries": {"covered": 0, "required": 0, "complete": True},
+        },
+        "rounds": deepcopy(state.get("rounds", [])),
+        "pending_action": review_action,
+    }
+    artifact_bytes = {
+        corrected_name: corrected,
+        diff_name: built["diff"],
+        record_name: built["record_bytes"],
+        evidence_name: evidence_bytes,
+        **built["artifacts"],
+    }
+    _validate_correction_artifact_budget(
+        artifact_bytes, source_markdown=source_markdown
+    )
+    artifact_manifest = _artifact_manifest(artifact_bytes)
+
+    def descriptor(name: str) -> dict:
+        value = artifact_manifest[name]
+        return {
+            "path": f"04-review/{name}",
+            "sha256": value["sha256"],
+            "size_bytes": value["size_bytes"],
+        }
+
+    correction_summary = {
+        "schema_version": SCHEMA_VERSION,
+        "correction_id": correction_id,
+        "path": corrected_path,
+        "source_target": deepcopy(source_target),
+        "finding_ids": [
+            item["finding_id"] for item in built["payload"]["corrections"]
+        ],
+        "corrected_markdown": descriptor(corrected_name),
+        "diff": descriptor(diff_name),
+        "record": descriptor(record_name),
+        "review_evidence": descriptor(evidence_name),
+        "assets": [descriptor(name) for name in sorted(built["artifacts"])],
+        "created_at": at,
+    }
+    new_generation = expected_generation + 1
+    operation_id = f"correction-record-{uuid.uuid4().hex}"
+    temporary_names = {
+        name: f".{operation_id}-{index:04d}.part"
+        for index, name in enumerate(sorted(artifact_bytes), start=1)
+    }
+    intent = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "correction_record_intent",
+        "operation_id": operation_id,
+        "expected_generation": expected_generation,
+        "new_generation": new_generation,
+        "at": at,
+        "action_id": action_id,
+        "evidence_hash": evidence_hash,
+        "payload": built["payload"],
+        "source_target": deepcopy(source_target),
+        "correction_id": correction_id,
+        "correction_document": built["record"],
+        "resource_reference_oracle": built["resource_reference_oracle"],
+        "source_review_document": review_document,
+        "source_review_evidence": source_review_evidence,
+        "review_evidence": evidence,
+        "review": review_state,
+        "correction": correction_summary,
+        "previous_review": deepcopy(state),
+        "previous_corrections": deepcopy(manifest.get("corrections", [])),
+        "previous_artifacts": {
+            key: manifest.get("artifacts", {}).get(key)
+            for key in (
+                "corrected_markdown",
+                "corrections_diff",
+                "correction_record",
+                "review_evidence",
+                "final_markdown",
+            )
+        },
+        "artifact_manifest": artifact_manifest,
+        "temporary_names": temporary_names,
+        "previous_manifest_hash": object_hash(manifest),
+        "previous_private_hash": object_hash(private_state),
+    }
+    desired = _correction_desired_state(manifest, private_state, intent)
+    if desired is None:
+        raise ReviewError(
+            "integrity_violation", "The correction state transition is invalid."
+        )
+    desired_manifest, desired_private = desired
+    prepared = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "correction_record_prepared",
+        "operation_id": operation_id,
+        "expected_generation": expected_generation,
+        "new_generation": new_generation,
+        "at": at,
+        "intent_hash": object_hash(intent),
+        "artifact_manifest": artifact_manifest,
+        "tree_hash": object_hash({"artifacts": artifact_manifest}),
+    }
+    committed = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "correction_record_committed",
+        "operation_id": operation_id,
+        "previous_generation": expected_generation,
+        "generation": new_generation,
+        "at": at,
+        "manifest_hash": object_hash(desired_manifest),
+        "private_hash": object_hash(desired_private),
+        "tree_hash": prepared["tree_hash"],
+    }
+    _validate_history_budget(
+        [intent, prepared, committed], state_fd=descriptors["state"]
+    )
+    bundle.append_history(intent, state_fd=descriptors["state"])
+    _ensure_correction_artifact_parents(
+        artifact_bytes, review_fd=descriptors["review"]
+    )
+    for name, data in sorted(artifact_bytes.items()):
+        _write_exclusive(
+            temporary_names[name], data, dir_fd=descriptors["review"]
+        )
+    bundle.append_history(prepared, state_fd=descriptors["state"])
+    for name in sorted(artifact_bytes):
+        _promote_correction_artifact(
+            temporary_names[name], name, review_fd=descriptors["review"]
+        )
+    bundle.atomic_write_json("private.json", desired_private, dir_fd=descriptors["state"])
+    bundle.atomic_write_json("manifest.json", desired_manifest, dir_fd=descriptors["root"])
+    bundle.append_history(committed, state_fd=descriptors["state"])
+    return desired_manifest
+
+
 def commit_review_record(
     *,
     descriptors: dict,
     manifest: dict,
     private_state: dict,
+    bundle_root: Path,
     payload: dict,
     expected_generation: int,
     action_id: str,
@@ -1726,9 +3254,15 @@ def commit_review_record(
         raise ReviewError("review_action_mismatch", "The review action ID does not match.")
     if pending.get("evidence_hash") != evidence_hash:
         raise ReviewError("evidence_hash_mismatch", "The review evidence hash does not match.")
-    evidence_name = PurePosixPath(state["evidence"]["path"]).name
-    evidence_bytes = _read_regular_file(
-        evidence_name, dir_fd=descriptors["review"], max_bytes=MAX_RECORD_BYTES
+    validate_committed_artifacts(
+        descriptors=descriptors,
+        manifest=manifest,
+        bundle_root=bundle_root,
+    )
+    evidence_bytes = _read_bundle_path(
+        state["evidence"]["path"],
+        root_fd=descriptors["root"],
+        max_bytes=MAX_RECORD_BYTES,
     )
     actual_evidence_hash = "sha256:" + _bytes_hash(evidence_bytes)
     if actual_evidence_hash != evidence_hash:
@@ -1743,7 +3277,10 @@ def commit_review_record(
         review_status == "local_complete"
         and evidence["structural_validation"]["status"] != "pass"
     ):
-        review_status = "correction_required"
+        raise ReviewError(
+            "invalid_review_record",
+            "A structurally blocked target requires evidence-bound correction findings.",
+        )
     reason_code = {
         "local_complete": None,
         "correction_required": None,
@@ -1773,17 +3310,22 @@ def commit_review_record(
         "rounds": [*prior_rounds, round_record],
         "coverage": coverage,
     }
-    review_bytes = _json_bytes(review)
+    review_bytes = _bounded_json_bytes(review, artifact="review record")
     review_sha256 = "sha256:" + _bytes_hash(review_bytes)
-    report_bytes = _report(review)
+    report_bytes = _bounded_artifact_bytes(
+        _report(review), artifact="review report"
+    )
     report_sha256 = "sha256:" + _bytes_hash(report_bytes)
-    raw = manifest["raw_conversion"]
     final_markdown = (
         {
-            "kind": "raw_conversion",
-            "attempt_id": raw["attempt_id"],
-            "path": raw["main_markdown_path"],
-            "sha256": raw["main_markdown_sha256"],
+            "kind": evidence["target"]["kind"],
+            **(
+                {"attempt_id": evidence["target"]["attempt_id"]}
+                if evidence["target"]["kind"] == "raw_conversion"
+                else {"correction_id": evidence["target"]["correction_id"]}
+            ),
+            "path": evidence["target"]["path"],
+            "sha256": evidence["target"]["sha256"],
             "size_bytes": evidence["target"]["size_bytes"],
             "review_round_id": round_record["round_id"],
             "review_sha256": review_sha256,
@@ -1796,7 +3338,22 @@ def commit_review_record(
     )
     new_generation = expected_generation + 1
     decision_action = None
-    if (
+    if review_status == "correction_required":
+        decision_action = {
+            "kind": "record_correction",
+            "action_id": f"correction-{uuid.uuid4().hex}",
+            "generation": new_generation,
+            "evidence_hash": object_hash(
+                {
+                    "review_sha256": review_sha256,
+                    "target_sha256": evidence["target"]["sha256"],
+                    "finding_ids": [
+                        finding["finding_id"] for finding in normalized["findings"]
+                    ],
+                }
+            ),
+        }
+    elif (
         review_status == "review_ambiguity"
         and manifest["settings_snapshot"]["interaction_mode"] == "confirm"
     ):
@@ -1946,7 +3503,11 @@ def _apply_review_open(
     manifest: dict, private_state: dict, intent: dict, prepared: dict, committed: dict
 ) -> tuple[dict, dict] | None:
     if (
-        intent.get("event") != "review_open_intent"
+        not all(
+            isinstance(event, dict) and _current_schema(event)
+            for event in (intent, prepared, committed)
+        )
+        or intent.get("event") != "review_open_intent"
         or prepared.get("event") != "review_open_prepared"
         or committed.get("event") != "review_open_committed"
         or prepared.get("operation_id") != intent.get("operation_id")
@@ -1982,7 +3543,11 @@ def _apply_review_record(
     manifest: dict, private_state: dict, intent: dict, prepared: dict, committed: dict
 ) -> tuple[dict, dict] | None:
     if (
-        intent.get("event") != "review_record_intent"
+        not all(
+            isinstance(event, dict) and _current_schema(event)
+            for event in (intent, prepared, committed)
+        )
+        or intent.get("event") != "review_record_intent"
         or prepared.get("event") != "review_record_prepared"
         or committed.get("event") != "review_record_committed"
         or prepared.get("operation_id") != intent.get("operation_id")
@@ -2026,6 +3591,8 @@ def _apply_review_record(
     desired_manifest["artifacts"].update(
         {"review": review_path, "review_report": report_path}
     )
+    if intent.get("request_kind") == "review_decision":
+        desired_manifest["artifacts"]["review_decision"] = review_path
     if final is not None:
         desired_manifest["artifacts"]["final_markdown"] = final.get("path")
     desired_private = deepcopy(private_state)
@@ -2040,6 +3607,145 @@ def _apply_review_record(
     return desired_manifest, desired_private
 
 
+def _correction_summary_artifacts(summary: dict) -> dict | None:
+    if not isinstance(summary, dict):
+        return None
+    descriptors = []
+    for key in ("corrected_markdown", "diff", "record", "review_evidence"):
+        descriptor = summary.get(key)
+        if not isinstance(descriptor, dict):
+            return None
+        descriptors.append((descriptor, False))
+    assets = summary.get("assets")
+    if not isinstance(assets, list):
+        return None
+    descriptors.extend((descriptor, True) for descriptor in assets)
+    artifacts = {}
+    try:
+        for descriptor, is_asset in descriptors:
+            if set(descriptor) != {"path", "sha256", "size_bytes"}:
+                return None
+            path = PurePosixPath(descriptor.get("path"))
+            relative = path.relative_to("04-review")
+            parsed = _correction_artifact_path(relative.as_posix())
+            if (len(parsed.parts) == 2) != is_asset:
+                return None
+            name = parsed.as_posix()
+            if name in artifacts:
+                return None
+            artifacts[name] = descriptor
+    except (TypeError, ValueError, ReviewError):
+        return None
+    return artifacts
+
+
+def _valid_correction_intent(intent: dict) -> bool:
+    operation_id = intent.get("operation_id") if isinstance(intent, dict) else None
+    artifact_manifest = (
+        intent.get("artifact_manifest") if isinstance(intent, dict) else None
+    )
+    temporary_names = (
+        intent.get("temporary_names") if isinstance(intent, dict) else None
+    )
+    correction_summary = intent.get("correction") if isinstance(intent, dict) else None
+    expected_artifacts = _correction_summary_artifacts(correction_summary)
+    return (
+        isinstance(intent, dict)
+        and _current_schema(intent)
+        and intent.get("event") == "correction_record_intent"
+        and isinstance(operation_id, str)
+        and re.fullmatch(r"correction-record-[0-9a-f]{32}", operation_id) is not None
+        and intent.get("new_generation") == intent.get("expected_generation") + 1
+        and isinstance(intent.get("payload"), dict)
+        and isinstance(intent.get("source_target"), dict)
+        and isinstance(intent.get("source_review_document"), dict)
+        and isinstance(intent.get("source_review_evidence"), dict)
+        and isinstance(intent.get("correction_document"), dict)
+        and isinstance(intent.get("resource_reference_oracle"), list)
+        and isinstance(intent.get("review_evidence"), dict)
+        and isinstance(intent.get("review"), dict)
+        and isinstance(correction_summary, dict)
+        and isinstance(intent.get("previous_review"), dict)
+        and isinstance(intent.get("previous_corrections"), list)
+        and isinstance(intent.get("previous_artifacts"), dict)
+        and isinstance(artifact_manifest, dict)
+        and expected_artifacts is not None
+        and set(artifact_manifest) == set(expected_artifacts)
+        and all(
+            artifact_manifest[name]
+            == {
+                "sha256": descriptor["sha256"],
+                "size_bytes": descriptor["size_bytes"],
+            }
+            for name, descriptor in expected_artifacts.items()
+        )
+        and all(
+            isinstance(value, dict)
+            and set(value) == {"sha256", "size_bytes"}
+            and isinstance(value.get("sha256"), str)
+            and value["sha256"].startswith("sha256:")
+            and type(value.get("size_bytes")) is int
+            and value["size_bytes"] >= 0
+            and value["size_bytes"] <= MAX_CORRECTION_ARTIFACT_BYTES
+            for value in artifact_manifest.values()
+        )
+        and isinstance(temporary_names, dict)
+        and set(temporary_names) == set(artifact_manifest)
+        and all(
+            value == f".{operation_id}-{index:04d}.part"
+            for index, (_name, value) in enumerate(
+                sorted(temporary_names.items()), start=1
+            )
+        )
+    )
+
+
+def _valid_correction_prepared(prepared: dict, intent: dict) -> bool:
+    return (
+        isinstance(prepared, dict)
+        and _current_schema(prepared)
+        and prepared.get("event") == "correction_record_prepared"
+        and prepared.get("operation_id") == intent.get("operation_id")
+        and prepared.get("expected_generation") == intent.get("expected_generation")
+        and prepared.get("new_generation") == intent.get("new_generation")
+        and prepared.get("at") == intent.get("at")
+        and prepared.get("intent_hash") == object_hash(intent)
+        and prepared.get("artifact_manifest") == intent.get("artifact_manifest")
+        and prepared.get("tree_hash")
+        == object_hash({"artifacts": intent.get("artifact_manifest")})
+    )
+
+
+def _apply_correction_record(
+    manifest: dict, private_state: dict, intent: dict, prepared: dict, committed: dict
+) -> tuple[dict, dict] | None:
+    if (
+        not _valid_correction_intent(intent)
+        or not _valid_correction_prepared(prepared, intent)
+        or not isinstance(committed, dict)
+        or not _current_schema(committed)
+        or committed.get("event") != "correction_record_committed"
+        or committed.get("operation_id") != intent.get("operation_id")
+        or intent.get("expected_generation") != manifest.get("generation")
+        or intent.get("previous_manifest_hash") != object_hash(manifest)
+        or intent.get("previous_private_hash") != object_hash(private_state)
+    ):
+        return None
+    desired = _correction_desired_state(manifest, private_state, intent)
+    if desired is None:
+        return None
+    desired_manifest, desired_private = desired
+    if (
+        committed.get("previous_generation") != manifest.get("generation")
+        or committed.get("generation") != intent.get("new_generation")
+        or committed.get("manifest_hash") != object_hash(desired_manifest)
+        or committed.get("private_hash") != object_hash(desired_private)
+        or committed.get("tree_hash") != prepared.get("tree_hash")
+    ):
+        return None
+    return desired_manifest, desired_private
+
+
 def apply_settings_override_transition(previous: dict, updated: dict) -> dict:
     del previous
     transitioned = deepcopy(updated)
@@ -2048,7 +3754,9 @@ def apply_settings_override_transition(previous: dict, updated: dict) -> dict:
         return transitioned
     status = review.get("status")
     pending = review.get("pending_action")
-    if status == "review_pending" and isinstance(pending, dict):
+    if status in {"review_pending", "correction_required"} and isinstance(
+        pending, dict
+    ):
         rebound = deepcopy(pending)
         rebound["generation"] = transitioned["generation"]
         review["pending_action"] = rebound
@@ -2131,6 +3839,10 @@ def resolve_history_state(
             transitioned = _apply_review_record(
                 manifest, private_state, intent, prepared, committed
             )
+        elif intent.get("event") == "correction_record_intent":
+            transitioned = _apply_correction_record(
+                manifest, private_state, intent, prepared, committed
+            )
         else:
             return None
         if transitioned is None:
@@ -2160,7 +3872,7 @@ def valid_manifest(manifest: dict) -> bool:
     }:
         return False
     if (
-        review.get("schema_version") != SCHEMA_VERSION
+        not _current_schema(review)
         or review.get("status")
         not in {
             "review_pending",
@@ -2188,6 +3900,41 @@ def valid_manifest(manifest: dict) -> bool:
         for index, item in enumerate(rounds, start=1)
     ):
         return False
+    corrections = manifest.get("corrections", [])
+    if not isinstance(corrections, list) or not all(
+        isinstance(item, dict)
+        and _current_schema(item)
+        and item.get("correction_id") == f"correction-{index:04d}"
+        and item.get("path") == item.get("corrected_markdown", {}).get("path")
+        and isinstance(item.get("source_target"), dict)
+        and isinstance(item.get("finding_ids"), list)
+        and item["finding_ids"]
+        and all(isinstance(value, str) and value for value in item["finding_ids"])
+        and all(
+            isinstance(item.get(key), dict)
+            and isinstance(item[key].get("path"), str)
+            and isinstance(item[key].get("sha256"), str)
+            and item[key]["sha256"].startswith("sha256:")
+            and type(item[key].get("size_bytes")) is int
+            and item[key]["size_bytes"] >= 0
+            for key in ("corrected_markdown", "diff", "record", "review_evidence")
+        )
+        and isinstance(item.get("assets", []), list)
+        and all(
+            isinstance(asset, dict)
+            and isinstance(asset.get("path"), str)
+            and PurePosixPath(asset["path"]).parent
+            == PurePosixPath("04-review/assets")
+            and PurePosixPath(asset["path"]).suffix == ".png"
+            and isinstance(asset.get("sha256"), str)
+            and asset["sha256"].startswith("sha256:")
+            and type(asset.get("size_bytes")) is int
+            and 0 < asset["size_bytes"] <= MAX_CORRECTION_ARTIFACT_BYTES
+            for asset in item.get("assets", [])
+        )
+        for index, item in enumerate(corrections, start=1)
+    ):
+        return False
     pending = review.get("pending_action")
     if manifest.get("conversion_state") == "review_pending":
         if review.get("status") == "review_pending":
@@ -2203,23 +3950,41 @@ def valid_manifest(manifest: dict) -> bool:
             and review.get("reason_code") is None
             and manifest.get("final_markdown") is None
             and len(review["rounds"]) >= 1
-            and pending is None
+            and isinstance(pending, dict)
+            and pending.get("kind") == "record_correction"
+            and pending.get("generation") == manifest.get("generation")
+            and isinstance(pending.get("action_id"), str)
+            and pending["action_id"].startswith("correction-")
+            and isinstance(pending.get("evidence_hash"), str)
+            and pending["evidence_hash"].startswith("sha256:")
         )
     if manifest.get("conversion_state") == "local_complete":
         final = manifest.get("final_markdown")
+        raw_final = (
+            isinstance(final, dict)
+            and final.get("kind") == "raw_conversion"
+            and final.get("path")
+            == manifest.get("raw_conversion", {}).get("main_markdown_path")
+            and final.get("sha256")
+            == manifest.get("raw_conversion", {}).get("main_markdown_sha256")
+            and not corrections
+        )
+        corrected_final = (
+            isinstance(final, dict)
+            and final.get("kind") == "corrected_markdown"
+            and corrections
+            and final.get("correction_id") == corrections[-1].get("correction_id")
+            and final.get("path")
+            == corrections[-1].get("corrected_markdown", {}).get("path")
+            and "sha256:" + final.get("sha256", "")
+            == corrections[-1].get("corrected_markdown", {}).get("sha256")
+        )
         return (
             review.get("status") == "local_complete"
             and review.get("reason_code") is None
             and pending is None
             and len(review["rounds"]) >= 1
-            and isinstance(final, dict)
-            and final.get("kind") == "raw_conversion"
-            and final.get("path") == manifest.get("raw_conversion", {}).get(
-                "main_markdown_path"
-            )
-            and final.get("sha256") == manifest.get("raw_conversion", {}).get(
-                "main_markdown_sha256"
-            )
+            and (raw_final or corrected_final)
         )
     if manifest.get("conversion_state") == "awaiting_user":
         interaction_mode = manifest.get("settings_snapshot", {}).get(
@@ -2253,19 +4018,110 @@ def valid_manifest(manifest: dict) -> bool:
     return False
 
 
-def validate_committed_artifacts(*, descriptors: dict, manifest: dict) -> None:
+def _valid_review_artifact_path(path) -> bool:
+    parsed = PurePosixPath(path) if isinstance(path, str) else None
+    return (
+        isinstance(parsed, PurePosixPath)
+        and not parsed.is_absolute()
+        and len(parsed.parts) >= 2
+        and parsed.parts[0] == "04-review"
+        and all(part not in {"", ".", ".."} for part in parsed.parts)
+    )
+
+
+def _crop_asset_authorizations(manifest: dict) -> dict:
+    authorized = {}
+    for correction_summary in manifest.get("corrections", []):
+        correction_id = (
+            correction_summary.get("correction_id")
+            if isinstance(correction_summary, dict)
+            else None
+        )
+        for asset in correction_summary.get("assets", []):
+            path = asset.get("path") if isinstance(asset, dict) else None
+            if (
+                not isinstance(correction_id, str)
+                or not isinstance(path, str)
+                or path in authorized
+            ):
+                raise ReviewError(
+                    "integrity_violation",
+                    "Correction crop authorization is inconsistent.",
+                )
+            authorized[path] = {
+                "correction_id": correction_id,
+                "sha256": asset.get("sha256"),
+                "size_bytes": asset.get("size_bytes"),
+            }
+    return authorized
+
+
+def _validate_target_local_resources(
+    *, descriptors: dict, manifest: dict, bundle_root: Path
+) -> None:
+    target = manifest.get("review", {}).get("target")
+    if not isinstance(target, dict) or not isinstance(
+        target.get("local_resources"), dict
+    ):
+        raise ReviewError(
+            "integrity_violation", "The reviewed resource snapshot is missing."
+        )
+    target_path = target.get("path")
+    if not isinstance(target_path, str):
+        raise ReviewError(
+            "integrity_violation", "The reviewed Markdown target path is invalid."
+        )
+    markdown = _read_bundle_path(
+        target_path,
+        root_fd=descriptors["root"],
+        max_bytes=MAX_MARKDOWN_BYTES,
+    )
+    if (
+        _bytes_hash(markdown) != target.get("sha256")
+        or target["local_resources"].get("markdown_path") != target_path
+    ):
+        raise ReviewError(
+            "integrity_violation", "The reviewed Markdown target changed."
+        )
+    raw = manifest.get("raw_conversion", {})
+    attempt_id = raw.get("attempt_id")
+    if not isinstance(attempt_id, str):
+        raise ReviewError(
+            "integrity_violation", "The active raw resource root is invalid."
+        )
+    try:
+        markdown_assets.validate_local_reference_snapshot(
+            markdown,
+            bundle_root=bundle_root,
+            snapshot=target["local_resources"],
+            raw_root=f"03-converted/attempts/{attempt_id}/raw",
+            crop_assets=_crop_asset_authorizations(manifest),
+        )
+    except markdown_assets.MarkdownAssetError:
+        raise ReviewError(
+            "integrity_violation",
+            "A reviewed local resource no longer matches its authorized snapshot.",
+        ) from None
+
+
+def validate_committed_artifacts(
+    *, descriptors: dict, manifest: dict, bundle_root: Path
+) -> None:
     review = manifest["review"]
+    _validate_target_local_resources(
+        descriptors=descriptors,
+        manifest=manifest,
+        bundle_root=bundle_root,
+    )
     evidence = review["evidence"]
     if (
-        not isinstance(evidence.get("path"), str)
-        or PurePosixPath(evidence["path"]).parent != PurePosixPath("04-review")
+        not _valid_review_artifact_path(evidence.get("path"))
     ):
         raise ReviewError(
             "integrity_violation", "The review evidence path is invalid."
         )
-    evidence_name = PurePosixPath(evidence["path"]).name
-    evidence_bytes = _read_regular_file(
-        evidence_name, dir_fd=descriptors["review"], max_bytes=MAX_RECORD_BYTES
+    evidence_bytes = _read_bundle_path(
+        evidence["path"], root_fd=descriptors["root"], max_bytes=MAX_RECORD_BYTES
     )
     if "sha256:" + _bytes_hash(evidence_bytes) != evidence.get("sha256"):
         raise ReviewError("integrity_violation", "The review evidence hash changed.")
@@ -2277,15 +4133,14 @@ def validate_committed_artifacts(*, descriptors: dict, manifest: dict) -> None:
         ):
             path = summary.get(path_key) if isinstance(summary, dict) else None
             if (
-                not isinstance(path, str)
-                or PurePosixPath(path).parent != PurePosixPath("04-review")
+                not _valid_review_artifact_path(path)
             ):
                 raise ReviewError(
                     "integrity_violation", "A historical review artifact path is invalid."
                 )
-            artifact_bytes = _read_regular_file(
-                PurePosixPath(path).name,
-                dir_fd=descriptors["review"],
+            artifact_bytes = _read_bundle_path(
+                path,
+                root_fd=descriptors["root"],
                 max_bytes=MAX_RECORD_BYTES,
             )
             if (
@@ -2302,21 +4157,20 @@ def validate_committed_artifacts(*, descriptors: dict, manifest: dict) -> None:
         review_path = manifest.get("artifacts", {}).get("review")
         report_path = manifest.get("artifacts", {}).get("review_report")
         if not all(
-            isinstance(path, str)
-            and PurePosixPath(path).parent == PurePosixPath("04-review")
+            _valid_review_artifact_path(path)
             for path in (review_path, report_path)
         ):
             raise ReviewError(
                 "integrity_violation", "The committed review artifact path is invalid."
             )
-        review_bytes = _read_regular_file(
-            PurePosixPath(review_path).name,
-            dir_fd=descriptors["review"],
+        review_bytes = _read_bundle_path(
+            review_path,
+            root_fd=descriptors["root"],
             max_bytes=MAX_RECORD_BYTES,
         )
-        report_bytes = _read_regular_file(
-            PurePosixPath(report_path).name,
-            dir_fd=descriptors["review"],
+        report_bytes = _read_bundle_path(
+            report_path,
+            root_fd=descriptors["root"],
             max_bytes=MAX_RECORD_BYTES,
         )
         if not report_bytes:
@@ -2342,6 +4196,43 @@ def validate_committed_artifacts(*, descriptors: dict, manifest: dict) -> None:
             != manifest["final_markdown"]["review_sha256"]
         ):
             raise ReviewError("integrity_violation", "The final review hash changed.")
+
+    corrections = manifest.get("corrections", [])
+    if corrections:
+        for item in corrections:
+            artifact_descriptors = [
+                item[key]
+                for key in (
+                    "corrected_markdown",
+                    "diff",
+                    "record",
+                    "review_evidence",
+                )
+            ] + list(item.get("assets", []))
+            for descriptor in artifact_descriptors:
+                data = _read_bundle_path(
+                    descriptor["path"],
+                    root_fd=descriptors["root"],
+                    max_bytes=MAX_CORRECTION_ARTIFACT_BYTES,
+                )
+                if (
+                    "sha256:" + _bytes_hash(data) != descriptor["sha256"]
+                    or len(data) != descriptor["size_bytes"]
+                ):
+                    raise ReviewError(
+                        "integrity_violation", "A correction artifact changed."
+                    )
+        final = manifest.get("final_markdown")
+        if isinstance(final, dict) and final.get("kind") == "corrected_markdown":
+            final_bytes = _read_bundle_path(
+                final["path"],
+                root_fd=descriptors["root"],
+                max_bytes=MAX_MARKDOWN_BYTES,
+            )
+            if _bytes_hash(final_bytes) != final.get("sha256"):
+                raise ReviewError(
+                    "integrity_violation", "The corrected final Markdown changed."
+                )
 
 
 def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> dict:
