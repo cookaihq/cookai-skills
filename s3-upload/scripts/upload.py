@@ -28,10 +28,12 @@ from multipart import (
     MultipartError, abort_multipart, execute_multipart, reconcile_multipart,
     resume_multipart,
 )
+from delivery_schema import serialize_artifact
 from planning import (
     LocalFileError, PlanError, build_delete_dry_run, build_upload_dry_run,
     provider_candidate_for_target,
 )
+from probe import build_probe
 from provider_candidates import build_candidate_request
 from resolver import ResolutionError, resolve_target
 from results import build_result, exit_code_for_result
@@ -68,6 +70,13 @@ def v2_parser() -> argparse.ArgumentParser:
         description="Use scoped Upload Targets to upload or reference one S3-compatible object"
     )
     commands = p.add_subparsers(dest="operation", required=True)
+    probe = commands.add_parser(
+        "probe", help="report machine-readable readiness without any file or network side effect"
+    )
+    probe.add_argument("--target")
+    probe.add_argument("--caller-skill")
+    probe.add_argument("--json", action="store_true")
+    probe.add_argument("--use-local-key", action="store_true")
     upload = commands.add_parser(
         "upload", help="upload one local file; provider capabilities gate the selected mode"
     )
@@ -498,6 +507,19 @@ def _v2_reconcile(args, *, environ, cwd, config_home, transport, now) -> int:
 
 def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
     args = v2_parser().parse_args(argv)
+    if args.operation == "probe":
+        artifact = build_probe(
+            cwd=cwd,
+            config_home=config_home,
+            environ=environ,
+            cli_target=args.target,
+            cli_caller=args.caller_skill,
+            use_local_key=args.use_local_key,
+            executable=sys.executable,
+            state_root=os.path.join(cwd, ".s3-upload"),
+        )
+        sys.stdout.write(serialize_artifact(artifact).decode("utf-8") + "\n")
+        return 0
     if args.operation == "url":
         return _v2_url(args, environ=environ, cwd=cwd, config_home=config_home, now=now)
     if args.operation == "delete":
@@ -635,7 +657,7 @@ def main(argv=None, *, environ=None, cwd=None, config_home=None, transport=http_
     environ = dict(os.environ if environ is None else environ)
     cwd = cwd or os.getcwd()
     config_home = config_home or os.path.expanduser("~/.config/s3-upload")
-    commands = {"upload", "url", "delete", "resume", "reconcile", "abort"}
+    commands = {"upload", "url", "delete", "resume", "reconcile", "abort", "probe"}
     if argv and argv[0] in commands | {"-h", "--help"}:
         return _v2_main(
             argv,
