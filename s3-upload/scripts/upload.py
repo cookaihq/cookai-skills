@@ -75,7 +75,6 @@ def v2_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--target")
     probe.add_argument("--caller-skill")
-    probe.add_argument("--json", action="store_true")
     probe.add_argument("--use-local-key", action="store_true")
     upload = commands.add_parser(
         "upload", help="upload one local file; provider capabilities gate the selected mode"

@@ -1,9 +1,11 @@
 import json
+import os
+import socket
 
 import pytest
 
 from delivery_schema import parse_artifact
-from probe import build_probe
+from probe import BLOCKING_REASONS, READINESS, build_probe
 from target_contract import contract_hash, credential_binding_hash
 from v2_schema import ScopedReference
 
@@ -35,6 +37,21 @@ TARGET = {
     "retry": {"part_max_attempts": 3, "collision_max_attempts": 3},
     "setup": {"exclusive_prefix": True, "integration_test": False, "cors": None},
 }
+
+MISMATCHED_ADDRESSING_TARGET = TARGET | {
+    "provider": "aliyun-oss",
+    "region": "cn-hangzhou",
+    "endpoint": None,
+    "addressing": "path",
+}
+
+
+class _NetworkGuardTripped(BaseException):
+    pass
+
+
+def _explode(*args, **kwargs):
+    raise _NetworkGuardTripped("probe must not perform network I/O")
 
 
 def _write_env_local(path, credentials):
@@ -113,25 +130,33 @@ def test_probe_never_reports_credential_values(project):
 
 
 def test_probe_creates_no_files(project, tmp_path):
-    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+    def snapshot():
+        return {
+            p.relative_to(tmp_path): (st.st_size, st.st_mtime_ns)
+            for p in tmp_path.rglob("*")
+            if p.is_file()
+            for st in [p.stat()]
+        }
+
+    before = snapshot()
     probe_for(project)
-    after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+    after = snapshot()
     assert before == after
 
 
 def test_probe_makes_no_network_call(project, monkeypatch):
-    import urllib.request
-
-    import s3
-
-    def explode(*args, **kwargs):
-        raise AssertionError("probe must not perform network I/O")
-
-    monkeypatch.setattr(s3, "http_request", explode)
-    monkeypatch.setattr(urllib.request, "urlopen", explode)
+    monkeypatch.setattr(socket.socket, "connect", _explode)
+    monkeypatch.setattr(socket, "getaddrinfo", _explode)
     item = probe_for(project)
     assert item["artifact_type"] == "s3-upload.probe"
     assert item["readiness"] == "ready"
+
+
+def test_network_guard_actually_fires(monkeypatch):
+    monkeypatch.setattr(socket.socket, "connect", _explode)
+    monkeypatch.setattr(socket, "getaddrinfo", _explode)
+    with pytest.raises(_NetworkGuardTripped):
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("127.0.0.1", 1))
 
 
 def test_probe_is_unconfigured_without_target(project, tmp_path):
@@ -141,7 +166,7 @@ def test_probe_is_unconfigured_without_target(project, tmp_path):
     assert item["readiness"] == "installed_unconfigured"
     assert item["target_contract"] is None
     assert item["target_contract_hash"] is None
-    assert item["blocking_reason"] == "ResolutionError"
+    assert item["blocking_reason"] == "target_unresolved"
 
 
 def test_probe_blocks_indirect_global_target_without_local_key(project, monkeypatch):
@@ -171,7 +196,7 @@ def test_probe_blocks_indirect_global_target_without_local_key(project, monkeypa
     assert item["readiness"] == "installed_unconfigured"
     assert item["target_contract"] is None
     assert item["target_contract_hash"] is None
-    assert item["blocking_reason"] == "ResolutionError"
+    assert item["blocking_reason"] == "target_unresolved"
 
 
 def test_probe_reads_home_config_when_authorized(project):
@@ -191,6 +216,50 @@ def test_probe_reads_home_config_when_authorized(project):
     assert item["target_contract"] is not None
     assert item["target_contract"]["bucket"] == "example-bucket"
     assert item["readiness"] == "installed_unconfigured"
+
+
+def test_probe_reports_provider_contract_mismatch(project):
+    (project / ".s3-upload" / "targets" / "images.json").write_text(
+        json.dumps(MISMATCHED_ADDRESSING_TARGET)
+    )
+    item = probe_for(project)
+    assert item["readiness"] == "installed_unconfigured"
+    assert item["target_contract"] is None
+    assert item["target_contract_hash"] is None
+    assert item["blocking_reason"] == "provider_contract_mismatch"
+
+
+def test_probe_normalizes_cwd_for_contract_hash(project):
+    dotted_cwd = os.path.join(str(project), "sub", "..")
+    assert dotted_cwd != str(project)
+    canonical = probe_for(project)
+    dotted = probe_for(project, cwd=dotted_cwd)
+    assert dotted["cwd"] == canonical["cwd"] == str(project)
+    assert dotted["target_contract_hash"] == canonical["target_contract_hash"]
+
+
+def test_readiness_vocabulary_is_locked():
+    assert READINESS == ("ready", "installed_unconfigured")
+
+
+def test_blocking_reason_vocabulary_is_locked():
+    assert BLOCKING_REASONS == ("target_unresolved", "provider_contract_mismatch")
+
+
+def test_probe_readiness_and_blocking_reason_are_always_in_vocabulary(project):
+    for item in (
+        probe_for(project),
+        probe_for(project, cli_target=None, cwd=str(project.parent / "does-not-exist")),
+    ):
+        assert item["readiness"] in READINESS
+        assert item["blocking_reason"] is None or item["blocking_reason"] in BLOCKING_REASONS
+
+    (project / ".s3-upload" / "targets" / "images.json").write_text(
+        json.dumps(MISMATCHED_ADDRESSING_TARGET)
+    )
+    mismatched = probe_for(project)
+    assert mismatched["readiness"] in READINESS
+    assert mismatched["blocking_reason"] in BLOCKING_REASONS
 
 
 def test_probe_cli_emits_canonical_artifact(project, capsys, monkeypatch):
