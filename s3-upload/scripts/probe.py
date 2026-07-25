@@ -3,15 +3,16 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional
 
+from capabilities import CapabilityContractError
 from delivery_schema import envelope
 from planning import PlanError, derive_contract_key, registry_for_target
-from resolver import ResolutionError, resolve_target
+from resolver import CredentialExpiringError, ResolutionError, resolve_target
 from target_contract import CONTRACT_VERSION, contract_hash, contract_snapshot
 
 READINESS = ("ready", "installed_unconfigured")
-BLOCKING_REASONS = ("target_unresolved", "provider_contract_mismatch")
+BLOCKING_REASONS = ("target_unresolved", "provider_contract_mismatch", "credential_expiring")
 READY, INSTALLED_UNCONFIGURED = READINESS
-TARGET_UNRESOLVED, PROVIDER_CONTRACT_MISMATCH = BLOCKING_REASONS
+TARGET_UNRESOLVED, PROVIDER_CONTRACT_MISMATCH, CREDENTIAL_EXPIRING = BLOCKING_REASONS
 
 
 def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
@@ -44,10 +45,13 @@ def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
             contract_key=key,
             registry=registry_for_target(resolved.target, key),
         )
+    except CredentialExpiringError:
+        body["blocking_reason"] = CREDENTIAL_EXPIRING
+        return envelope("s3-upload.probe", body)
     except ResolutionError:
         body["blocking_reason"] = TARGET_UNRESOLVED
         return envelope("s3-upload.probe", body)
-    except PlanError:
+    except (PlanError, CapabilityContractError):
         body["blocking_reason"] = PROVIDER_CONTRACT_MISMATCH
         return envelope("s3-upload.probe", body)
 

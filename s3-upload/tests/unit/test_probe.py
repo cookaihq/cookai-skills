@@ -20,6 +20,13 @@ CREDENTIAL_PROFILE = {
     "expires_at": None,
 }
 
+EXPIRING_CREDENTIAL_PROFILE = {
+    "access_key_id": FAKE_ACCESS_KEY,
+    "secret_access_key": FAKE_SECRET,
+    "session_token": "temporary-session-token",
+    "expires_at": "2020-01-01T00:00:00Z",
+}
+
 TARGET = {
     "schema_version": 1,
     "credential": "project:images-key",
@@ -43,6 +50,12 @@ MISMATCHED_ADDRESSING_TARGET = TARGET | {
     "region": "cn-hangzhou",
     "endpoint": None,
     "addressing": "path",
+}
+
+CUSTOM_BUCKET_BOUND_TARGET = TARGET | {
+    "provider": "custom",
+    "endpoint": "https://minio.example.com",
+    "addressing": "bucket-bound",
 }
 
 
@@ -229,6 +242,24 @@ def test_probe_reports_provider_contract_mismatch(project):
     assert item["blocking_reason"] == "provider_contract_mismatch"
 
 
+def test_probe_reports_credential_expiring(project):
+    _write_env_local(project / ".env.local", {"images-key": EXPIRING_CREDENTIAL_PROFILE})
+    item = probe_for(project)
+    assert item["readiness"] == "installed_unconfigured"
+    assert item["blocking_reason"] == "credential_expiring"
+
+
+def test_probe_reports_provider_contract_mismatch_for_asserted_custom_contract(project):
+    (project / ".s3-upload" / "targets" / "images.json").write_text(
+        json.dumps(CUSTOM_BUCKET_BOUND_TARGET)
+    )
+    item = probe_for(project)
+    assert item["readiness"] == "installed_unconfigured"
+    assert item["target_contract"] is None
+    assert item["target_contract_hash"] is None
+    assert item["blocking_reason"] == "provider_contract_mismatch"
+
+
 def test_probe_normalizes_cwd_for_contract_hash(project):
     dotted_cwd = os.path.join(str(project), "sub", "..")
     assert dotted_cwd != str(project)
@@ -243,7 +274,9 @@ def test_readiness_vocabulary_is_locked():
 
 
 def test_blocking_reason_vocabulary_is_locked():
-    assert BLOCKING_REASONS == ("target_unresolved", "provider_contract_mismatch")
+    assert BLOCKING_REASONS == (
+        "target_unresolved", "provider_contract_mismatch", "credential_expiring",
+    )
 
 
 def test_probe_readiness_and_blocking_reason_are_always_in_vocabulary(project):
