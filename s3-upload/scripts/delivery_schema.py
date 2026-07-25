@@ -64,13 +64,14 @@ def parse_artifact(text: str, *, expected_type: Optional[str] = None) -> Dict[st
 def serialize_artifact(artifact: Dict[str, Any]) -> bytes:
     if not isinstance(artifact, dict):
         raise DeliverySchemaError("artifact must be an object")
-    if artifact.get("artifact_type") not in ARTIFACT_TYPES:
+    artifact_type = artifact.get("artifact_type")
+    if not isinstance(artifact_type, str) or artifact_type not in ARTIFACT_TYPES:
         raise DeliverySchemaError("unregistered artifact_type")
     version = artifact.get("schema_version")
     if isinstance(version, bool) or not isinstance(version, int):
         raise DeliverySchemaError("schema_version must be an integer")
-    if version != SCHEMA_VERSIONS[artifact["artifact_type"]]:
-        raise DeliverySchemaError("unregistered schema_version")
+    if version != SCHEMA_VERSIONS[artifact_type]:
+        raise DeliverySchemaError("unsupported schema_version")
     try:
         return canonicalize(artifact)
     except StrictJSONError as exc:

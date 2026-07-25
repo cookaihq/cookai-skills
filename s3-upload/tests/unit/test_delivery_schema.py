@@ -104,3 +104,13 @@ def test_serialize_rejects_missing_or_unregistered_version():
 def test_serialize_rejects_floats_via_strict_json():
     with pytest.raises(DeliverySchemaError):
         serialize_artifact(envelope("s3-upload.probe", {"x": 1.5}))
+
+
+def test_serialize_rejects_boolean_version():
+    with pytest.raises(DeliverySchemaError):
+        serialize_artifact({"artifact_type": "s3-upload.probe", "schema_version": True})
+
+
+def test_serialize_rejects_unhashable_type():
+    with pytest.raises(DeliverySchemaError):
+        serialize_artifact({"artifact_type": ["x"], "schema_version": 1})
