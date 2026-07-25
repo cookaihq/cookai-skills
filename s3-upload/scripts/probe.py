@@ -55,7 +55,7 @@ def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
         snapshot = contract_snapshot(
             target_ref=resolved.ref,
             config_scope=resolved.ref.scope,
-            project_root=cwd,
+            project_root=_canonical_text(cwd),
             target=resolved.target,
             contract_key=key,
             registry=registry_for_target(resolved.target, key),

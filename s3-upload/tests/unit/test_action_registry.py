@@ -5,6 +5,7 @@ from action_registry import (
     AUTHORIZED_ACTIONS,
     AUTHORIZED_ACTION_ORDER,
     ActionRegistryError,
+    NO_REMOTE_EFFECT_ACTIONS,
     RECOVERY_STATES,
     _RETRY_SAFE,
     _TABLE,
@@ -161,3 +162,7 @@ def test_retry_safe_for_every_registered_state_is_a_bool():
 def test_authorized_actions_exclude_inspect_and_ack():
     assert "inspect" not in AUTHORIZED_ACTIONS
     assert "ack" not in AUTHORIZED_ACTIONS
+
+
+def test_no_remote_effect_actions_are_exactly():
+    assert NO_REMOTE_EFFECT_ACTIONS == frozenset({"inspect", "ack"})

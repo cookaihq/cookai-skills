@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from typing import Any, Dict
 
 from capabilities import BASELINE_DISABLED_OPERATIONS, CapabilityRegistry, ContractKey
@@ -22,7 +23,7 @@ def _digest(domain: str, value: Any) -> str:
 
 
 def credential_binding_hash(reference: ScopedReference) -> str:
-    return _digest(CREDENTIAL_BINDING_DOMAIN, reference.text)
+    return _digest(CREDENTIAL_BINDING_DOMAIN, {"scope": reference.scope, "name": reference.name})
 
 
 def contract_snapshot(*, target_ref: ScopedReference, config_scope: str, project_root: str,
@@ -63,7 +64,7 @@ def contract_snapshot(*, target_ref: ScopedReference, config_scope: str, project
         "setup": {
             "exclusive_prefix": target.setup.exclusive_prefix,
             "integration_test": target.setup.integration_test,
-            "cors": target.setup.cors,
+            "cors": deepcopy(target.setup.cors) if target.setup.cors is not None else None,
         },
         "contract_key": contract_key.as_dict(),
         "capabilities": [

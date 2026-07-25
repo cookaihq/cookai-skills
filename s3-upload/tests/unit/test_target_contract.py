@@ -5,6 +5,7 @@ import pytest
 from capabilities import Capability, CapabilityRegistry, ContractKey
 from planning import derive_contract_key, registry_for_target
 from target_contract import (
+    CAPABILITY_OPERATIONS,
     CONTRACT_VERSION,
     contract_hash,
     contract_snapshot,
@@ -74,6 +75,12 @@ def test_credential_binding_hash_is_domain_separated():
     assert first.startswith("sha256:")
 
 
+def test_credential_binding_hash_does_not_collide_across_the_scope_name_boundary():
+    first = credential_binding_hash(ScopedReference("project", "a:b"))
+    second = credential_binding_hash(ScopedReference("project:a", "b"))
+    assert first != second
+
+
 @pytest.mark.parametrize("overrides", [
     {"prefix": "other/"},
     {"collision": "replace"},
@@ -110,6 +117,46 @@ def test_capability_state_drift_changes_hash():
         target_ref=reference, config_scope="project", project_root="/tmp/project",
         target=target, contract_key=key, registry=baseline,
     ))
+
+
+def test_cors_snapshot_mutation_does_not_corrupt_the_frozen_target():
+    cors = {
+        "allowed_origins": ["https://example.com"],
+        "allowed_methods": ["GET"],
+        "allowed_headers": [],
+        "expose_headers": [],
+        "max_age_seconds": 0,
+    }
+    target = base_target(setup={"exclusive_prefix": True, "integration_test": False, "cors": cors})
+    snapshot = snapshot_for(target)
+    snapshot["setup"]["cors"]["allowed_origins"].append("https://mutated.example.com")
+    assert target.setup.cors["allowed_origins"] == ["https://example.com"]
+
+
+def test_capability_operations_is_exactly_the_locked_literal():
+    # CAPABILITY_OPERATIONS is derived from capabilities.BASELINE_DISABLED_OPERATIONS
+    # (sorted). That module cannot be modified by this task, so this pins the
+    # *current* literal tuple: any upstream addition/removal there must show up
+    # here as a loud CI failure instead of silently reshaping every persisted
+    # contract_hash without a CONTRACT_VERSION bump.
+    assert CAPABILITY_OPERATIONS == (
+        "AbortMultipartUpload",
+        "CompleteMultipartUpload",
+        "ConditionalCompleteMultipartUpload",
+        "ConditionalPutObject",
+        "CreateMultipartUpload",
+        "DeleteObjectCurrentKey",
+        "DeleteObjectVersion",
+        "GetObject",
+        "HeadObject",
+        "ListParts",
+        "ObserveDeleteCurrentKey",
+        "ObserveDeleteVersion",
+        "ObserveMultipartSession",
+        "PublicGetObject",
+        "ReservedMetadataRoundTrip",
+        "UploadPart",
+    )
 
 
 def test_location_fingerprint_does_not_replace_contract_hash():

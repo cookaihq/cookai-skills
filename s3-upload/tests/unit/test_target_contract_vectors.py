@@ -123,6 +123,26 @@ def test_evidence_scope_drift_changes_hash():
     assert with_evidence("aliyun-bucket-a") != with_evidence("aliyun-bucket-b")
 
 
+def test_contract_hash_matches_golden_vector():
+    # Absolute literal, derived from current implementation behaviour (not
+    # independently specified) — pins CONTRACT_DOMAIN, CONTRACT_VERSION, the
+    # digest algorithm, and the snapshot shape all at once, so any of those
+    # silently changing fails loudly instead of only failing a relative
+    # (!=/==) comparison.
+    assert contract_hash(snapshot(target())) == (
+        "sha256:4b2831d0201e77b1004cad0761d9d9bb6646531042160c4b9b003fb81d1413c4"
+    )
+
+
+def test_credential_binding_hash_matches_golden_vector():
+    # Absolute literal, derived from current implementation behaviour (not
+    # independently specified) — pins CREDENTIAL_BINDING_DOMAIN and the digest
+    # algorithm.
+    assert credential_binding_hash(ScopedReference("project", "images-key")) == (
+        "sha256:f5953ab6774af81184b4706335d72960a954c7b0605924890474bbb11c5c50a6"
+    )
+
+
 def test_config_scope_is_part_of_identity():
     item = target()
     key = derive_contract_key(item)

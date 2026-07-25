@@ -7,8 +7,9 @@ import pytest
 import probe
 from delivery_schema import parse_artifact, serialize_artifact
 from probe import BLOCKING_REASONS, READINESS, build_probe
+from resolver import ResolvedTarget
 from target_contract import contract_hash, credential_binding_hash
-from v2_schema import ScopedReference
+from v2_schema import ScopedReference, parse_target
 
 
 FAKE_ACCESS_KEY = "AKIAPROBEFAKE0001"
@@ -309,6 +310,37 @@ def test_probe_normalizes_cwd_for_contract_hash(project):
     dotted = probe_for(project, cwd=dotted_cwd)
     assert dotted["cwd"] == canonical["cwd"] == str(project)
     assert dotted["target_contract_hash"] == canonical["target_contract_hash"]
+
+
+def test_probe_normalizes_non_utf8_project_root_for_contract_hash(monkeypatch):
+    # A cwd carrying bytes that are not valid UTF-8 decodes (via surrogateescape,
+    # same as os.fsdecode) to a Python str containing a lone surrogate. Real
+    # filesystems (this one included) reject such names outright, so we can't
+    # reproduce this by actually creating the directory -- we stub out
+    # resolve_target (the only thing that needs the real filesystem) and drive
+    # build_probe's own cwd/project_root handling directly, which is exactly
+    # the code this item changes.
+    surrogate_cwd = "/tmp/project-\udcff"
+    target = parse_target(dict(TARGET), expected_scope="project")
+    resolved = ResolvedTarget(
+        ref=ScopedReference("project", "images"),
+        source="cli",
+        target=target,
+        credential=None,
+        credential_source=None,
+        credential_state="credential_unavailable",
+    )
+    monkeypatch.setattr(probe, "resolve_target", lambda **kwargs: resolved)
+
+    item = build_probe(
+        cwd=surrogate_cwd, config_home="/tmp/home", environ={},
+        cli_target="project:images", cli_caller=None, use_local_key=False,
+        executable="/usr/bin/python3", state_root="/tmp/state",
+    )
+
+    assert item["blocking_reason"] is None
+    assert item["target_contract"] is not None
+    assert item["target_contract"]["project_root"] == item["cwd"]
 
 
 def test_readiness_vocabulary_is_locked():
