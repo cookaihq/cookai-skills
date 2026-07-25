@@ -1,5 +1,8 @@
+import inspect
+
 from capabilities import Capability, CapabilityRegistry
 from planning import derive_contract_key, registry_for_target
+from strict_json import canonicalize
 from target_contract import contract_hash, contract_snapshot, credential_binding_hash
 from v2_schema import CredentialProfile, ScopedReference, parse_target
 
@@ -48,6 +51,23 @@ def test_public_base_url_drift_changes_hash():
     assert contract_hash(snapshot(first)) != contract_hash(snapshot(second))
 
 
+def test_contract_snapshot_has_no_credential_value_channel():
+    assert set(inspect.signature(contract_snapshot).parameters) == {
+        "target_ref",
+        "config_scope",
+        "project_root",
+        "target",
+        "contract_key",
+        "registry",
+    }
+    assert isinstance(target().credential, ScopedReference)
+
+
+def test_snapshot_credential_field_is_exactly_the_binding_hash():
+    item = target()
+    assert snapshot(item)["credential_binding_hash"] == credential_binding_hash(item.credential)
+
+
 def test_credential_value_rotation_does_not_change_hash():
     item = target()
     before = contract_hash(snapshot(item))
@@ -57,7 +77,10 @@ def test_credential_value_rotation_does_not_change_hash():
         session_token="",
         expires_at=None,
     )
-    assert rotated.access_key_id not in repr(snapshot(item))
+    raw = canonicalize(snapshot(item)).decode("utf-8")
+    assert rotated.access_key_id not in raw
+    assert rotated.secret_access_key not in raw
+    assert item.credential.name not in raw
     assert contract_hash(snapshot(item)) == before
 
 
