@@ -175,7 +175,12 @@ including recovery from a rename boundary. A complete local ZIP is revalidated
 and locally extracted even if the signed URL is no longer usable. Without a
 complete ZIP, result HTTP 401/403/404 closes that raw operation as recoverable;
 a later resume polls only the same task with its bound credential and stores a
-replacement URL only in private state. Prepared recovery accepts exactly one
+replacement URL only in private state. That recoverable closure holds only
+while the task keeps offering a different URL: if the same task instead
+answers with the exact URL already rejected as unavailable, the raw operation
+closes for good as `terminal_error` with reason `result_url_not_renewed` (rc
+`0`, `action_required: null`), and further `resume` calls only report that
+same outcome without polling again. Prepared recovery accepts exactly one
 identity- and hash-matching staging or final path.
 
 Main Markdown selection is a local deterministic policy pending live Doc2X
