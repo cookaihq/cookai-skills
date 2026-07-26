@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import hashlib
+from typing import Any, Dict, Optional, Tuple
 
 from strict_json import StrictJSONError, canonicalize, loads
 
@@ -76,3 +77,96 @@ def serialize_artifact(artifact: Dict[str, Any]) -> bytes:
         return canonicalize(artifact)
     except StrictJSONError as exc:
         raise DeliverySchemaError("artifact is not canonically serializable") from exc
+
+
+OPERATIONS: Tuple[str, ...] = ("publish", "reconcile", "resume", "abort", "ack", "inspect")
+
+BLOCKING_REASONS: Tuple[str, ...] = (
+    "already_acknowledged",
+    "caller_drift",
+    "capability_missing",
+    "cwd_drift",
+    "executable_drift",
+    "handoff_unsafe",
+    "handoff_write_failed",
+    "plan_not_executable",
+    "source_drift",
+    "state_root_drift",
+    "target_contract_drift",
+    "token_invalid",
+    "unclassified_outcome",
+)
+
+PLAN_FIELDS: Tuple[str, ...] = (
+    "access", "blocking_reasons", "caller", "collision", "contract_key", "cwd",
+    "executable", "executable_path", "object_headers", "object_key", "plan_hash",
+    "plan_id", "plan_token", "recovery_out", "remote_operations",
+    "required_capabilities", "result_out", "retention", "source", "state_root",
+    "target_contract", "target_contract_hash", "target_ref", "upload_mode",
+)
+
+RECOVERY_FIELDS: Tuple[str, ...] = (
+    "allowed_actions", "object_key", "operation", "operation_id", "plan_hash",
+    "plan_id", "recovery_id", "recovery_state", "result_out", "retry_safe",
+    "root_recovery_id", "target_contract_hash",
+)
+
+RESULT_FIELDS: Tuple[str, ...] = (
+    "allowed_actions", "authorization_required", "blocking_reasons", "operation",
+    "operation_id", "plan_hash", "plan_id", "predecessor_operation_id",
+    "predecessor_result_hash", "recovery_id", "recovery_state", "result_hash",
+    "retry_safe", "root_recovery_id", "target_contract_hash",
+)
+
+ACK_FIELDS: Tuple[str, ...] = (
+    "acknowledged", "caller", "plan_id", "predecessor_operation_id", "recovery_id",
+    "result_hash", "root_recovery_id",
+)
+
+BODY_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "s3-upload.plan": PLAN_FIELDS,
+    "s3-upload.recovery-descriptor": RECOVERY_FIELDS,
+    "s3-upload.result": RESULT_FIELDS,
+    "s3-upload.ack": ACK_FIELDS,
+}
+
+
+def body_of(artifact: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(artifact, dict):
+        raise DeliverySchemaError("artifact must be an object")
+    return {key: value for key, value in artifact.items() if key not in ENVELOPE_KEYS}
+
+
+def _exact_body(artifact_type: str, body: Dict[str, Any]) -> None:
+    if artifact_type not in BODY_FIELDS:
+        raise DeliverySchemaError("artifact type has no registered field set")
+    if not isinstance(body, dict):
+        raise DeliverySchemaError("artifact body must be an object")
+    expected = set(BODY_FIELDS[artifact_type])
+    unknown = sorted(set(body) - expected)
+    missing = sorted(expected - set(body))
+    if unknown:
+        raise DeliverySchemaError(f"{artifact_type} body has unknown fields: {', '.join(unknown)}")
+    if missing:
+        raise DeliverySchemaError(f"{artifact_type} body is missing fields: {', '.join(missing)}")
+
+
+def build_typed(artifact_type: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    _exact_body(artifact_type, body)
+    return envelope(artifact_type, body)
+
+
+def parse_typed(text: str, *, expected_type: str) -> Dict[str, Any]:
+    if expected_type not in BODY_FIELDS:
+        raise DeliverySchemaError("artifact type has no registered field set")
+    item = parse_artifact(text, expected_type=expected_type)
+    _exact_body(expected_type, body_of(item))
+    return item
+
+
+def artifact_digest(domain: str, value: Any) -> str:
+    try:
+        payload = canonicalize({"domain": domain, "value": value})
+    except StrictJSONError as exc:
+        raise DeliverySchemaError("digest input is not canonically serializable") from exc
+    return "sha256:" + hashlib.sha256(payload).hexdigest()

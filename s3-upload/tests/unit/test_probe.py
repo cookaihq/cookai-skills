@@ -343,6 +343,15 @@ def test_probe_normalizes_non_utf8_project_root_for_contract_hash(monkeypatch):
     assert item["target_contract"]["project_root"] == item["cwd"]
 
 
+def test_probe_body_key_set_is_locked(project):
+    item = probe_for(project)
+    assert set(item) == {
+        "artifact_type", "blocking_reason", "caller", "contract_versions", "cwd",
+        "executable_path", "readiness", "schema_version", "state_root",
+        "target_contract", "target_contract_hash", "target_ref",
+    }
+
+
 def test_readiness_vocabulary_is_locked():
     assert READINESS == ("ready", "installed_unconfigured")
 
