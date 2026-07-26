@@ -561,6 +561,49 @@ def _create_capacity_candidates(
     }
 
 
+def _recovered_transient_continuation(
+    *, manifest: dict, private_state: dict, at: str
+) -> tuple[dict, dict, dict] | None:
+    """The state recover_interrupted_attempt settles on when the URL is lost.
+
+    Mirrors the synthetic observation that recovery classifies when it finds a
+    durable conversion_poll_result_intent for a result_ready decision whose
+    private payload never reached the disk. Returns None when this bundle
+    cannot reach that branch at all, which also means it can never write it.
+    """
+    try:
+        return _poll_transition(
+            manifest=manifest,
+            private_state=private_state,
+            result=doc2x.PollResult(
+                "poll_transient", None, "result_private_payload_lost", None, None
+            ),
+            at=at,
+        )
+    except ConversionAttemptError:
+        return None
+
+
+def _recovered_transient_event(
+    committed: dict, continuation: tuple[dict, dict, dict]
+) -> dict:
+    """The committed event recovery appends instead of `committed`.
+
+    Same operation_id and generations -- recovery replays them off the durable
+    intent -- but a different event name, the hashes of the downgraded
+    documents, and the downgraded attempt embedded whole. That embedded attempt
+    is the entire reason this branch is larger than the direct one.
+    """
+    recovered_manifest, recovered_private, recovered_attempt = continuation
+    return {
+        **committed,
+        "event": "conversion_poll_result_recovered_transient",
+        "manifest_hash": object_hash(recovered_manifest),
+        "private_hash": object_hash(recovered_private),
+        "attempt": recovered_attempt,
+    }
+
+
 def _poll_capacity_candidates(
     *, manifest: dict, private_state: dict, history_bytes: int, at: str
 ) -> dict:
@@ -572,10 +615,25 @@ def _poll_capacity_candidates(
     bigger -- the result URL already recorded in private_state, the poll window
     and result reference already on the active attempt -- is inside the
     manifest and private_state it is handed, and is therefore measured exactly.
+
+    The tail also covers the continuation a crash would leave for the *next*
+    resume to finish. recover_interrupted_attempt runs at the top of the
+    caller's advance, ahead of every admission call site and returning as soon
+    as it succeeds, so nothing else ever budgets for it; and when the crash
+    landed between conversion_poll_result_intent and the private write of a
+    result_ready decision, the event it appends
+    (conversion_poll_result_recovered_transient) is strictly larger than the
+    conversion_poll_result_committed it stands in for, because it embeds the
+    downgraded attempt. Admitting on the direct branch alone would let a poll
+    start that its own recovery cannot finish, and that recovery has no way to
+    give up: it would raise on append_history at every later resume.
     """
     manifest_bytes = canonical_state_byte_length(manifest)
     private_bytes = canonical_state_byte_length(private_state)
     tail_bytes = 0
+    recovery_continuation = _recovered_transient_continuation(
+        manifest=manifest, private_state=private_state, at=at
+    )
     for result in _poll_response_branches():
         try:
             updated_manifest, updated_private, updated_attempt = _poll_transition(
@@ -602,9 +660,24 @@ def _poll_capacity_candidates(
             canonical_state_byte_length(intent)
             + canonical_state_byte_length(committed),
         )
+        if (
+            recovery_continuation is not None
+            and updated_attempt.get("state") == "result_ready"
+        ):
+            tail_bytes = max(
+                tail_bytes,
+                canonical_state_byte_length(intent)
+                + canonical_state_byte_length(
+                    _recovered_transient_event(committed, recovery_continuation)
+                ),
+            )
     return {
         "manifest_candidate_bytes": manifest_bytes,
         "private_candidate_bytes": private_bytes,
+        # The recovery's own manifest.json and private.json need no separate
+        # term: it writes the same documents the poll_transient branches above
+        # already measured, and those branches carry an HTTP status the
+        # recovery's synthetic observation leaves None.
         "history_candidate_bytes": history_bytes + tail_bytes,
         # private.json gains one result_urls record holding the full URL the
         # GET has not answered with yet. The task ID is already known and

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -3401,6 +3402,121 @@ def test_capacity_exhaustion_stops_before_intent_and_leaves_bytes_untouched(
         environ=environ,
         transport=never,
         now=at,
+    )
+
+    assert rc != 0, json.dumps(result, sort_keys=True)
+    assert result["outcome"] == "error"
+    assert [error["code"] for error in result["errors"]] == [
+        "local_state_capacity_exhausted"
+    ]
+    assert result["action_required"] == "preserve_work_bundle_and_stop"
+    assert never.calls == []
+    assert _bundle_state_snapshot(bundle) == before
+
+
+def test_poll_admission_counts_the_bytes_its_crash_recovery_would_append(
+    tmp_path, capsys, monkeypatch
+):
+    # spec.md:198 / design.md:305: the admission must budget the whole worst
+    # case of the operation it is admitting, and a poll's worst case does not
+    # end at conversion_poll_result_committed. If the process dies between the
+    # intent and the private write, the next resume finishes the operation from
+    # the journal inside recover_interrupted_attempt -- which runs at the very
+    # top of _advance, before either admission call site, and returns straight
+    # afterwards. That continuation therefore has no admission of its own, and
+    # it is *larger* than the committed event it replaces: when the result URL
+    # is gone it appends conversion_poll_result_recovered_transient, which
+    # embeds a whole attempt object the direct committed event does not carry.
+    #
+    # Budgeting only the direct branch would let a poll through at a history
+    # ceiling its own crash recovery cannot fit under -- and that recovery has
+    # no way to back out: bundle.append_history would raise BundleStateError on
+    # every later resume, replaying the same failure forever. So the operation
+    # must be refused up front, at the poll, with the bundle untouched.
+    #
+    # The ceiling below is not computed from the admission's own arithmetic
+    # (that would only prove the code agrees with itself). It is measured by
+    # actually crashing and recovering this exact bundle and reading the byte
+    # size the recovery really left behind.
+    bundle, environ, resume, ready = _refresh_ready_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    expired = resume(
+        ready["generation"], transport=CountingNeverNetwork(), now=REFRESH_EXPIRY
+    )
+    assert expired["outcome"] == "result_url_unavailable"
+    generation = expired["generation"]
+    history_path = bundle / ".state" / "history.ndjson"
+    argv = [
+        "resume",
+        "--work-bundle",
+        str(bundle),
+        "--expected-generation",
+        str(generation),
+    ]
+
+    # Phase 1 -- run the crash and the recovery for real, and measure it.
+    snapshot = tmp_path / "pre-poll-bundle"
+    shutil.copytree(bundle, snapshot)
+    original_atomic_write, original_append_history = _install_conversion_journal_crash(
+        monkeypatch,
+        event="conversion_poll_result_committed",
+        boundary="private",
+    )
+    _crash_resume(
+        tmp_path,
+        bundle,
+        environ,
+        generation,
+        transport=PollStatus(
+            REFRESH_TASK_ID, "completed", results=[{"url": REFRESH_SECOND_URL}]
+        ),
+        now=REFRESH_EXPIRY,
+    )
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+    )
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "append_history", original_append_history
+    )
+    capsys.readouterr()
+    recovered_rc, recovered, _stderr = invoke(
+        capsys,
+        argv,
+        cwd=tmp_path,
+        environ=environ,
+        transport=CountingNeverNetwork(),
+        now=REFRESH_EXPIRY,
+    )
+    assert recovered_rc == 0, json.dumps(recovered, sort_keys=True)
+    recovered_history = [
+        json.loads(line)
+        for line in history_path.read_text().splitlines()
+    ]
+    # The continuation this test is about, not the ordinary committed event.
+    assert recovered_history[-1]["event"] == (
+        "conversion_poll_result_recovered_transient"
+    )
+    recovered_history_bytes = len(history_path.read_bytes())
+
+    # Phase 2 -- rewind to the moment the poll had not started yet, and give
+    # the bundle one byte less than that recovery actually consumed.
+    shutil.rmtree(bundle)
+    shutil.copytree(snapshot, bundle)
+    before = _bundle_state_snapshot(bundle)
+    assert len(before["history"]) < recovered_history_bytes - 1
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "MAX_STATE_BYTES", recovered_history_bytes - 1
+    )
+
+    never = CountingNeverNetwork()
+    rc, result, _stderr = invoke(
+        capsys,
+        argv,
+        cwd=tmp_path,
+        environ=environ,
+        transport=never,
+        now=REFRESH_EXPIRY,
     )
 
     assert rc != 0, json.dumps(result, sort_keys=True)
