@@ -3529,6 +3529,80 @@ def test_poll_admission_counts_the_bytes_its_crash_recovery_would_append(
     assert _bundle_state_snapshot(bundle) == before
 
 
+def test_capacity_admission_reads_history_at_the_history_ceiling(
+    tmp_path, capsys, monkeypatch
+):
+    # spec.md:199 / design.md:448: a bundle whose history.ndjson is over
+    # workflow's 8 MiB *state* ceiling but inside bundle's 64 MiB *history*
+    # ceiling is legal. The admission has to read that file to know how much
+    # room is left, and reading it at the wrong ceiling turns a legal bundle
+    # into invalid_bundle + repair_or_restore_work_bundle -- the one action
+    # design.md:448 forbids here, because it authorises the user to truncate
+    # append-only history or rebuild a task that may already have been charged.
+    # It would also make the 64 MiB history ceiling unreachable: an 8 MiB cap
+    # on the term it is compared against leaves the history verdict constantly
+    # true.
+    #
+    # scripts/review.py:2808 already reads the same file at the same ceiling
+    # for the same reason.
+    bundle, environ, generation, at = _capacity_exhaustion_bundle(
+        "ordinary_poll", tmp_path, capsys, monkeypatch
+    )
+    original_read = workflow._read_private_file
+    history_ceilings = []
+
+    def recording_read(name, *, dir_fd, max_bytes=workflow.MAX_STATE_BYTES):
+        if name == "history.ndjson":
+            history_ceilings.append(max_bytes)
+        return original_read(name, dir_fd=dir_fd, max_bytes=max_bytes)
+
+    monkeypatch.setattr(workflow, "_read_private_file", recording_read)
+    # Stop at the admission so the only history read under observation is the
+    # admission's own.
+    monkeypatch.setattr(conversion_attempt, "MAX_MANIFEST_CANDIDATE_BYTES", 1)
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=CountingNeverNetwork(),
+        now=at,
+    )
+    assert rc != 0, json.dumps(result, sort_keys=True)
+    assert history_ceilings == [conversion_attempt.bundle.MAX_STATE_BYTES]
+
+    # And that ceiling is load-bearing, not decoration: a history file just
+    # past workflow's state ceiling is still a legal history, and the default
+    # this call site must not fall back to rejects it with exactly the action
+    # design.md:448 rules out.
+    oversized = tmp_path / "oversized-state"
+    oversized.mkdir(mode=0o700)
+    history = oversized / "history.ndjson"
+    history.write_bytes(b"x" * (workflow.MAX_STATE_BYTES + 8))
+    history.chmod(0o600)
+    state_fd = os.open(oversized, os.O_RDONLY)
+    try:
+        assert len(
+            original_read(
+                "history.ndjson",
+                dir_fd=state_fd,
+                max_bytes=conversion_attempt.bundle.MAX_STATE_BYTES,
+            )
+        ) == workflow.MAX_STATE_BYTES + 8
+        with pytest.raises(workflow.WorkflowError) as rejected:
+            original_read("history.ndjson", dir_fd=state_fd)
+    finally:
+        os.close(state_fd)
+    assert rejected.value.code == "invalid_bundle"
+    assert rejected.value.action_required == "repair_or_restore_work_bundle"
+
+
 def test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary():
     # spec.md's "Completed 结果不安全" scenario: any result URL over 16,384
     # UTF-8 *bytes* is unsafe_result_url. doc2x.valid_https_url

@@ -733,7 +733,17 @@ def _assert_conversion_capacity(
             manifest=manifest,
             private_state=private_state,
             history_bytes=len(
-                _read_private_file("history.ndjson", dir_fd=descriptors["state"])
+                # history.ndjson is bounded by bundle's 64 MiB *history*
+                # ceiling, not by this module's 8 MiB state ceiling. Reading it
+                # at the default would reject a legal bundle with
+                # repair_or_restore_work_bundle, which design.md:448 forbids
+                # here, and would cap the term the history verdict is computed
+                # from at 8 MiB. scripts/review.py:2808 reads it the same way.
+                _read_private_file(
+                    "history.ndjson",
+                    dir_fd=descriptors["state"],
+                    max_bytes=bundle_module.MAX_STATE_BYTES,
+                )
             ),
             at=at,
             **response_inputs,
