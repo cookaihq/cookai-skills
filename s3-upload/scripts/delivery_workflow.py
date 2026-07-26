@@ -113,6 +113,13 @@ def _derived_id(domain: str, plan_id: str, plan_hash: str, action: str) -> str:
     return digest.split(":", 1)[1][:32]
 
 
+def _drop_checkpoint(project_root: str, checkpoint_id: str) -> None:
+    try:
+        CheckpointStore(project_root).remove(checkpoint_id)
+    except (ArtifactError, FileNotFoundError, OSError):
+        pass
+
+
 def _read_handoff(path: str) -> bytes:
     try:
         with open(path, "rb") as handle:
@@ -312,13 +319,6 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         def checkpoint_notice(checkpoint_id: str) -> None:
             hook("checkpoint_durable")
             handoff["checkpoint_id"] = checkpoint_id
-            store.write_operation_record(plan_id, {
-                "checkpoint_id": checkpoint_id,
-                "operation_id": operation_id,
-                "recovery_id": recovery_id,
-                "result_out": plan["result_out"],
-                "root_recovery_id": root,
-            })
             descriptor = build_recovery_descriptor(
                 recovery_id=recovery_id,
                 root_recovery_id=root,
@@ -332,15 +332,24 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 state="in_flight_unknown",
                 capabilities_ok=True,
             )
+            if store.operation_record(plan_id) is not None:
+                handoff["recovery"] = descriptor
+                _drop_checkpoint(project_root, checkpoint_id)
+                handoff["checkpoint_id"] = None
+                raise AlreadyHandedOff("this plan already began a durable handoff")
+            store.write_operation_record(plan_id, {
+                "checkpoint_id": checkpoint_id,
+                "operation_id": operation_id,
+                "recovery_id": recovery_id,
+                "result_out": plan["result_out"],
+                "root_recovery_id": root,
+            })
             hook("before_recovery_fsync")
             disposition = commit(recovery_target, serialize_artifact(descriptor))
             hook("after_recovery_fsync")
             handoff["recovery"] = descriptor
             if disposition == "idempotent":
-                try:
-                    CheckpointStore(project_root).remove(checkpoint_id)
-                except (ArtifactError, FileNotFoundError, OSError):
-                    pass
+                _drop_checkpoint(project_root, checkpoint_id)
                 handoff["checkpoint_id"] = None
                 raise AlreadyHandedOff("this plan already handed a recovery descriptor off")
             gate.arm()
