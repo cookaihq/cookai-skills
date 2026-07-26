@@ -241,10 +241,16 @@ def poll_task(*, task_id: str, api_key: str, transport=None) -> PollResult:
 
 
 def valid_https_url(value) -> bool:
-    if not isinstance(value, str) or not value or len(value) > 16384:
+    # spec.md's "Completed 结果不安全" scenario bounds a result URL at 16,384
+    # UTF-8 *bytes*, not code points. Measure the encoded length -- a
+    # code-point count would admit a URL several times over the byte ceiling,
+    # and this gate is the last thing a result URL passes before it is written
+    # verbatim into private.json.
+    if not isinstance(value, str) or not value:
         return False
     try:
-        value.encode("utf-8")
+        if len(value.encode("utf-8")) > 16384:
+            return False
         parsed = urlsplit(value)
         _port = parsed.port
     except (UnicodeError, ValueError):
