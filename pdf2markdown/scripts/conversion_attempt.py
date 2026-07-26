@@ -1032,7 +1032,17 @@ def recover_interrupted_attempt(
     private_state: dict,
     at: str,
     expected_generation: int,
+    resolve_history,
 ) -> tuple[dict, dict] | None:
+    """Finish a conversion operation that a crash left pending.
+
+    `resolve_history` reduces the durable prefix and must be supplied by the
+    caller: once a bundle carries raw conversion records, its history holds
+    events this module does not know, and only the caller knows which layer's
+    reducer understands every event the bundle can hold. It takes the same
+    shape as `resolve_history_state` below. Required rather than defaulted so
+    a caller cannot silently fall back to a reducer that is too narrow.
+    """
     try:
         history = bundle.read_history(state_fd=descriptors["state"])
     except bundle.BundleStateError as exc:
@@ -1049,7 +1059,11 @@ def recover_interrupted_attempt(
             intent_new,
             message="Expected generation does not match the pending conversion retry.",
         )
-        previous = _reduce_history(history[:-1], private_template=private_state)
+        previous = resolve_history(
+            history[:-1],
+            manifest_template=manifest,
+            private_template=private_state,
+        )
         if previous is None:
             raise ConversionAttemptError(
                 "integrity_violation",
@@ -1109,7 +1123,11 @@ def recover_interrupted_attempt(
             ),
         )
         intended_attempt = final.get("attempt")
-        previous = _reduce_history(history[:-1], private_template=private_state)
+        previous = resolve_history(
+            history[:-1],
+            manifest_template=manifest,
+            private_template=private_state,
+        )
         if (
             type(intent_expected) is not int
             or intent_new != intent_expected + 1

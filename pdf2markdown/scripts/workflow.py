@@ -707,6 +707,23 @@ def _read_json(name, *, dir_fd: int) -> dict:
         ) from None
 
 
+def _conversion_history_resolver(manifest: dict):
+    """Pick the reducer that understands every event this bundle can hold.
+
+    Once a bundle carries a raw conversion record its history mixes raw
+    conversion events with conversion attempt operations, and only the raw
+    conversion reducer can replay both. `conversion_attempt` cannot make this
+    choice itself: it is the lower layer and does not know the raw events.
+    Mirrors the layer ladder already used for `prefix_state_resolver`.
+    """
+    module = (
+        raw_conversion_module
+        if "raw_conversion" in manifest
+        else conversion_attempt_module
+    )
+    return module.resolve_history_state
+
+
 def _source_digest(name, *, dir_fd: int) -> tuple[str, int]:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1405,6 +1422,9 @@ def _advance(
                         ),
                         at=operation_at,
                         expected_generation=args.expected_generation,
+                        resolve_history=_conversion_history_resolver(
+                            recovery_manifest
+                        ),
                     )
                 )
             except conversion_attempt_module.ConversionAttemptError as exc:
@@ -2525,6 +2545,9 @@ def _record(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
                         ),
                         at=_isoformat(_moment(now)),
                         expected_generation=args.expected_generation,
+                        resolve_history=_conversion_history_resolver(
+                            recovery_manifest
+                        ),
                     )
                 )
             except conversion_attempt_module.ConversionAttemptError as exc:
@@ -3128,6 +3151,7 @@ def _resume(
                 private_state=resume_private,
                 at=_isoformat(_moment(now)),
                 expected_generation=args.expected_generation,
+                resolve_history=_conversion_history_resolver(resume_manifest),
             )
         except conversion_attempt_module.ConversionAttemptError as exc:
             raise WorkflowError(
