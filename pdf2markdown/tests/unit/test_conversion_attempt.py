@@ -3739,10 +3739,16 @@ def test_flat_state_migration_table_covers_the_whole_flat_domain():
 def test_flat_state_migration_agrees_with_the_live_conversion_state_projection():
     import conversion_attempt as ca
 
+    # 跳过的是「不经 _conversion_state_for_attempt 投影」的 state：
+    #   not_started / submitting —— 落该函数的默认分支，投影不负责；
+    #   submission_unknown —— 由提交路径直写字面量（conversion_attempt.py:1486、
+    #     :1630），不经此函数。design.md Decision 1 第 4 行要求它最终投影为
+    #     submission_unknown，但那属于后续折叠任务 2.1c / 4.2a；本任务是
+    #     characterization，固化现状，不得改生产行为。
     # result_ready 是唯一一个 reason 可空可非空的行，投影随 reason 变，
     # 不能拿单值的 _conversion_state_for_attempt 去比。
     for flat, (_, reason, top_level) in ca.FLAT_STATE_MIGRATION.items():
-        if flat in {"not_started", "submitting"} or (
+        if flat in {"not_started", "submitting", "submission_unknown"} or (
             flat == "result_ready" and reason is not None
         ):
             continue

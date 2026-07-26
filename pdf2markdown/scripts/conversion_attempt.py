@@ -2032,8 +2032,6 @@ def _conversion_state_for_attempt(state: str) -> str:
         return "terminal_error"
     if state == "failed":
         return "awaiting_user"
-    if state == "submission_unknown":
-        return "submission_unknown"
     if state in {
         "credential_source_missing",
         "credential_source_changed",
