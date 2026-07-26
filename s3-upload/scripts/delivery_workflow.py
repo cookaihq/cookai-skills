@@ -332,7 +332,11 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 state="in_flight_unknown",
                 capabilities_ok=True,
             )
-            if store.operation_record(plan_id) is not None:
+            try:
+                existing = store.operation_record(plan_id)
+            except PlanStoreError:
+                existing = True
+            if existing is not None:
                 handoff["recovery"] = descriptor
                 _drop_checkpoint(project_root, checkpoint_id)
                 handoff["checkpoint_id"] = None
@@ -345,7 +349,11 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 "root_recovery_id": root,
             })
             hook("before_recovery_fsync")
-            disposition = commit(recovery_target, serialize_artifact(descriptor))
+            try:
+                disposition = commit(recovery_target, serialize_artifact(descriptor))
+            except HandoffError:
+                store.discard_operation_record(plan_id)
+                raise
             hook("after_recovery_fsync")
             handoff["recovery"] = descriptor
             if disposition == "idempotent":

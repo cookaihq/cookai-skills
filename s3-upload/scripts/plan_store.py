@@ -300,6 +300,23 @@ class PlanStore:
         except (OSError, FileSecurityError) as exc:
             raise PlanStoreError("plan operation record could not be written durably") from exc
 
+    def discard_operation_record(self, plan_id: str) -> None:
+        directory = self._plan_dir(plan_id)
+        try:
+            parent_fd = open_directory(directory)
+        except (OSError, FileSecurityError) as exc:
+            raise PlanStoreError("plan directory is unavailable") from exc
+        try:
+            try:
+                os.unlink("operation.json", dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            os.fsync(parent_fd)
+        except OSError as exc:
+            raise PlanStoreError("plan operation record could not be discarded") from exc
+        finally:
+            os.close(parent_fd)
+
     def consume(self, token: str, *, caller: str, executable_path: str, cwd: str,
                 state_root: str) -> ConsumedPlan:
         if not isinstance(token, str) or "." not in token:

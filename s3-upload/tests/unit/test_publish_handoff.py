@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 import handoff_io
 from conftest import CALLER
 from delivery_schema import body_of, parse_typed
@@ -33,6 +35,14 @@ def issue_plan(project, dry_run, snapshot, digest):
     )
     return store, store.issue(body, source_path=str(project.source),
                               soft_max_bytes=1048576, created_at=CREATED_AT)
+
+
+class HardCrash(BaseException):
+    pass
+
+
+def operation_record_path(project, plan_id):
+    return project.state_root / "plans" / plan_id / "operation.json"
 
 
 def run(project, resolved, store, token, transport, **overrides):
@@ -193,7 +203,9 @@ def test_recovery_write_failure_sends_zero_requests(
     assert body["recovery_state"] == "known_not_applied"
     assert body["blocking_reasons"] == ["handoff_write_failed"]
     assert body["allowed_actions"] == ["inspect", "publish"]
+    assert body["retry_safe"] is True
     assert not os.path.exists(project.recovery_out)
+    assert durable_state(project, issued.plan_id)["operation_record"] is False
 
 
 def test_recovery_parent_drift_after_preflight_sends_zero_requests(
@@ -213,7 +225,9 @@ def test_recovery_parent_drift_after_preflight_sends_zero_requests(
     assert raw.calls == []
     assert outcome.transport_calls == 0
     assert body_of(outcome.result)["blocking_reasons"] == ["handoff_write_failed"]
+    assert body_of(outcome.result)["retry_safe"] is True
     assert not os.path.exists(project.recovery_out)
+    assert durable_state(project, issued.plan_id)["operation_record"] is False
 
 
 def test_recovery_out_is_immutable_and_a_second_publish_replays(
@@ -232,7 +246,7 @@ def test_recovery_out_is_immutable_and_a_second_publish_replays(
     assert body_of(outcome.result) == body_of(original_outcome.result)
 
 
-def test_a_replay_after_a_crash_before_the_descriptor_sends_zero_requests(
+def test_a_retry_after_an_in_process_descriptor_failure_uploads(
     project, resolved, dry_run, snapshot, contract_digest, monkeypatch
 ):
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
@@ -243,13 +257,46 @@ def test_a_replay_after_a_crash_before_the_descriptor_sends_zero_requests(
                                       reason=handoff_io.HANDOFF_WRITE_FAILED)
 
     monkeypatch.setattr("delivery_workflow.commit", explode)
-    crashed = run(project, resolved, store, issued.token, first)
+    crashed = body_of(run(project, resolved, store, issued.token, first).result)
     assert first.calls == []
-    assert body_of(crashed.result)["recovery_state"] == "known_not_applied"
-    assert durable_state(project, issued.plan_id)["operation_record"] is True
+    assert crashed["recovery_state"] == "known_not_applied"
+    assert crashed["retry_safe"] is True
+    assert crashed["allowed_actions"] == ["inspect", "publish"]
+    assert durable_state(project, issued.plan_id)["operation_record"] is False
     assert not os.path.exists(project.recovery_out)
 
     monkeypatch.undo()
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second)
+    body = body_of(outcome.result)
+    assert len(second.calls) == 1
+    assert outcome.transport_calls == 1
+    assert body["recovery_state"] == "terminal_unacknowledged"
+    assert body["allowed_actions"] == ["inspect", "ack"]
+    assert body["retry_safe"] is False
+    assert durable_state(project, issued.plan_id)["operation_record"] is True
+    assert body_of(parse_typed(open(project.recovery_out, "r", encoding="utf-8").read(),
+                               expected_type="s3-upload.recovery-descriptor"))["plan_id"] == issued.plan_id
+    assert body_of(parse_typed(open(project.result_out, "r", encoding="utf-8").read(),
+                               expected_type="s3-upload.result")) == body
+
+
+def test_a_hard_crash_between_the_operation_record_and_the_descriptor_stays_conservative(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    first = Recorder()
+
+    def die(name):
+        if name == "before_recovery_fsync":
+            raise HardCrash("the process is gone before the descriptor is durable")
+
+    with pytest.raises(HardCrash):
+        run(project, resolved, store, issued.token, first, on_boundary=die)
+    assert first.calls == []
+    assert durable_state(project, issued.plan_id)["operation_record"] is True
+    assert not os.path.exists(project.recovery_out)
+
     second = Recorder()
     outcome = run(project, resolved, store, issued.token, second)
     body = body_of(outcome.result)
@@ -258,6 +305,68 @@ def test_a_replay_after_a_crash_before_the_descriptor_sends_zero_requests(
     assert body["recovery_state"] == "in_flight_unknown"
     assert body["allowed_actions"] == ["inspect", "reconcile"]
     assert body["retry_safe"] is False
+    assert body_of(parse_typed(open(project.result_out, "r", encoding="utf-8").read(),
+                               expected_type="s3-upload.result")) == body
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "unreadable"])
+def test_an_unreadable_operation_record_fails_closed(
+    project, resolved, dry_run, snapshot, contract_digest, damage
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    path = operation_record_path(project, issued.plan_id)
+    if damage == "corrupt":
+        path.write_bytes(b"{not json at all")
+        path.chmod(0o600)
+    else:
+        path.write_bytes(b"{}")
+        path.chmod(0o644)
+    raw = Recorder()
+    outcome = run(project, resolved, store, issued.token, raw)
+    body = body_of(outcome.result)
+    assert raw.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["retry_safe"] is False
+    assert body["allowed_actions"] == ["inspect", "reconcile"]
+    assert body["blocking_reasons"] == []
+    assert not os.path.exists(project.recovery_out)
+    assert os.path.exists(path)
+
+
+def test_a_descriptor_that_outlived_a_rolled_back_operation_record_replays(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    real = handoff_io.commit
+    failed = []
+
+    def create_then_fail(target, data):
+        if target.path == project.recovery_out and not failed:
+            real(target, data)
+            failed.append(target.path)
+            raise handoff_io.HandoffError("injected post-create fsync failure",
+                                          reason=handoff_io.HANDOFF_WRITE_FAILED)
+        return real(target, data)
+
+    monkeypatch.setattr("delivery_workflow.commit", create_then_fail)
+    first = Recorder()
+    crashed = body_of(run(project, resolved, store, issued.token, first).result)
+    assert first.calls == []
+    assert crashed["recovery_state"] == "known_not_applied"
+    descriptor = open(project.recovery_out, "rb").read()
+    assert durable_state(project, issued.plan_id)["operation_record"] is False
+
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second)
+    body = body_of(outcome.result)
+    assert second.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["retry_safe"] is False
+    assert body["allowed_actions"] == ["inspect", "reconcile"]
+    assert open(project.recovery_out, "rb").read() == descriptor
+    assert durable_state(project, issued.plan_id)["operation_record"] is True
     assert body_of(parse_typed(open(project.result_out, "r", encoding="utf-8").read(),
                                expected_type="s3-upload.result")) == body
 
