@@ -3762,41 +3762,103 @@ def test_flat_state_migration_agrees_with_the_live_conversion_state_projection()
 def test_legal_triples_is_the_single_owner_of_state_legality():
     import conversion_attempt as ca
 
-    # POLL_STATE_CONTRACT 与 valid_private_state 的期望表今天是两份可漂移副本。
-    # 合并后两者都必须由 LEGAL_TRIPLES 派生，不再各自存在。
+    # ⚠️ 2026-07-26 重写（2.1a 复审 Important #1）。初版用与生产代码**同一个
+    # 推导式**构造 contract 再与该推导式的产物比较，重构一落地就变成 x == x：
+    # 把 POLL_STATE_CONTRACT 重新硬编码回字面量也照样过。断言 2 同理——它原本
+    # 拿表去比一条独立的 if/elif 链，而 _conversion_state_for_attempt 现在也从
+    # 表派生，于是 15 次循环里 14 次是同义反复。
     #
-    # LEGAL_TRIPLES 覆盖 FLAT_STATE_DOMAIN 全域（18 行），与
-    # valid_private_state 的 expected_manifest_state 同域——后者实测 18 项，
-    # 且其值与 1.1 的 FLAT_STATE_MIGRATION 第三列 18 行逐条一致，是权威那份。
-    #
-    # 三个「非 poll 观测」state 必须从两条断言里各自排除，理由不同：
-    #   POLL_STATE_CONTRACT 只描述**poll 响应可以提交的观测**，实测 14 项，
-    #   恰好等于 FLAT_STATE_DOMAIN 减去 not_started / submitting /
-    #   submission_unknown / poll_transient 四个（前三个不是 poll 观测，
-    #   poll_transient 是 poll 结果但不入 contract）。
-    NON_POLL_OBSERVATIONS = {"not_started", "submitting", "submission_unknown"}
-    contract = {
-        row.attempt_state: (row.http_status, row.upstream_status, row.reason)
-        for row in ca.LEGAL_TRIPLES
-        if row.attempt_state not in NON_POLL_OBSERVATIONS | {"poll_transient"}
+    # 因此本测试改用**独立 oracle**：下面的字面量是重构前 c0d197a 的真实值，
+    # 逐字抄自被删除的 POLL_STATE_CONTRACT / expected_manifest_state 字面量。
+    # 它不从任何生产表派生，所以生产侧任何一处回退成字面量、或派生逻辑写错，
+    # 都会红。
+    CONTRACT_BEFORE_REFACTOR = {
+        "submitted": (200, None, None),
+        "pending": (200, "pending", None),
+        "processing": (200, "processing", None),
+        "result_pending": (200, "completed", None),
+        "result_ready": (200, "completed", None),
+        "unsafe_result_url": (200, "completed", "unsafe_result_url"),
+        "unexpected_result_count": (200, "completed", "unexpected_result_count"),
+        "failed": (200, "failed", "task_failed"),
+        "credential_source_missing": (None, None, "credential_source_missing"),
+        "credential_source_changed": (None, None, "credential_source_changed"),
+        "poll_unauthorized": (401, None, "poll_unauthorized"),
+        "task_unavailable": (404, None, "task_unavailable"),
+        "poll_timeout": (None, None, "poll_timeout"),
+        "result_pending_timeout": (None, "completed", "result_pending_timeout"),
     }
-    assert contract == ca.POLL_STATE_CONTRACT
-    expected_top_level = {
+    CONVERSION_STATE_BEFORE_REFACTOR = {
+        "not_started": "ready_to_submit",
+        "submitting": "submitting",
+        "submitted": "submitted",
+        "pending": "submitted",
+        "processing": "submitted",
+        "result_pending": "submitted",
+        "submission_unknown": "submission_unknown",
+        "result_ready": "result_downloading",
+        "unsafe_result_url": "terminal_error",
+        "unexpected_result_count": "terminal_error",
+        "failed": "awaiting_user",
+        "credential_source_missing": "recoverable_error",
+        "credential_source_changed": "recoverable_error",
+        "poll_unauthorized": "recoverable_error",
+        "task_unavailable": "recoverable_error",
+        "poll_transient": "recoverable_error",
+        "poll_timeout": "recoverable_error",
+        "result_pending_timeout": "recoverable_error",
+    }
+
+    # 表的行集必须被钉住：否则多一行、少一行、重复一行都只会以 KeyError
+    # 间接暴露，而「唯一 owner 表」这条性质本身没有断言保护。
+    assert len(ca.LEGAL_TRIPLES) == 18
+    assert {row.attempt_state for row in ca.LEGAL_TRIPLES} == ca.FLAT_STATE_DOMAIN
+
+    # 派生处 1：POLL_STATE_CONTRACT。与独立 oracle 比，不与自身推导式比。
+    assert ca.POLL_STATE_CONTRACT == CONTRACT_BEFORE_REFACTOR
+
+    # 表的 conversion_state 列必须与独立 oracle 全 18 行一致——含
+    # not_started / submitting / submission_unknown 这三行，它们被下面的
+    # 投影循环排除（函数输入域比表窄），若不在这里钉住就没有任何测试覆盖。
+    assert {
         row.attempt_state: row.conversion_state for row in ca.LEGAL_TRIPLES
-    }
-    # _conversion_state_for_attempt 的**输入域比表窄**：那三个 state 今天永远
-    # 落它的默认分支（返回 "submitted"），与表值不符——实测分歧三行：
-    #   not_started        表 ready_to_submit    / 函数 submitted
-    #   submitting         表 submitting         / 函数 submitted
-    #   submission_unknown 表 submission_unknown / 函数 submitted
-    # 这不是缺陷：该函数只接收 poll 结果 state，三者都到不了它（调用点
-    # conversion_attempt.py:2162 受 POLL_RESULT_STATES 守卫；:2451 要求合法
-    # task_id，与 submission_unknown 要求 task_id is None 互斥）。
-    # ⚠️ 2.1a 是纯重构，**不得**为了让本断言覆盖它们而给该函数加分支——
-    # Task 1.1 正因这样做被 reviewer 判越界并回退，用户已裁决该目标投影
-    # 归后续折叠任务 2.1c / 4.2a。
+    } == CONVERSION_STATE_BEFORE_REFACTOR
+
+    # _conversion_state_for_attempt 的输入域比表窄：那三个 state 今天永远落它
+    # 的默认分支（返回 "submitted"），与表值不符。这不是缺陷——它只接收 poll
+    # 结果 state：调用点 conversion_attempt.py 的 _poll_transition 硬守卫
+    # `result.state not in POLL_RESULT_STATES` 即 raise；另一处调用点不在调用
+    # 时守卫，而是由 _valid_attempt 的逐 state 形状检查在函数返回前排除
+    # （2.1a 复审订正：协调者原先以 task_id 互斥解释，那只覆盖
+    # submission_unknown，not_started / submitting 靠的是形状检查）。
+    # ⚠️ 2.1a 是纯重构，**不得**为了让本循环覆盖它们而给该函数加分支——
+    # Task 1.1 正因这样做被判越界并回退，用户已裁决该目标投影归 2.1c / 4.2a。
+    NON_POLL_OBSERVATIONS = {"not_started", "submitting", "submission_unknown"}
     for flat in ca.FLAT_STATE_DOMAIN - NON_POLL_OBSERVATIONS:
-        assert expected_top_level[flat] == ca._conversion_state_for_attempt(flat)
+        assert (
+            CONVERSION_STATE_BEFORE_REFACTOR[flat]
+            == ca._conversion_state_for_attempt(flat)
+        ), flat
+
+    # 派生处 3（易漏项）：容量准入的最坏 poll 分支也必须从同一张表构造。
+    # 实测形态：13 个表派生分支（每个非 poll_transient 的 poll 结果 state 一
+    # 个）+ 4 个 poll_transient 分支（2 个 reason code × 2 个最坏 HTTP 状态）
+    # = 17。断言这两部分而不是只断言总数，避免任一侧变化被另一侧掩盖。
+    branches = ca._poll_response_branches()
+    assert len(branches) == 17
+    table_driven = [b for b in branches if b.state != "poll_transient"]
+    assert len(table_driven) == 13
+    assert {b.state for b in table_driven} == set(CONTRACT_BEFORE_REFACTOR) - {
+        "submitted"
+    }
+    for branch in table_driven:
+        http_status, upstream_status, reason_code = CONTRACT_BEFORE_REFACTOR[
+            branch.state
+        ]
+        assert branch.http_status == http_status, branch.state
+        assert branch.upstream_status == upstream_status, branch.state
+        assert branch.reason_code == reason_code, branch.state
+    assert len([b for b in branches if b.state == "poll_transient"]) == 4
 
 
 # --- Task 1.3: characterization of the pre-fold flat state projections -----

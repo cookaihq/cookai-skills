@@ -165,18 +165,27 @@ class _LegalTriple(NamedTuple):
 
     conversion_state is the top-level manifest projection valid_private_state
     requires (today's expected_manifest_state, verbatim); attempt_state is the
-    flat state name; reason/http_status/upstream_status are the triple
+    flat state name; reason_code/http_status/upstream_status are the triple
     POLL_STATE_CONTRACT and _valid_attempt enforce for the 14 states that are
     poll observations. The four states that are not single-valued poll
     observations (not_started, submitting, submission_unknown -- see
-    NON_POLL_OBSERVATIONS -- and poll_transient, whose reason/http_status vary
-    across POLL_TRANSIENT_REASON_CODES and _WORST_CASE_HTTP_STATUSES) carry
-    None placeholders in those three fields: nothing derives from them there.
+    NON_POLL_OBSERVATIONS -- and poll_transient, whose reason_code/http_status
+    vary across POLL_TRANSIENT_REASON_CODES and _WORST_CASE_HTTP_STATUSES)
+    carry None placeholders in those three fields: nothing derives from them
+    there.
+
+    reason_code is today's wire reason_code -- it is deliberately *not* named
+    `reason`: 2.1b renames the attempt field reason_code to reason and gives
+    it a new, closed vocabulary (FLAT_STATE_MIGRATION's target reason column),
+    which disagrees with this column on two rows (poll_unauthorized:
+    poll_authentication_rejected, credential_source_changed:
+    credential_fingerprint_changed). A reader who found `.reason` here would
+    silently get today's wire value where the folded target value was meant.
     """
 
     conversion_state: str
     attempt_state: str
-    reason: str | None
+    reason_code: str | None
     http_status: int | None
     upstream_status: str | None
 
@@ -188,6 +197,10 @@ class _LegalTriple(NamedTuple):
 # expected_manifest_state (the top-level conversion_state each flat state
 # projects to). Both are now derived from this table below, so the two can
 # never again drift out of sync with each other.
+#
+# This table's reason_code column is today's wire reason_code, not the folded
+# target reason 2.1b/2.1c introduce. The folded (attempt_state, reason) pair
+# still lives only in FLAT_STATE_MIGRATION below, pending the 2.1c merge.
 LEGAL_TRIPLES = (
     _LegalTriple("ready_to_submit", "not_started", None, None, None),
     _LegalTriple("submitting", "submitting", None, None, None),
@@ -248,14 +261,35 @@ LEGAL_TRIPLES = (
 # single-valued contract entry either).
 NON_POLL_OBSERVATIONS = frozenset({"not_started", "submitting", "submission_unknown"})
 
-_LEGAL_TRIPLE_BY_ATTEMPT_STATE = {row.attempt_state: row for row in LEGAL_TRIPLES}
+# Indexed over the same domain POLL_STATE_CONTRACT describes -- every
+# non-transient poll observation state, excluding NON_POLL_OBSERVATIONS and
+# poll_transient. Filtering here (rather than indexing all 18 rows) means a
+# future widening of _poll_response_branches' input domain raises KeyError
+# instead of silently returning a NON_POLL_OBSERVATIONS/poll_transient row
+# shaped like a single-valued contract entry -- a shape _valid_attempt would
+# reject, and exactly the shape _poll_response_branches' docstring promises
+# never to budget capacity for.
+_LEGAL_TRIPLE_BY_ATTEMPT_STATE = {
+    row.attempt_state: row
+    for row in LEGAL_TRIPLES
+    if row.attempt_state not in NON_POLL_OBSERVATIONS | {"poll_transient"}
+}
+
+# The top-level conversion_state each flat attempt state projects to, over
+# LEGAL_TRIPLES' full 18-row domain. valid_private_state's expected_manifest_
+# state and _conversion_state_for_attempt's (POLL_RESULT_STATES-filtered)
+# _ATTEMPT_STATE_CONVERSION_STATE both derive from this single dict instead of
+# each rebuilding a near-identical comprehension over LEGAL_TRIPLES.
+_MANIFEST_STATE_BY_ATTEMPT_STATE = {
+    row.attempt_state: row.conversion_state for row in LEGAL_TRIPLES
+}
 
 # The (http_status, upstream_status, reason_code) triple each non-transient
 # attempt state must carry. _valid_attempt enforces it; the capacity admission
 # below builds its worst-case poll branches from the same table so the two can
 # never disagree about which observations are legal.
 POLL_STATE_CONTRACT = {
-    row.attempt_state: (row.http_status, row.upstream_status, row.reason)
+    row.attempt_state: (row.http_status, row.upstream_status, row.reason_code)
     for row in LEGAL_TRIPLES
     if row.attempt_state not in NON_POLL_OBSERVATIONS | {"poll_transient"}
 }
@@ -580,15 +614,12 @@ def _poll_response_branches() -> list[doc2x.PollResult]:
     branches = []
     for state in sorted(POLL_RESULT_STATES - {"poll_transient"}):
         row = _LEGAL_TRIPLE_BY_ATTEMPT_STATE[state]
-        http_status, upstream_status, reason_code = (
-            row.http_status, row.upstream_status, row.reason
-        )
         branches.append(
             doc2x.PollResult(
                 state,
-                http_status,
-                reason_code,
-                upstream_status,
+                row.http_status,
+                row.reason_code,
+                row.upstream_status,
                 None,
                 _UNRECEIVED_RESULT_URL_PLACEHOLDER
                 if state == "result_ready"
@@ -2116,11 +2147,14 @@ def timeout_before_poll(attempt: dict, *, at: str) -> doc2x.PollResult | None:
 # and submission_unknown never reach this projection (see
 # NON_POLL_OBSERVATIONS), so they are deliberately absent here and any input
 # outside this table -- including those three -- falls to the "submitted"
-# default below, exactly as the pre-refactor if/elif chain did.
+# default below, exactly as the pre-refactor if/elif chain did. Filtered from
+# _MANIFEST_STATE_BY_ATTEMPT_STATE rather than re-deriving the same
+# attempt_state->conversion_state comprehension from LEGAL_TRIPLES a second
+# time.
 _ATTEMPT_STATE_CONVERSION_STATE = {
-    row.attempt_state: row.conversion_state
-    for row in LEGAL_TRIPLES
-    if row.attempt_state in POLL_RESULT_STATES
+    state: conversion_state
+    for state, conversion_state in _MANIFEST_STATE_BY_ATTEMPT_STATE.items()
+    if state in POLL_RESULT_STATES
 }
 
 
@@ -2927,9 +2961,9 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
             if attempt.get("request_hash") != object_hash(request):
                 return False
         active = attempts[-1]
-        expected_manifest_state = {
-            row.attempt_state: row.conversion_state for row in LEGAL_TRIPLES
-        }.get(active.get("state"))
+        expected_manifest_state = _MANIFEST_STATE_BY_ATTEMPT_STATE.get(
+            active.get("state")
+        )
         if manifest.get("conversion_state") != expected_manifest_state:
             return False
         active_pending = active.get("pending_action")
