@@ -113,11 +113,12 @@ def _derived_id(domain: str, plan_id: str, plan_hash: str, action: str) -> str:
     return digest.split(":", 1)[1][:32]
 
 
-def _drop_checkpoint(project_root: str, checkpoint_id: str) -> None:
+def _drop_checkpoint(project_root: str, checkpoint_id: str) -> bool:
     try:
         CheckpointStore(project_root).remove(checkpoint_id)
     except (ArtifactError, FileNotFoundError, OSError):
-        pass
+        return False
+    return True
 
 
 def _read_handoff(path: str) -> bytes:
@@ -338,16 +339,27 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 handed_off = True
             if handed_off:
                 handoff["recovery"] = descriptor
-                _drop_checkpoint(project_root, checkpoint_id)
-                handoff["checkpoint_id"] = None
+                if _drop_checkpoint(project_root, checkpoint_id):
+                    handoff["checkpoint_id"] = None
                 raise AlreadyHandedOff("this plan already began a durable handoff")
-            store.write_operation_record(plan_id, {
-                "checkpoint_id": checkpoint_id,
-                "operation_id": operation_id,
-                "recovery_id": recovery_id,
-                "result_out": plan["result_out"],
-                "root_recovery_id": root,
-            })
+            try:
+                store.write_operation_record(plan_id, {
+                    "checkpoint_id": checkpoint_id,
+                    "operation_id": operation_id,
+                    "recovery_id": recovery_id,
+                    "result_out": plan["result_out"],
+                    "root_recovery_id": root,
+                })
+            except PlanStoreError as exc:
+                try:
+                    survived = store.operation_record(plan_id) is not None
+                except PlanStoreError:
+                    survived = True
+                if survived:
+                    raise AlreadyHandedOff(
+                        "the operation record survived a failed write"
+                    ) from exc
+                raise
             hook("before_recovery_fsync")
             try:
                 disposition = commit(recovery_target, serialize_artifact(descriptor))
@@ -358,14 +370,14 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                     raise AlreadyHandedOff(
                         "the operation record survived a failed handoff"
                     ) from exc
-                _drop_checkpoint(project_root, checkpoint_id)
-                handoff["checkpoint_id"] = None
+                if _drop_checkpoint(project_root, checkpoint_id):
+                    handoff["checkpoint_id"] = None
                 raise
             hook("after_recovery_fsync")
             handoff["recovery"] = descriptor
             if disposition == "idempotent":
-                _drop_checkpoint(project_root, checkpoint_id)
-                handoff["checkpoint_id"] = None
+                if _drop_checkpoint(project_root, checkpoint_id):
+                    handoff["checkpoint_id"] = None
                 raise AlreadyHandedOff("this plan already handed a recovery descriptor off")
             gate.arm()
             hook("before_request")

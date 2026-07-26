@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import stat
@@ -462,6 +463,97 @@ def test_repeated_rollbacks_do_not_accumulate_orphan_checkpoints(
     assert state["checkpoints"] == [
         operation_record(project, issued.plan_id)["checkpoint_id"] + ".json"
     ]
+
+
+@pytest.mark.parametrize("readback", ["legible", "unsafe"])
+def test_an_operation_record_that_survived_a_failed_write_stays_conservative(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch, readback
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    plan_dir = project.state_root / "plans" / issued.plan_id
+    record_path = operation_record_path(project, issued.plan_id)
+    info = os.stat(plan_dir)
+    plan_identity = (info.st_dev, info.st_ino)
+    real_fsync = os.fsync
+    injected = []
+
+    def fail_the_plan_directory_fsync_once(fd):
+        current = os.fstat(fd)
+        if (
+            not injected
+            and stat.S_ISDIR(current.st_mode)
+            and (current.st_dev, current.st_ino) == plan_identity
+            and record_path.exists()
+        ):
+            injected.append(fd)
+            if readback == "unsafe":
+                record_path.chmod(0o644)
+            raise OSError(errno.EIO, "injected plan directory fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_the_plan_directory_fsync_once)
+    first = Recorder()
+    outcome = run(project, resolved, store, issued.token, first)
+    body = body_of(outcome.result)
+    assert injected
+    assert record_path.exists()
+    surviving = json.loads(record_path.read_text(encoding="utf-8"))
+    assert checkpoint_path(project, surviving["checkpoint_id"]).exists()
+    assert first.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["retry_safe"] is False
+    assert body["allowed_actions"] == ["inspect", "reconcile"]
+    assert body["blocking_reasons"] == []
+    assert not os.path.exists(project.recovery_out)
+    assert body_of(parse_typed(open(project.result_out, "r", encoding="utf-8").read(),
+                               expected_type="s3-upload.result")) == body
+
+    second = Recorder()
+    replay = body_of(run(project, resolved, store, issued.token, second).result)
+    assert second.calls == []
+    assert replay["recovery_state"] == "in_flight_unknown"
+    assert replay["retry_safe"] is False
+    assert replay["allowed_actions"] == ["inspect", "reconcile"]
+    assert record_path.exists()
+    assert json.loads(record_path.read_text(encoding="utf-8")) == surviving
+
+
+def test_a_failed_checkpoint_drop_reports_the_checkpoint_it_left_behind(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    checkpoints = project.state_root / "checkpoints"
+    out_mode = stat.S_IMODE(os.stat(project.out).st_mode)
+
+    def wound(name):
+        if name == "checkpoint_durable":
+            os.chmod(project.out, 0o500)
+            os.chmod(checkpoints, 0o500)
+
+    reported = []
+    for _ in range(2):
+        recorder = Recorder()
+        outcome = run(project, resolved, store, issued.token, recorder,
+                      on_boundary=wound)
+        os.chmod(project.out, out_mode)
+        os.chmod(checkpoints, 0o700)
+        body = body_of(outcome.result)
+        assert recorder.calls == []
+        assert outcome.transport_calls == 0
+        assert body["recovery_state"] == "known_not_applied"
+        assert body["blocking_reasons"] == ["handoff_write_failed"]
+        assert durable_state(project, issued.plan_id)["operation_record"] is False
+        assert not os.path.exists(project.recovery_out)
+        reported.append(outcome.checkpoint_id)
+
+    stranded = sorted(
+        item.name[: -len(".json")] for item in checkpoints.iterdir()
+        if item.suffix == ".json"
+    )
+    assert len(stranded) == 2
+    assert sorted(reported) == stranded
+    assert reported[0] != reported[1]
 
 
 def test_recovery_and_operation_identities_are_derived_from_the_plan(
