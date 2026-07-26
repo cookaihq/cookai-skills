@@ -714,13 +714,16 @@ def _conversion_history_resolver(manifest: dict):
     conversion events with conversion attempt operations, and only the raw
     conversion reducer can replay both. `conversion_attempt` cannot make this
     choice itself: it is the lower layer and does not know the raw events.
-    Mirrors the layer ladder already used for `prefix_state_resolver`.
+    Mirrors the layer ladder already used for `prefix_state_resolver`: each
+    rung delegates verbatim to the one below when its own events are absent,
+    so following the manifest's layering can only widen what replays.
     """
-    module = (
-        raw_conversion_module
-        if "raw_conversion" in manifest
-        else conversion_attempt_module
-    )
+    if "review" in manifest:
+        module = review_module
+    elif "raw_conversion" in manifest:
+        module = raw_conversion_module
+    else:
+        module = conversion_attempt_module
     return module.resolve_history_state
 
 
