@@ -148,6 +148,71 @@ COMMITTED_EVENT_KEYS = frozenset(
     }
 )
 
+# The reason codes a create can land on when it produced no task ID.
+SUBMISSION_UNKNOWN_REASON_CODES = frozenset(
+    {
+        "no_task_id",
+        "invalid_transport_result",
+        "network_result_unknown",
+        "interrupted_before_result_commit",
+    }
+)
+
+# The (http_status, upstream_status, reason_code) triple each non-transient
+# attempt state must carry. _valid_attempt enforces it; the capacity admission
+# below builds its worst-case poll branches from the same table so the two can
+# never disagree about which observations are legal.
+POLL_STATE_CONTRACT = {
+    "submitted": (200, None, None),
+    "pending": (200, "pending", None),
+    "processing": (200, "processing", None),
+    "result_pending": (200, "completed", None),
+    "result_ready": (200, "completed", None),
+    "unsafe_result_url": (200, "completed", "unsafe_result_url"),
+    "unexpected_result_count": (200, "completed", "unexpected_result_count"),
+    "failed": (200, "failed", "task_failed"),
+    "credential_source_missing": (None, None, "credential_source_missing"),
+    "credential_source_changed": (None, None, "credential_source_changed"),
+    "poll_unauthorized": (401, None, "poll_unauthorized"),
+    "task_unavailable": (404, None, "task_unavailable"),
+    "poll_timeout": (None, None, "poll_timeout"),
+    "result_pending_timeout": (None, "completed", "result_pending_timeout"),
+}
+
+# poll_transient is the one state POLL_STATE_CONTRACT cannot describe: it
+# carries no upstream status and admits either of two reason codes, the second
+# of which only a crash recovery produces.
+POLL_TRANSIENT_REASON_CODES = frozenset(
+    {"poll_transient", "result_private_payload_lost"}
+)
+
+# The result states a poll observation may commit. "submitted" is in
+# POLL_STATE_CONTRACT because an attempt can be *in* that state, but no poll
+# response can return it.
+POLL_RESULT_STATES = frozenset(POLL_STATE_CONTRACT) - {"submitted"} | {
+    "poll_transient"
+}
+
+# The attempt states an active attempt may be in when a poll observation is
+# applied to it.
+POLL_ACTIVE_ATTEMPT_STATES = frozenset(
+    {
+        "submitted",
+        "pending",
+        "processing",
+        "result_pending",
+        "credential_source_missing",
+        "credential_source_changed",
+        "poll_unauthorized",
+        "task_unavailable",
+        "poll_transient",
+        "poll_timeout",
+        "result_pending_timeout",
+        "unsafe_result_url",
+        "result_ready",
+    }
+)
+
 
 class ConversionAttemptError(ValueError):
     def __init__(self, code: str, message: str):
@@ -323,6 +388,276 @@ def worst_case_admission_for_unknown_response(
         "private": private_total <= MAX_PRIVATE_CANDIDATE_BYTES,
         "history": history_total <= bundle.MAX_STATE_BYTES,
     }
+
+
+# --- Wiring the verdict into a stop-before-intent behavior (plan.md 2.3) ---
+
+CREATE_OPERATION = "create"
+ORDINARY_POLL_OPERATION = "ordinary_poll"
+RESULT_REFRESH_OPERATION = "result_refresh"
+POLL_OPERATIONS = frozenset({ORDINARY_POLL_OPERATION, RESULT_REFRESH_OPERATION})
+
+# Stand-ins for the two bounded strings an operation has not received yet when
+# admission runs. Each is the *shortest* legal value of its kind, so the
+# candidate it builds carries only the field's structural cost; the value's
+# worst case is added on top by worst_case_admission_for_unknown_response's
+# *_unreceived_*_count arguments, which assume a 2-byte `""` placeholder.
+#
+# The task ID cannot use `""`: doc2x.TASK_ID_PATTERN, and through it
+# _valid_attempt, rejects an empty task ID, so a `submitted` branch built with
+# `""` would be discarded as unproducible instead of measured. "0" is the
+# shortest task ID the pattern accepts and costs one byte more than the `""`
+# the count arithmetic assumes -- a one-byte *over*-count, which can only fail
+# closed earlier, never later.
+_UNRECEIVED_TASK_ID_PLACEHOLDER = "0"
+_UNRECEIVED_RESULT_URL_PLACEHOLDER = ""
+
+# _valid_http_status admits 100..599, so every non-null HTTP status renders as
+# exactly three JSON bytes; `null` renders as four. Both are measured because
+# the wider one is not the one an intuition would pick.
+_WORST_CASE_HTTP_STATUSES = (None, 599)
+
+
+def _worst_case_timestamp(at: str) -> str:
+    """The longest legal timestamp an operation running at `at` could write.
+
+    workflow._isoformat drops the microsecond field when it is zero, so two
+    timestamps taken from the same operation can differ in length by the seven
+    bytes of ".999999". Admission measures candidates with a single timestamp
+    value, so it uses the longest form that instant can take; the real write
+    can then only be shorter.
+    """
+    moment = _parse_timestamp(at)
+    if moment.microsecond:
+        return at
+    padded = moment.replace(microsecond=999999).isoformat()
+    return padded[:-6] + "Z" if padded.endswith("+00:00") else padded
+
+
+def _create_response_branches() -> list[doc2x.CreateResult]:
+    """Every classification a create POST could still come back as."""
+    branches = [
+        doc2x.CreateResult(
+            "submitted", 200, None, _UNRECEIVED_TASK_ID_PLACEHOLDER
+        )
+    ]
+    for reason_code in sorted(SUBMISSION_UNKNOWN_REASON_CODES):
+        for http_status in _WORST_CASE_HTTP_STATUSES:
+            branches.append(
+                doc2x.CreateResult(
+                    "submission_unknown", http_status, reason_code, None
+                )
+            )
+    return branches
+
+
+def _poll_response_branches() -> list[doc2x.PollResult]:
+    """Every observation a poll GET could still come back as.
+
+    Built from POLL_RESULT_STATES and POLL_STATE_CONTRACT -- the same tables
+    _poll_transition and _valid_attempt judge against -- so admission cannot
+    budget for a shape the writer would refuse, or miss one it would accept.
+    """
+    branches = []
+    for state in sorted(POLL_RESULT_STATES - {"poll_transient"}):
+        http_status, upstream_status, reason_code = POLL_STATE_CONTRACT[state]
+        branches.append(
+            doc2x.PollResult(
+                state,
+                http_status,
+                reason_code,
+                upstream_status,
+                None,
+                _UNRECEIVED_RESULT_URL_PLACEHOLDER
+                if state == "result_ready"
+                else None,
+            )
+        )
+    for reason_code in sorted(POLL_TRANSIENT_REASON_CODES):
+        for http_status in _WORST_CASE_HTTP_STATUSES:
+            branches.append(
+                doc2x.PollResult(
+                    "poll_transient", http_status, reason_code, None, None
+                )
+            )
+    return branches
+
+
+def _create_capacity_candidates(
+    *, manifest: dict, private_state: dict, history_bytes: int,
+    credential: dict, request: dict, request_summary: dict, at: str
+) -> dict:
+    """Largest candidate each file reaches across a create's legal branches.
+
+    A create writes four history events -- conversion_submit_intent and
+    conversion_submit_started around the submitting write, then
+    conversion_submit_result_intent and conversion_submit_result_committed
+    around the result write -- and rewrites manifest.json and private.json
+    twice. The intent/started pair is identical on every branch, so it is
+    counted once; the result pair and the two finished documents are maximized
+    over every classification the POST could return.
+
+    The maximum is taken per file. Judging each file against its own ceiling is
+    what worst_case_admission_for_unknown_response already does, so a branch
+    that is largest for manifest.json need not be the one that is largest for
+    history.ndjson.
+    """
+    submitting = _submit_state(
+        manifest=manifest,
+        private_state=private_state,
+        credential=credential,
+        request=request,
+        request_summary=request_summary,
+        at=at,
+    )
+    submit_intent, submit_started = _submit_events(submitting)
+    prefix_bytes = canonical_state_byte_length(
+        submit_intent
+    ) + canonical_state_byte_length(submit_started)
+    manifest_bytes = max(
+        canonical_state_byte_length(manifest),
+        canonical_state_byte_length(submitting["updated_manifest"]),
+    )
+    private_bytes = max(
+        canonical_state_byte_length(private_state),
+        canonical_state_byte_length(submitting["updated_private"]),
+    )
+    tail_bytes = 0
+    for result in _create_response_branches():
+        try:
+            finished = _submission_result_state(
+                manifest=submitting["updated_manifest"],
+                private_state=submitting["updated_private"],
+                result=result,
+                at=at,
+            )
+        except ConversionAttemptError:
+            # A branch this module refuses to build is a branch it can never
+            # write, so it can never consume capacity either.
+            continue
+        result_intent, result_committed = _submission_result_events(finished)
+        manifest_bytes = max(
+            manifest_bytes, canonical_state_byte_length(finished["updated_manifest"])
+        )
+        private_bytes = max(
+            private_bytes, canonical_state_byte_length(finished["updated_private"])
+        )
+        tail_bytes = max(
+            tail_bytes,
+            canonical_state_byte_length(result_intent)
+            + canonical_state_byte_length(result_committed),
+        )
+    return {
+        "manifest_candidate_bytes": manifest_bytes,
+        "private_candidate_bytes": private_bytes,
+        "history_candidate_bytes": history_bytes + prefix_bytes + tail_bytes,
+        # The finished manifest and conversion_submit_result_intent each hold
+        # exactly one task ID the POST has not answered with yet. No other
+        # candidate field of this operation is unreceived: the submitting
+        # attempt's task_id is the literal None begin_attempt writes, a known
+        # value rather than a placeholder.
+        "manifest_unreceived_task_id_count": 1,
+        "history_unreceived_task_id_count": 1,
+    }
+
+
+def _poll_capacity_candidates(
+    *, manifest: dict, private_state: dict, history_bytes: int, at: str
+) -> dict:
+    """Largest candidate each file reaches across a poll's legal branches.
+
+    Shared by the ordinary poll and the result refresh. They classify the same
+    observations through the same _poll_transition, and the refresh does not
+    end up with the smaller processing-window shape: whatever makes a refresh
+    bigger -- the result URL already recorded in private_state, the poll window
+    and result reference already on the active attempt -- is inside the
+    manifest and private_state it is handed, and is therefore measured exactly.
+    """
+    manifest_bytes = canonical_state_byte_length(manifest)
+    private_bytes = canonical_state_byte_length(private_state)
+    tail_bytes = 0
+    for result in _poll_response_branches():
+        try:
+            updated_manifest, updated_private, updated_attempt = _poll_transition(
+                manifest=manifest, private_state=private_state, result=result, at=at
+            )
+        except ConversionAttemptError:
+            continue
+        intent, committed = _poll_result_events(
+            manifest=manifest,
+            private_state=private_state,
+            updated_manifest=updated_manifest,
+            updated_private=updated_private,
+            updated_attempt=updated_attempt,
+            at=at,
+        )
+        manifest_bytes = max(
+            manifest_bytes, canonical_state_byte_length(updated_manifest)
+        )
+        private_bytes = max(
+            private_bytes, canonical_state_byte_length(updated_private)
+        )
+        tail_bytes = max(
+            tail_bytes,
+            canonical_state_byte_length(intent)
+            + canonical_state_byte_length(committed),
+        )
+    return {
+        "manifest_candidate_bytes": manifest_bytes,
+        "private_candidate_bytes": private_bytes,
+        "history_candidate_bytes": history_bytes + tail_bytes,
+        # private.json gains one result_urls record holding the full URL the
+        # GET has not answered with yet. The task ID is already known and
+        # measured exactly, and the raw URL never reaches history.ndjson or
+        # manifest.json -- both carry only its fixed-width sha256 digest.
+        "private_unreceived_result_url_count": 1,
+    }
+
+
+def assert_local_state_capacity(
+    *, operation: str, manifest: dict, private_state: dict, history_bytes: int,
+    at: str, credential: dict | None = None, request: dict | None = None,
+    request_summary: dict | None = None
+) -> None:
+    """Fail closed before the first intent when local state cannot hold the
+    operation's worst-case result.
+
+    design.md:305 / spec.md "本地状态容量在外部调用前耗尽": callers must invoke
+    this before appending their first history event and before their external
+    call, so a refusal leaves manifest.json, private.json and history.ndjson at
+    their exact previous bytes with no temporary file and no network access.
+    Raising is the only signal; nothing here writes.
+    """
+    at = _worst_case_timestamp(at)
+    if operation == CREATE_OPERATION:
+        candidates = _create_capacity_candidates(
+            manifest=manifest,
+            private_state=private_state,
+            history_bytes=history_bytes,
+            credential=credential,
+            request=request,
+            request_summary=request_summary,
+            at=at,
+        )
+    elif operation in POLL_OPERATIONS:
+        candidates = _poll_capacity_candidates(
+            manifest=manifest,
+            private_state=private_state,
+            history_bytes=history_bytes,
+            at=at,
+        )
+    else:
+        raise ConversionAttemptError(
+            "integrity_violation",
+            "The conversion operation has no capacity admission.",
+        )
+    verdict = worst_case_admission_for_unknown_response(**candidates)
+    if not all(verdict.values()):
+        raise ConversionAttemptError(
+            "local_state_capacity_exhausted",
+            "The work bundle cannot hold this conversion operation's "
+            "worst-case local state.",
+        )
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -592,13 +927,7 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     if state == "submission_unknown":
         return (
             attempt.get("task_id") is None
-            and attempt.get("reason_code")
-            in {
-                "no_task_id",
-                "invalid_transport_result",
-                "network_result_unknown",
-                "interrupted_before_result_commit",
-            }
+            and attempt.get("reason_code") in SUBMISSION_UNKNOWN_REASON_CODES
             and attempt.get("poll_count") == 0
             and _empty_poll_and_result_fields(attempt)
         )
@@ -608,32 +937,17 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
         or doc2x.TASK_ID_PATTERN.fullmatch(task_id) is None
     ):
         return False
-    state_contract = {
-        "submitted": (200, None, None),
-        "pending": (200, "pending", None),
-        "processing": (200, "processing", None),
-        "result_pending": (200, "completed", None),
-        "result_ready": (200, "completed", None),
-        "unsafe_result_url": (200, "completed", "unsafe_result_url"),
-        "unexpected_result_count": (200, "completed", "unexpected_result_count"),
-        "failed": (200, "failed", "task_failed"),
-        "credential_source_missing": (None, None, "credential_source_missing"),
-        "credential_source_changed": (None, None, "credential_source_changed"),
-        "poll_unauthorized": (401, None, "poll_unauthorized"),
-        "task_unavailable": (404, None, "task_unavailable"),
-        "poll_timeout": (None, None, "poll_timeout"),
-        "result_pending_timeout": (None, "completed", "result_pending_timeout"),
-    }
     if state == "poll_transient":
-        if attempt.get("upstream_status") is not None or attempt.get(
-            "reason_code"
-        ) not in {"poll_transient", "result_private_payload_lost"}:
+        if (
+            attempt.get("upstream_status") is not None
+            or attempt.get("reason_code") not in POLL_TRANSIENT_REASON_CODES
+        ):
             return False
-    elif state not in state_contract or (
+    elif state not in POLL_STATE_CONTRACT or (
         attempt.get("http_status"),
         attempt.get("upstream_status"),
         attempt.get("reason_code"),
-    ) != state_contract[state]:
+    ) != POLL_STATE_CONTRACT[state]:
         return False
     if state in {"task_unavailable", "poll_transient"}:
         if (
@@ -774,10 +1088,16 @@ def build_request(
     return request, summary
 
 
-def begin_attempt(
-    *, descriptors: dict, manifest: dict, private_state: dict, credential: dict,
+def _submit_state(
+    *, manifest: dict, private_state: dict, credential: dict,
     request: dict, request_summary: dict, at: str
-) -> tuple[dict, dict, dict]:
+) -> dict:
+    """The in-memory submitting state a create would durably commit.
+
+    Split out of begin_attempt so the local-state capacity admission can size
+    exactly the documents and events begin_attempt is about to write, without
+    writing anything. It performs no I/O and mutates nothing.
+    """
     staging = manifest.get("source_staging")
     attempts = manifest.get("conversion_attempts")
     if (
@@ -845,42 +1165,69 @@ def begin_attempt(
         raise ConversionAttemptError(
             "integrity_violation", "The conversion submission intent is invalid."
         )
-    operation_id = f"{attempt_id}-submit"
-    bundle.append_history(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "event": "conversion_submit_intent",
-            "operation_id": operation_id,
-            "expected_generation": expected_generation,
-            "new_generation": new_generation,
-            "at": at,
-            "attempt": attempt,
-            "previous_attempt": deepcopy(placeholder),
-            "previous_manifest_hash": object_hash(manifest),
-            "previous_private_hash": object_hash(private_state),
-        },
-        state_fd=descriptors["state"],
+    return {
+        "manifest": manifest,
+        "private_state": private_state,
+        "updated_manifest": updated_manifest,
+        "updated_private": updated_private,
+        "attempt": attempt,
+        "placeholder": placeholder,
+        "expected_generation": expected_generation,
+        "new_generation": new_generation,
+        "at": at,
+    }
+
+
+def _submit_events(state: dict) -> tuple[dict, dict]:
+    """The intent and started events a create appends around its two writes."""
+    operation_id = f"{state['attempt']['attempt_id']}-submit"
+    intent = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "conversion_submit_intent",
+        "operation_id": operation_id,
+        "expected_generation": state["expected_generation"],
+        "new_generation": state["new_generation"],
+        "at": state["at"],
+        "attempt": state["attempt"],
+        "previous_attempt": deepcopy(state["placeholder"]),
+        "previous_manifest_hash": object_hash(state["manifest"]),
+        "previous_private_hash": object_hash(state["private_state"]),
+    }
+    started = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "conversion_submit_started",
+        "operation_id": operation_id,
+        "previous_generation": state["expected_generation"],
+        "generation": state["new_generation"],
+        "at": state["at"],
+        "manifest_hash": object_hash(state["updated_manifest"]),
+        "private_hash": object_hash(state["updated_private"]),
+    }
+    return intent, started
+
+
+def begin_attempt(
+    *, descriptors: dict, manifest: dict, private_state: dict, credential: dict,
+    request: dict, request_summary: dict, at: str
+) -> tuple[dict, dict, dict]:
+    state = _submit_state(
+        manifest=manifest,
+        private_state=private_state,
+        credential=credential,
+        request=request,
+        request_summary=request_summary,
+        at=at,
+    )
+    intent, started = _submit_events(state)
+    bundle.append_history(intent, state_fd=descriptors["state"])
+    bundle.atomic_write_json(
+        "private.json", state["updated_private"], dir_fd=descriptors["state"]
     )
     bundle.atomic_write_json(
-        "private.json", updated_private, dir_fd=descriptors["state"]
+        "manifest.json", state["updated_manifest"], dir_fd=descriptors["root"]
     )
-    bundle.atomic_write_json(
-        "manifest.json", updated_manifest, dir_fd=descriptors["root"]
-    )
-    bundle.append_history(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "event": "conversion_submit_started",
-            "operation_id": operation_id,
-            "previous_generation": expected_generation,
-            "generation": new_generation,
-            "at": at,
-            "manifest_hash": object_hash(updated_manifest),
-            "private_hash": object_hash(updated_private),
-        },
-        state_fd=descriptors["state"],
-    )
-    return updated_manifest, updated_private, attempt
+    bundle.append_history(started, state_fd=descriptors["state"])
+    return state["updated_manifest"], state["updated_private"], state["attempt"]
 
 
 def _started_state_from_intent(
@@ -983,10 +1330,15 @@ def _started_state_from_intent(
     return previous_manifest, previous_private, desired_manifest, desired_private
 
 
-def finish_submission(
-    *, descriptors: dict, manifest: dict, private_state: dict,
-    result: doc2x.CreateResult, at: str
-) -> tuple[dict, dict]:
+def _submission_result_state(
+    *, manifest: dict, private_state: dict, result: doc2x.CreateResult, at: str
+) -> dict:
+    """The in-memory state a classified create response would commit.
+
+    Split out of finish_submission for the same reason as _submit_state: the
+    capacity admission must size this operation's largest legal end state
+    before the create POST happens. It performs no I/O.
+    """
     attempts = manifest.get("conversion_attempts")
     if (
         manifest.get("conversion_state") != "submitting"
@@ -1031,41 +1383,62 @@ def finish_submission(
         raise ConversionAttemptError(
             "integrity_violation", "The conversion submission result is invalid."
         )
-    operation_id = f"{completed['attempt_id']}-submit-result"
-    bundle.append_history(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "event": "conversion_submit_result_intent",
-            "operation_id": operation_id,
-            "expected_generation": expected_generation,
-            "new_generation": new_generation,
-            "at": at,
-            "attempt": completed,
-            "previous_manifest_hash": object_hash(manifest),
-            "previous_private_hash": object_hash(private_state),
-        },
-        state_fd=descriptors["state"],
+    return {
+        "manifest": manifest,
+        "private_state": private_state,
+        "updated_manifest": updated_manifest,
+        "updated_private": updated_private,
+        "attempt": completed,
+        "expected_generation": expected_generation,
+        "new_generation": new_generation,
+        "at": at,
+    }
+
+
+def _submission_result_events(state: dict) -> tuple[dict, dict]:
+    """The intent and committed events a classified create response appends."""
+    operation_id = f"{state['attempt']['attempt_id']}-submit-result"
+    intent = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "conversion_submit_result_intent",
+        "operation_id": operation_id,
+        "expected_generation": state["expected_generation"],
+        "new_generation": state["new_generation"],
+        "at": state["at"],
+        "attempt": state["attempt"],
+        "previous_manifest_hash": object_hash(state["manifest"]),
+        "previous_private_hash": object_hash(state["private_state"]),
+    }
+    committed = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "conversion_submit_result_committed",
+        "operation_id": operation_id,
+        "previous_generation": state["expected_generation"],
+        "generation": state["new_generation"],
+        "at": state["at"],
+        "manifest_hash": object_hash(state["updated_manifest"]),
+        "private_hash": object_hash(state["updated_private"]),
+    }
+    return intent, committed
+
+
+def finish_submission(
+    *, descriptors: dict, manifest: dict, private_state: dict,
+    result: doc2x.CreateResult, at: str
+) -> tuple[dict, dict]:
+    state = _submission_result_state(
+        manifest=manifest, private_state=private_state, result=result, at=at
+    )
+    intent, committed = _submission_result_events(state)
+    bundle.append_history(intent, state_fd=descriptors["state"])
+    bundle.atomic_write_json(
+        "private.json", state["updated_private"], dir_fd=descriptors["state"]
     )
     bundle.atomic_write_json(
-        "private.json", updated_private, dir_fd=descriptors["state"]
+        "manifest.json", state["updated_manifest"], dir_fd=descriptors["root"]
     )
-    bundle.atomic_write_json(
-        "manifest.json", updated_manifest, dir_fd=descriptors["root"]
-    )
-    bundle.append_history(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "event": "conversion_submit_result_committed",
-            "operation_id": operation_id,
-            "previous_generation": expected_generation,
-            "generation": new_generation,
-            "at": at,
-            "manifest_hash": object_hash(updated_manifest),
-            "private_hash": object_hash(updated_private),
-        },
-        state_fd=descriptors["state"],
-    )
-    return updated_manifest, updated_private
+    bundle.append_history(committed, state_fd=descriptors["state"])
+    return state["updated_manifest"], state["updated_private"]
 
 
 def _submission_result_state_from_intent(
@@ -1571,42 +1944,11 @@ def _poll_transition(
         manifest.get("conversion_state")
         not in {"submitted", "recoverable_error", "terminal_error"}
         or not isinstance(active, dict)
-        or active.get("state")
-        not in {
-            "submitted",
-            "pending",
-            "processing",
-            "result_pending",
-            "credential_source_missing",
-            "credential_source_changed",
-            "poll_unauthorized",
-            "task_unavailable",
-            "poll_transient",
-            "poll_timeout",
-            "result_pending_timeout",
-            "unsafe_result_url",
-            "result_ready",
-        }
+        or active.get("state") not in POLL_ACTIVE_ATTEMPT_STATES
         or not isinstance(active.get("task_id"), str)
         or not active["task_id"]
         or private_state.get("generation") != manifest.get("generation")
-        or result.state
-        not in {
-            "pending",
-            "processing",
-            "result_pending",
-            "result_ready",
-            "unsafe_result_url",
-            "unexpected_result_count",
-            "failed",
-            "credential_source_missing",
-            "credential_source_changed",
-            "poll_unauthorized",
-            "task_unavailable",
-            "poll_transient",
-            "poll_timeout",
-            "result_pending_timeout",
-        }
+        or result.state not in POLL_RESULT_STATES
     ):
         raise ConversionAttemptError(
             "invalid_state_transition", "The Doc2X poll result is not applicable."
@@ -1734,17 +2076,20 @@ def _poll_transition(
     return updated_manifest, updated_private, updated_attempt
 
 
-def commit_poll_result(
+def _poll_result_events(
     *,
-    descriptors: dict,
     manifest: dict,
     private_state: dict,
-    result: doc2x.PollResult,
+    updated_manifest: dict,
+    updated_private: dict,
+    updated_attempt: dict,
     at: str,
 ) -> tuple[dict, dict]:
-    updated_manifest, updated_private, updated_attempt = _poll_transition(
-        manifest=manifest, private_state=private_state, result=result, at=at
-    )
+    """The intent and committed events a poll observation appends.
+
+    Split out of commit_poll_result so the capacity admission can size the
+    exact events this operation is about to append. It performs no I/O.
+    """
     active = manifest["conversion_attempts"][-1]
     expected_generation = manifest["generation"]
     new_generation = updated_manifest["generation"]
@@ -1760,6 +2105,38 @@ def commit_poll_result(
         "previous_manifest_hash": object_hash(manifest),
         "previous_private_hash": object_hash(private_state),
     }
+    committed = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "conversion_poll_result_committed",
+        "operation_id": operation_id,
+        "previous_generation": expected_generation,
+        "generation": new_generation,
+        "at": at,
+        "manifest_hash": object_hash(updated_manifest),
+        "private_hash": object_hash(updated_private),
+    }
+    return intent, committed
+
+
+def commit_poll_result(
+    *,
+    descriptors: dict,
+    manifest: dict,
+    private_state: dict,
+    result: doc2x.PollResult,
+    at: str,
+) -> tuple[dict, dict]:
+    updated_manifest, updated_private, updated_attempt = _poll_transition(
+        manifest=manifest, private_state=private_state, result=result, at=at
+    )
+    intent, committed = _poll_result_events(
+        manifest=manifest,
+        private_state=private_state,
+        updated_manifest=updated_manifest,
+        updated_private=updated_private,
+        updated_attempt=updated_attempt,
+        at=at,
+    )
     bundle.append_history(intent, state_fd=descriptors["state"])
     bundle.atomic_write_json(
         "private.json", updated_private, dir_fd=descriptors["state"]
@@ -1767,19 +2144,7 @@ def commit_poll_result(
     bundle.atomic_write_json(
         "manifest.json", updated_manifest, dir_fd=descriptors["root"]
     )
-    bundle.append_history(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "event": "conversion_poll_result_committed",
-            "operation_id": operation_id,
-            "previous_generation": expected_generation,
-            "generation": new_generation,
-            "at": at,
-            "manifest_hash": object_hash(updated_manifest),
-            "private_hash": object_hash(updated_private),
-        },
-        state_fd=descriptors["state"],
-    )
+    bundle.append_history(committed, state_fd=descriptors["state"])
     return updated_manifest, updated_private
 
 

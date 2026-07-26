@@ -714,6 +714,44 @@ def _read_json(name, *, dir_fd: int) -> dict:
         ) from None
 
 
+def _assert_conversion_capacity(
+    *, operation: str, descriptors: dict, manifest: dict, private_state: dict,
+    at: str, context, **response_inputs
+) -> None:
+    """Run a conversion operation's local-state capacity admission.
+
+    Call sites must place this before their first history append and before
+    their external call. `local_state_capacity_exhausted` is reported with
+    `preserve_work_bundle_and_stop` (design.md:448: the caller must keep the
+    bundle, not truncate append-only history or rebuild a task that may already
+    have been charged); any other failure keeps the repair action the writing
+    call would have reported.
+    """
+    try:
+        conversion_attempt_module.assert_local_state_capacity(
+            operation=operation,
+            manifest=manifest,
+            private_state=private_state,
+            history_bytes=len(
+                _read_private_file("history.ndjson", dir_fd=descriptors["state"])
+            ),
+            at=at,
+            **response_inputs,
+        )
+    except conversion_attempt_module.ConversionAttemptError as exc:
+        raise WorkflowError(
+            exc.code,
+            exc.message,
+            return_code=4,
+            action_required=(
+                "preserve_work_bundle_and_stop"
+                if exc.code == "local_state_capacity_exhausted"
+                else "repair_or_restore_work_bundle"
+            ),
+            context=context,
+        ) from None
+
+
 def _conversion_history_resolver(manifest: dict):
     """Pick the reducer that understands every event this bundle can hold.
 
@@ -1890,6 +1928,28 @@ def _advance(
                         file=sys.stderr,
                     )
                     return result
+                # design.md:305 -- the admission for the two operations that
+                # reach this block: an ordinary poll, and the refresh a locally
+                # expired result reference triggers on the same task. Both
+                # commit through commit_poll_result, whose
+                # conversion_poll_result_intent is this operation's first
+                # history event, and both may issue the poll GET just below, so
+                # a refusal here predates every byte and every ledger entry.
+                _assert_conversion_capacity(
+                    operation=(
+                        conversion_attempt_module.RESULT_REFRESH_OPERATION
+                        if manifest["conversion_state"] == "recoverable_error"
+                        and active_attempt["state"] == "result_ready"
+                        else conversion_attempt_module.ORDINARY_POLL_OPERATION
+                    ),
+                    descriptors=descriptors,
+                    manifest=manifest,
+                    private_state=_read_json(
+                        "private.json", dir_fd=descriptors["state"]
+                    ),
+                    at=poll_at,
+                    context=inspected,
+                )
                 if poll_result is None:
                     try:
                         credential = config_module.read_exact_api_key(
@@ -2188,6 +2248,24 @@ def _advance(
                             preflight_record=preflight_record,
                         )
                         submitted_at = _isoformat(_moment(now))
+                        # design.md:305 -- the create path's local-state
+                        # capacity admission. It must run here: the very next
+                        # statement's begin_attempt appends
+                        # conversion_submit_intent, and doc2x create_task
+                        # follows it, so this is the last point at which a
+                        # refusal leaves every byte and the create ledger
+                        # untouched.
+                        _assert_conversion_capacity(
+                            operation=conversion_attempt_module.CREATE_OPERATION,
+                            descriptors=descriptors,
+                            manifest=manifest,
+                            private_state=ready_private,
+                            at=submitted_at,
+                            context=inspected,
+                            credential=credential.public_identity,
+                            request=request,
+                            request_summary=request_summary,
+                        )
                         try:
                             submitting_manifest, submitting_private, _attempt = (
                                 conversion_attempt_module.begin_attempt(

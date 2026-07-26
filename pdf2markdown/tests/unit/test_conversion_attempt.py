@@ -3285,6 +3285,134 @@ def test_worst_case_admission_reads_every_bound_and_ceiling_at_call_time(monkeyp
     ) == {"manifest": False, "private": False, "history": False}
 
 
+def _bundle_state_snapshot(bundle):
+    """Every byte and every directory entry the operation must leave alone.
+
+    Byte *contents* (not lengths, not mtimes) of the three durable files, plus
+    the full entry list of the bundle root and its .state directory so a
+    leftover ``.manifest.json.<pid>.<n>`` temporary from
+    bundle._atomic_write_bytes -- or a half-written NDJSON line -- shows up as
+    a difference.
+    """
+    state = bundle / ".state"
+    return {
+        "manifest": (bundle / "manifest.json").read_bytes(),
+        "private": (state / "private.json").read_bytes(),
+        "history": (state / "history.ndjson").read_bytes(),
+        "root_entries": sorted(entry.name for entry in bundle.iterdir()),
+        "state_entries": sorted(entry.name for entry in state.iterdir()),
+    }
+
+
+def _capacity_exhaustion_bundle(path, tmp_path, capsys, monkeypatch):
+    """Drive a bundle to the state each admission path starts from.
+
+    Returns the bundle, the environment, the generation the next resume must
+    quote, and the moment that resume runs at.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+
+    def resume(expected_generation, *, transport, now=NOW):
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(expected_generation),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=transport,
+            now=now,
+        )
+        assert rc == 0, json.dumps(result, sort_keys=True)
+        return result
+
+    if path == "create":
+        # conversion_state == "ready_to_submit": the next resume would append
+        # conversion_submit_intent and then POST create.
+        return bundle, environ, staged["generation"], NOW
+
+    submitted = resume(
+        staged["generation"], transport=SuccessfulCreate("task-capacity")
+    )
+    if path == "ordinary_poll":
+        # conversion_state == "submitted": the next resume would GET the task
+        # and then append conversion_poll_result_intent.
+        return bundle, environ, submitted["generation"], NOW
+
+    ready = resume(
+        submitted["generation"],
+        transport=PollStatus(
+            "task-capacity", "completed", results=[{"url": FIRST_RESULT_URL}]
+        ),
+    )
+    expired = resume(
+        ready["generation"], transport=CountingNeverNetwork(), now=FIRST_EXPIRY
+    )
+    assert expired["outcome"] == "result_url_unavailable"
+    assert expired["conversion_state"] == "recoverable_error"
+    # recoverable_error + result_ready + result_url_unavailable: the next
+    # resume re-polls the *same* task for a fresh URL (the 1.3 refresh branch).
+    return bundle, environ, expired["generation"], FIRST_EXPIRY
+
+
+@pytest.mark.parametrize("path", ["create", "ordinary_poll", "result_refresh"])
+def test_capacity_exhaustion_stops_before_intent_and_leaves_bytes_untouched(
+    path, tmp_path, capsys, monkeypatch
+):
+    # design.md:305 / spec.md "本地状态容量在外部调用前耗尽": when the worst
+    # legal response of create, an ordinary poll or a result refresh would push
+    # a candidate past its ceiling, the command must stop with
+    # local_state_capacity_exhausted and
+    # action_required=preserve_work_bundle_and_stop *before* the first intent
+    # and before the external call. Because the first intent is what makes the
+    # operation durable, "before" is only observable as: the three files still
+    # hold their exact previous bytes, no temporary or half-written file was
+    # left behind, and the transport ledger counted zero accesses on all three
+    # entry points (__call__, resolve, connect_https -- archive downloads use
+    # the latter two, which a __call__-only double would not see).
+    bundle, environ, generation, at = _capacity_exhaustion_bundle(
+        path, tmp_path, capsys, monkeypatch
+    )
+    before = _bundle_state_snapshot(bundle)
+
+    # An injected ceiling far below any real candidate. design.md:305 requires
+    # the ceilings to be injectable precisely so this boundary can be driven
+    # without building an 8 MiB bundle.
+    monkeypatch.setattr(conversion_attempt, "MAX_MANIFEST_CANDIDATE_BYTES", 1)
+
+    never = CountingNeverNetwork()
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=never,
+        now=at,
+    )
+
+    assert rc != 0, json.dumps(result, sort_keys=True)
+    assert result["outcome"] == "error"
+    assert [error["code"] for error in result["errors"]] == [
+        "local_state_capacity_exhausted"
+    ]
+    assert result["action_required"] == "preserve_work_bundle_and_stop"
+    assert never.calls == []
+    assert _bundle_state_snapshot(bundle) == before
+
+
 def test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary():
     # spec.md's "Completed 结果不安全" scenario: any result URL over 16,384
     # UTF-8 *bytes* is unsafe_result_url. doc2x.valid_https_url
