@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+import delivery_workflow
 import handoff_io
 from artifacts import ArtifactError, CheckpointStore
 from conftest import CALLER
@@ -318,6 +319,10 @@ def test_an_internal_failure_after_the_request_is_reported_as_in_flight(
     assert open(project.result_out, "rb").read() == serialize_artifact(outcome.result)
     assert os.path.exists(project.recovery_out)
     assert operation_record(project, issued.plan_id) is not None
+    # The reported checkpoint is the one the checkpoint directory still holds,
+    # not merely the handle this process happens to be carrying.
+    assert outcome.checkpoint_id is not None
+    assert checkpoints_on_disk(project) == [outcome.checkpoint_id]
 
 
 def test_a_sealed_violation_is_never_swallowed_by_a_structured_exit(
@@ -389,6 +394,196 @@ def test_a_descriptor_that_outlived_a_rollback_is_reported_and_keeps_its_checkpo
     assert record is not None
     assert record["checkpoint_id"] in checkpoints_on_disk(project)
     assert replay.checkpoint_id == record["checkpoint_id"]
+
+
+def fail_the_first_checkpoint_replace(monkeypatch):
+    """Wedge the window between CheckpointStore.create and checkpoint_notice.
+
+    execute_single_put creates the checkpoint, moves it to put_in_flight with
+    a replace, and only then calls checkpoint_notice. Failing that first
+    replace lands the publish in the generic exception exit with a checkpoint
+    already on disk and nothing else durable.
+    """
+    real = CheckpointStore.replace
+    seen = {"count": 0}
+
+    def flaky(self, checkpoint):
+        seen["count"] += 1
+        if seen["count"] == 1:
+            raise ArtifactError("injected checkpoint replace failure")
+        return real(self, checkpoint)
+
+    monkeypatch.setattr(CheckpointStore, "replace", flaky)
+    return seen
+
+
+def test_a_later_exception_never_contradicts_the_durable_result(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    first = run(project, resolved, store, issued.token, Recorder())
+    original = open(project.result_out, "rb").read()
+    assert body_of(first.result)["recovery_state"] == "terminal_unacknowledged"
+
+    fail_the_first_checkpoint_replace(monkeypatch)
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second)
+    body = body_of(outcome.result)
+    assert second.calls == []
+    assert body == body_of(first.result)
+    assert body["recovery_state"] == "terminal_unacknowledged"
+    assert body["allowed_actions"] == ["inspect", "ack"]
+    assert body["retry_safe"] is False
+    assert open(project.result_out, "rb").read() == original
+
+
+def test_a_later_exception_before_the_notice_still_defers_to_the_durable_result(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    first = run(project, resolved, store, issued.token, Recorder(status=403))
+    original = open(project.result_out, "rb").read()
+    assert body_of(first.result)["recovery_state"] == "known_not_applied"
+
+    def explode(target, data):
+        raise handoff_io.HandoffError("injected handoff failure",
+                                      reason=handoff_io.HANDOFF_WRITE_FAILED)
+
+    monkeypatch.setattr("delivery_workflow.commit", explode)
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second)
+    assert second.calls == []
+    assert body_of(outcome.result) == body_of(first.result)
+    assert open(project.result_out, "rb").read() == original
+
+
+@pytest.mark.parametrize("damage", ["foreign_plan", "corrupt"])
+def test_a_foreign_or_corrupt_result_out_is_never_this_plans_answer(
+    project, resolved, dry_run, snapshot, contract_digest, damage
+):
+    if damage == "corrupt":
+        payload = b"{not a result artifact at all"
+    else:
+        other_store, other = issue_plan(
+            project, dry_run, snapshot, contract_digest,
+            recovery_out=str(project.out / "other-recovery.json"),
+            result_out=str(project.out / "other-result.json"),
+        )
+        run(project, resolved, other_store, other.token, Recorder())
+        payload = open(project.out / "other-result.json", "rb").read()
+        assert durable(project.out / "other-result.json",
+                       "s3-upload.result")["plan_id"] == other.plan_id
+    with open(project.result_out, "wb") as handle:
+        handle.write(payload)
+    os.chmod(project.result_out, 0o600)
+
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    raw = Recorder()
+    outcome = run(project, resolved, store, issued.token, raw)
+    body = body_of(outcome.result)
+    assert len(raw.calls) == 1
+    assert body["plan_id"] == issued.plan_id
+    assert body["recovery_state"] == "terminal_unacknowledged"
+    assert "handoff_write_failed" in body["blocking_reasons"]
+    assert open(project.result_out, "rb").read() == payload
+
+
+def test_a_handoff_error_after_the_request_is_never_reported_as_retry_safe(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    real = delivery_workflow.execute_single_put
+
+    def send_then_fail(**kwargs):
+        real(**kwargs)
+        raise handoff_io.HandoffError("injected post-request handoff failure",
+                                      reason=handoff_io.HANDOFF_WRITE_FAILED)
+
+    monkeypatch.setattr("delivery_workflow.execute_single_put", send_then_fail)
+    raw = Recorder()
+    outcome = run(project, resolved, store, issued.token, raw)
+    body = body_of(outcome.result)
+    assert len(raw.calls) == 1
+    assert outcome.transport_calls == 1
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["retry_safe"] is False
+    assert body["allowed_actions"] == ["inspect", "reconcile"]
+    assert body["blocking_reasons"] == ["handoff_write_failed"]
+    assert durable(project.result_out, "s3-upload.result") == body
+
+
+def test_a_handoff_error_with_no_request_still_invites_a_retry(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+
+    def explode(target, data):
+        raise handoff_io.HandoffError("injected recovery write failure",
+                                      reason=handoff_io.HANDOFF_WRITE_FAILED)
+
+    monkeypatch.setattr("delivery_workflow.commit", explode)
+    raw = Recorder()
+    outcome = run(project, resolved, store, issued.token, raw)
+    body = body_of(outcome.result)
+    assert raw.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "known_not_applied"
+    assert body["retry_safe"] is True
+    assert body["allowed_actions"] == ["inspect", "publish"]
+    assert body["blocking_reasons"] == ["handoff_write_failed"]
+    assert not os.path.exists(project.result_out)
+    assert operation_record(project, issued.plan_id) is None
+
+
+def test_a_definitive_no_write_keeps_an_operation_record_pointing_at_nothing(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    """Pin the current (defective) state of the 403 exit, not an endorsement.
+
+    operations.execute_single_put removes the checkpoint before raising
+    OperationError, and publish deliberately leaves operation.json behind:
+    discarding it would let a replay lose the AlreadyHandedOff trigger and
+    send the Put a second time. Structural repair needs operations.py and is
+    deferred; this test exists so the window cannot drift unnoticed.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    outcome = run(project, resolved, store, issued.token, Recorder(status=403))
+    record = operation_record(project, issued.plan_id)
+    assert body_of(outcome.result)["recovery_state"] == "known_not_applied"
+    assert record is not None
+    assert record["checkpoint_id"] not in checkpoints_on_disk(project)
+    assert checkpoints_on_disk(project) == []
+    assert outcome.checkpoint_id is None
+
+
+def test_a_failure_before_the_notice_strands_the_checkpoint_it_reports_as_absent(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    """Pin the current (defective) state of the create-to-notice window.
+
+    handoff["checkpoint_id"] is only assigned inside checkpoint_notice, so a
+    failure before the notice reports checkpoint_id=None while the checkpoint
+    is already durable. _surviving_checkpoint cannot see it: its input is the
+    in-process handle, not the checkpoint directory. Repair needs a callback
+    on execute_single_put and is deferred; do NOT close this by relabelling
+    the exit in_flight_unknown, which would turn a safely retryable failure
+    into a dead end.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    fail_the_first_checkpoint_replace(monkeypatch)
+    raw = Recorder()
+    outcome = run(project, resolved, store, issued.token, raw)
+    body = body_of(outcome.result)
+    assert raw.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "known_not_applied"
+    assert body["retry_safe"] is True
+    assert body["allowed_actions"] == ["inspect", "publish"]
+    assert outcome.checkpoint_id is None
+    assert len(checkpoints_on_disk(project)) == 1
+    assert operation_record(project, issued.plan_id) is None
+    assert not os.path.exists(project.recovery_out)
+    assert not os.path.exists(project.result_out)
 
 
 def test_an_unreadable_operation_record_keeps_the_checkpoint_it_could_not_clear(

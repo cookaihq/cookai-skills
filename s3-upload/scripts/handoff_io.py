@@ -47,10 +47,12 @@ def _protected(path: str, *, project_root: str, config_home: str, state_root: st
     )
 
 
-def _existing(parent_fd: int, name: str,
-              source_identity: Optional[Tuple[int, int]], *, reason: str) -> Optional[str]:
+def _existing_bytes(parent_fd: int, name: str,
+                    source_identity: Optional[Tuple[int, int]], *,
+                    reason: str) -> Optional[bytes]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -75,9 +77,44 @@ def _existing(parent_fd: int, name: str,
             data += chunk
         if len(data) > MAX_ARTIFACT_BYTES:
             raise HandoffError("handoff destination is too large", reason=reason)
-        return hashlib.sha256(data).hexdigest()
+        return data
     finally:
         os.close(descriptor)
+
+
+def _existing(parent_fd: int, name: str,
+              source_identity: Optional[Tuple[int, int]], *, reason: str) -> Optional[str]:
+    data = _existing_bytes(parent_fd, name, source_identity, reason=reason)
+    return None if data is None else hashlib.sha256(data).hexdigest()
+
+
+def read_artifact(target: HandoffTarget) -> Optional[bytes]:
+    """Re-read a preflighted destination under the preflight safety rules.
+
+    Callers that want the bytes back out of a handoff destination MUST come
+    through here rather than through open(): the descriptor is re-opened
+    no-follow and non-blocking relative to the preflighted parent, and the
+    regular-file, ownership, mode, single-link and size rules are re-checked
+    against the file that is actually there now.
+    """
+    try:
+        parent_fd = open_directory(os.path.dirname(target.path))
+    except (OSError, FileSecurityError) as exc:
+        raise HandoffError("handoff parent directory is unsafe", reason=HANDOFF_UNSAFE) from exc
+    try:
+        parent = os.fstat(parent_fd)
+        if (
+            parent.st_dev != target.parent_device
+            or parent.st_ino != target.parent_inode
+            or parent.st_uid != target.parent_owner
+            or stat.S_IMODE(parent.st_mode) != target.parent_mode
+        ):
+            raise HandoffError("handoff parent changed after preflight", reason=HANDOFF_UNSAFE)
+        return _existing_bytes(
+            parent_fd, os.path.basename(target.path), None, reason=HANDOFF_UNSAFE,
+        )
+    finally:
+        os.close(parent_fd)
 
 
 def preflight(path: str, *, project_root: str, config_home: str, state_root: str,

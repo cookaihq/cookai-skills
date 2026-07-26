@@ -7,7 +7,7 @@ import pytest
 
 import handoff_io
 from conftest import CALLER
-from delivery_schema import body_of, parse_typed
+from delivery_schema import body_of, parse_typed, serialize_artifact
 from delivery_workflow import BOUNDARIES, publish
 from plan_store import PlanStore, build_plan_body, new_plan_id
 from s3 import Response
@@ -742,6 +742,79 @@ def test_the_descriptor_and_the_result_agree_on_the_operation_chain(
     assert descriptor["plan_id"] == result["plan_id"] == issued.plan_id
     assert descriptor["plan_hash"] == result["plan_hash"]
     assert descriptor["target_contract_hash"] == result["target_contract_hash"]
+
+
+@pytest.mark.parametrize("swap", ["none", "symlink", "mode", "hardlink", "fifo"])
+def test_a_descriptor_destination_that_turned_unsafe_reads_back_as_absent(
+    project, resolved, dry_run, snapshot, contract_digest, swap
+):
+    """The descriptor read must obey the same rules as the write.
+
+    Reading recovery_out back with a plain open() would follow a symlink,
+    accept a world-writable file or a hardlink alias, and block forever on a
+    FIFO. The read goes through the preflighted HandoffTarget instead, so a
+    destination swapped out after preflight reports no descriptor at all.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    first = run(project, resolved, store, issued.token, Recorder())
+    assert first.recovery is not None
+    descriptor = open(project.recovery_out, "rb").read()
+
+    def wound(name):
+        if name != "checkpoint_durable":
+            return
+        if swap == "symlink":
+            os.rename(project.recovery_out, project.out / "hidden.json")
+            os.symlink("hidden.json", project.recovery_out)
+        elif swap == "mode":
+            os.chmod(project.recovery_out, 0o666)
+        elif swap == "hardlink":
+            os.link(project.recovery_out, project.out / "alias.json")
+        elif swap == "fifo":
+            os.unlink(project.recovery_out)
+            os.mkfifo(project.recovery_out, 0o600)
+
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second, on_boundary=wound)
+    assert second.calls == []
+    assert body_of(outcome.result) == body_of(first.result)
+    if swap == "none":
+        assert outcome.recovery is not None
+        assert serialize_artifact(outcome.recovery) == descriptor
+    else:
+        assert outcome.recovery is None
+    if swap == "symlink":
+        assert os.path.islink(project.recovery_out)
+        assert open(project.out / "hidden.json", "rb").read() == descriptor
+
+
+@pytest.mark.parametrize("reason", ["source_drift", "handoff_unsafe"])
+def test_an_exit_before_the_handoff_preflight_reports_no_descriptor(
+    project, resolved, dry_run, snapshot, contract_digest, reason
+):
+    """Only a destination this call preflighted may be read back.
+
+    Every drift exit runs before preflight, and handoff_unsafe is the exit
+    that just judged one of the two destinations unsafe. Reading recovery_out
+    on those paths would report a descriptor through an unvetted path.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    first = run(project, resolved, store, issued.token, Recorder())
+    assert first.recovery is not None
+    if reason == "source_drift":
+        project.source.write_bytes(b"different!!")
+    else:
+        os.chmod(project.result_out, 0o666)
+
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second)
+    body = body_of(outcome.result)
+    assert second.calls == []
+    assert outcome.transport_calls == 0
+    assert body["blocking_reasons"] == [reason]
+    assert body["recovery_state"] == "blocked"
+    assert outcome.recovery is None
+    assert os.path.exists(project.recovery_out)
 
 
 def test_already_handed_off_is_disjoint_from_the_handoff_error_hierarchy():

@@ -10,7 +10,7 @@ from delivery_records import build_recovery_descriptor, build_result
 from delivery_schema import (
     DeliverySchemaError, artifact_digest, body_of, parse_typed, serialize_artifact,
 )
-from handoff_io import HandoffError, commit, preflight
+from handoff_io import HandoffError, HandoffTarget, commit, preflight, read_artifact
 from operations import OperationError, execute_single_put
 from plan_store import PlanStore, PlanStoreError
 from planning import PlanError, derive_contract_key, registry_for_target
@@ -133,6 +133,15 @@ def _surviving_checkpoint(project_root: str,
 
 def _drop_checkpoint(store: PlanStore, plan_id: str, project_root: str,
                      checkpoint_id: str) -> bool:
+    """Best-effort rollback of a checkpoint this call created.
+
+    Scope note: this guard binds the four rollback call sites in this module
+    only. It is NOT a workspace-wide invariant that a surviving operation
+    record always points at a checkpoint on disk -- operations.execute_single_put
+    removes the checkpoint on a definitive no-write response while
+    operation.json keeps pointing at it, and this module deliberately does not
+    roll that record back (see the F2 pin in the publish tests).
+    """
     try:
         record = store.operation_record(plan_id)
     except PlanStoreError:
@@ -146,19 +155,28 @@ def _drop_checkpoint(store: PlanStore, plan_id: str, project_root: str,
     return True
 
 
-def _read_handoff(path: str) -> bytes:
+def _read_handoff(target: Optional[HandoffTarget]) -> bytes:
+    """Read back a handoff destination that this call already preflighted.
+
+    A None target means preflight never succeeded for that destination, so
+    there is nothing this process is allowed to read. Every other read goes
+    through the handoff safety rules (no-follow, non-blocking, regular file,
+    owner, 0600, single link, size), so a destination that was swapped for a
+    symlink, a FIFO, a hardlink alias or a loosened file after preflight
+    reads back as absent instead of as content.
+    """
+    if target is None:
+        return b""
     try:
-        with open(path, "rb") as handle:
-            return handle.read(262145)
-    except OSError as exc:
-        raise WorkflowError("durable handoff artifact is unavailable") from exc
+        raw = read_artifact(target)
+    except HandoffError:
+        return b""
+    return b"" if raw is None else raw
 
 
-def _durable_result(path: str, plan_id: str) -> Optional[Dict[str, Any]]:
-    try:
-        raw = _read_handoff(path)
-    except WorkflowError:
-        return None
+def _durable_result(target: Optional[HandoffTarget],
+                    plan_id: str) -> Optional[Dict[str, Any]]:
+    raw = _read_handoff(target)
     if not raw:
         return None
     try:
@@ -168,11 +186,9 @@ def _durable_result(path: str, plan_id: str) -> Optional[Dict[str, Any]]:
     return item if body_of(item)["plan_id"] == plan_id else None
 
 
-def _durable_recovery(path: str, recovery_id: str) -> Optional[Dict[str, Any]]:
-    try:
-        raw = _read_handoff(path)
-    except WorkflowError:
-        return None
+def _durable_recovery(target: Optional[HandoffTarget],
+                      recovery_id: str) -> Optional[Dict[str, Any]]:
+    raw = _read_handoff(target)
     if not raw:
         return None
     try:
@@ -254,11 +270,25 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
     root = root_recovery_id or recovery_id
     project_root = lexical_absolute(project_root)
 
+    # Only a destination this call preflighted may be read back, so every exit
+    # taken before preflight succeeded reports no descriptor at all rather than
+    # reading an unvetted path. Both entries are filled in together: a run that
+    # preflighted the descriptor but failed on the result destination has not
+    # cleared the handoff preflight and must not read either.
+    targets: Dict[str, Optional[HandoffTarget]] = {"recovery": None, "result": None}
+
     def stop(reasons, *, state="blocked", plan=None, contract=None, checkpoint_id=None):
-        recovery = (
-            None if plan is None
-            else _durable_recovery(plan["recovery_out"], recovery_id)
-        )
+        # A durable result already on result_out is this plan's answer. It is
+        # immutable and was written before the caller could observe anything,
+        # so an exit that merely raised later must never contradict it.
+        if plan is not None:
+            durable = _durable_result(targets["result"], plan["plan_id"])
+            if durable is not None:
+                return PublishOutcome(
+                    durable, _durable_recovery(targets["recovery"], recovery_id),
+                    gate.calls, checkpoint_id,
+                )
+        recovery = _durable_recovery(targets["recovery"], recovery_id)
         return PublishOutcome(
             result=build_result(
                 operation="publish",
@@ -349,6 +379,8 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             )
         except HandoffError:
             return stop(["handoff_unsafe"], plan=plan, contract=digest)
+        targets["recovery"] = recovery_target
+        targets["result"] = result_target
         hook("revalidated")
         try:
             frozen = store.spool_bytes(
@@ -377,6 +409,17 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             )
 
         def emit(state, reasons=(), *, capabilities_ok=True, checkpoint_id=None):
+            # result_out is create-once, so a result already durable there for
+            # this plan is the authoritative answer and outranks whatever this
+            # attempt would have composed. Without this the immutable commit
+            # below fails and the caller is handed a fresh in_flight_unknown
+            # that contradicts a terminal_unacknowledged already on disk.
+            durable = _durable_result(result_target, plan_id)
+            if durable is not None:
+                return PublishOutcome(
+                    durable, _durable_recovery(recovery_target, recovery_id),
+                    gate.calls, checkpoint_id,
+                )
             record = compose(state, reasons, capabilities_ok)
             hook("before_result_fsync")
             try:
@@ -386,13 +429,13 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                     state, list(reasons) + ["handoff_write_failed"], capabilities_ok
                 )
                 return PublishOutcome(
-                    record, _durable_recovery(plan["recovery_out"], recovery_id),
+                    record, _durable_recovery(recovery_target, recovery_id),
                     gate.calls, checkpoint_id,
                 )
             hook("after_result_fsync")
             hook("before_stdout")
             return PublishOutcome(
-                record, _durable_recovery(plan["recovery_out"], recovery_id),
+                record, _durable_recovery(recovery_target, recovery_id),
                 gate.calls, checkpoint_id,
             )
 
@@ -484,10 +527,10 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 uuid_factory=uuid_factory,
             )
         except AlreadyHandedOff:
-            existing = _durable_result(plan["result_out"], plan_id)
+            existing = _durable_result(result_target, plan_id)
             if existing is not None:
                 return PublishOutcome(
-                    existing, _durable_recovery(plan["recovery_out"], recovery_id), 0,
+                    existing, _durable_recovery(recovery_target, recovery_id), 0,
                     handoff["checkpoint_id"],
                 )
             replayed = compose("in_flight_unknown", (), True)
@@ -496,12 +539,21 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             except HandoffError:
                 pass
             return PublishOutcome(
-                replayed, _durable_recovery(plan["recovery_out"], recovery_id), 0,
+                replayed, _durable_recovery(recovery_target, recovery_id), 0,
                 handoff["checkpoint_id"],
             )
         except (HandoffError, PlanStoreError):
-            return stop(["handoff_write_failed"], state="known_not_applied", plan=plan,
-                        contract=digest, checkpoint_id=handoff["checkpoint_id"])
+            # Classify by what left the process, not by which exception type
+            # arrived: the only answer that may promise a safe retry is one
+            # taken with zero transport calls and no operation record on disk.
+            if gate.calls == 0 and not _armed(store, plan_id):
+                return stop(["handoff_write_failed"], state="known_not_applied",
+                            plan=plan, contract=digest,
+                            checkpoint_id=handoff["checkpoint_id"])
+            if gate.calls:
+                hook("after_request")
+            return emit("in_flight_unknown", ["handoff_write_failed"],
+                        checkpoint_id=handoff["checkpoint_id"])
         except TransportSealed:
             raise
         except OperationError:
