@@ -181,9 +181,9 @@ def canonical_state_byte_length(value: dict) -> int:
 # create/ordinary-poll/refresh each talk to an *unvalidated* Doc2X response
 # before doc2x._classify/_classify_poll have accepted or rejected it. To fail
 # closed before that call rather than after, admission must assume the worst
-# legal shape that response could still take: a task_id at the spec's byte
-# ceiling and a result URL at doc2x.valid_https_url's byte ceiling, each
-# inflated by ensure_ascii=True's worst-case \uXXXX escaping. This module
+# legal shape that response could still take: a task_id and a result URL each
+# at the UTF-8 byte ceiling the spec puts on them, each inflated by
+# ensure_ascii=True's worst-case \uXXXX escaping. This module
 # only computes and judges those worst cases -- plan.md 2.3 is responsible
 # for wiring the verdict into a stop-before-intent behavior.
 
@@ -194,9 +194,11 @@ def canonical_state_byte_length(value: dict) -> int:
 # admission must bound what an as-yet-unclassified response could contain.
 TASK_ID_UPPER_BOUND_BYTES = 4096
 
-# Matches doc2x.valid_https_url's own bound (doc2x.py:244, `len(value) >
-# 16384`) -- pinned equal by
-# test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary in
+# Spec's UTF-8 byte upper bound for a response result URL: spec.md's
+# "Completed 结果不安全" scenario makes any result URL over 16,384 UTF-8 bytes
+# an unsafe_result_url. doc2x.valid_https_url is the gate that enforces it
+# before such a URL can reach private.json; the two numbers are pinned equal
+# by test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary in
 # tests/unit/test_conversion_attempt.py.
 RESULT_URL_UPPER_BOUND_BYTES = 16384
 

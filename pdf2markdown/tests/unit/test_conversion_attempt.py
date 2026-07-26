@@ -3092,16 +3092,45 @@ def test_manifest_and_private_candidate_ceilings_match_workflow_read_ceiling():
 
 
 def test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary():
-    # doc2x.valid_https_url (doc2x.py:243-258) rejects any URL longer than
-    # 16384 bytes (doc2x.py:244, `len(value) > 16384`) -- an inline literal,
-    # not a named constant. Pin conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
-    # to that same real enforced boundary so the two numbers cannot silently
-    # drift apart.
+    # spec.md's "Completed 结果不安全" scenario: any result URL over 16,384
+    # UTF-8 *bytes* is unsafe_result_url. doc2x.valid_https_url
+    # (doc2x.py:243-258) is the only gate that URL passes before it is written
+    # verbatim into private.json, so RESULT_URL_UPPER_BOUND_BYTES (which the
+    # capacity admission math budgets for) must equal the bound that gate
+    # actually enforces -- otherwise admission budgets for a URL smaller than
+    # one the gate would still let through.
     prefix = "https://example.com/"
     at_bound = prefix + "a" * (
         conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES - len(prefix)
     )
     over_bound = at_bound + "a"
-    assert len(at_bound) == conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+    # ASCII: one character is one UTF-8 byte, so this exercises the boundary
+    # in both units at once.
+    assert len(at_bound.encode("utf-8")) == (
+        conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+    )
     assert conversion_attempt.doc2x.valid_https_url(at_bound) is True
     assert conversion_attempt.doc2x.valid_https_url(over_bound) is False
+
+    # Non-ASCII: 16,384 astral-plane characters are 65,476 UTF-8 bytes, four
+    # times over the spec's byte ceiling. This is the case that separates a
+    # byte bound from a code-point bound, so it must be rejected for the
+    # admission budget above to hold.
+    over_bound_in_bytes_only = prefix + "\U0001d11e" * (
+        conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES - len(prefix)
+    )
+    assert len(over_bound_in_bytes_only) == (
+        conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+    )
+    assert len(over_bound_in_bytes_only.encode("utf-8")) > (
+        conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+    )
+    # KNOWN DEVIATION (pinned so it cannot be silently re-introduced):
+    # doc2x.py:244 measures len(value) in code points, not UTF-8 bytes, so it
+    # still admits this URL even though spec.md calls it unsafe. While that is
+    # true, capacity admission's RESULT_URL_UPPER_BOUND_BYTES budget is not a
+    # real upper bound on what can reach private.json. Once doc2x.py is fixed
+    # to measure bytes, this assertion goes red and must be flipped to False.
+    assert (
+        conversion_attempt.doc2x.valid_https_url(over_bound_in_bytes_only) is True
+    )
