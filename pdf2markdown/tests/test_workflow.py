@@ -1910,6 +1910,13 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
         """逐分支产出 (是否静态字符串, 值)，穿透三元表达式的全部分支。"""
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             yield True, node.value
+        elif isinstance(node, ast.Constant) and node.value is None:
+            # action_required=None 是合同明确允许的取值（见
+            # test_workflow_error_accepts_a_null_action_required）。它既不属于
+            # 词汇表、也不是动态传参，必须跳过——否则后续任务在某个构造点传
+            # None 就会撞上 assert not dynamic，而 Global Constraints 禁止 4.3
+            # 之外的任务改写既有断言。
+            return
         elif isinstance(node, ast.IfExp):
             yield from _leaves(node.body)
             yield from _leaves(node.orelse)
@@ -1938,6 +1945,27 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
     # 词汇表的值写进同一个 action_required 键，扫全部 dict 会把它们误收进来，
     # 让本断言在 2.4 变红，而 Global Constraints 又禁止 2.4 改写既有断言。
     SERIALIZED_ONLY = {"inspect_runtime_error"}
+
+    # 白名单必须自我校验：若它对应的产生点被改名或删除，该值就成了表内死值，
+    # 而下面的等值断言依旧全绿——正是把 <= 升级成 == 想堵的洞，在这一个成员
+    # 上会重新敞开。这里做**定向**扫描（只看 "action_required" 这个 dict 键的
+    # 字符串字面量），并用子集方向断言，使任务 2.4 往同一键写入 conversion
+    # 值时不会误伤。
+    serialized = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "action_required"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                ):
+                    serialized.add(value.value)
+    assert SERIALIZED_ONLY <= serialized, (
+        f"whitelisted serialized-only action no longer produced: "
+        f"{SERIALIZED_ONLY - serialized}"
+    )
 
     assert constructed | SERIALIZED_ONLY == set(workflow.ERROR_PATH_ACTIONS)
 

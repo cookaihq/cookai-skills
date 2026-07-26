@@ -59,7 +59,11 @@ SUPPORTED_PUBLICATION_STATES = frozenset({"not_requested", "blocked"})
 # MECHANISM, not by return code: values here are produced by constructing a
 # WorkflowError (or re-serializing one); the conversion table is produced by
 # project_conversion_action. They only meet in the serialized action_required
-# key.
+# key -- and that key carries MORE than these two tables: source-staging /
+# raw-conversion / review pending_action "kind" values are written to it too
+# (preflight.py, source_staging.py, raw_conversion.py, conversion_attempt.py,
+# review.py), as is None. So the key's value domain is NOT the union of the two
+# tables; do not derive that premise for tasks 2.4 / 3.2.
 #
 # Do NOT restate this as an rc-based split -- rc == 0 results can and do carry
 # a member of this table: preflight.dependency_result() sets
