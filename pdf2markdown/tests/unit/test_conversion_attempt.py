@@ -3778,15 +3778,31 @@ class _CapturedIO:
     capsys, so this swaps sys.stdout/sys.stderr for plain StringIO buffers
     (the same technique capsys itself uses under the hood) and hands that
     back out, letting every existing helper run completely unmodified.
+
+    A context manager rather than a plain object with a close() method: the
+    swap must always be paired with a restore, and making that pairing a
+    type-level property (enter/exit) means callers can't forget the
+    restore the way a bare close() call relies on the caller remembering to
+    make (and to make even when the wrapped body raises).
     """
 
     def __init__(self):
         self._out = io.StringIO()
         self._err = io.StringIO()
+        self._real_out = None
+        self._real_err = None
+
+    def __enter__(self):
         self._real_out = sys.stdout
         self._real_err = sys.stderr
         sys.stdout = self._out
         sys.stderr = self._err
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        sys.stdout = self._real_out
+        sys.stderr = self._real_err
+        return False
 
     def readouterr(self):
         out = self._out.getvalue()
@@ -3796,10 +3812,6 @@ class _CapturedIO:
         self._err.seek(0)
         self._err.truncate(0)
         return SimpleNamespace(out=out, err=err)
-
-    def close(self):
-        sys.stdout = self._real_out
-        sys.stderr = self._real_err
 
 
 def drive_to_flat_state(tmp_path, flat_state):
@@ -3820,8 +3832,7 @@ def drive_to_flat_state(tmp_path, flat_state):
     """
     call_root = tmp_path / f"drive-{flat_state}"
     call_root.mkdir()
-    capture = _CapturedIO()
-    try:
+    with _CapturedIO() as capture:
         with pytest.MonkeyPatch.context() as monkeypatch:
             bundle, staged, dependencies, key, _source_url, _source_sha256 = (
                 ready_staged_bundle(call_root, capture, monkeypatch)
@@ -4031,8 +4042,6 @@ def drive_to_flat_state(tmp_path, flat_state):
             raise AssertionError(
                 f"drive_to_flat_state: unknown flat_state {flat_state!r}"
             )
-    finally:
-        capture.close()
 
 
 FLAT_STATE_OBSERVABLES = {
@@ -4104,8 +4113,6 @@ FLAT_STATE_OBSERVABLES = {
 
 @pytest.mark.parametrize("flat_state", sorted(FLAT_STATE_OBSERVABLES))
 def test_flat_state_observable_projection_is_pinned(tmp_path, flat_state):
-    import conversion_attempt as ca
-
     result = drive_to_flat_state(tmp_path, flat_state)
     expected = FLAT_STATE_OBSERVABLES[flat_state]
     assert (
@@ -4114,7 +4121,7 @@ def test_flat_state_observable_projection_is_pinned(tmp_path, flat_state):
         result["outcome"],
         result.get("action_required"),
     ) == expected
-    assert set(FLAT_STATE_OBSERVABLES) == ca.FLAT_STATE_DOMAIN
+    assert set(FLAT_STATE_OBSERVABLES) == conversion_attempt.FLAT_STATE_DOMAIN
 
 
 def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_path):
@@ -4124,8 +4131,10 @@ def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_
     使 2.2 的可观测性净增可被证明，而不是被声称。
     """
     result = drive_to_flat_state(tmp_path, "submission_unknown")
+    assert result["conversion_attempt_state"] == "submission_unknown"
     assert "conversion_attempt_reason" not in result
     assert "conversion_attempt_reason_detail" not in result
     result = drive_to_flat_state(tmp_path, "poll_transient")
+    assert result["conversion_attempt_state"] == "poll_transient"
     assert "conversion_attempt_reason" not in result
     assert "conversion_attempt_reason_detail" not in result
