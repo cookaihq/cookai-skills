@@ -6,7 +6,7 @@ import pytest
 from conftest import CALLER, SOURCE_BYTES, write_target
 from delivery_schema import body_of
 from delivery_workflow import TransportGate, TransportSealed, publish
-from plan_store import PlanStore, build_plan_body, new_plan_id
+from plan_store import PlanStore, PlanStoreError, build_plan_body, new_plan_id
 from planning import build_upload_dry_run, derive_contract_key, registry_for_target
 from resolver import resolve_target
 from s3 import Response
@@ -47,6 +47,18 @@ def issue_plan(project, dry_run, snapshot, digest, **overrides):
                               soft_max_bytes=1048576, created_at=CREATED_AT)
 
 
+def observed_contract_hash(project, resolved):
+    key = derive_contract_key(resolved.target)
+    return contract_hash(contract_snapshot(
+        target_ref=resolved.ref,
+        config_scope=resolved.ref.scope,
+        project_root=str(project.root),
+        target=resolved.target,
+        contract_key=key,
+        registry=registry_for_target(resolved.target, key),
+    ))
+
+
 def run(project, resolved, store, token, transport, **overrides):
     kwargs = dict(
         resolved=resolved, store=store, token=token, transport=transport,
@@ -69,6 +81,31 @@ def test_sealed_gate_refuses_before_arming():
     gate("PUT", "https://example.invalid/a", {}, b"")
     assert len(raw.calls) == 1
     assert gate.calls == 1
+
+
+def test_publish_hard_fails_when_a_request_precedes_the_durable_handoff(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    raw = Recorder()
+
+    class FakeOutcome:
+        def __init__(self, result):
+            self.result = result
+
+    def leaky_execute(*, transport, checkpoint_notice, **kwargs):
+        try:
+            transport("PUT", "https://example.invalid/early", {}, b"")
+        except Exception:
+            pass
+        checkpoint_notice("00000000000000000000000000000001")
+        transport("PUT", "https://example.invalid/late", {}, b"")
+        return FakeOutcome({"status": "ok"})
+
+    monkeypatch.setattr("delivery_workflow.execute_single_put", leaky_execute)
+    with pytest.raises(TransportSealed):
+        run(project, resolved, store, issued.token, raw)
+    assert [call[1] for call in raw.calls] == ["https://example.invalid/late"]
 
 
 def test_publish_succeeds_and_sends_exactly_one_request(project, resolved, dry_run, snapshot, contract_digest):
@@ -138,10 +175,15 @@ def test_publish_rejects_target_contract_drift_before_any_request(
         cwd=str(project.root), config_home=str(project.home), environ={},
         cli_target=None, cli_caller=CALLER, use_local_key=False,
     )
+    drifted_digest = observed_contract_hash(project, drifted)
+    assert drifted_digest != contract_digest
     raw = Recorder()
     outcome = run(project, drifted, store, issued.token, raw)
     assert raw.calls == []
-    assert body_of(outcome.result)["blocking_reasons"] == ["target_contract_drift"]
+    body = body_of(outcome.result)
+    assert body["blocking_reasons"] == ["target_contract_drift"]
+    assert body["target_contract_hash"] == drifted_digest
+    assert body["target_contract_hash"] != contract_digest
     assert not os.path.exists(project.recovery_out)
 
 
@@ -158,10 +200,15 @@ def test_publish_rejects_public_base_drift_before_any_request(
         cwd=str(project.root), config_home=str(project.home), environ={},
         cli_target=None, cli_caller=CALLER, use_local_key=False,
     )
+    drifted_digest = observed_contract_hash(project, drifted)
+    assert drifted_digest != contract_digest
     raw = Recorder()
     outcome = run(project, drifted, store, issued.token, raw)
     assert raw.calls == []
-    assert body_of(outcome.result)["blocking_reasons"] == ["target_contract_drift"]
+    body = body_of(outcome.result)
+    assert body["blocking_reasons"] == ["target_contract_drift"]
+    assert body["target_contract_hash"] == drifted_digest
+    assert body["target_contract_hash"] != contract_digest
 
 
 def test_publish_rejects_source_drift_before_any_request(
@@ -216,19 +263,24 @@ def test_publish_holds_the_project_target_and_plan_locks(
     project, resolved, dry_run, snapshot, contract_digest
 ):
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
-    held = []
+    probes = (
+        "project",
+        "target-" + contract_digest.split(":", 1)[1],
+        "plan-" + issued.plan_id,
+    )
+    observed = []
 
     def observe(name):
         if name == "revalidated":
-            for lock_name in ("project", "plan-" + issued.plan_id):
+            for lock_name in probes:
                 try:
                     with PlanStore(str(project.state_root)).lock(lock_name):
-                        held.append(("free", lock_name))
-                except Exception:
-                    held.append(("held", lock_name))
+                        observed.append(("free", lock_name))
+                except PlanStoreError as exc:
+                    observed.append((str(exc), lock_name))
 
     run(project, resolved, store, issued.token, Recorder(), on_boundary=observe)
-    assert held == [("held", "project"), ("held", "plan-" + issued.plan_id)]
+    assert observed == [("plan store lock is held", name) for name in probes]
 
 
 def test_publish_never_finalizes_the_internal_checkpoint(

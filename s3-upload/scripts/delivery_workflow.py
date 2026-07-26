@@ -59,6 +59,7 @@ class TransportGate:
         self._transport = transport
         self._armed = False
         self.calls = 0
+        self.sealed_violations = 0
 
     @property
     def armed(self) -> bool:
@@ -69,6 +70,7 @@ class TransportGate:
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if not self._armed:
+            self.sealed_violations += 1
             raise TransportSealed("no remote request may precede a durable recovery handoff")
         self.calls += 1
         return self._transport(*args, **kwargs)
@@ -165,8 +167,39 @@ def publish(*, resolved, store: PlanStore, token: str, transport: Callable[..., 
             root_recovery_id: Optional[str] = None,
             predecessor_operation_id: Optional[str] = None,
             predecessor_result_hash: Optional[str] = None) -> PublishOutcome:
-    hook = on_boundary or _no_hook
     gate = TransportGate(transport)
+    outcome = _publish(
+        resolved=resolved,
+        store=store,
+        token=token,
+        gate=gate,
+        project_root=project_root,
+        config_home=config_home,
+        caller=caller,
+        executable_path=executable_path,
+        cwd=cwd,
+        now=now,
+        on_boundary=on_boundary,
+        uuid_factory=uuid_factory,
+        root_recovery_id=root_recovery_id,
+        predecessor_operation_id=predecessor_operation_id,
+        predecessor_result_hash=predecessor_result_hash,
+    )
+    if gate.sealed_violations:
+        raise TransportSealed(
+            "a remote request preceded the durable recovery handoff"
+        )
+    return outcome
+
+
+def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
+             project_root: str, config_home: str, caller: str, executable_path: str,
+             cwd: str, now=None, on_boundary: Optional[Callable[[str], None]] = None,
+             uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4,
+             root_recovery_id: Optional[str] = None,
+             predecessor_operation_id: Optional[str] = None,
+             predecessor_result_hash: Optional[str] = None) -> PublishOutcome:
+    hook = on_boundary or _no_hook
     operation_id = uuid_factory().hex
     recovery_id = uuid_factory().hex
     root = root_recovery_id or recovery_id
@@ -230,7 +263,7 @@ def publish(*, resolved, store: PlanStore, token: str, transport: Callable[..., 
             return stop(["capability_missing"], plan=plan)
         digest = contract_hash(snapshot)
         if digest != plan["target_contract_hash"] or resolved.ref.text != plan["target_ref"]:
-            return stop(["target_contract_drift"], plan=plan)
+            return stop(["target_contract_drift"], plan=plan, contract=digest)
         if plan["caller"] != caller:
             return stop(["caller_drift"], plan=plan, contract=digest)
         if plan["executable_path"] != executable_path:
