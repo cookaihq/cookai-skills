@@ -3759,6 +3759,46 @@ def test_flat_state_migration_agrees_with_the_live_conversion_state_projection()
         assert ca._conversion_state_for_attempt(flat) == top_level, flat
 
 
+def test_legal_triples_is_the_single_owner_of_state_legality():
+    import conversion_attempt as ca
+
+    # POLL_STATE_CONTRACT 与 valid_private_state 的期望表今天是两份可漂移副本。
+    # 合并后两者都必须由 LEGAL_TRIPLES 派生，不再各自存在。
+    #
+    # LEGAL_TRIPLES 覆盖 FLAT_STATE_DOMAIN 全域（18 行），与
+    # valid_private_state 的 expected_manifest_state 同域——后者实测 18 项，
+    # 且其值与 1.1 的 FLAT_STATE_MIGRATION 第三列 18 行逐条一致，是权威那份。
+    #
+    # 三个「非 poll 观测」state 必须从两条断言里各自排除，理由不同：
+    #   POLL_STATE_CONTRACT 只描述**poll 响应可以提交的观测**，实测 14 项，
+    #   恰好等于 FLAT_STATE_DOMAIN 减去 not_started / submitting /
+    #   submission_unknown / poll_transient 四个（前三个不是 poll 观测，
+    #   poll_transient 是 poll 结果但不入 contract）。
+    NON_POLL_OBSERVATIONS = {"not_started", "submitting", "submission_unknown"}
+    contract = {
+        row.attempt_state: (row.http_status, row.upstream_status, row.reason)
+        for row in ca.LEGAL_TRIPLES
+        if row.attempt_state not in NON_POLL_OBSERVATIONS | {"poll_transient"}
+    }
+    assert contract == ca.POLL_STATE_CONTRACT
+    expected_top_level = {
+        row.attempt_state: row.conversion_state for row in ca.LEGAL_TRIPLES
+    }
+    # _conversion_state_for_attempt 的**输入域比表窄**：那三个 state 今天永远
+    # 落它的默认分支（返回 "submitted"），与表值不符——实测分歧三行：
+    #   not_started        表 ready_to_submit    / 函数 submitted
+    #   submitting         表 submitting         / 函数 submitted
+    #   submission_unknown 表 submission_unknown / 函数 submitted
+    # 这不是缺陷：该函数只接收 poll 结果 state，三者都到不了它（调用点
+    # conversion_attempt.py:2162 受 POLL_RESULT_STATES 守卫；:2451 要求合法
+    # task_id，与 submission_unknown 要求 task_id is None 互斥）。
+    # ⚠️ 2.1a 是纯重构，**不得**为了让本断言覆盖它们而给该函数加分支——
+    # Task 1.1 正因这样做被 reviewer 判越界并回退，用户已裁决该目标投影
+    # 归后续折叠任务 2.1c / 4.2a。
+    for flat in ca.FLAT_STATE_DOMAIN - NON_POLL_OBSERVATIONS:
+        assert expected_top_level[flat] == ca._conversion_state_for_attempt(flat)
+
+
 # --- Task 1.3: characterization of the pre-fold flat state projections -----
 #
 # Everything below pins the *observable* (conversion_state,

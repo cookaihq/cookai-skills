@@ -7,6 +7,7 @@ import re
 import secrets
 from copy import deepcopy
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 import bundle
 import doc2x
@@ -158,25 +159,105 @@ SUBMISSION_UNKNOWN_REASON_CODES = frozenset(
     }
 )
 
+
+class _LegalTriple(NamedTuple):
+    """One row of the single owner table of flat attempt state legality.
+
+    conversion_state is the top-level manifest projection valid_private_state
+    requires (today's expected_manifest_state, verbatim); attempt_state is the
+    flat state name; reason/http_status/upstream_status are the triple
+    POLL_STATE_CONTRACT and _valid_attempt enforce for the 14 states that are
+    poll observations. The four states that are not single-valued poll
+    observations (not_started, submitting, submission_unknown -- see
+    NON_POLL_OBSERVATIONS -- and poll_transient, whose reason/http_status vary
+    across POLL_TRANSIENT_REASON_CODES and _WORST_CASE_HTTP_STATUSES) carry
+    None placeholders in those three fields: nothing derives from them there.
+    """
+
+    conversion_state: str
+    attempt_state: str
+    reason: str | None
+    http_status: int | None
+    upstream_status: str | None
+
+
+# design.md Decision 1 / Task 2.1a -- the single owner table of flat attempt
+# state legality. It is the union of what used to be two independently
+# maintained copies: POLL_STATE_CONTRACT (the (http_status, upstream_status,
+# reason_code) triple a poll observation may carry) and valid_private_state's
+# expected_manifest_state (the top-level conversion_state each flat state
+# projects to). Both are now derived from this table below, so the two can
+# never again drift out of sync with each other.
+LEGAL_TRIPLES = (
+    _LegalTriple("ready_to_submit", "not_started", None, None, None),
+    _LegalTriple("submitting", "submitting", None, None, None),
+    _LegalTriple("submitted", "submitted", None, 200, None),
+    _LegalTriple("submission_unknown", "submission_unknown", None, None, None),
+    _LegalTriple("submitted", "pending", None, 200, "pending"),
+    _LegalTriple("submitted", "processing", None, 200, "processing"),
+    _LegalTriple("submitted", "result_pending", None, 200, "completed"),
+    _LegalTriple("result_downloading", "result_ready", None, 200, "completed"),
+    _LegalTriple(
+        "terminal_error", "unsafe_result_url", "unsafe_result_url", 200, "completed"
+    ),
+    _LegalTriple(
+        "terminal_error",
+        "unexpected_result_count",
+        "unexpected_result_count",
+        200,
+        "completed",
+    ),
+    _LegalTriple("awaiting_user", "failed", "task_failed", 200, "failed"),
+    _LegalTriple("recoverable_error", "poll_transient", None, None, None),
+    _LegalTriple(
+        "recoverable_error", "poll_unauthorized", "poll_unauthorized", 401, None
+    ),
+    _LegalTriple(
+        "recoverable_error", "task_unavailable", "task_unavailable", 404, None
+    ),
+    _LegalTriple(
+        "recoverable_error",
+        "credential_source_missing",
+        "credential_source_missing",
+        None,
+        None,
+    ),
+    _LegalTriple(
+        "recoverable_error",
+        "credential_source_changed",
+        "credential_source_changed",
+        None,
+        None,
+    ),
+    _LegalTriple("recoverable_error", "poll_timeout", "poll_timeout", None, None),
+    _LegalTriple(
+        "recoverable_error",
+        "result_pending_timeout",
+        "result_pending_timeout",
+        None,
+        "completed",
+    ),
+)
+
+# The flat states LEGAL_TRIPLES carries that are not single-valued poll
+# observations: not_started and submitting precede any poll response, and
+# submission_unknown is written by the create path (conversion_attempt.py
+# :1486, :1630) directly, never by a poll observation. POLL_STATE_CONTRACT and
+# _poll_response_branches must both exclude these three (poll_transient is
+# excluded alongside them where noted, since it is a poll result but not a
+# single-valued contract entry either).
+NON_POLL_OBSERVATIONS = frozenset({"not_started", "submitting", "submission_unknown"})
+
+_LEGAL_TRIPLE_BY_ATTEMPT_STATE = {row.attempt_state: row for row in LEGAL_TRIPLES}
+
 # The (http_status, upstream_status, reason_code) triple each non-transient
 # attempt state must carry. _valid_attempt enforces it; the capacity admission
 # below builds its worst-case poll branches from the same table so the two can
 # never disagree about which observations are legal.
 POLL_STATE_CONTRACT = {
-    "submitted": (200, None, None),
-    "pending": (200, "pending", None),
-    "processing": (200, "processing", None),
-    "result_pending": (200, "completed", None),
-    "result_ready": (200, "completed", None),
-    "unsafe_result_url": (200, "completed", "unsafe_result_url"),
-    "unexpected_result_count": (200, "completed", "unexpected_result_count"),
-    "failed": (200, "failed", "task_failed"),
-    "credential_source_missing": (None, None, "credential_source_missing"),
-    "credential_source_changed": (None, None, "credential_source_changed"),
-    "poll_unauthorized": (401, None, "poll_unauthorized"),
-    "task_unavailable": (404, None, "task_unavailable"),
-    "poll_timeout": (None, None, "poll_timeout"),
-    "result_pending_timeout": (None, "completed", "result_pending_timeout"),
+    row.attempt_state: (row.http_status, row.upstream_status, row.reason)
+    for row in LEGAL_TRIPLES
+    if row.attempt_state not in NON_POLL_OBSERVATIONS | {"poll_transient"}
 }
 
 # poll_transient is the one state POLL_STATE_CONTRACT cannot describe: it
@@ -491,13 +572,17 @@ def _create_response_branches() -> list[doc2x.CreateResult]:
 def _poll_response_branches() -> list[doc2x.PollResult]:
     """Every observation a poll GET could still come back as.
 
-    Built from POLL_RESULT_STATES and POLL_STATE_CONTRACT -- the same tables
-    _poll_transition and _valid_attempt judge against -- so admission cannot
-    budget for a shape the writer would refuse, or miss one it would accept.
+    Built from POLL_RESULT_STATES and LEGAL_TRIPLES -- the same table
+    _poll_transition and _valid_attempt (via POLL_STATE_CONTRACT, itself
+    derived from LEGAL_TRIPLES) judge against -- so admission cannot budget
+    for a shape the writer would refuse, or miss one it would accept.
     """
     branches = []
     for state in sorted(POLL_RESULT_STATES - {"poll_transient"}):
-        http_status, upstream_status, reason_code = POLL_STATE_CONTRACT[state]
+        row = _LEGAL_TRIPLE_BY_ATTEMPT_STATE[state]
+        http_status, upstream_status, reason_code = (
+            row.http_status, row.upstream_status, row.reason
+        )
         branches.append(
             doc2x.PollResult(
                 state,
@@ -2025,24 +2110,22 @@ def timeout_before_poll(attempt: dict, *, at: str) -> doc2x.PollResult | None:
     return None
 
 
+# The projection _conversion_state_for_attempt applies. Its domain is
+# POLL_RESULT_STATES -- the states a poll observation can commit -- which is
+# narrower than LEGAL_TRIPLES' full FLAT_STATE_DOMAIN: not_started, submitting
+# and submission_unknown never reach this projection (see
+# NON_POLL_OBSERVATIONS), so they are deliberately absent here and any input
+# outside this table -- including those three -- falls to the "submitted"
+# default below, exactly as the pre-refactor if/elif chain did.
+_ATTEMPT_STATE_CONVERSION_STATE = {
+    row.attempt_state: row.conversion_state
+    for row in LEGAL_TRIPLES
+    if row.attempt_state in POLL_RESULT_STATES
+}
+
+
 def _conversion_state_for_attempt(state: str) -> str:
-    if state == "result_ready":
-        return "result_downloading"
-    if state in {"unsafe_result_url", "unexpected_result_count"}:
-        return "terminal_error"
-    if state == "failed":
-        return "awaiting_user"
-    if state in {
-        "credential_source_missing",
-        "credential_source_changed",
-        "poll_unauthorized",
-        "task_unavailable",
-        "poll_transient",
-        "poll_timeout",
-        "result_pending_timeout",
-    }:
-        return "recoverable_error"
-    return "submitted"
+    return _ATTEMPT_STATE_CONVERSION_STATE.get(state, "submitted")
 
 
 def _poll_transition(
@@ -2845,24 +2928,7 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
                 return False
         active = attempts[-1]
         expected_manifest_state = {
-            "not_started": "ready_to_submit",
-            "submitting": "submitting",
-            "submitted": "submitted",
-            "pending": "submitted",
-            "processing": "submitted",
-            "result_pending": "submitted",
-            "submission_unknown": "submission_unknown",
-            "result_ready": "result_downloading",
-            "unsafe_result_url": "terminal_error",
-            "unexpected_result_count": "terminal_error",
-            "failed": "awaiting_user",
-            "credential_source_missing": "recoverable_error",
-            "credential_source_changed": "recoverable_error",
-            "poll_unauthorized": "recoverable_error",
-            "task_unavailable": "recoverable_error",
-            "poll_transient": "recoverable_error",
-            "poll_timeout": "recoverable_error",
-            "result_pending_timeout": "recoverable_error",
+            row.attempt_state: row.conversion_state for row in LEGAL_TRIPLES
         }.get(active.get("state"))
         if manifest.get("conversion_state") != expected_manifest_state:
             return False
