@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import itertools
 import json
 import os
 import shutil
@@ -3814,6 +3815,9 @@ class _CapturedIO:
         return SimpleNamespace(out=out, err=err)
 
 
+_drive_to_flat_state_call_counter = itertools.count()
+
+
 def drive_to_flat_state(tmp_path, flat_state):
     """Drive a fresh work bundle to `flat_state` through main()'s public
     CLI boundary and return the machine result JSON of the call that lands
@@ -3828,9 +3832,15 @@ def drive_to_flat_state(tmp_path, flat_state):
     module's invisible-branches test included) may drive more than one
     flat_state off a single tmp_path fixture, and ready_staged_bundle's
     install_preflight_dependencies() would otherwise collide creating the
-    same python-packages/bs4 stub twice under one shared directory.
+    same python-packages/bs4 stub twice under one shared directory. The
+    directory name carries a monotonic call counter (not just flat_state)
+    so that repeated calls for the *same* flat_state under one tmp_path --
+    e.g. a fold-before/fold-after comparison -- get distinct scratch
+    directories instead of colliding on mkdir().
     """
-    call_root = tmp_path / f"drive-{flat_state}"
+    call_root = tmp_path / (
+        f"drive-{flat_state}-{next(_drive_to_flat_state_call_counter)}"
+    )
     call_root.mkdir()
     with _CapturedIO() as capture:
         with pytest.MonkeyPatch.context() as monkeypatch:
@@ -4053,7 +4063,12 @@ FLAT_STATE_OBSERVABLES = {
     #    "conversion_retry_authorized" (workflow.py's only
     #    "conversion_authorized"-shaped literal is
     #    "conversion_retry_authorized"; plain "conversion_authorized" is
-    #    not a string this codebase ever prints).
+    #    not a string this codebase ever prints). `record conversion`
+    #    prints this outcome unconditionally (workflow.py:3024-3025 sets it
+    #    for every `record conversion` call, independent of the attempt
+    #    state being recorded against) -- it is command-derived, does not
+    #    carry state information, and therefore does NOT constitute
+    #    evidence that folding leaves outcome unchanged.
     #  - pending/processing: an ordinary poll's outcome falls through
     #    workflow.py's `f"conversion_{poll_result.state}"` default (the same
     #    rule result_pending's sibling result_ready overrides but pending/
@@ -4067,7 +4082,16 @@ FLAT_STATE_OBSERVABLES = {
     #    command that returns a result without also recovering the
     #    crash forward past "submitting". `inspect` always reports outcome
     #    "inspected"; "conversion_submitting" is not a string any production
-    #    code path prints.
+    #    code path prints. `inspect` prints "inspected" for any state it
+    #    observes (workflow.py:1269 for the has_conversion_attempt branch,
+    #    :1285 for the generic fallback) -- it is command-derived, not
+    #    state-derived, so this outcome cell does NOT constitute evidence
+    #    that folding leaves outcome unchanged. The other three columns on
+    #    this row are not discounted: conversion_state,
+    #    conversion_attempt_state, and action_required all come from the
+    #    same conversion_attempt.result_from_manifest projection
+    #    (workflow.py:1267-1270) that produces the other 17 rows -- only
+    #    the outcome cell carries this discount, not the whole row.
     "not_started": (
         "ready_to_submit", "not_started", "conversion_retry_authorized", None
     ),
@@ -4129,12 +4153,35 @@ def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_
 
     任务 2.2 会让这个断言反转；它在此处的作用是把「盲区确实存在」钉死，
     使 2.2 的可观测性净增可被证明，而不是被声称。
+
+    先把前提钉到底：只断言字段缺席的话，四条 not in 可以空过——驱动路径
+    一旦漂到别的 state（甚至漂到一个本就不带 reason 字段的 state），断言
+    依然全绿，而 2.2 的可观测性净增正建立在这条基线上。
+
+    复用 FLAT_STATE_OBSERVABLES 做整四元组比对，而不是只钉
+    conversion_attempt_state：后者仍放过「state 正确但命令换了」的漂移
+    （`submitting` 那一行正好证明「用 inspect 也能读到某个 state」这条替代
+    路径客观存在）。整元组比对一行到底，且与钉表共用同一份真相。
     """
-    result = drive_to_flat_state(tmp_path, "submission_unknown")
-    assert result["conversion_attempt_state"] == "submission_unknown"
-    assert "conversion_attempt_reason" not in result
-    assert "conversion_attempt_reason_detail" not in result
-    result = drive_to_flat_state(tmp_path, "poll_transient")
-    assert result["conversion_attempt_state"] == "poll_transient"
-    assert "conversion_attempt_reason" not in result
-    assert "conversion_attempt_reason_detail" not in result
+    for flat_state in ("submission_unknown", "poll_transient"):
+        result = drive_to_flat_state(tmp_path, flat_state)
+        assert (
+            result["conversion_state"],
+            result["conversion_attempt_state"],
+            result["outcome"],
+            result.get("action_required"),
+        ) == FLAT_STATE_OBSERVABLES[flat_state], flat_state
+        assert "conversion_attempt_reason" not in result
+        assert "conversion_attempt_reason_detail" not in result
+
+
+def test_drive_to_flat_state_can_be_called_twice_for_the_same_state(tmp_path):
+    """Task 2.1c drives a fold-before/fold-after comparison off the same
+    flat_state under one tmp_path fixture; drive_to_flat_state must tolerate
+    being called more than once for the same flat_state without colliding on
+    its scratch directory.
+    """
+    first = drive_to_flat_state(tmp_path, "submitted")
+    second = drive_to_flat_state(tmp_path, "submitted")
+    assert first["conversion_attempt_state"] == "submitted"
+    assert second["conversion_attempt_state"] == "submitted"
