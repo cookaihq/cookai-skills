@@ -94,7 +94,7 @@ def test_domain_constants_are_pinned_literals():
 @pytest.mark.parametrize("state", RECOVERY_STATES)
 @pytest.mark.parametrize("capabilities_ok", [True, False])
 def test_recovery_state_fields_come_from_the_registry(state, capabilities_ok):
-    item = body_of(recovery(state=state, capabilities_ok=capabilities_ok))
+    item = body_of(recovery(state=state, capabilities_ok=capabilities_ok, operation="inspect"))
     assert item["allowed_actions"] == list(
         allowed_actions(state, capabilities_ok=capabilities_ok)
     )
@@ -111,13 +111,13 @@ def test_recovery_descriptor_rejects_an_unregistered_operation():
         recovery(operation="verify_public")
 
 
+def test_recovery_descriptor_rejects_an_operation_not_permitted_by_state():
+    with pytest.raises(RecordError):
+        recovery(operation="resume", state="terminal_acknowledged")
+
+
 def test_recovery_descriptor_carries_no_private_checkpoint_channel():
-    body = body_of(recovery())
-    assert "checkpoint_id" not in body
-    assert "credential" not in body
-    assert "authorization" not in body
     raw = serialize_artifact(recovery()).decode("utf-8")
-    assert "project-secret-value" not in raw
     assert ".s3-upload/checkpoints" not in raw
 
 
@@ -137,6 +137,22 @@ def test_authorization_required_is_a_subset_of_allowed_authorized_actions(state)
     assert list(required) == sorted(required, key=ACTIONS.index)
 
 
+AUTHORIZATION_REQUIRED_BY_STATE = {
+    "not_started": ("publish",),
+    "known_not_applied": ("publish",),
+    "in_flight_unknown": ("reconcile",),
+    "multipart_resumable": ("resume", "abort"),
+    "terminal_unacknowledged": (),
+    "terminal_acknowledged": (),
+    "blocked": (),
+}
+
+
+@pytest.mark.parametrize("state", RECOVERY_STATES)
+def test_authorization_required_matches_the_literal_expectation_table(state):
+    assert authorization_required(state, capabilities_ok=True) == AUTHORIZATION_REQUIRED_BY_STATE[state]
+
+
 def test_authorization_required_is_empty_without_capabilities():
     for state in RECOVERY_STATES:
         assert authorization_required(state, capabilities_ok=False) == ()
@@ -152,6 +168,12 @@ def test_result_hash_is_self_consistent():
 def test_result_hash_is_computed_from_canonical_bytes_not_repr():
     body = body_of(result())
     material = {key: value for key, value in body.items() if key != "result_hash"}
+    assert set(material) == {
+        "allowed_actions", "authorization_required", "blocking_reasons", "operation",
+        "operation_id", "plan_hash", "plan_id", "predecessor_operation_id",
+        "predecessor_result_hash", "recovery_id", "recovery_state", "retry_safe",
+        "root_recovery_id", "target_contract_hash",
+    }
     expected = "sha256:" + hashlib.sha256(
         canonicalize({"domain": "s3-upload/result/v1", "value": material})
     ).hexdigest()

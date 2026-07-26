@@ -19,16 +19,20 @@ RESULT_DOMAIN = "s3-upload/result/v1"
 ACK_DOMAIN = "s3-upload/ack/v1"
 
 
-def authorization_required(state: str, *, capabilities_ok: bool) -> Tuple[str, ...]:
+def _state(state: str) -> str:
     if state not in RECOVERY_STATES:
         raise RecordError("unregistered recovery state")
+    return state
+
+
+def authorization_required(state: str, *, capabilities_ok: bool) -> Tuple[str, ...]:
+    state = _state(state)
     available = set(allowed_actions(state, capabilities_ok=capabilities_ok))
     return tuple(action for action in AUTHORIZED_ACTION_ORDER if action in available)
 
 
 def _state_fields(state: str, capabilities_ok: bool) -> Dict[str, Any]:
-    if state not in RECOVERY_STATES:
-        raise RecordError("unregistered recovery state")
+    state = _state(state)
     return {
         "allowed_actions": list(allowed_actions(state, capabilities_ok=capabilities_ok)),
         "recovery_state": state,
@@ -62,7 +66,10 @@ def build_recovery_descriptor(*, recovery_id: str, root_recovery_id: str, operat
         "root_recovery_id": root_recovery_id,
         "target_contract_hash": target_contract_hash,
     }
-    body.update(_state_fields(state, capabilities_ok))
+    state_fields = _state_fields(state, capabilities_ok)
+    if body["operation"] not in state_fields["allowed_actions"]:
+        raise RecordError("operation is not permitted by recovery state")
+    body.update(state_fields)
     return build_typed("s3-upload.recovery-descriptor", body)
 
 
