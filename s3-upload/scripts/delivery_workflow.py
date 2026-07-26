@@ -11,7 +11,7 @@ from delivery_schema import (
     DeliverySchemaError, artifact_digest, body_of, parse_typed, serialize_artifact,
 )
 from handoff_io import HandoffError, commit, preflight
-from operations import execute_single_put
+from operations import OperationError, execute_single_put
 from plan_store import PlanStore, PlanStoreError
 from planning import PlanError, derive_contract_key, registry_for_target
 from safe_io import lexical_absolute
@@ -113,7 +113,32 @@ def _derived_id(domain: str, plan_id: str, plan_hash: str, action: str) -> str:
     return digest.split(":", 1)[1][:32]
 
 
-def _drop_checkpoint(project_root: str, checkpoint_id: str) -> bool:
+def _armed(store: PlanStore, plan_id: str) -> bool:
+    try:
+        return store.operation_record(plan_id) is not None
+    except PlanStoreError:
+        return True
+
+
+def _surviving_checkpoint(project_root: str,
+                          checkpoint_id: Optional[str]) -> Optional[str]:
+    if checkpoint_id is None:
+        return None
+    try:
+        CheckpointStore(project_root).load(checkpoint_id)
+    except (ArtifactError, FileNotFoundError, OSError):
+        return None
+    return checkpoint_id
+
+
+def _drop_checkpoint(store: PlanStore, plan_id: str, project_root: str,
+                     checkpoint_id: str) -> bool:
+    try:
+        record = store.operation_record(plan_id)
+    except PlanStoreError:
+        return False
+    if record is not None and record["checkpoint_id"] == checkpoint_id:
+        return False
     try:
         CheckpointStore(project_root).remove(checkpoint_id)
     except (ArtifactError, FileNotFoundError, OSError):
@@ -141,6 +166,21 @@ def _durable_result(path: str, plan_id: str) -> Optional[Dict[str, Any]]:
     except (DeliverySchemaError, UnicodeDecodeError):
         return None
     return item if body_of(item)["plan_id"] == plan_id else None
+
+
+def _durable_recovery(path: str, recovery_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        raw = _read_handoff(path)
+    except WorkflowError:
+        return None
+    if not raw:
+        return None
+    try:
+        item = parse_typed(raw.decode("utf-8"),
+                           expected_type="s3-upload.recovery-descriptor")
+    except (DeliverySchemaError, UnicodeDecodeError):
+        return None
+    return item if body_of(item)["recovery_id"] == recovery_id else None
 
 
 def _plan_snapshot(plan: Dict[str, Any]) -> SourceSnapshot:
@@ -214,8 +254,11 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
     root = root_recovery_id or recovery_id
     project_root = lexical_absolute(project_root)
 
-    def stop(reasons, *, state="blocked", plan=None, contract=None, checkpoint_id=None,
-             recovery=None):
+    def stop(reasons, *, state="blocked", plan=None, contract=None, checkpoint_id=None):
+        recovery = (
+            None if plan is None
+            else _durable_recovery(plan["recovery_out"], recovery_id)
+        )
         return PublishOutcome(
             result=build_result(
                 operation="publish",
@@ -315,7 +358,43 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             )
         except PlanStoreError:
             return stop(["source_drift"], plan=plan, contract=digest)
-        handoff: Dict[str, Any] = {"checkpoint_id": None, "recovery": None}
+        handoff: Dict[str, Any] = {"checkpoint_id": None}
+
+        def compose(state, reasons, capabilities_ok):
+            return build_result(
+                operation="publish",
+                operation_id=operation_id,
+                plan_id=plan_id,
+                plan_hash=plan["plan_hash"],
+                target_contract_hash=digest,
+                recovery_id=recovery_id,
+                root_recovery_id=root,
+                state=state,
+                capabilities_ok=capabilities_ok,
+                blocking_reasons=list(reasons),
+                predecessor_operation_id=predecessor_operation_id,
+                predecessor_result_hash=predecessor_result_hash,
+            )
+
+        def emit(state, reasons=(), *, capabilities_ok=True, checkpoint_id=None):
+            record = compose(state, reasons, capabilities_ok)
+            hook("before_result_fsync")
+            try:
+                commit(result_target, serialize_artifact(record))
+            except HandoffError:
+                record = compose(
+                    state, list(reasons) + ["handoff_write_failed"], capabilities_ok
+                )
+                return PublishOutcome(
+                    record, _durable_recovery(plan["recovery_out"], recovery_id),
+                    gate.calls, checkpoint_id,
+                )
+            hook("after_result_fsync")
+            hook("before_stdout")
+            return PublishOutcome(
+                record, _durable_recovery(plan["recovery_out"], recovery_id),
+                gate.calls, checkpoint_id,
+            )
 
         def checkpoint_notice(checkpoint_id: str) -> None:
             hook("checkpoint_durable")
@@ -338,8 +417,7 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             except PlanStoreError:
                 handed_off = True
             if handed_off:
-                handoff["recovery"] = descriptor
-                if _drop_checkpoint(project_root, checkpoint_id):
+                if _drop_checkpoint(store, plan_id, project_root, checkpoint_id):
                     handoff["checkpoint_id"] = None
                 raise AlreadyHandedOff("this plan already began a durable handoff")
             value = {
@@ -369,7 +447,7 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                         raise AlreadyHandedOff(
                             "the operation record survived a failed write"
                         ) from exc
-                if _drop_checkpoint(project_root, checkpoint_id):
+                if _drop_checkpoint(store, plan_id, project_root, checkpoint_id):
                     handoff["checkpoint_id"] = None
                 raise
             hook("before_recovery_fsync")
@@ -382,13 +460,12 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                     raise AlreadyHandedOff(
                         "the operation record survived a failed handoff"
                     ) from exc
-                if _drop_checkpoint(project_root, checkpoint_id):
+                if _drop_checkpoint(store, plan_id, project_root, checkpoint_id):
                     handoff["checkpoint_id"] = None
                 raise
             hook("after_recovery_fsync")
-            handoff["recovery"] = descriptor
             if disposition == "idempotent":
-                if _drop_checkpoint(project_root, checkpoint_id):
+                if _drop_checkpoint(store, plan_id, project_root, checkpoint_id):
                     handoff["checkpoint_id"] = None
                 raise AlreadyHandedOff("this plan already handed a recovery descriptor off")
             gate.arm()
@@ -409,26 +486,39 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         except AlreadyHandedOff:
             existing = _durable_result(plan["result_out"], plan_id)
             if existing is not None:
-                return PublishOutcome(existing, handoff["recovery"], 0,
-                                      handoff["checkpoint_id"])
-            replayed = build_result(
-                operation="publish", operation_id=operation_id, plan_id=plan_id,
-                plan_hash=plan["plan_hash"], target_contract_hash=digest,
-                recovery_id=recovery_id, root_recovery_id=root,
-                state="in_flight_unknown", capabilities_ok=True,
-                predecessor_operation_id=predecessor_operation_id,
-                predecessor_result_hash=predecessor_result_hash,
-            )
+                return PublishOutcome(
+                    existing, _durable_recovery(plan["recovery_out"], recovery_id), 0,
+                    handoff["checkpoint_id"],
+                )
+            replayed = compose("in_flight_unknown", (), True)
             try:
                 commit(result_target, serialize_artifact(replayed))
             except HandoffError:
                 pass
-            return PublishOutcome(replayed, handoff["recovery"], 0,
-                                  handoff["checkpoint_id"])
+            return PublishOutcome(
+                replayed, _durable_recovery(plan["recovery_out"], recovery_id), 0,
+                handoff["checkpoint_id"],
+            )
         except (HandoffError, PlanStoreError):
             return stop(["handoff_write_failed"], state="known_not_applied", plan=plan,
-                        contract=digest, checkpoint_id=handoff["checkpoint_id"],
-                        recovery=handoff["recovery"])
+                        contract=digest, checkpoint_id=handoff["checkpoint_id"])
+        except TransportSealed:
+            raise
+        except OperationError:
+            hook("after_request")
+            return emit(
+                "known_not_applied", capabilities_ok=False,
+                checkpoint_id=_surviving_checkpoint(project_root,
+                                                    handoff["checkpoint_id"]),
+            )
+        except Exception:
+            surviving = _surviving_checkpoint(project_root, handoff["checkpoint_id"])
+            if gate.calls == 0 and not _armed(store, plan_id):
+                return stop([], state="known_not_applied", plan=plan, contract=digest,
+                            checkpoint_id=surviving)
+            if gate.calls:
+                hook("after_request")
+            return emit("in_flight_unknown", checkpoint_id=surviving)
         if gate.sealed_violations:
             raise TransportSealed(
                 "a remote request preceded the durable recovery handoff"
@@ -437,41 +527,4 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         state, reasons = STATE_BY_STATUS.get(
             outcome.result["status"], ("blocked", ("unclassified_outcome",))
         )
-        record = build_result(
-            operation="publish",
-            operation_id=operation_id,
-            plan_id=plan_id,
-            plan_hash=plan["plan_hash"],
-            target_contract_hash=digest,
-            recovery_id=recovery_id,
-            root_recovery_id=root,
-            state=state,
-            capabilities_ok=True,
-            blocking_reasons=list(reasons),
-            predecessor_operation_id=predecessor_operation_id,
-            predecessor_result_hash=predecessor_result_hash,
-        )
-        hook("before_result_fsync")
-        try:
-            commit(result_target, serialize_artifact(record))
-        except HandoffError:
-            degraded = build_result(
-                operation="publish",
-                operation_id=operation_id,
-                plan_id=plan_id,
-                plan_hash=plan["plan_hash"],
-                target_contract_hash=digest,
-                recovery_id=recovery_id,
-                root_recovery_id=root,
-                state=state,
-                capabilities_ok=True,
-                blocking_reasons=list(reasons) + ["handoff_write_failed"],
-                predecessor_operation_id=predecessor_operation_id,
-                predecessor_result_hash=predecessor_result_hash,
-            )
-            return PublishOutcome(degraded, handoff["recovery"], gate.calls,
-                                  handoff["checkpoint_id"])
-        hook("after_result_fsync")
-        hook("before_stdout")
-        return PublishOutcome(record, handoff["recovery"], gate.calls,
-                              handoff["checkpoint_id"])
+        return emit(state, reasons, checkpoint_id=handoff["checkpoint_id"])
