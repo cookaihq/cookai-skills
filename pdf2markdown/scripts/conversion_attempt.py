@@ -246,25 +246,42 @@ WORST_CASE_RESULT_URL_JSON_BYTES = worst_case_json_string_bytes(
 
 def worst_case_admission_for_unknown_response(
     *,
-    manifest_current_bytes: int,
-    private_current_bytes: int,
-    history_current_bytes: int,
-    manifest_may_add_task_id: bool = False,
-    private_may_add_result_url: bool = False,
-    history_may_add_task_id: bool = False,
-    history_may_add_result_url: bool = False,
+    manifest_candidate_bytes: int,
+    private_candidate_bytes: int,
+    history_candidate_bytes: int,
+    manifest_unreceived_task_id_count: int = 0,
+    private_unreceived_result_url_count: int = 0,
+    history_unreceived_task_id_count: int = 0,
+    history_unreceived_result_url_count: int = 0,
 ) -> dict:
     """Operation-local worst-case candidate admission for manifest.json,
     private.json and history.ndjson.
 
-    Each *_current_bytes argument is the file's exact current on-disk
-    canonical byte length (e.g. len(bundle.canonical_json_bytes(manifest)),
-    or the length of the raw bytes already read from disk). Each
-    *_may_add_task_id / *_may_add_result_url flag says whether the calling
-    operation's still-unvalidated response could still add one worst-case
-    task_id and/or result URL field to that file; when set, the matching
-    WORST_CASE_*_JSON_BYTES upper bound is added to that file's candidate
-    total before comparing against its own ceiling.
+    Each *_candidate_bytes argument is the exact canonical byte length of the
+    largest legal candidate for that file (design.md:305: the maximum over
+    every direct and crash-recovery candidate the operation could produce),
+    built with every not-yet-received bounded string set to the empty-string
+    placeholder `""` and measured with canonical_state_byte_length. Because
+    that measures the whole serialized document, every byte the candidate
+    actually costs is already counted: key names, punctuation, nested objects,
+    sha256 digests, timestamps and the single trailing LF. Passing only the
+    file's *current* size and letting this function add value-sized deltas
+    would omit all of that and under-admit.
+
+    For manifest.json and private.json the candidate is the whole finished
+    document. For history.ndjson the candidate is the current file's bytes
+    plus every event the operation would append -- a create appends *two*
+    events (conversion_submit_intent and conversion_submit_started), each
+    carrying a full event shell: the complete attempt object, an operation_id,
+    several timestamps and two sha256 digests. Each event's
+    canonical_state_byte_length already includes that event's own trailing LF,
+    so summing them is exact.
+
+    Each *_unreceived_*_count says how many `""` placeholders of that kind the
+    corresponding candidate still holds. Every one of them is upgraded from
+    its 2-byte placeholder to the worst case that value could reach --
+    `2 + 6 * max_utf8_bytes` JSON bytes (design.md:296) -- before the
+    comparison, so a candidate holding two unknown values is charged twice.
 
     manifest, private and history are judged independently against their own
     ceiling (8 MiB / 8 MiB / 64 MiB) -- headroom in one file can never mask
@@ -274,21 +291,31 @@ def worst_case_admission_for_unknown_response(
     anything. Wiring a verdict into a stop-before-intent/before-external-call
     behavior is plan.md 2.3's responsibility.
     """
-    manifest_candidate_bytes = manifest_current_bytes + (
-        WORST_CASE_TASK_ID_JSON_BYTES if manifest_may_add_task_id else 0
+    unknown_task_id_bytes = (
+        worst_case_json_string_bytes(TASK_ID_UPPER_BOUND_BYTES)
+        - _JSON_STRING_QUOTE_BYTES
     )
-    private_candidate_bytes = private_current_bytes + (
-        WORST_CASE_RESULT_URL_JSON_BYTES if private_may_add_result_url else 0
+    unknown_result_url_bytes = (
+        worst_case_json_string_bytes(RESULT_URL_UPPER_BOUND_BYTES)
+        - _JSON_STRING_QUOTE_BYTES
     )
-    history_candidate_bytes = (
-        history_current_bytes
-        + (WORST_CASE_TASK_ID_JSON_BYTES if history_may_add_task_id else 0)
-        + (WORST_CASE_RESULT_URL_JSON_BYTES if history_may_add_result_url else 0)
+    manifest_total = (
+        manifest_candidate_bytes
+        + manifest_unreceived_task_id_count * unknown_task_id_bytes
+    )
+    private_total = (
+        private_candidate_bytes
+        + private_unreceived_result_url_count * unknown_result_url_bytes
+    )
+    history_total = (
+        history_candidate_bytes
+        + history_unreceived_task_id_count * unknown_task_id_bytes
+        + history_unreceived_result_url_count * unknown_result_url_bytes
     )
     return {
-        "manifest": manifest_candidate_bytes <= MAX_MANIFEST_CANDIDATE_BYTES,
-        "private": private_candidate_bytes <= MAX_PRIVATE_CANDIDATE_BYTES,
-        "history": history_candidate_bytes <= bundle.MAX_STATE_BYTES,
+        "manifest": manifest_total <= MAX_MANIFEST_CANDIDATE_BYTES,
+        "private": private_total <= MAX_PRIVATE_CANDIDATE_BYTES,
+        "history": history_total <= bundle.MAX_STATE_BYTES,
     }
 
 

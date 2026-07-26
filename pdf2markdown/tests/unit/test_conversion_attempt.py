@@ -2974,7 +2974,8 @@ def test_worst_case_admission_uses_upper_bounds_for_unknown_response():
     # -- a 4,096-byte task_id (spec's byte bound, not doc2x.TASK_ID_PATTERN's
     # stricter 256-char/charset-restricted match, which is a fail-closed
     # tightening the admission math must not rely on) and a 16,384-byte
-    # result URL (doc2x.valid_https_url's own bound) -- and must account for
+    # result URL (spec.md's ceiling, enforced by doc2x.valid_https_url in the
+    # same UTF-8 byte unit) -- and must account for
     # ensure_ascii=True's worst-case \uXXXX escape inflation of up to 6 JSON
     # output bytes per raw UTF-8 input byte. manifest/private/history are
     # each compared against their own ceiling (8 MiB / 8 MiB / 64 MiB)
@@ -3013,26 +3014,31 @@ def test_worst_case_admission_uses_upper_bounds_for_unknown_response():
     manifest_ceiling = conversion_attempt.MAX_MANIFEST_CANDIDATE_BYTES
     private_ceiling = conversion_attempt.MAX_PRIVATE_CANDIDATE_BYTES
     history_ceiling = conversion_attempt.bundle.MAX_STATE_BYTES
-    task_id_bytes = conversion_attempt.WORST_CASE_TASK_ID_JSON_BYTES
-    url_bytes = conversion_attempt.WORST_CASE_RESULT_URL_JSON_BYTES
+    # Cost of upgrading one `""` placeholder to its worst-case bound.
+    task_id_bytes = conversion_attempt.worst_case_json_string_bytes(
+        conversion_attempt.TASK_ID_UPPER_BOUND_BYTES
+    ) - 2
+    url_bytes = conversion_attempt.worst_case_json_string_bytes(
+        conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+    ) - 2
 
     # Baseline: every file has comfortable headroom -> all admitted.
     baseline = conversion_attempt.worst_case_admission_for_unknown_response(
-        manifest_current_bytes=1_000,
-        private_current_bytes=1_000,
-        history_current_bytes=1_000,
-        manifest_may_add_task_id=True,
-        history_may_add_task_id=True,
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=1_000,
+        history_candidate_bytes=1_000,
+        manifest_unreceived_task_id_count=1,
+        history_unreceived_task_id_count=1,
     )
     assert baseline == {"manifest": True, "private": True, "history": True}
 
     # Exactly at the manifest ceiling once the worst-case task_id lands ->
     # still admitted (<=, not <).
     at_manifest_ceiling = conversion_attempt.worst_case_admission_for_unknown_response(
-        manifest_current_bytes=manifest_ceiling - task_id_bytes,
-        private_current_bytes=1_000,
-        history_current_bytes=1_000,
-        manifest_may_add_task_id=True,
+        manifest_candidate_bytes=manifest_ceiling - task_id_bytes,
+        private_candidate_bytes=1_000,
+        history_candidate_bytes=1_000,
+        manifest_unreceived_task_id_count=1,
     )
     assert at_manifest_ceiling["manifest"] is True
 
@@ -3041,27 +3047,27 @@ def test_worst_case_admission_uses_upper_bounds_for_unknown_response():
     # This pins that the three files are judged independently: manifest's
     # overrun must not be masked by private/history's headroom.
     only_manifest_over = conversion_attempt.worst_case_admission_for_unknown_response(
-        manifest_current_bytes=manifest_ceiling - task_id_bytes + 1,
-        private_current_bytes=1_000,
-        history_current_bytes=1_000,
-        manifest_may_add_task_id=True,
+        manifest_candidate_bytes=manifest_ceiling - task_id_bytes + 1,
+        private_candidate_bytes=1_000,
+        history_candidate_bytes=1_000,
+        manifest_unreceived_task_id_count=1,
     )
     assert only_manifest_over == {"manifest": False, "private": True, "history": True}
 
     only_private_over = conversion_attempt.worst_case_admission_for_unknown_response(
-        manifest_current_bytes=1_000,
-        private_current_bytes=private_ceiling - url_bytes + 1,
-        history_current_bytes=1_000,
-        private_may_add_result_url=True,
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_ceiling - url_bytes + 1,
+        history_candidate_bytes=1_000,
+        private_unreceived_result_url_count=1,
     )
     assert only_private_over == {"manifest": True, "private": False, "history": True}
 
     only_history_over = conversion_attempt.worst_case_admission_for_unknown_response(
-        manifest_current_bytes=1_000,
-        private_current_bytes=1_000,
-        history_current_bytes=history_ceiling - task_id_bytes - url_bytes + 1,
-        history_may_add_task_id=True,
-        history_may_add_result_url=True,
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=1_000,
+        history_candidate_bytes=history_ceiling - task_id_bytes - url_bytes + 1,
+        history_unreceived_task_id_count=1,
+        history_unreceived_result_url_count=1,
     )
     assert only_history_over == {"manifest": True, "private": True, "history": False}
 
@@ -3071,10 +3077,10 @@ def test_worst_case_admission_uses_upper_bounds_for_unknown_response():
     # add one at all.
     without_worst_case_addition = (
         conversion_attempt.worst_case_admission_for_unknown_response(
-            manifest_current_bytes=manifest_ceiling - task_id_bytes + 1,
-            private_current_bytes=1_000,
-            history_current_bytes=1_000,
-            manifest_may_add_task_id=False,
+            manifest_candidate_bytes=manifest_ceiling - task_id_bytes + 1,
+            private_candidate_bytes=1_000,
+            history_candidate_bytes=1_000,
+            manifest_unreceived_task_id_count=0,
         )
     )
     assert without_worst_case_addition["manifest"] is True
@@ -3089,6 +3095,165 @@ def test_manifest_and_private_candidate_ceilings_match_workflow_read_ceiling():
     # to either side cannot silently drift them apart.
     assert conversion_attempt.MAX_MANIFEST_CANDIDATE_BYTES == workflow.MAX_STATE_BYTES
     assert conversion_attempt.MAX_PRIVATE_CANDIDATE_BYTES == workflow.MAX_STATE_BYTES
+
+
+def test_worst_case_admission_counts_whole_candidate_not_just_unknown_values():
+    # design.md:305 requires admission to take the *largest serialized size*
+    # across every legal candidate for each file, and design.md:296 requires
+    # known fields to be counted at their exact C() length. So the caller
+    # hands in a candidate's exact canonical byte length -- keys, punctuation,
+    # nested objects, sha256 digests, timestamps and the trailing LF all
+    # included -- and the counts only say how many not-yet-received bounded
+    # strings inside that candidate still sit at their `""` placeholder.
+    task_id_bound = conversion_attempt.TASK_ID_UPPER_BOUND_BYTES
+    url_bound = conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+
+    # A private.json result-reference candidate, URL still a placeholder. Its
+    # cost is dominated by structure, not by the one unknown value: the record
+    # carries a 71-byte sha256 digest, an attempt id, a task id and a
+    # timestamp, none of which the old two-boolean contract could express.
+    private_candidate = {
+        "schema_version": 1,
+        "generation": 7,
+        "result_urls": [
+            {
+                "attempt_id": "attempt-1",
+                "task_id": "task-1",
+                "url": "",
+                "url_sha256": "sha256:" + "0" * 64,
+                "observed_at": "2026-01-01T00:00:00Z",
+                "expires_at": None,
+                "validity_window_hours": 24,
+            }
+        ],
+    }
+    private_candidate_bytes = conversion_attempt.canonical_state_byte_length(
+        private_candidate
+    )
+    # Structure alone costs far more than the placeholder value's 2 bytes.
+    assert private_candidate_bytes > 150
+
+    # A create appends *two* history events, and each carries a full event
+    # shell: the whole attempt object, an operation id, timestamps and two
+    # sha256 digests. history_candidate_bytes is the current file plus every
+    # event the operation would append, each already including its trailing LF.
+    submit_intent_event = {
+        "schema_version": 1,
+        "event": "conversion_submit_intent",
+        "operation_id": "attempt-1-submit",
+        "expected_generation": 6,
+        "new_generation": 7,
+        "at": "2026-01-01T00:00:00Z",
+        "attempt": {"attempt_id": "attempt-1", "state": "submitting", "task_id": ""},
+        "previous_attempt": None,
+        "previous_manifest_hash": "sha256:" + "1" * 64,
+        "previous_private_hash": "sha256:" + "2" * 64,
+    }
+    submit_started_event = {
+        "schema_version": 1,
+        "event": "conversion_submit_started",
+        "operation_id": "attempt-1-submit",
+        "previous_generation": 6,
+        "generation": 7,
+        "at": "2026-01-01T00:00:00Z",
+        "manifest_hash": "sha256:" + "3" * 64,
+        "private_hash": "sha256:" + "4" * 64,
+    }
+    history_current_bytes = 4_096
+    appended = conversion_attempt.canonical_state_byte_length(
+        submit_intent_event
+    ) + conversion_attempt.canonical_state_byte_length(submit_started_event)
+    # Two events' shells, so the sum is far more than one event's worth.
+    assert appended > 400
+    history_candidate_bytes = history_current_bytes + appended
+
+    private_ceiling = conversion_attempt.MAX_PRIVATE_CANDIDATE_BYTES
+    unknown_url_bytes = conversion_attempt.worst_case_json_string_bytes(url_bound) - 2
+
+    # The private candidate's own bytes are part of the budget: sitting exactly
+    # at the ceiling once the placeholder is upgraded is admitted, one byte
+    # more is not. If the structure bytes were dropped the flip point would
+    # move by private_candidate_bytes.
+    at_ceiling = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_ceiling - unknown_url_bytes,
+        history_candidate_bytes=1_000,
+        private_unreceived_result_url_count=1,
+    )
+    assert at_ceiling["private"] is True
+    over_ceiling = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_ceiling - unknown_url_bytes + 1,
+        history_candidate_bytes=1_000,
+        private_unreceived_result_url_count=1,
+    )
+    assert over_ceiling == {"manifest": True, "private": False, "history": True}
+
+    # A candidate that fits on its own but not once its placeholder is
+    # upgraded to the worst-case bound.
+    tight = private_ceiling - private_candidate_bytes
+    assert conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_ceiling,
+        history_candidate_bytes=1_000,
+    )["private"] is True
+    assert conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_ceiling,
+        history_candidate_bytes=1_000,
+        private_unreceived_result_url_count=1,
+    )["private"] is False
+    assert tight > 0
+
+    # Each unreceived placeholder is charged separately: the same candidate
+    # holding two unknown result URLs costs twice the upgrade.
+    two_unknowns = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_ceiling - 2 * unknown_url_bytes,
+        history_candidate_bytes=1_000,
+        private_unreceived_result_url_count=2,
+    )
+    assert two_unknowns["private"] is True
+    two_unknowns_over = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_ceiling - 2 * unknown_url_bytes + 1,
+        history_candidate_bytes=1_000,
+        private_unreceived_result_url_count=2,
+    )
+    assert two_unknowns_over["private"] is False
+
+    # History mixes both kinds of unknown, on top of the real two-event shell.
+    history_ceiling = conversion_attempt.bundle.MAX_STATE_BYTES
+    unknown_task_id_bytes = (
+        conversion_attempt.worst_case_json_string_bytes(task_id_bound) - 2
+    )
+    assert conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=1_000,
+        history_candidate_bytes=(
+            history_ceiling - unknown_task_id_bytes - unknown_url_bytes
+        ),
+        history_unreceived_task_id_count=1,
+        history_unreceived_result_url_count=1,
+    )["history"] is True
+    assert conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=1_000,
+        history_candidate_bytes=(
+            history_ceiling - unknown_task_id_bytes - unknown_url_bytes + 1
+        ),
+        history_unreceived_task_id_count=1,
+        history_unreceived_result_url_count=1,
+    )["history"] is False
+
+    # The real two-event create candidate is admitted against a real ceiling.
+    assert conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=1_000,
+        private_candidate_bytes=private_candidate_bytes,
+        history_candidate_bytes=history_candidate_bytes,
+        private_unreceived_result_url_count=1,
+        history_unreceived_task_id_count=1,
+    ) == {"manifest": True, "private": True, "history": True}
 
 
 def test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary():
