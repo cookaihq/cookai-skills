@@ -97,7 +97,7 @@ class WorkflowError(Exception):
         message: str,
         *,
         return_code: int,
-        action_required: str | None = None,
+        action_required: str | None,
         context=None,
     ):
         if action_required is not None and action_required not in ERROR_PATH_ACTIONS:

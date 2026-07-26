@@ -1948,8 +1948,13 @@ def test_workflow_error_accepts_a_null_action_required():
     # 「action_required=None 仍合法」是本任务明写的接口契约，但今天 85 个
     # 构造点没有一处传 None，若无此断言，有人删掉 __init__ 里的 is not None
     # 短路全量回归依然全绿。
-    error = workflow.WorkflowError("invalid_bundle", "message", return_code=4)
-    assert error.action_required is None
+    #
+    # ⚠️ 只断言「显式传 None 合法」，不要断言「该参数可省略」。
+    # action_required 今天是**必传**关键字参数（`action_required: str,`，无默认
+    # 值）。写成省略参数的调用会迫使实现者给它加 `= None` 默认值，那是未经
+    # 授权的构造器 API 放宽，超出本任务范围（2026-07-26 订正：本测试初稿正是
+    # 这么写的，导致修复轮次 1 引入了该默认值）。本任务只改类型标注，不改
+    # 参数是否必传。
     explicit = workflow.WorkflowError(
         "invalid_bundle", "message", return_code=4, action_required=None
     )
