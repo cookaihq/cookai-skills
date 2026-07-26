@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -2926,3 +2927,42 @@ def test_result_reference_is_expired_rejects_malformed_attempt(attempt):
             attempt, at="2024-01-02T03:04:05Z"
         )
     assert excinfo.value.code == "integrity_violation"
+
+
+def test_canonical_accounting_matches_writer_bytes_including_trailing_lf(tmp_path):
+    # Local-state capacity admission (plan.md 2.2/2.3) needs to estimate how
+    # many bytes a candidate payload will occupy on disk *before* writing it,
+    # using the same canonical encoder bundle.atomic_write_json/append_history
+    # actually use. If the accounting side re-implemented its own json.dumps
+    # call with different parameters, the estimate could silently drift from
+    # what gets persisted. This pins the two paths to the same source: the
+    # byte length conversion_attempt.canonical_state_byte_length reports must
+    # equal, exactly, the length of the compact ASCII JSON + single trailing
+    # LF that bundle.atomic_write_json actually writes to disk -- including
+    # for a payload containing non-ASCII content, where ensure_ascii's value
+    # changes the byte count the most.
+    value = {
+        "schema_version": 1,
+        "note": "文件名包含中文与非 ASCII 字符 café",
+        "nested": {"z": 1, "a": [1, 2, 3], "empty": {}},
+    }
+    expected_bytes = (
+        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY
+    dir_fd = os.open(str(tmp_path), directory_flags)
+    try:
+        conversion_attempt.bundle.atomic_write_json(
+            "canonical-accounting.json", value, dir_fd=dir_fd
+        )
+    finally:
+        os.close(dir_fd)
+
+    written_bytes = (tmp_path / "canonical-accounting.json").read_bytes()
+
+    assert written_bytes == expected_bytes
+    assert conversion_attempt.canonical_state_byte_length(value) == len(
+        expected_bytes
+    )

@@ -163,6 +163,19 @@ def object_hash(value: dict) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def canonical_state_byte_length(value: dict) -> int:
+    """Bytes a candidate manifest/private-state/history-event payload would
+    occupy on disk if written now.
+
+    Local-state capacity admission (plan.md 2.2/2.3) needs this number
+    *before* writing, to decide whether to fail closed instead of writing a
+    truncated file. It delegates to bundle.canonical_json_bytes -- the same
+    encoder bundle.atomic_write_json/append_history use to actually persist
+    state -- so the estimate can never diverge from what the writer produces.
+    """
+    return len(bundle.canonical_json_bytes(value))
+
+
 def _parse_timestamp(value: str) -> datetime:
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:

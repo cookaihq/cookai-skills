@@ -30,7 +30,16 @@ def decode_json_object(data: bytes) -> dict:
     return value
 
 
-def _json_bytes(value: dict) -> bytes:
+def canonical_json_bytes(value: dict) -> bytes:
+    """Canonical on-disk encoding for work-bundle JSON state.
+
+    Compact ASCII JSON (sorted keys, no separator whitespace) plus a single
+    trailing LF. This is the *only* place that encodes bytes for
+    atomic_write_json/append_history; local-state capacity accounting
+    (conversion_attempt.canonical_state_byte_length) calls this same
+    function so its byte estimates cannot drift from what actually lands on
+    disk.
+    """
     return (
         json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         + "\n"
@@ -81,7 +90,7 @@ def _atomic_write_bytes(name: str, data: bytes, *, dir_fd: int) -> None:
 
 
 def atomic_write_json(name: str, value: dict, *, dir_fd: int) -> None:
-    _atomic_write_bytes(name, _json_bytes(value), dir_fd=dir_fd)
+    _atomic_write_bytes(name, canonical_json_bytes(value), dir_fd=dir_fd)
 
 
 def _open_private_file(name: str, *, dir_fd: int, writable: bool = False) -> int:
@@ -151,7 +160,7 @@ def read_history(*, state_fd: int) -> list[dict]:
 
 
 def append_history(event: dict, *, state_fd: int) -> None:
-    data = _json_bytes(event)
+    data = canonical_json_bytes(event)
     previous = _read_private_file("history.ndjson", dir_fd=state_fd)
     if not previous.endswith(b"\n"):
         raise BundleStateError("bundle history has an incomplete final event")
