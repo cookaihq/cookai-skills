@@ -182,12 +182,13 @@ def read_regular_bytes(path: str, *, max_bytes: int, secret: bool,
 
 
 def atomic_write(path: str, data: bytes, *, mode: int = 0o600,
-                 replace: bool = True) -> None:
+                 replace: bool = True, dir_fd: Optional[int] = None) -> None:
     if not isinstance(data, bytes):
         raise TypeError("atomic_write data must be bytes")
     absolute = lexical_absolute(path)
     parent, name = os.path.split(absolute)
-    parent_fd = open_directory(parent)
+    owns_parent_fd = dir_fd is None
+    parent_fd = open_directory(parent) if owns_parent_fd else dir_fd
     temporary = f".{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     descriptor = None
     published = False
@@ -226,4 +227,5 @@ def atomic_write(path: str, data: bytes, *, mode: int = 0o600,
                 os.unlink(temporary, dir_fd=parent_fd)
             except FileNotFoundError:
                 pass
-        os.close(parent_fd)
+        if owns_parent_fd:
+            os.close(parent_fd)
