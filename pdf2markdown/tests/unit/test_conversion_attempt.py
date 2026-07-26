@@ -632,7 +632,10 @@ def test_a_crash_after_submit_intent_recovers_unknown_without_ever_sending_creat
     assert recovered["conversion_state"] == "submission_unknown"
     assert recovered["action_required"] == "resolve_submission_unknown"
     manifest = json.loads((bundle / "manifest.json").read_text())
-    assert manifest["conversion_attempts"][0]["reason_code"] == (
+    # schema v2 (task 2.1b): the folded `reason` is single-valued per state,
+    # and the branch the wire actually took survives in `reason_detail`.
+    assert manifest["conversion_attempts"][0]["reason"] == "no_task_id"
+    assert manifest["conversion_attempts"][0]["reason_detail"] == (
         "interrupted_before_result_commit"
     )
     assert create.calls == []
@@ -1531,15 +1534,30 @@ def test_failed_task_stops_with_a_bound_confirm_action_and_never_recreates_itsel
     assert len(create.calls) == 1
 
 
+# expected_attempt_reason is deliberately a separate column from
+# expected_reason: schema v2 (task 2.1b) renames the persisted reason of the
+# drifted-credential state to credential_fingerprint_changed, while the flat
+# state name -- and with it outcome/conversion_attempt_state -- is untouched
+# this substep. Collapsing the two columns back into one would hide exactly
+# that rename.
 @pytest.mark.parametrize(
-    ("poll_environ", "expected_reason"),
+    ("poll_environ", "expected_reason", "expected_attempt_reason"),
     [
-        ({}, "credential_source_missing"),
-        ({"AIHUB_API_KEY": "different-key"}, "credential_source_changed"),
+        ({}, "credential_source_missing", "credential_source_missing"),
+        (
+            {"AIHUB_API_KEY": "different-key"},
+            "credential_source_changed",
+            "credential_fingerprint_changed",
+        ),
     ],
 )
 def test_resume_persists_missing_and_drifted_creation_credentials_without_polling(
-    tmp_path, capsys, monkeypatch, poll_environ, expected_reason
+    tmp_path,
+    capsys,
+    monkeypatch,
+    poll_environ,
+    expected_reason,
+    expected_attempt_reason,
 ):
     bundle, staged, dependencies, key, _source_url, _source_sha256 = (
         ready_staged_bundle(tmp_path, capsys, monkeypatch)
@@ -1578,7 +1596,8 @@ def test_resume_persists_missing_and_drifted_creation_credentials_without_pollin
     assert blocked["conversion_state"] == "recoverable_error"
     assert blocked["conversion_attempt_state"] == expected_reason
     manifest = json.loads((bundle / "manifest.json").read_text())
-    assert manifest["conversion_attempts"][-1]["reason_code"] == expected_reason
+    assert manifest["conversion_attempts"][-1]["reason"] == expected_attempt_reason
+    assert manifest["conversion_attempts"][-1]["reason_detail"] is None
     assert manifest["conversion_attempts"][-1]["poll_count"] == 0
     assert len(manifest["conversion_attempts"]) == 1
 
@@ -1602,12 +1621,18 @@ def test_resume_persists_missing_and_drifted_creation_credentials_without_pollin
     assert len(create.calls) == 1
 
 
+# See the credential test above for why expected_attempt_reason is its own
+# column: 401 keeps the flat state name poll_unauthorized but persists the
+# renamed reason poll_authentication_rejected from schema v2 onward.
 @pytest.mark.parametrize(
-    ("http_status", "expected_reason"),
-    [(401, "poll_unauthorized"), (404, "task_unavailable")],
+    ("http_status", "expected_reason", "expected_attempt_reason"),
+    [
+        (401, "poll_unauthorized", "poll_authentication_rejected"),
+        (404, "task_unavailable", "task_unavailable"),
+    ],
 )
 def test_poll_401_and_404_have_distinct_recoverable_reasons_on_the_same_task(
-    tmp_path, capsys, monkeypatch, http_status, expected_reason
+    tmp_path, capsys, monkeypatch, http_status, expected_reason, expected_attempt_reason
 ):
     bundle, staged, dependencies, key, _source_url, _source_sha256 = (
         ready_staged_bundle(tmp_path, capsys, monkeypatch)
@@ -1648,7 +1673,8 @@ def test_poll_401_and_404_have_distinct_recoverable_reasons_on_the_same_task(
     assert recoverable["conversion_attempt_state"] == expected_reason
     assert rejected.calls == 1
     manifest = json.loads((bundle / "manifest.json").read_text())
-    assert manifest["conversion_attempts"][-1]["reason_code"] == expected_reason
+    assert manifest["conversion_attempts"][-1]["reason"] == expected_attempt_reason
+    assert manifest["conversion_attempts"][-1]["reason_detail"] is None
     assert manifest["conversion_attempts"][-1]["task_id"] == (
         "task-auth-diagnostic"
     )
@@ -1729,7 +1755,8 @@ def test_transient_poll_failures_are_persisted_and_only_the_same_task_is_retried
     assert recoverable["conversion_state"] == "recoverable_error"
     assert recoverable["conversion_attempt_state"] == "poll_transient"
     manifest = json.loads((bundle / "manifest.json").read_text())
-    assert manifest["conversion_attempts"][-1]["reason_code"] == "poll_transient"
+    assert manifest["conversion_attempts"][-1]["reason"] == "poll_transient"
+    assert manifest["conversion_attempts"][-1]["reason_detail"] == "poll_transient"
     assert manifest["conversion_attempts"][-1]["poll_count"] == 1
     assert manifest["conversion_attempts"][-1]["next_poll_at"] == (
         "2024-01-02T03:04:13Z"
@@ -1816,7 +1843,8 @@ def test_processing_poll_window_expires_without_an_extra_network_request(
     assert timed_out["conversion_state"] == "recoverable_error"
     assert timed_out["conversion_attempt_state"] == "poll_timeout"
     manifest = json.loads((bundle / "manifest.json").read_text())
-    assert manifest["conversion_attempts"][-1]["reason_code"] == "poll_timeout"
+    assert manifest["conversion_attempts"][-1]["reason"] == "poll_timeout"
+    assert manifest["conversion_attempts"][-1]["reason_detail"] is None
     assert manifest["conversion_attempts"][-1]["task_id"] == "task-poll-timeout"
     assert len(first_poll.calls) == 1
     assert len(create.calls) == 1
@@ -1985,9 +2013,10 @@ def test_completed_empty_result_window_has_its_own_bounded_timeout(
     assert timed_out["conversion_state"] == "recoverable_error"
     assert timed_out["conversion_attempt_state"] == "result_pending_timeout"
     manifest = json.loads((bundle / "manifest.json").read_text())
-    assert manifest["conversion_attempts"][-1]["reason_code"] == (
+    assert manifest["conversion_attempts"][-1]["reason"] == (
         "result_pending_timeout"
     )
+    assert manifest["conversion_attempts"][-1]["reason_detail"] is None
     assert manifest["conversion_attempts"][-1]["task_id"] == (
         "task-result-timeout"
     )
@@ -2285,31 +2314,39 @@ def _crash_resume(tmp_path, bundle, environ, generation, *, transport, now):
         )
 
 
-# conversion_state, attempt.state, attempt.reason_code, len(private result_urls)
-# after recovery. Pinning the settled state -- not just "rc 0 and no network" --
-# is what keeps a recovery that silently discards a valid decision visible.
+# conversion_state, attempt.state, attempt.reason, attempt.reason_detail,
+# len(private result_urls) after recovery. Pinning the settled state -- not
+# just "rc 0 and no network" -- is what keeps a recovery that silently
+# discards a valid decision visible.
+#
+# schema v2 (task 2.1b) split the single v1 `reason_code` column into two, so
+# this table carries both: the downgraded row is the only one where they
+# differ, and asserting only one of them would stop distinguishing "recovery
+# downgraded to poll_transient because the payload was lost" from "recovery
+# downgraded to poll_transient for some other transient reason".
 REFRESH_RECOVERY_EXPECTATIONS = {
     # The rebuilt intent carries the reservation's own `at`, so a crash before
     # the intent is durable replays exactly the decision the `intent` boundary
     # replays.
-    ("reservation", "new"): ("recoverable_error", "result_ready", None, 1),
-    ("intent", "new"): ("recoverable_error", "result_ready", None, 1),
-    ("prepared", "new"): ("converted", "result_ready", None, 2),
+    ("reservation", "new"): ("recoverable_error", "result_ready", None, None, 1),
+    ("intent", "new"): ("recoverable_error", "result_ready", None, None, 1),
+    ("prepared", "new"): ("converted", "result_ready", None, None, 2),
     # private.json never reached the disk, so the renewed URL is genuinely
     # gone: recovery must downgrade the decision instead of inventing a URL.
     ("private", "new"): (
         "recoverable_error",
         "poll_transient",
+        "poll_transient",
         "result_private_payload_lost",
         1,
     ),
-    ("manifest", "new"): ("result_downloading", "result_ready", None, 2),
+    ("manifest", "new"): ("result_downloading", "result_ready", None, None, 2),
     # A refresh that answers with the same URL appends no new version, so the
     # payload the crash left behind is the record already on disk rather than
     # "one more than before". It is not lost, and recovery must keep the
     # result_ready decision at either boundary.
-    ("private", "same"): ("result_downloading", "result_ready", None, 1),
-    ("manifest", "same"): ("result_downloading", "result_ready", None, 1),
+    ("private", "same"): ("result_downloading", "result_ready", None, None, 1),
+    ("manifest", "same"): ("result_downloading", "result_ready", None, None, 1),
 }
 
 # The journal event the crash left dangling, so a row cannot claim a boundary
@@ -2489,7 +2526,8 @@ def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
     (
         expected_conversion_state,
         expected_attempt_state,
-        expected_reason_code,
+        expected_reason,
+        expected_reason_detail,
         expected_result_urls,
     ) = REFRESH_RECOVERY_EXPECTATIONS[(boundary, renewal)]
     attempt = manifest["conversion_attempts"][-1]
@@ -2499,7 +2537,8 @@ def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
         renewal,
     )
     assert attempt["state"] == expected_attempt_state, (boundary, renewal)
-    assert attempt["reason_code"] == expected_reason_code, (boundary, renewal)
+    assert attempt["reason"] == expected_reason, (boundary, renewal)
+    assert attempt["reason_detail"] == expected_reason_detail, (boundary, renewal)
     assert len(private_state["result_urls"]) == expected_result_urls, (
         boundary,
         renewal,
@@ -3814,6 +3853,21 @@ def test_legal_triples_is_the_single_owner_of_state_legality():
     assert len(ca.LEGAL_TRIPLES) == 18
     assert {row.attempt_state for row in ca.LEGAL_TRIPLES} == ca.FLAT_STATE_DOMAIN
 
+    # 2.1b 前置 B（2.1a 复审转来）：四行占位 None 必须被显式钉住。这四行的
+    # reason_code / http_status / upstream_status 被 POLL_STATE_CONTRACT 与
+    # _LEGAL_TRIPLE_BY_ATTEMPT_STATE 两处派生全部过滤掉，改成任意垃圾值今天
+    # 都不会变红；而 2.1b 起就有读者读这几行（v1 降级要靠 .reason_code 取
+    # 线上值）。把「恒为 None」从「碰巧如此」升格为显式契约。
+    placeholder_states = {
+        "not_started", "submitting", "submission_unknown", "poll_transient",
+    }
+    assert placeholder_states == set(ca._NON_CONTRACT_STATES)
+    assert {
+        row.attempt_state: (row.reason_code, row.http_status, row.upstream_status)
+        for row in ca.LEGAL_TRIPLES
+        if row.attempt_state in placeholder_states
+    } == {state: (None, None, None) for state in placeholder_states}
+
     # 派生处 1：POLL_STATE_CONTRACT。与独立 oracle 比，不与自身推导式比。
     assert ca.POLL_STATE_CONTRACT == CONTRACT_BEFORE_REFACTOR
 
@@ -3859,6 +3913,195 @@ def test_legal_triples_is_the_single_owner_of_state_legality():
         assert branch.upstream_status == upstream_status, branch.state
         assert branch.reason_code == reason_code, branch.state
     assert len([b for b in branches if b.state == "poll_transient"]) == 4
+
+
+# --- Task 2.1b: the schema v2 attempt field set ----------------------------
+#
+# The two key sets below are independent literal oracles, transcribed once so
+# no assertion in this section ever compares a production comprehension with
+# itself (the failure mode the 2.1a review caught). SCHEMA_V1_ATTEMPT_KEYS is
+# the field set the pre-2.1b implementation wrote, copied verbatim from
+# conversion_attempt.ATTEMPT_KEYS at schema version 1.
+
+SCHEMA_V1_ATTEMPT_KEYS = frozenset(
+    {
+        "schema_version", "attempt_id", "state", "api_base", "request_summary",
+        "request_hash", "credential", "staging_identity", "submitted_at",
+        "response_at", "http_status", "reason_code", "task_id",
+        "pending_action", "authorization", "poll_started_at",
+        "poll_deadline_at", "last_polled_at", "poll_count", "upstream_status",
+        "next_poll_at", "consecutive_transient_count", "result_url_sha256",
+        "result_observed_at", "result_validity_hours",
+        "result_pending_started_at", "result_pending_deadline_at",
+    }
+)
+
+SCHEMA_V2_ATTEMPT_KEYS = frozenset(
+    {
+        "schema_version", "attempt_id", "state", "api_base", "request_summary",
+        "request_hash", "credential", "staging_identity", "submitted_at",
+        "response_at", "http_status", "task_id", "pending_action",
+        "authorization", "poll_started_at", "poll_deadline_at",
+        "last_polled_at", "poll_count", "upstream_status", "next_poll_at",
+        "consecutive_transient_count", "result_url_sha256",
+        "result_observed_at", "result_validity_hours",
+        "result_pending_started_at", "result_pending_deadline_at",
+        "reason", "reason_detail", "authorization_kind",
+        "result_refresh_round_count",
+    }
+)
+
+
+def test_attempt_schema_version_two_carries_the_final_field_set():
+    import conversion_attempt as ca
+
+    assert ca.SCHEMA_VERSION == 2
+    assert "reason_code" not in ca.ATTEMPT_KEYS
+    assert {
+        "reason", "reason_detail", "authorization_kind",
+        "result_refresh_round_count",
+    } <= ca.ATTEMPT_KEYS
+    # design.md Migration Plan 步骤 3：字段集变更一次性落位。整集比对（而非
+    # 只查四个新键）才能钉住「这是唯一一次变更」——多带或少带任何一个字段
+    # 都会红。
+    assert set(ca.ATTEMPT_KEYS) == set(SCHEMA_V2_ATTEMPT_KEYS)
+    assert len(SCHEMA_V1_ATTEMPT_KEYS) == 27
+    assert len(SCHEMA_V2_ATTEMPT_KEYS) == 30
+    assert SCHEMA_V1_ATTEMPT_KEYS - SCHEMA_V2_ATTEMPT_KEYS == {"reason_code"}
+    assert SCHEMA_V2_ATTEMPT_KEYS - SCHEMA_V1_ATTEMPT_KEYS == {
+        "reason", "reason_detail", "authorization_kind",
+        "result_refresh_round_count",
+    }
+
+
+def test_the_non_contract_state_exclusion_domain_has_a_single_owner():
+    """2.1b 前置 A（2.1a 复审转来）。
+
+    `NON_POLL_OBSERVATIONS | {"poll_transient"}` 这个排除域原本在
+    `_LEGAL_TRIPLE_BY_ATTEMPT_STATE` 与 `POLL_STATE_CONTRACT` 两处推导式的
+    `if` 里各写一遍。两处一旦不一致，索引域与 contract 就分歧——正是 2.1a
+    刚消灭的漂移形态以新形式回归。这里钉住：域有名字、且两处派生的键集都
+    恰好等于「全域减去它」。
+    """
+    import conversion_attempt as ca
+
+    assert set(ca._NON_CONTRACT_STATES) == {
+        "not_started", "submitting", "submission_unknown", "poll_transient",
+    }
+    contract_domain = set(ca.FLAT_STATE_DOMAIN) - set(ca._NON_CONTRACT_STATES)
+    assert len(contract_domain) == 14
+    assert set(ca.POLL_STATE_CONTRACT) == contract_domain
+    assert set(ca._LEGAL_TRIPLE_BY_ATTEMPT_STATE) == contract_domain
+
+
+def _schema_v1_attempt(attempt, wire_reason_code_by_state):
+    """The exact schema v1 record a v1 implementation would have written for
+    this v2 attempt.
+
+    v1's single `reason_code` field held today's *wire* reason code, so it is
+    rebuilt from the two columns v2 split it into: `reason_detail` for the two
+    states whose wire value ranges over a set (submission_unknown,
+    poll_transient), and LEGAL_TRIPLES' own `reason_code` column -- the owner
+    of the wire value, per its docstring -- for the 14 single-valued contract
+    states. The four placeholder rows contribute None, which is what a v1
+    attempt in those states carried.
+    """
+    downgraded = {
+        key: value
+        for key, value in attempt.items()
+        if key in SCHEMA_V1_ATTEMPT_KEYS
+    }
+    detail = attempt.get("reason_detail")
+    downgraded["schema_version"] = 1
+    downgraded["reason_code"] = (
+        detail
+        if detail is not None
+        else wire_reason_code_by_state.get(attempt["state"])
+    )
+    return downgraded
+
+
+def test_a_schema_version_one_attempt_fails_closed(tmp_path, capsys, monkeypatch):
+    """A schema v1 bundle must be refused by the v2 implementation.
+
+    design.md fixes this as a hard break: no migrator and no dual-write
+    compatibility window, so the only correct behaviour is to fail closed --
+    rc 4 / invalid_bundle -- with nothing written and nothing sent.
+
+    The rejection is attributed before the CLI runs: `valid_private_state`
+    accepts the v2 manifest and refuses the same manifest carrying v1
+    attempts, so the rc 4 below cannot be explained away as an incidental
+    history-hash mismatch caused by rewriting manifest.json.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    create_rc, submitted, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=SuccessfulCreate("task-schema-v2"),
+    )
+    assert create_rc == 0
+    assert submitted["conversion_attempt_state"] == "submitted"
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    attempt = manifest["conversion_attempts"][-1]
+
+    # Control: the v2 record this bundle actually holds is well formed, and
+    # its four new columns carry their 2.1b values (`submitted` folds to no
+    # reason at all; authorization_kind/result_refresh_round_count are the
+    # placeholders 2.2/2.3 and 2.1d will give meaning to).
+    assert set(attempt) == set(SCHEMA_V2_ATTEMPT_KEYS)
+    assert attempt["schema_version"] == 2
+    assert attempt["reason"] is None
+    assert attempt["reason_detail"] is None
+    assert attempt["authorization_kind"] is None
+    assert attempt["result_refresh_round_count"] == 0
+    assert conversion_attempt.valid_private_state(private_state, manifest) is True
+
+    wire_reason_code_by_state = {
+        row.attempt_state: row.reason_code
+        for row in conversion_attempt.LEGAL_TRIPLES
+    }
+    v1_manifest = json.loads(json.dumps(manifest))
+    v1_manifest["conversion_attempts"] = [
+        _schema_v1_attempt(item, wire_reason_code_by_state)
+        for item in v1_manifest["conversion_attempts"]
+    ]
+    assert set(v1_manifest["conversion_attempts"][-1]) == set(
+        SCHEMA_V1_ATTEMPT_KEYS
+    )
+    assert conversion_attempt.valid_private_state(private_state, v1_manifest) is (
+        False
+    )
+
+    (bundle / "manifest.json").write_text(
+        json.dumps(v1_manifest, sort_keys=True, separators=(",", ":"))
+    )
+    before = _bundle_state_snapshot(bundle)
+    transport = CountingNeverNetwork()
+
+    rc, result, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=transport,
+    )
+
+    assert rc == 4, json.dumps(result, sort_keys=True)
+    assert result["errors"][0]["code"] == "invalid_bundle"
+    assert transport.calls == []
+    assert _bundle_state_snapshot(bundle) == before
 
 
 # --- Task 1.3: characterization of the pre-fold flat state projections -----
