@@ -105,7 +105,7 @@ def probe_for(project, **overrides):
         cli_target="project:images",
         cli_caller="pdf2markdown",
         use_local_key=False,
-        executable="/usr/bin/python3",
+        executable_path="/usr/bin/python3",
         state_root=str(project / ".s3-upload"),
     )
     kwargs.update(overrides)
@@ -122,7 +122,7 @@ def test_probe_reports_identity_fields(project):
     item = probe_for(project)
     assert item["caller"] == "pdf2markdown"
     assert item["cwd"] == str(project)
-    assert item["executable"] == "/usr/bin/python3"
+    assert item["executable_path"] == "/usr/bin/python3"
     assert item["state_root"] == str(project / ".s3-upload")
     assert item["contract_versions"] == [1]
 
@@ -335,7 +335,7 @@ def test_probe_normalizes_non_utf8_project_root_for_contract_hash(monkeypatch):
     item = build_probe(
         cwd=surrogate_cwd, config_home="/tmp/home", environ={},
         cli_target="project:images", cli_caller=None, use_local_key=False,
-        executable="/usr/bin/python3", state_root="/tmp/state",
+        executable_path="/usr/bin/python3", state_root="/tmp/state",
     )
 
     assert item["blocking_reason"] is None

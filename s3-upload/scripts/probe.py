@@ -25,11 +25,11 @@ def _canonical_text(value: Optional[str]) -> Optional[str]:
 
 def build_probe(*, cwd: str, config_home: str, environ: Dict[str, str],
                 cli_target: Optional[str], cli_caller: Optional[str],
-                use_local_key: bool, executable: str, state_root: str) -> Dict[str, Any]:
+                use_local_key: bool, executable_path: str, state_root: str) -> Dict[str, Any]:
     cwd = os.path.abspath(cwd)
     body: Dict[str, Any] = {
         "contract_versions": [CONTRACT_VERSION],
-        "executable": _canonical_text(executable),
+        "executable_path": _canonical_text(executable_path),
         "caller": _canonical_text(cli_caller),
         "cwd": _canonical_text(cwd),
         "state_root": _canonical_text(state_root),

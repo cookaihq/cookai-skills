@@ -49,7 +49,7 @@ def probe_for(project, caller, target=None):
     return build_probe(
         cwd=str(project), config_home=str(project / "home"), environ={},
         cli_target=target, cli_caller=caller, use_local_key=False,
-        executable="/usr/bin/python3", state_root=str(project / ".s3-upload"),
+        executable_path="/usr/bin/python3", state_root=str(project / ".s3-upload"),
     )
 
 

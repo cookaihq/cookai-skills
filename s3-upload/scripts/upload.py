@@ -514,7 +514,7 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
             cli_target=args.target,
             cli_caller=args.caller_skill,
             use_local_key=args.use_local_key,
-            executable=sys.executable,
+            executable_path=sys.executable,
             state_root=os.path.join(cwd, ".s3-upload"),
         )
         sys.stdout.write(serialize_artifact(artifact).decode("utf-8") + "\n")
