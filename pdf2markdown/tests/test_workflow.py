@@ -1813,3 +1813,38 @@ def test_start_copies_and_hashes_the_same_open_source_descriptor(
     assert (bundle / "01-source" / "source.pdf").read_bytes() == PDF_BYTES
     assert result["evidence_hash"] == f"sha256:{PDF_SHA256}"
     assert manifest["source"]["sha256"] == PDF_SHA256
+
+
+def test_atomic_write_json_and_append_history_use_shared_canonical_encoder(tmp_path):
+    # workflow._atomic_write_json/_append_history (workflow.py:252-253,
+    # 282-283) are a second writer for manifest.json/private.json/
+    # history.ndjson (used at bundle-creation time, workflow.py:536/538/548):
+    # they used to inline their own copy of
+    # `json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"`
+    # rather than delegating to bundle.canonical_json_bytes -- the encoder
+    # bundle.atomic_write_json/append_history actually use for every other
+    # write path. This pins that both writers now produce byte-for-byte
+    # identical output to bundle.canonical_json_bytes, including for a
+    # payload with quotes, a backslash and non-ASCII content (where
+    # ensure_ascii's value changes the byte count the most), proving the
+    # switch to the shared encoder did not change what lands on disk.
+    value = {
+        "schema_version": 1,
+        "note": '文件名包含中文与非 ASCII 字符 café "quoted" and a backslash \\',
+        "nested": {"z": 1, "a": [1, 2, 3], "empty": {}},
+    }
+    expected_bytes = workflow.bundle_module.canonical_json_bytes(value)
+
+    manifest_path = tmp_path / "manifest.json"
+    workflow._atomic_write_json(manifest_path, value)
+    assert manifest_path.read_bytes() == expected_bytes
+
+    history_path = tmp_path / "history.ndjson"
+    workflow._append_history(history_path, value)
+    assert history_path.read_bytes() == expected_bytes
+
+    second_event = {"schema_version": 1, "event": "second"}
+    workflow._append_history(history_path, second_event)
+    assert history_path.read_bytes() == expected_bytes + (
+        workflow.bundle_module.canonical_json_bytes(second_event)
+    )

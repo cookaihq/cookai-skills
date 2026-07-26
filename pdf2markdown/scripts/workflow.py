@@ -250,7 +250,12 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _atomic_write_json(path: Path, value: dict) -> None:
-    data = (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    # Delegate to bundle.canonical_json_bytes -- the same encoder
+    # bundle.atomic_write_json/append_history use for every other manifest/
+    # private/history write -- instead of a separately maintained copy of
+    # the same encoding parameters, so this bundle-creation-time writer
+    # cannot silently drift from the rest of the codebase.
+    data = bundle_module.canonical_json_bytes(value)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     temporary = Path(temporary_name)
     try:
@@ -280,7 +285,9 @@ def _create_private_file(path: Path) -> None:
 
 
 def _append_history(path: Path, event: dict) -> None:
-    data = (json.dumps(event, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    # See _atomic_write_json above: delegate to the shared canonical encoder
+    # instead of a separately maintained copy of the same parameters.
+    data = bundle_module.canonical_json_bytes(event)
     descriptor = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
