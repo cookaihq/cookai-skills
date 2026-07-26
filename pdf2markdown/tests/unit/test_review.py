@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 import correction as correction_module
+import raw_conversion as raw_conversion_module
 import page_crop as page_crop_module
 import review as review_module
+import workflow as workflow_module
 
 import test_raw_conversion as raw_test
 
@@ -5103,3 +5105,112 @@ def test_finalization_revalidates_local_resource_snapshot_after_input_load(
     )
     assert rc == 4
     assert inspected["errors"][0]["code"] == "integrity_violation"
+
+
+def _bundle_history_state(bundle):
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    history = [
+        json.loads(line)
+        for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
+    ]
+    return manifest, private_state, history
+
+
+def test_pending_conversion_history_resolver_understands_review_events(
+    tmp_path, capsys, monkeypatch
+):
+    # `conversion_attempt.recover_interrupted_attempt` replays the durable
+    # prefix with whatever reducer `workflow` hands it, so that reducer has to
+    # understand every event the bundle can hold. The ladder must therefore
+    # follow the manifest's own layering rather than stopping at raw
+    # conversion, or a review-bearing bundle would be handed a reducer that
+    # hard-fails on its own history.
+    bundle, converted, dependencies = converted_bundle(tmp_path, capsys, monkeypatch)
+
+    manifest, private_state, history = _bundle_history_state(bundle)
+    assert "review" not in manifest
+    # Before any review event the review reducer is a verbatim delegation, so
+    # adding the rung cannot change how existing histories are replayed.
+    assert review_module.resolve_history_state(
+        history, manifest_template=manifest, private_template=private_state
+    ) == raw_conversion_module.resolve_history_state(
+        history, manifest_template=manifest, private_template=private_state
+    )
+
+    rc, pending, stderr = raw_test.invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(converted["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=raw_test.NeverNetwork(),
+    )
+    assert rc == 0, (pending, stderr)
+    review_input = tmp_path / "resolver-review-input.json"
+    review_input.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "local_complete",
+                "segments": [
+                    {
+                        "segment_id": "segment-0001",
+                        "source_pages": {"start": 1, "end": 1},
+                        "markdown_blocks": ["block-000001"],
+                        "checks": passing_checks(),
+                    }
+                ],
+                "boundaries": [],
+                "findings": [],
+                "page_misc": [],
+                "absence_basis": [],
+            }
+        )
+    )
+    rc, completed, stderr = raw_test.invoke(
+        capsys,
+        [
+            "record",
+            "review",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(pending["generation"]),
+            "--action-id",
+            pending["action_id"],
+            "--evidence-hash",
+            pending["evidence_hash"],
+            "--input",
+            str(review_input),
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=raw_test.NeverNetwork(),
+    )
+    assert rc == 0, (completed, stderr)
+
+    manifest, private_state, history = _bundle_history_state(bundle)
+    assert "review" in manifest
+    # The raw reducer -- the deepest rung the ladder used to reach -- cannot
+    # replay this history at all.
+    assert (
+        raw_conversion_module.resolve_history_state(
+            history, manifest_template=manifest, private_template=private_state
+        )
+        is None
+    )
+    resolver = workflow_module._conversion_history_resolver(manifest)
+    assert (
+        resolver(
+            history, manifest_template=manifest, private_template=private_state
+        )
+        is not None
+    )

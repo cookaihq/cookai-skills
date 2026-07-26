@@ -10,7 +10,7 @@ import pytest
 import conversion_attempt
 import raw_conversion
 import workflow
-from test_raw_conversion import ArchiveTransport, make_zip
+from test_raw_conversion import ArchiveTransport, make_zip, ready_result_bundle
 
 
 NOW = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
@@ -2279,9 +2279,58 @@ def _crash_resume(tmp_path, bundle, environ, generation, *, transport, now):
         )
 
 
-@pytest.mark.parametrize("boundary", ["intent", "prepared", "private", "manifest"])
+# conversion_state, attempt.state, attempt.reason_code, len(private result_urls)
+# after recovery. Pinning the settled state -- not just "rc 0 and no network" --
+# is what keeps a recovery that silently discards a valid decision visible.
+REFRESH_RECOVERY_EXPECTATIONS = {
+    # The rebuilt intent carries the reservation's own `at`, so a crash before
+    # the intent is durable replays exactly the decision the `intent` boundary
+    # replays.
+    ("reservation", "new"): ("recoverable_error", "result_ready", None, 1),
+    ("intent", "new"): ("recoverable_error", "result_ready", None, 1),
+    ("prepared", "new"): ("converted", "result_ready", None, 2),
+    # private.json never reached the disk, so the renewed URL is genuinely
+    # gone: recovery must downgrade the decision instead of inventing a URL.
+    ("private", "new"): (
+        "recoverable_error",
+        "poll_transient",
+        "result_private_payload_lost",
+        1,
+    ),
+    ("manifest", "new"): ("result_downloading", "result_ready", None, 2),
+    # A refresh that answers with the same URL appends no new version, so the
+    # payload the crash left behind is the record already on disk rather than
+    # "one more than before". It is not lost, and recovery must keep the
+    # result_ready decision at either boundary.
+    ("private", "same"): ("result_downloading", "result_ready", None, 1),
+    ("manifest", "same"): ("result_downloading", "result_ready", None, 1),
+}
+
+# The journal event the crash left dangling, so a row cannot claim a boundary
+# it never actually reached.
+REFRESH_CRASH_LAST_EVENT = {
+    "reservation": "raw_conversion_reservation",
+    "intent": "raw_conversion_intent",
+    "prepared": "raw_conversion_intent",
+    "private": "conversion_poll_result_intent",
+    "manifest": "conversion_poll_result_intent",
+}
+
+
+@pytest.mark.parametrize(
+    ("boundary", "renewal"),
+    [
+        ("reservation", "new"),
+        ("intent", "new"),
+        ("prepared", "new"),
+        ("private", "new"),
+        ("manifest", "new"),
+        ("private", "same"),
+        ("manifest", "same"),
+    ],
+)
 def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
-    tmp_path, capsys, monkeypatch, boundary
+    tmp_path, capsys, monkeypatch, boundary, renewal
 ):
     # A locally expired result reference is refreshed by re-polling the same
     # Doc2X task. Crashing anywhere along that journey must never cost a
@@ -2296,16 +2345,19 @@ def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
     ][-1]["request_summary"]["filename"]
     generation = ready["generation"]
 
-    if boundary == "intent":
-        # Crash after raw_conversion_intent, before the expiry rejection.
-        original_commit_rejection = raw_conversion._commit_rejection
+    if boundary in {"reservation", "intent"}:
+        if boundary == "reservation":
+            # Crash after raw_conversion_reservation, before its intent.
+            attribute = "_ensure_reserved_staging"
+        else:
+            # Crash after raw_conversion_intent, before the expiry rejection.
+            attribute = "_commit_rejection"
+        original = getattr(raw_conversion, attribute)
 
-        def crash_before_rejection(**_kwargs):
+        def crash(*_args, **_kwargs):
             raise SimulatedProcessCrash
 
-        monkeypatch.setattr(
-            raw_conversion, "_commit_rejection", crash_before_rejection
-        )
+        monkeypatch.setattr(raw_conversion, attribute, crash)
         _crash_resume(
             tmp_path,
             bundle,
@@ -2314,17 +2366,18 @@ def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
             transport=CountingNeverNetwork(),
             now=REFRESH_EXPIRY,
         )
-        monkeypatch.setattr(
-            raw_conversion, "_commit_rejection", original_commit_rejection
-        )
+        monkeypatch.setattr(raw_conversion, attribute, original)
     else:
         expired = resume(
             generation, transport=CountingNeverNetwork(), now=REFRESH_EXPIRY
         )
         assert expired["outcome"] == "result_url_unavailable"
         generation = expired["generation"]
+        refresh_url = (
+            REFRESH_SECOND_URL if renewal == "new" else REFRESH_FIRST_URL
+        )
         refresh_poll = PollStatus(
-            REFRESH_TASK_ID, "completed", results=[{"url": REFRESH_SECOND_URL}]
+            REFRESH_TASK_ID, "completed", results=[{"url": refresh_url}]
         )
         if boundary in {"private", "manifest"}:
             # Crash while committing the refreshed poll result.
@@ -2380,6 +2433,15 @@ def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
                 raw_conversion, "_append_prepared", original_append_prepared
             )
     capsys.readouterr()
+    crashed_history = [
+        json.loads(line)
+        for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
+    ]
+    assert crashed_history[-1]["event"] == REFRESH_CRASH_LAST_EVENT[boundary], (
+        boundary,
+        renewal,
+        crashed_history[-1]["event"],
+    )
 
     never = CountingNeverNetwork()
     recovered_rc, recovered, _stderr = invoke(
@@ -2416,6 +2478,26 @@ def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
     ).read_text()
     assert REFRESH_FIRST_URL not in public_state
     assert REFRESH_SECOND_URL not in public_state
+    # Recovery settled on the right decision, not merely on some self
+    # consistent one.
+    (
+        expected_conversion_state,
+        expected_attempt_state,
+        expected_reason_code,
+        expected_result_urls,
+    ) = REFRESH_RECOVERY_EXPECTATIONS[(boundary, renewal)]
+    attempt = manifest["conversion_attempts"][-1]
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    assert manifest["conversion_state"] == expected_conversion_state, (
+        boundary,
+        renewal,
+    )
+    assert attempt["state"] == expected_attempt_state, (boundary, renewal)
+    assert attempt["reason_code"] == expected_reason_code, (boundary, renewal)
+    assert len(private_state["result_urls"]) == expected_result_urls, (
+        boundary,
+        renewal,
+    )
 
 
 @pytest.mark.parametrize("boundary", ["private", "manifest", "commit"])
@@ -2501,6 +2583,98 @@ def test_conversion_retry_journal_recovers_each_write_boundary_idempotently(
             )
             if event.get("event") == "conversion_retry_intent"
         ]
+    ) == 1
+
+
+@pytest.mark.parametrize("boundary", ["private", "manifest", "commit"])
+def test_layout_retry_journal_recovers_inside_a_raw_bearing_bundle(
+    tmp_path, capsys, monkeypatch, boundary
+):
+    # A retry authorized after a raw conversion rejection lands in a bundle
+    # whose history already mixes raw conversion events with conversion
+    # attempt operations. Recovering that retry has to replay the whole
+    # prefix, so it needs the reducer that owns every event in it.
+    bundle, ready, dependencies, key, _result_url = ready_result_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    layout_rc, layout_error, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=ArchiveTransport(make_zip([("a.md", b"a"), ("b.md", b"b")])),
+    )
+    assert layout_rc == 0, json.dumps(layout_error, sort_keys=True)
+    assert layout_error["outcome"] == "unexpected_result_layout"
+    assert layout_error["action_required"] == "resolve_unexpected_result_layout"
+
+    argv = [
+        "record",
+        "conversion",
+        "--work-bundle",
+        str(bundle),
+        "--expected-generation",
+        str(layout_error["generation"]),
+        "--action-id",
+        layout_error["action_id"],
+        "--evidence-hash",
+        layout_error["evidence_hash"],
+        "--decision",
+        "retry",
+        "--basis",
+        "The ambiguous result layout requires a new conversion charge.",
+    ]
+    original_atomic_write, original_append_history = _install_conversion_journal_crash(
+        monkeypatch,
+        event="conversion_retry_committed",
+        boundary=boundary,
+    )
+    with pytest.raises(SimulatedProcessCrash):
+        workflow.main(
+            argv,
+            environ=dependencies,
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=CountingNeverNetwork(),
+            now=NOW,
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+    )
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "append_history", original_append_history
+    )
+
+    never = CountingNeverNetwork()
+    recovered_rc, recovered, _stderr = invoke(
+        capsys,
+        argv,
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=never,
+    )
+
+    assert never.calls == [], (boundary, never.calls)
+    assert recovered_rc == 0, (boundary, json.dumps(recovered, sort_keys=True))
+    assert recovered["outcome"] == "conversion_retry_authorized"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert [attempt["state"] for attempt in manifest["conversion_attempts"]] == [
+        "result_ready",
+        "not_started",
+    ]
+    history = [
+        json.loads(line)
+        for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
+    ]
+    assert sum(
+        event.get("event") == "conversion_retry_intent" for event in history
     ) == 1
 
 
