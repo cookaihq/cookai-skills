@@ -465,33 +465,87 @@ def test_repeated_rollbacks_do_not_accumulate_orphan_checkpoints(
     ]
 
 
-@pytest.mark.parametrize("readback", ["legible", "unsafe"])
-def test_an_operation_record_that_survived_a_failed_write_stays_conservative(
-    project, resolved, dry_run, snapshot, contract_digest, monkeypatch, readback
-):
-    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
-    plan_dir = project.state_root / "plans" / issued.plan_id
-    record_path = operation_record_path(project, issued.plan_id)
+FOREIGN_RECORD = {
+    "checkpoint_id": "f" * 32,
+    "operation_id": "e" * 32,
+    "recovery_id": "d" * 32,
+    "result_out": "/nowhere/foreign-result.json",
+    "root_recovery_id": "c" * 32,
+}
+
+
+def fail_the_plan_directory_fsync(project, plan_id, monkeypatch, *, limit=1,
+                                  on_failure=None):
+    plan_dir = project.state_root / "plans" / plan_id
+    record_path = operation_record_path(project, plan_id)
     info = os.stat(plan_dir)
     plan_identity = (info.st_dev, info.st_ino)
     real_fsync = os.fsync
     injected = []
 
-    def fail_the_plan_directory_fsync_once(fd):
+    def failing_fsync(fd):
         current = os.fstat(fd)
         if (
-            not injected
+            len(injected) < limit
             and stat.S_ISDIR(current.st_mode)
             and (current.st_dev, current.st_ino) == plan_identity
             and record_path.exists()
         ):
             injected.append(fd)
-            if readback == "unsafe":
-                record_path.chmod(0o644)
+            if on_failure is not None:
+                on_failure(record_path)
             raise OSError(errno.EIO, "injected plan directory fsync failure")
         return real_fsync(fd)
 
-    monkeypatch.setattr(os, "fsync", fail_the_plan_directory_fsync_once)
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    return injected
+
+
+def test_an_operation_record_that_survived_a_failed_write_is_rolled_back(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    record_path = operation_record_path(project, issued.plan_id)
+    injected = fail_the_plan_directory_fsync(project, issued.plan_id, monkeypatch)
+    first = Recorder()
+    outcome = run(project, resolved, store, issued.token, first)
+    body = body_of(outcome.result)
+    assert injected
+    assert first.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "known_not_applied"
+    assert body["retry_safe"] is True
+    assert body["allowed_actions"] == ["inspect", "publish"]
+    assert body["blocking_reasons"] == ["handoff_write_failed"]
+    assert not record_path.exists()
+    assert outcome.checkpoint_id is None
+    state = durable_state(project, issued.plan_id)
+    assert state["operation_record"] is False
+    assert state["checkpoints"] == []
+    assert not os.path.exists(project.recovery_out)
+
+    second = Recorder()
+    replay = run(project, resolved, store, issued.token, second)
+    replayed = body_of(replay.result)
+    assert len(second.calls) == 1
+    assert replay.transport_calls == 1
+    assert replayed["recovery_state"] == "terminal_unacknowledged"
+    assert replayed["allowed_actions"] == ["inspect", "ack"]
+    assert record_path.exists()
+    assert durable_state(project, issued.plan_id)["operation_record"] is True
+    assert body_of(parse_typed(open(project.result_out, "r", encoding="utf-8").read(),
+                               expected_type="s3-upload.result")) == replayed
+
+
+def test_an_operation_record_that_cannot_be_read_back_stays_conservative(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    record_path = operation_record_path(project, issued.plan_id)
+    injected = fail_the_plan_directory_fsync(
+        project, issued.plan_id, monkeypatch,
+        on_failure=lambda path: path.chmod(0o644),
+    )
     first = Recorder()
     outcome = run(project, resolved, store, issued.token, first)
     body = body_of(outcome.result)
@@ -505,6 +559,7 @@ def test_an_operation_record_that_survived_a_failed_write_stays_conservative(
     assert body["retry_safe"] is False
     assert body["allowed_actions"] == ["inspect", "reconcile"]
     assert body["blocking_reasons"] == []
+    assert outcome.checkpoint_id == surviving["checkpoint_id"]
     assert not os.path.exists(project.recovery_out)
     assert body_of(parse_typed(open(project.result_out, "r", encoding="utf-8").read(),
                                expected_type="s3-upload.result")) == body
@@ -517,6 +572,101 @@ def test_an_operation_record_that_survived_a_failed_write_stays_conservative(
     assert replay["allowed_actions"] == ["inspect", "reconcile"]
     assert record_path.exists()
     assert json.loads(record_path.read_text(encoding="utf-8")) == surviving
+
+
+def test_a_foreign_operation_record_is_never_rolled_back(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    record_path = operation_record_path(project, issued.plan_id)
+
+    def substitute(path):
+        path.write_text(json.dumps(FOREIGN_RECORD, sort_keys=True), encoding="utf-8")
+        path.chmod(0o600)
+
+    injected = fail_the_plan_directory_fsync(project, issued.plan_id, monkeypatch,
+                                             on_failure=substitute)
+    first = Recorder()
+    outcome = run(project, resolved, store, issued.token, first)
+    body = body_of(outcome.result)
+    assert injected
+    assert first.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["retry_safe"] is False
+    assert body["allowed_actions"] == ["inspect", "reconcile"]
+    assert json.loads(record_path.read_text(encoding="utf-8")) == FOREIGN_RECORD
+    assert outcome.checkpoint_id is not None
+    assert outcome.checkpoint_id != FOREIGN_RECORD["checkpoint_id"]
+    assert checkpoint_path(project, outcome.checkpoint_id).exists()
+    assert not os.path.exists(project.recovery_out)
+
+    second = Recorder()
+    replay = body_of(run(project, resolved, store, issued.token, second).result)
+    assert second.calls == []
+    assert replay["recovery_state"] == "in_flight_unknown"
+    assert replay["retry_safe"] is False
+    assert json.loads(record_path.read_text(encoding="utf-8")) == FOREIGN_RECORD
+
+
+def test_repeated_operation_record_failures_do_not_accumulate_orphan_checkpoints(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    injected = fail_the_plan_directory_fsync(project, issued.plan_id, monkeypatch,
+                                             limit=4)
+    for _ in range(4):
+        outcome = run(project, resolved, store, issued.token, Recorder())
+        body = body_of(outcome.result)
+        assert body["recovery_state"] == "known_not_applied"
+        assert body["retry_safe"] is True
+        assert outcome.transport_calls == 0
+        assert outcome.checkpoint_id is None
+        state = durable_state(project, issued.plan_id)
+        assert state["checkpoints"] == []
+        assert state["operation_record"] is False
+    assert len(injected) == 4
+
+    last = Recorder()
+    outcome = run(project, resolved, store, issued.token, last)
+    assert len(last.calls) == 1
+    assert body_of(outcome.result)["recovery_state"] == "terminal_unacknowledged"
+    state = durable_state(project, issued.plan_id)
+    assert state["operation_record"] is True
+    assert state["checkpoints"] == [
+        operation_record(project, issued.plan_id)["checkpoint_id"] + ".json"
+    ]
+
+
+def test_a_replayed_handoff_reports_a_checkpoint_it_could_not_drop(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    checkpoints = project.state_root / "checkpoints"
+
+    def die(name):
+        if name == "before_recovery_fsync":
+            raise HardCrash("the process is gone before the descriptor is durable")
+
+    with pytest.raises(HardCrash):
+        run(project, resolved, store, issued.token, Recorder(), on_boundary=die)
+    dropped = run(project, resolved, store, issued.token, Recorder())
+    assert dropped.checkpoint_id is None
+    assert os.path.exists(project.result_out)
+
+    def wound(name):
+        if name == "checkpoint_durable":
+            os.chmod(checkpoints, 0o500)
+
+    outcome = run(project, resolved, store, issued.token, Recorder(), on_boundary=wound)
+    os.chmod(checkpoints, 0o700)
+    body = body_of(outcome.result)
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["retry_safe"] is False
+    assert outcome.checkpoint_id is not None
+    assert checkpoint_path(project, outcome.checkpoint_id).exists()
+    assert outcome.checkpoint_id != operation_record(project, issued.plan_id)["checkpoint_id"]
 
 
 def test_a_failed_checkpoint_drop_reports_the_checkpoint_it_left_behind(

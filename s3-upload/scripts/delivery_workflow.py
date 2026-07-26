@@ -342,23 +342,35 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 if _drop_checkpoint(project_root, checkpoint_id):
                     handoff["checkpoint_id"] = None
                 raise AlreadyHandedOff("this plan already began a durable handoff")
+            value = {
+                "checkpoint_id": checkpoint_id,
+                "operation_id": operation_id,
+                "recovery_id": recovery_id,
+                "result_out": plan["result_out"],
+                "root_recovery_id": root,
+            }
             try:
-                store.write_operation_record(plan_id, {
-                    "checkpoint_id": checkpoint_id,
-                    "operation_id": operation_id,
-                    "recovery_id": recovery_id,
-                    "result_out": plan["result_out"],
-                    "root_recovery_id": root,
-                })
+                store.write_operation_record(plan_id, value)
             except PlanStoreError as exc:
                 try:
-                    survived = store.operation_record(plan_id) is not None
+                    surviving = store.operation_record(plan_id)
                 except PlanStoreError:
-                    survived = True
-                if survived:
                     raise AlreadyHandedOff(
-                        "the operation record survived a failed write"
+                        "the operation record could not be read back"
                     ) from exc
+                if surviving is not None:
+                    if surviving != value:
+                        raise AlreadyHandedOff(
+                            "another operation record survived a failed write"
+                        ) from exc
+                    try:
+                        store.discard_operation_record(plan_id)
+                    except PlanStoreError:
+                        raise AlreadyHandedOff(
+                            "the operation record survived a failed write"
+                        ) from exc
+                if _drop_checkpoint(project_root, checkpoint_id):
+                    handoff["checkpoint_id"] = None
                 raise
             hook("before_recovery_fsync")
             try:
@@ -397,7 +409,8 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         except AlreadyHandedOff:
             existing = _durable_result(plan["result_out"], plan_id)
             if existing is not None:
-                return PublishOutcome(existing, handoff["recovery"], 0, None)
+                return PublishOutcome(existing, handoff["recovery"], 0,
+                                      handoff["checkpoint_id"])
             replayed = build_result(
                 operation="publish", operation_id=operation_id, plan_id=plan_id,
                 plan_hash=plan["plan_hash"], target_contract_hash=digest,
@@ -410,7 +423,8 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 commit(result_target, serialize_artifact(replayed))
             except HandoffError:
                 pass
-            return PublishOutcome(replayed, handoff["recovery"], 0, None)
+            return PublishOutcome(replayed, handoff["recovery"], 0,
+                                  handoff["checkpoint_id"])
         except (HandoffError, PlanStoreError):
             return stop(["handoff_write_failed"], state="known_not_applied", plan=plan,
                         contract=digest, checkpoint_id=handoff["checkpoint_id"],
