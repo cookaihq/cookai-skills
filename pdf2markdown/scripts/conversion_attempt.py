@@ -1141,15 +1141,23 @@ def recover_interrupted_attempt(
         previous_manifest, previous_private = previous
         private_payload = None
         if intended_attempt.get("state") == "result_ready":
-            previous_results = previous_private.get("result_urls")
+            # Look the payload up the way `apply_committed_operations` does:
+            # by attempt and URL digest. Counting entries would be wrong,
+            # because a refresh answering with the URL already on file appends
+            # no new version -- the payload is present but the list length is
+            # unchanged, and the private write is a content-level no-op.
             current_results = private_state.get("result_urls")
-            if (
-                isinstance(previous_results, list)
-                and isinstance(current_results, list)
-                and len(current_results) == len(previous_results) + 1
-                and current_results[:-1] == previous_results
-            ):
-                private_payload = current_results[-1]
+            if isinstance(current_results, list):
+                matching = [
+                    record
+                    for record in current_results
+                    if isinstance(record, dict)
+                    and record.get("attempt_id") == intended_attempt.get("attempt_id")
+                    and record.get("url_sha256")
+                    == intended_attempt.get("result_url_sha256")
+                ]
+                if len(matching) == 1:
+                    private_payload = matching[0]
         recovered_secret_loss = (
             intended_attempt.get("state") == "result_ready" and private_payload is None
         )
