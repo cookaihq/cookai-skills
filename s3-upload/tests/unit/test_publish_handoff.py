@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 
 import pytest
 
@@ -43,6 +44,14 @@ class HardCrash(BaseException):
 
 def operation_record_path(project, plan_id):
     return project.state_root / "plans" / plan_id / "operation.json"
+
+
+def operation_record(project, plan_id):
+    return json.loads(operation_record_path(project, plan_id).read_text(encoding="utf-8"))
+
+
+def checkpoint_path(project, checkpoint_id):
+    return project.state_root / "checkpoints" / (str(checkpoint_id) + ".json")
 
 
 def run(project, resolved, store, token, transport, **overrides):
@@ -369,6 +378,90 @@ def test_a_descriptor_that_outlived_a_rolled_back_operation_record_replays(
     assert durable_state(project, issued.plan_id)["operation_record"] is True
     assert body_of(parse_typed(open(project.result_out, "r", encoding="utf-8").read(),
                                expected_type="s3-upload.result")) == body
+
+
+@pytest.mark.parametrize("wedge", ["read_only_plan_directory", "detached_plan_directory"])
+def test_a_rollback_that_itself_fails_answers_conservatively_twice(
+    project, resolved, dry_run, snapshot, contract_digest, tmp_path, wedge
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    plan_dir = project.state_root / "plans" / issued.plan_id
+    detached = tmp_path / "detached-plan"
+    out_mode = stat.S_IMODE(os.stat(project.out).st_mode)
+    plan_mode = stat.S_IMODE(os.stat(plan_dir).st_mode)
+
+    def wound(name):
+        if name == "checkpoint_durable":
+            os.chmod(project.out, 0o500)
+        elif name == "before_recovery_fsync":
+            if wedge == "read_only_plan_directory":
+                os.chmod(plan_dir, 0o500)
+            else:
+                plan_dir.rename(detached)
+
+    first = Recorder()
+    outcome = run(project, resolved, store, issued.token, first, on_boundary=wound)
+    os.chmod(project.out, out_mode)
+    if wedge == "read_only_plan_directory":
+        os.chmod(plan_dir, plan_mode)
+    else:
+        detached.rename(plan_dir)
+    body = body_of(outcome.result)
+    assert first.calls == []
+    assert outcome.transport_calls == 0
+    assert not os.path.exists(project.recovery_out)
+    assert durable_state(project, issued.plan_id)["operation_record"] is True
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["retry_safe"] is False
+    assert body["allowed_actions"] == ["inspect", "reconcile"]
+    surviving = operation_record(project, issued.plan_id)
+    assert checkpoint_path(project, surviving["checkpoint_id"]).exists()
+
+    second = Recorder()
+    replay = body_of(run(project, resolved, store, issued.token, second).result)
+    assert second.calls == []
+    assert replay["recovery_state"] == "in_flight_unknown"
+    assert replay["retry_safe"] is False
+    assert replay["allowed_actions"] == ["inspect", "reconcile"]
+    assert operation_record(project, issued.plan_id) == surviving
+    assert checkpoint_path(project, surviving["checkpoint_id"]).exists()
+
+
+def test_repeated_rollbacks_do_not_accumulate_orphan_checkpoints(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    real = handoff_io.commit
+    attempts = []
+
+    def explode_until_the_fifth(target, data):
+        if target.path == project.recovery_out and len(attempts) < 4:
+            attempts.append(target.path)
+            raise handoff_io.HandoffError("injected recovery write failure",
+                                          reason=handoff_io.HANDOFF_WRITE_FAILED)
+        return real(target, data)
+
+    monkeypatch.setattr("delivery_workflow.commit", explode_until_the_fifth)
+    for _ in range(4):
+        outcome = run(project, resolved, store, issued.token, Recorder())
+        body = body_of(outcome.result)
+        assert body["recovery_state"] == "known_not_applied"
+        assert body["retry_safe"] is True
+        assert outcome.transport_calls == 0
+        assert durable_state(project, issued.plan_id)["checkpoints"] == []
+        assert durable_state(project, issued.plan_id)["operation_record"] is False
+        assert outcome.checkpoint_id is None
+
+    last = Recorder()
+    outcome = run(project, resolved, store, issued.token, last)
+    assert len(last.calls) == 1
+    assert body_of(outcome.result)["recovery_state"] == "terminal_unacknowledged"
+    state = durable_state(project, issued.plan_id)
+    assert len(state["checkpoints"]) == 1
+    assert state["operation_record"] is True
+    assert state["checkpoints"] == [
+        operation_record(project, issued.plan_id)["checkpoint_id"] + ".json"
+    ]
 
 
 def test_recovery_and_operation_identities_are_derived_from_the_plan(

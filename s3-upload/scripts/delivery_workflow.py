@@ -333,10 +333,10 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 capabilities_ok=True,
             )
             try:
-                existing = store.operation_record(plan_id)
+                handed_off = store.operation_record(plan_id) is not None
             except PlanStoreError:
-                existing = True
-            if existing is not None:
+                handed_off = True
+            if handed_off:
                 handoff["recovery"] = descriptor
                 _drop_checkpoint(project_root, checkpoint_id)
                 handoff["checkpoint_id"] = None
@@ -351,8 +351,15 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             hook("before_recovery_fsync")
             try:
                 disposition = commit(recovery_target, serialize_artifact(descriptor))
-            except HandoffError:
-                store.discard_operation_record(plan_id)
+            except HandoffError as exc:
+                try:
+                    store.discard_operation_record(plan_id)
+                except PlanStoreError:
+                    raise AlreadyHandedOff(
+                        "the operation record survived a failed handoff"
+                    ) from exc
+                _drop_checkpoint(project_root, checkpoint_id)
+                handoff["checkpoint_id"] = None
                 raise
             hook("after_recovery_fsync")
             handoff["recovery"] = descriptor
