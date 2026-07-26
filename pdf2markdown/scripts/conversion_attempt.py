@@ -176,6 +176,120 @@ def canonical_state_byte_length(value: dict) -> int:
     return len(bundle.canonical_json_bytes(value))
 
 
+# --- Worst-case local-state capacity admission (plan.md 2.2) ---------------
+#
+# create/ordinary-poll/refresh each talk to an *unvalidated* Doc2X response
+# before doc2x._classify/_classify_poll have accepted or rejected it. To fail
+# closed before that call rather than after, admission must assume the worst
+# legal shape that response could still take: a task_id at the spec's byte
+# ceiling and a result URL at doc2x.valid_https_url's byte ceiling, each
+# inflated by ensure_ascii=True's worst-case \uXXXX escaping. This module
+# only computes and judges those worst cases -- plan.md 2.3 is responsible
+# for wiring the verdict into a stop-before-intent behavior.
+
+# Spec's UTF-8 byte upper bound for an unvalidated response task_id. This is
+# intentionally *not* doc2x.TASK_ID_PATTERN's 256-char/charset-restricted
+# match (doc2x.py:18): that pattern is a stricter, fail-closed *validator*
+# applied only after a response is trusted enough to classify, whereas
+# admission must bound what an as-yet-unclassified response could contain.
+TASK_ID_UPPER_BOUND_BYTES = 4096
+
+# Matches doc2x.valid_https_url's own bound (doc2x.py:244, `len(value) >
+# 16384`) -- pinned equal by
+# test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary in
+# tests/unit/test_conversion_attempt.py.
+RESULT_URL_UPPER_BOUND_BYTES = 16384
+
+# json.dumps(..., ensure_ascii=True) -- the encoding bundle.canonical_json_bytes
+# uses -- can \uXXXX-escape a single raw UTF-8 input byte (e.g. an ASCII
+# control character) into up to 6 ASCII output bytes. That is the worst
+# inflation ratio across every UTF-8 sequence length, so applying it
+# uniformly per raw input byte is a safe (if not perfectly tight) upper
+# bound for any string this encoder could produce.
+JSON_STRING_ESCAPE_MAX_BYTES_PER_UTF8_BYTE = 6
+
+# The wrapping `"..."` quote bytes json.dumps always adds around a string.
+_JSON_STRING_QUOTE_BYTES = 2
+
+# manifest.json / private.json read ceiling (workflow.py:34, workflow._read_json's
+# default max_bytes). conversion_attempt.py cannot import workflow.py (workflow.py
+# already imports this module), so this reuses the same already-established 8 MiB
+# value rather than inventing a third constant; pinned equal to workflow.MAX_STATE_BYTES
+# by test_manifest_and_private_candidate_ceilings_match_workflow_read_ceiling.
+MAX_MANIFEST_CANDIDATE_BYTES = 8 * 1024 * 1024
+MAX_PRIVATE_CANDIDATE_BYTES = 8 * 1024 * 1024
+# history.ndjson's ceiling is bundle.MAX_STATE_BYTES (bundle.py:16, 64 MiB) itself --
+# referenced directly at the call site below so there is exactly one place that owns
+# that value.
+
+
+def worst_case_json_string_bytes(raw_utf8_byte_length: int) -> int:
+    """Worst-case canonical-JSON bytes a raw UTF-8 string of
+    raw_utf8_byte_length could occupy once encoded by
+    bundle.canonical_json_bytes (ensure_ascii=True): the two wrapping quote
+    bytes plus up to JSON_STRING_ESCAPE_MAX_BYTES_PER_UTF8_BYTE bytes per
+    raw input byte.
+    """
+    return (
+        _JSON_STRING_QUOTE_BYTES
+        + raw_utf8_byte_length * JSON_STRING_ESCAPE_MAX_BYTES_PER_UTF8_BYTE
+    )
+
+
+WORST_CASE_TASK_ID_JSON_BYTES = worst_case_json_string_bytes(TASK_ID_UPPER_BOUND_BYTES)
+WORST_CASE_RESULT_URL_JSON_BYTES = worst_case_json_string_bytes(
+    RESULT_URL_UPPER_BOUND_BYTES
+)
+
+
+def worst_case_admission_for_unknown_response(
+    *,
+    manifest_current_bytes: int,
+    private_current_bytes: int,
+    history_current_bytes: int,
+    manifest_may_add_task_id: bool = False,
+    private_may_add_result_url: bool = False,
+    history_may_add_task_id: bool = False,
+    history_may_add_result_url: bool = False,
+) -> dict:
+    """Operation-local worst-case candidate admission for manifest.json,
+    private.json and history.ndjson.
+
+    Each *_current_bytes argument is the file's exact current on-disk
+    canonical byte length (e.g. len(bundle.canonical_json_bytes(manifest)),
+    or the length of the raw bytes already read from disk). Each
+    *_may_add_task_id / *_may_add_result_url flag says whether the calling
+    operation's still-unvalidated response could still add one worst-case
+    task_id and/or result URL field to that file; when set, the matching
+    WORST_CASE_*_JSON_BYTES upper bound is added to that file's candidate
+    total before comparing against its own ceiling.
+
+    manifest, private and history are judged independently against their own
+    ceiling (8 MiB / 8 MiB / 64 MiB) -- headroom in one file can never mask
+    an overrun in another.
+
+    This function only computes and judges; it does not raise or stop
+    anything. Wiring a verdict into a stop-before-intent/before-external-call
+    behavior is plan.md 2.3's responsibility.
+    """
+    manifest_candidate_bytes = manifest_current_bytes + (
+        WORST_CASE_TASK_ID_JSON_BYTES if manifest_may_add_task_id else 0
+    )
+    private_candidate_bytes = private_current_bytes + (
+        WORST_CASE_RESULT_URL_JSON_BYTES if private_may_add_result_url else 0
+    )
+    history_candidate_bytes = (
+        history_current_bytes
+        + (WORST_CASE_TASK_ID_JSON_BYTES if history_may_add_task_id else 0)
+        + (WORST_CASE_RESULT_URL_JSON_BYTES if history_may_add_result_url else 0)
+    )
+    return {
+        "manifest": manifest_candidate_bytes <= MAX_MANIFEST_CANDIDATE_BYTES,
+        "private": private_candidate_bytes <= MAX_PRIVATE_CANDIDATE_BYTES,
+        "history": history_candidate_bytes <= bundle.MAX_STATE_BYTES,
+    }
+
+
 def _parse_timestamp(value: str) -> datetime:
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:

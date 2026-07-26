@@ -2807,7 +2807,14 @@ def _validate_history_budget(events: list[dict], *, state_fd: int) -> None:
     current = _read_regular_file(
         "history.ndjson", dir_fd=state_fd, max_bytes=bundle.MAX_STATE_BYTES
     )
-    if len(current) + sum(len(_json_bytes(event)) for event in events) > bundle.MAX_STATE_BYTES:
+    # Delegate to bundle.canonical_json_bytes -- the same encoder
+    # bundle.append_history uses to actually persist each event -- rather
+    # than review._json_bytes's separately maintained copy of the same
+    # encoding parameters, so this pre-check can never silently drift from
+    # what append_history actually writes to disk.
+    if len(current) + sum(
+        len(bundle.canonical_json_bytes(event)) for event in events
+    ) > bundle.MAX_STATE_BYTES:
         raise correction.CorrectionError(
             "correction_size_limit",
             "The correction journal events exceed the remaining history budget.",

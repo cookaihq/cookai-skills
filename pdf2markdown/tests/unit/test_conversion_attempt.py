@@ -2966,3 +2966,142 @@ def test_canonical_accounting_matches_writer_bytes_including_trailing_lf(tmp_pat
     assert conversion_attempt.canonical_state_byte_length(value) == len(
         expected_bytes
     )
+
+
+def test_worst_case_admission_uses_upper_bounds_for_unknown_response():
+    # plan.md 2.2 / design.md: admission for create/ordinary-poll/refresh must
+    # assume the *worst legal* unknown response before it has been validated
+    # -- a 4,096-byte task_id (spec's byte bound, not doc2x.TASK_ID_PATTERN's
+    # stricter 256-char/charset-restricted match, which is a fail-closed
+    # tightening the admission math must not rely on) and a 16,384-byte
+    # result URL (doc2x.valid_https_url's own bound) -- and must account for
+    # ensure_ascii=True's worst-case \uXXXX escape inflation of up to 6 JSON
+    # output bytes per raw UTF-8 input byte. manifest/private/history are
+    # each compared against their own ceiling (8 MiB / 8 MiB / 64 MiB)
+    # independently, so headroom in one file can never mask an overrun in
+    # another.
+    assert conversion_attempt.TASK_ID_UPPER_BOUND_BYTES == 4096
+    assert conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES == 16384
+    assert conversion_attempt.JSON_STRING_ESCAPE_MAX_BYTES_PER_UTF8_BYTE == 6
+
+    # The escape-inflation upper bound applies per raw UTF-8 byte, plus the
+    # two wrapping quote bytes every JSON string gets.
+    assert conversion_attempt.worst_case_json_string_bytes(1) == 2 + 6
+    assert (
+        conversion_attempt.worst_case_json_string_bytes(
+            conversion_attempt.TASK_ID_UPPER_BOUND_BYTES
+        )
+        == 2 + 4096 * 6
+    )
+    assert (
+        conversion_attempt.worst_case_json_string_bytes(
+            conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+        )
+        == 2 + 16384 * 6
+    )
+    assert conversion_attempt.WORST_CASE_TASK_ID_JSON_BYTES == (
+        conversion_attempt.worst_case_json_string_bytes(4096)
+    )
+    assert conversion_attempt.WORST_CASE_RESULT_URL_JSON_BYTES == (
+        conversion_attempt.worst_case_json_string_bytes(16384)
+    )
+
+    assert conversion_attempt.MAX_MANIFEST_CANDIDATE_BYTES == 8 * 1024 * 1024
+    assert conversion_attempt.MAX_PRIVATE_CANDIDATE_BYTES == 8 * 1024 * 1024
+    assert conversion_attempt.bundle.MAX_STATE_BYTES == 64 * 1024 * 1024
+
+    manifest_ceiling = conversion_attempt.MAX_MANIFEST_CANDIDATE_BYTES
+    private_ceiling = conversion_attempt.MAX_PRIVATE_CANDIDATE_BYTES
+    history_ceiling = conversion_attempt.bundle.MAX_STATE_BYTES
+    task_id_bytes = conversion_attempt.WORST_CASE_TASK_ID_JSON_BYTES
+    url_bytes = conversion_attempt.WORST_CASE_RESULT_URL_JSON_BYTES
+
+    # Baseline: every file has comfortable headroom -> all admitted.
+    baseline = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_current_bytes=1_000,
+        private_current_bytes=1_000,
+        history_current_bytes=1_000,
+        manifest_may_add_task_id=True,
+        history_may_add_task_id=True,
+    )
+    assert baseline == {"manifest": True, "private": True, "history": True}
+
+    # Exactly at the manifest ceiling once the worst-case task_id lands ->
+    # still admitted (<=, not <).
+    at_manifest_ceiling = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_current_bytes=manifest_ceiling - task_id_bytes,
+        private_current_bytes=1_000,
+        history_current_bytes=1_000,
+        manifest_may_add_task_id=True,
+    )
+    assert at_manifest_ceiling["manifest"] is True
+
+    # One byte over the manifest ceiling once the worst-case task_id lands ->
+    # rejected, while private/history (comfortable headroom) stay admitted.
+    # This pins that the three files are judged independently: manifest's
+    # overrun must not be masked by private/history's headroom.
+    only_manifest_over = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_current_bytes=manifest_ceiling - task_id_bytes + 1,
+        private_current_bytes=1_000,
+        history_current_bytes=1_000,
+        manifest_may_add_task_id=True,
+    )
+    assert only_manifest_over == {"manifest": False, "private": True, "history": True}
+
+    only_private_over = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_current_bytes=1_000,
+        private_current_bytes=private_ceiling - url_bytes + 1,
+        history_current_bytes=1_000,
+        private_may_add_result_url=True,
+    )
+    assert only_private_over == {"manifest": True, "private": False, "history": True}
+
+    only_history_over = conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_current_bytes=1_000,
+        private_current_bytes=1_000,
+        history_current_bytes=history_ceiling - task_id_bytes - url_bytes + 1,
+        history_may_add_task_id=True,
+        history_may_add_result_url=True,
+    )
+    assert only_history_over == {"manifest": True, "private": True, "history": False}
+
+    # The upper bound is actually used, not a stand-in placeholder/zero: the
+    # same current_bytes value that overruns the ceiling once the worst-case
+    # task_id is added stays comfortably admitted when the operation cannot
+    # add one at all.
+    without_worst_case_addition = (
+        conversion_attempt.worst_case_admission_for_unknown_response(
+            manifest_current_bytes=manifest_ceiling - task_id_bytes + 1,
+            private_current_bytes=1_000,
+            history_current_bytes=1_000,
+            manifest_may_add_task_id=False,
+        )
+    )
+    assert without_worst_case_addition["manifest"] is True
+
+
+def test_manifest_and_private_candidate_ceilings_match_workflow_read_ceiling():
+    # workflow._read_json (workflow.py:696-707) already bounds manifest.json
+    # and private.json reads to workflow.MAX_STATE_BYTES (workflow.py:34, 8
+    # MiB) via _read_private_file's default max_bytes. Candidate admission's
+    # manifest/private ceilings reuse that same already-existing 8 MiB value
+    # rather than inventing a third one; this pins the two so a future edit
+    # to either side cannot silently drift them apart.
+    assert conversion_attempt.MAX_MANIFEST_CANDIDATE_BYTES == workflow.MAX_STATE_BYTES
+    assert conversion_attempt.MAX_PRIVATE_CANDIDATE_BYTES == workflow.MAX_STATE_BYTES
+
+
+def test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary():
+    # doc2x.valid_https_url (doc2x.py:243-258) rejects any URL longer than
+    # 16384 bytes (doc2x.py:244, `len(value) > 16384`) -- an inline literal,
+    # not a named constant. Pin conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+    # to that same real enforced boundary so the two numbers cannot silently
+    # drift apart.
+    prefix = "https://example.com/"
+    at_bound = prefix + "a" * (
+        conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES - len(prefix)
+    )
+    over_bound = at_bound + "a"
+    assert len(at_bound) == conversion_attempt.RESULT_URL_UPPER_BOUND_BYTES
+    assert conversion_attempt.doc2x.valid_https_url(at_bound) is True
+    assert conversion_attempt.doc2x.valid_https_url(over_bound) is False

@@ -482,6 +482,46 @@ def test_review_and_correction_artifact_budgets_are_checked_before_commit(
     assert history_error.value.code == "correction_size_limit"
 
 
+def test_validate_history_budget_uses_shared_canonical_encoder(tmp_path, monkeypatch):
+    # review._validate_history_budget pre-checks a batch of events before
+    # they are appended one-by-one via bundle.append_history, which persists
+    # each event as bundle.canonical_json_bytes(event). _validate_history_budget
+    # used to separately re-implement that same encoding via review._json_bytes
+    # -- a second, independently maintained copy of the writer's exact
+    # encoding parameters. The two encoders' parameters happen to match
+    # byte-for-byte today, so there was no live bug, but nothing pinned them
+    # together: a future edit to either encoder's parameters could silently
+    # drift the pre-check away from what actually lands on disk. This pins
+    # _validate_history_budget to delegate its byte accounting to
+    # bundle.canonical_json_bytes itself (the same function bundle.append_history
+    # uses), not a parallel implementation, by spying on the shared encoder and
+    # asserting it is actually invoked for every event being budgeted.
+    state_dir = tmp_path / ".state"
+    state_dir.mkdir()
+    history = state_dir / "history.ndjson"
+    history.write_bytes(b"{}\n")
+    history.chmod(0o600)
+    state_descriptor = os.open(state_dir, os.O_RDONLY)
+    events = [
+        {"schema_version": 1, "event": "first"},
+        {"schema_version": 1, "event": "second"},
+    ]
+    calls = []
+    original_encoder = review_module.bundle.canonical_json_bytes
+
+    def spy(value):
+        calls.append(value)
+        return original_encoder(value)
+
+    monkeypatch.setattr(review_module.bundle, "canonical_json_bytes", spy)
+    try:
+        review_module._validate_history_budget(events, state_fd=state_descriptor)
+    finally:
+        os.close(state_descriptor)
+
+    assert calls == events
+
+
 def test_review_artifact_removed_during_read_is_an_integrity_error(
     tmp_path, monkeypatch
 ):
