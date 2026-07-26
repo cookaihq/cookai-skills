@@ -7,6 +7,8 @@ from pathlib import Path
 
 import fitz
 import pytest
+import aihub_upload
+import doc2x
 import source_staging
 import workflow
 
@@ -1782,3 +1784,54 @@ def test_confirm_wait_reissues_a_decision_only_after_the_conservative_window(
         "2024-01-05T03:04:05Z"
     )
     assert lost.calls == 1
+
+
+def test_aihub_upload_valid_https_url_agrees_with_doc2x_valid_https_url():
+    # aihub_upload.valid_https_url is the write-side gate that decides
+    # whether an AIHub upload response's URL is allowed into private.json
+    # (source_staging.py's source_upload_ready transition); doc2x.valid_https_url
+    # is the read-side gate that same field must clear again when a later
+    # create/poll/refresh command loads private.json back
+    # (conversion_attempt.py, raw_conversion.py). If the two ever disagree, a
+    # URL the writer accepts and persists verbatim can be one the reader then
+    # rejects with no way to fix the bundle -- so this pins that both gates
+    # classify the same inputs identically, in the same unit (UTF-8 bytes,
+    # not code points).
+    prefix = "https://example.com/"
+
+    # ASCII at/over the 16,384-byte bound: one character is one UTF-8 byte,
+    # so this exercises the boundary in both units at once.
+    at_bound = prefix + "a" * (16384 - len(prefix))
+    over_bound = at_bound + "a"
+    assert len(at_bound.encode("utf-8")) == 16384
+    assert aihub_upload.valid_https_url(at_bound) is doc2x.valid_https_url(at_bound) is True
+    assert (
+        aihub_upload.valid_https_url(over_bound)
+        is doc2x.valid_https_url(over_bound)
+        is False
+    )
+
+    # Non-ASCII: 16,384 astral-plane characters are 65,476 UTF-8 bytes --
+    # under the 16,384 *code point* bound but four times over the 16,384
+    # *byte* bound. This is the case that separates a byte gate from a
+    # code-point gate, so both must reject it.
+    non_ascii_over_bound = prefix + "\U0001d11e" * (16384 - len(prefix))
+    assert len(non_ascii_over_bound) == 16384
+    assert len(non_ascii_over_bound.encode("utf-8")) == 65476
+    assert aihub_upload.valid_https_url(non_ascii_over_bound) is False
+    assert doc2x.valid_https_url(non_ascii_over_bound) is False
+
+    # fail-closed paths both gates must still cover identically.
+    fail_closed_cases = [
+        None,
+        "",
+        "http://example.com",
+        "https://user:pass@example.com",
+        "https://exa mple.com/path",
+        "https://example.com/\x01path",
+        "https://\ud800.example.com",
+        "https://example.com:not-a-port",
+    ]
+    for case in fail_closed_cases:
+        assert aihub_upload.valid_https_url(case) is False
+        assert doc2x.valid_https_url(case) is False

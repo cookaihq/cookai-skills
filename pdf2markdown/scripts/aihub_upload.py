@@ -107,10 +107,17 @@ def _response_body(response) -> bytes:
 
 
 def valid_https_url(value) -> bool:
-    if not isinstance(value, str) or not value or len(value) > 16384:
+    # This gate must stay byte-for-byte aligned with doc2x.valid_https_url
+    # (doc2x.py:243-263): this is the write-side gate for a source URL
+    # before it is persisted into private.json, doc2x's is the read-side
+    # gate the same field is checked against again on create/poll/refresh.
+    # A code-point bound here would admit a URL doc2x's byte bound then
+    # rejects, staging a bundle with no way to recover it.
+    if not isinstance(value, str) or not value:
         return False
     try:
-        value.encode("utf-8")
+        if len(value.encode("utf-8")) > 16384:
+            return False
         parsed = urlsplit(value)
         _port = parsed.port
     except (UnicodeError, ValueError):
