@@ -786,6 +786,24 @@ def _reference_already_unavailable(manifest: dict, attempt: dict) -> bool:
     )
 
 
+def _reference_rejection(manifest: dict, attempt: dict, *, at: str) -> str | None:
+    """Decide whether the recorded result reference may still be fetched.
+
+    The single source of truth for both the forward adoption path and the
+    recovery path, so an interrupted operation replays exactly the decision
+    the crashed process was about to commit.
+    """
+    if _reference_already_unavailable(manifest, attempt):
+        return "result_url_not_renewed"
+    try:
+        reference_expired = conversion_attempt.result_reference_is_expired(
+            attempt, at=at
+        )
+    except conversion_attempt.ConversionAttemptError as exc:
+        raise RawConversionError(exc.code, exc.message) from exc
+    return "result_url_unavailable" if reference_expired else None
+
+
 def adopt_ready_result(
     *,
     descriptors: dict,
@@ -809,28 +827,14 @@ def adopt_ready_result(
     bundle.append_history(intent, state_fd=descriptors["state"])
     _finish_reservation_after_intent(attempts_fd, reservation, intent)
     active_attempt, private_result = _active_result(manifest, private_state)
-    if _reference_already_unavailable(manifest, active_attempt):
+    reason_code = _reference_rejection(manifest, active_attempt, at=at)
+    if reason_code is not None:
         return _commit_rejection(
             descriptors=descriptors,
             manifest=manifest,
             private_state=private_state,
             intent=intent,
-            reason_code="result_url_not_renewed",
-            at=at,
-        )
-    try:
-        reference_expired = conversion_attempt.result_reference_is_expired(
-            active_attempt, at=at
-        )
-    except conversion_attempt.ConversionAttemptError as exc:
-        raise RawConversionError(exc.code, exc.message) from exc
-    if reference_expired:
-        return _commit_rejection(
-            descriptors=descriptors,
-            manifest=manifest,
-            private_state=private_state,
-            intent=intent,
-            reason_code="result_url_unavailable",
+            reason_code=reason_code,
             at=at,
         )
     _assert_directory_identity(
@@ -1117,7 +1121,23 @@ def recover_interrupted_adoption(
             "integrity_violation", "The raw conversion reservation suffix is invalid."
         )
     if len(suffix) == 2:
-        _active, private_result = _active_result(prefix[0], prefix[1])
+        active_attempt, private_result = _active_result(prefix[0], prefix[1])
+        # The crashed process had already decided, at intent["at"], whether the
+        # recorded result reference was still fetchable. Replay that decision
+        # instead of fetching: otherwise a crash between the intent and its
+        # rejection would send the very result GET the decision ruled out.
+        reason_code = _reference_rejection(
+            prefix[0], active_attempt, at=intent["at"]
+        )
+        if reason_code is not None:
+            return _commit_rejection(
+                descriptors=descriptors,
+                manifest=prefix[0],
+                private_state=prefix[1],
+                intent=intent,
+                reason_code=reason_code,
+                at=at,
+            )
         try:
             prepared = _prepare_pending_intent(
                 descriptors=descriptors,
