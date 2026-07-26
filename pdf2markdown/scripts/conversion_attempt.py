@@ -186,6 +186,43 @@ POLL_TRANSIENT_REASON_CODES = frozenset(
     {"poll_transient", "result_private_payload_lost"}
 )
 
+# design.md Decision 1 -- the single enumeration of today's flat attempt
+# state domain and its target (state, reason, conversion_state) triple.
+# Every production site of a flat value is listed once; the table is the sole
+# driver of the 2.1c fold, the 2.2 reason closure and the 4.2 migration note.
+FLAT_STATE_MIGRATION = {
+    # flat state: (attempt state, reason, top-level conversion_state)
+    "not_started": ("authorized", None, "ready_to_submit"),
+    "submitting": ("submitting", None, "submitting"),
+    "submitted": ("submitted", None, "submitted"),
+    "submission_unknown": ("submission_unknown", "no_task_id", "submission_unknown"),
+    "pending": ("processing", None, "submitted"),
+    "processing": ("processing", None, "submitted"),
+    "result_pending": ("processing", None, "submitted"),
+    "result_ready": ("result_ready", None, "result_downloading"),
+    "unsafe_result_url": ("failed", "unsafe_result_url", "terminal_error"),
+    "unexpected_result_count": (
+        "failed", "unexpected_result_count", "terminal_error"
+    ),
+    "failed": ("failed", "task_failed", "awaiting_user"),
+    "poll_transient": ("failed", "poll_transient", "recoverable_error"),
+    "poll_unauthorized": (
+        "failed", "poll_authentication_rejected", "recoverable_error"
+    ),
+    "task_unavailable": ("failed", "task_unavailable", "recoverable_error"),
+    "credential_source_missing": (
+        "failed", "credential_source_missing", "recoverable_error"
+    ),
+    "credential_source_changed": (
+        "failed", "credential_fingerprint_changed", "recoverable_error"
+    ),
+    "poll_timeout": ("failed", "poll_timeout", "recoverable_error"),
+    "result_pending_timeout": (
+        "failed", "result_pending_timeout", "recoverable_error"
+    ),
+}
+FLAT_STATE_DOMAIN = frozenset(FLAT_STATE_MIGRATION)
+
 # The result states a poll observation may commit. "submitted" is in
 # POLL_STATE_CONTRACT because an attempt can be *in* that state, but no poll
 # response can return it.
@@ -1995,6 +2032,8 @@ def _conversion_state_for_attempt(state: str) -> str:
         return "terminal_error"
     if state == "failed":
         return "awaiting_user"
+    if state == "submission_unknown":
+        return "submission_unknown"
     if state in {
         "credential_source_missing",
         "credential_source_changed",

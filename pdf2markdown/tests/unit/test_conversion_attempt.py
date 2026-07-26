@@ -3705,3 +3705,45 @@ def test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary():
     assert (
         conversion_attempt.doc2x.valid_https_url(over_bound_in_bytes_only) is False
     )
+
+
+def test_flat_state_migration_table_covers_the_whole_flat_domain():
+    import conversion_attempt as ca
+
+    expected_domain = {
+        "not_started", "submitting", "submitted", "submission_unknown",
+        "pending", "processing", "result_pending", "result_ready",
+        "unsafe_result_url", "unexpected_result_count", "failed",
+        "poll_transient", "poll_unauthorized", "task_unavailable",
+        "credential_source_missing", "credential_source_changed",
+        "poll_timeout", "result_pending_timeout",
+    }
+    assert ca.FLAT_STATE_DOMAIN == expected_domain
+    # 今天扁平 state 的两份真相必须都被这张表覆盖，且不多不少。
+    assert set(ca.POLL_STATE_CONTRACT) <= ca.FLAT_STATE_DOMAIN
+    assert set(ca.FLAT_STATE_MIGRATION) == ca.FLAT_STATE_DOMAIN
+    assert {target for target, _, _ in ca.FLAT_STATE_MIGRATION.values()} == {
+        "authorized", "submitting", "submitted", "processing",
+        "failed", "result_ready", "submission_unknown",
+    }
+    reasons = {reason for _, reason, _ in ca.FLAT_STATE_MIGRATION.values()}
+    assert reasons - {None} <= {
+        "no_task_id", "credential_source_missing",
+        "credential_fingerprint_changed", "poll_authentication_rejected",
+        "task_unavailable", "poll_transient", "poll_timeout",
+        "result_pending_timeout", "task_failed", "result_url_expired",
+        "unsafe_result_url", "unexpected_result_count",
+    }
+
+
+def test_flat_state_migration_agrees_with_the_live_conversion_state_projection():
+    import conversion_attempt as ca
+
+    # result_ready 是唯一一个 reason 可空可非空的行，投影随 reason 变，
+    # 不能拿单值的 _conversion_state_for_attempt 去比。
+    for flat, (_, reason, top_level) in ca.FLAT_STATE_MIGRATION.items():
+        if flat in {"not_started", "submitting"} or (
+            flat == "result_ready" and reason is not None
+        ):
+            continue
+        assert ca._conversion_state_for_attempt(flat) == top_level, flat
