@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import os
 import stat
@@ -378,6 +379,31 @@ def test_invalidate_after_acknowledge_does_not_overwrite_the_tombstone(
     assert invalidated["result_hash"] == result_hash
 
 
+def test_finish_writes_the_tombstone_before_removing_spool_and_record(
+    project, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    directory = project.state_root / "plans" / issued.plan_id
+    events = []
+    real_unlink = plan_store.os.unlink
+
+    def unlink_spy(path, *, dir_fd=None):
+        events.append((path, (directory / "tombstone.json").exists()))
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(plan_store.os, "unlink", unlink_spy)
+    store.acknowledge(issued.plan_id, result_hash="sha256:" + "4" * 64)
+    monkeypatch.undo()
+
+    tombstone_tmp_events = [
+        event for event in events if event[0].startswith(".tombstone.json.") and event[0].endswith(".tmp")
+    ]
+    cleanup_events = [event for event in events if event[0] in ("spool", "record.json")]
+    assert len(tombstone_tmp_events) == 1
+    assert cleanup_events == [("spool", True), ("record.json", True)]
+    assert tombstone_tmp_events[0][1] is True
+
+
 def test_prepare_wraps_a_guard_write_failure_as_plan_store_error(
     project, dry_run, snapshot, contract_digest, monkeypatch
 ):
@@ -436,8 +462,51 @@ def test_lock_wraps_a_symlinked_lock_path_as_plan_store_error(tmp_path):
     store = PlanStore(str(state_root))
     store._prepare()
     (state_root / "locks" / "escape.lock").symlink_to(state_root / "locks" / "elsewhere")
-    with pytest.raises(PlanStoreError):
+    with pytest.raises(PlanStoreError, match="plan store lock path is unsafe"):
         with store.lock("escape"):
+            pass
+
+
+def test_lock_wraps_an_fchmod_failure_as_plan_store_error(tmp_path, monkeypatch):
+    state_root = tmp_path / "state-root"
+    store = PlanStore(str(state_root))
+    store._prepare()
+
+    def failing_fchmod(descriptor, mode):
+        raise OSError(errno.EPERM, "not permitted")
+
+    monkeypatch.setattr(plan_store.os, "fchmod", failing_fchmod)
+    with pytest.raises(PlanStoreError, match="plan store lock could not be secured"):
+        with store.lock("plan-lock"):
+            pass
+
+
+def test_lock_wraps_a_non_blocking_flock_failure_as_plan_store_error(tmp_path, monkeypatch):
+    state_root = tmp_path / "state-root"
+    store = PlanStore(str(state_root))
+    real_flock = plan_store.fcntl.flock
+
+    def failing_flock(descriptor, operation):
+        if operation == plan_store.fcntl.LOCK_UN:
+            return real_flock(descriptor, operation)
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(plan_store.fcntl, "flock", failing_flock)
+    with pytest.raises(PlanStoreError, match="plan store lock could not be acquired"):
+        with store.lock("plan-lock"):
+            pass
+
+
+def test_lock_swallows_an_unlock_failure_and_surfaces_the_original_error(tmp_path, monkeypatch):
+    state_root = tmp_path / "state-root"
+    store = PlanStore(str(state_root))
+
+    def flock_enotsup(descriptor, operation):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(plan_store.fcntl, "flock", flock_enotsup)
+    with pytest.raises(PlanStoreError, match="plan store lock could not be acquired"):
+        with store.lock("plan-lock"):
             pass
 
 

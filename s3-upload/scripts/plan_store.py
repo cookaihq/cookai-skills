@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import os
@@ -418,7 +419,9 @@ class PlanStore:
         try:
             descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except OSError as exc:
-            raise PlanStoreError("plan store lock path is unsafe") from exc
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise PlanStoreError("plan store lock path is unsafe") from exc
+            raise PlanStoreError("plan store lock path could not be opened") from exc
         try:
             try:
                 os.fchmod(descriptor, 0o600)
@@ -433,6 +436,9 @@ class PlanStore:
             yield
         finally:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
             finally:
                 os.close(descriptor)

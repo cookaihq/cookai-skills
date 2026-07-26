@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from conftest import CALLER, TARGET, write_target
+from conftest import CALLER, write_target
 from delivery_schema import body_of
 from plan_store import PlanStore, PlanStoreError, build_plan_body, new_plan_id
 from planning import build_upload_dry_run, derive_contract_key, registry_for_target
@@ -87,10 +87,9 @@ def test_blocked_plan_leaves_no_usable_local_credential(project):
                              soft_max_bytes=1048576, created_at=CREATED_AT)
     finally:
         dry_run.close()
-    with pytest.raises(PlanStoreError):
-        store.consume(issued.plan_id + ".anything", caller=CALLER,
-                      executable_path="/usr/bin/python3", cwd=str(project.root),
-                      state_root=str(project.state_root))
+    directory = project.state_root / "plans" / issued.plan_id
+    assert not (directory / "record.json").exists()
+    assert not (directory / "spool").exists()
 
 
 def test_blocked_plan_is_still_a_complete_machine_artifact(project):
@@ -183,4 +182,5 @@ def test_invalidate_records_an_unacknowledged_tombstone(project, dry_run, snapsh
                              executable_path="/usr/bin/python3", cwd=str(project.root),
                              state_root=str(project.state_root))
     assert consumed.state == "acknowledged"
+    assert consumed.record is None
     assert consumed.tombstone["acknowledged"] is False
