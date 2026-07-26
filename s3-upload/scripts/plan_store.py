@@ -8,6 +8,7 @@ import secrets
 import stat
 import uuid
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, Optional, Tuple
 
@@ -78,7 +79,7 @@ def build_plan_body(*, dry_run_plan: Dict[str, Any], source_snapshot: Any,
         "retention": dict(dry_run_plan["retention"]),
         "source": dict(source_snapshot.as_checkpoint()),
         "state_root": lexical_absolute(state_root),
-        "target_contract": target_contract,
+        "target_contract": deepcopy(target_contract),
         "target_contract_hash": target_contract_hash,
         "target_ref": target_contract["target_ref"],
         "upload_mode": dry_run_plan["upload_mode"],
@@ -133,6 +134,8 @@ class PlanStore:
                 atomic_write(guard, self.GUARD, mode=0o600, replace=False)
             except FileExistsError:
                 text = read_regular_file(guard, max_bytes=64, secret=True, missing_ok=False)
+            except (OSError, FileSecurityError) as exc:
+                raise PlanStoreError("plan store Git ignore guard could not be written durably") from exc
         if text is not None and text.encode("utf-8") != self.GUARD:
             raise PlanStoreError("plan store Git ignore guard has unexpected content")
 
@@ -196,6 +199,8 @@ class PlanStore:
             published = True
             os.fsync(parent_fd)
             return total, digest.hexdigest()
+        except OSError as exc:
+            raise PlanStoreError("plan spool could not be written durably") from exc
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -270,6 +275,9 @@ class PlanStore:
                         expected_type="s3-upload.plan")
         except DeliverySchemaError as exc:
             raise PlanStoreError("plan record contains an invalid plan artifact") from exc
+        body = body_of(record["plan"])
+        if body["plan_hash"] != plan_hash(body):
+            raise PlanStoreError("plan record plan_hash does not match its bound facts")
         return record
 
     def load_tombstone(self, plan_id: str) -> Optional[Dict[str, Any]]:
@@ -378,7 +386,10 @@ class PlanStore:
                 raise PlanStoreError("plan tombstone could not be written durably") from exc
         else:
             tombstone = existing
-        parent_fd = open_directory(directory)
+        try:
+            parent_fd = open_directory(directory)
+        except (OSError, FileSecurityError) as exc:
+            raise PlanStoreError("plan directory is unavailable") from exc
         try:
             for name in ("spool", "record.json"):
                 try:
@@ -386,6 +397,8 @@ class PlanStore:
                 except FileNotFoundError:
                     pass
             os.fsync(parent_fd)
+        except OSError as exc:
+            raise PlanStoreError("plan directory cleanup failed") from exc
         finally:
             os.close(parent_fd)
         return tombstone
@@ -398,9 +411,9 @@ class PlanStore:
 
     @contextmanager
     def lock(self, name: str) -> Iterator[None]:
-        self._prepare()
         if not isinstance(name, str) or not LOCK_NAME_RE.fullmatch(name):
             raise PlanStoreError("invalid lock name")
+        self._prepare()
         path = os.path.join(self.locks_dir, name + ".lock")
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:

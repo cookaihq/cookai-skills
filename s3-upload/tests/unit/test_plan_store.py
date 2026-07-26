@@ -6,7 +6,10 @@ import pytest
 
 import plan_store
 from conftest import CALLER, SOURCE_BYTES
-from delivery_schema import DeliverySchemaError, body_of, parse_typed, serialize_artifact
+from delivery_schema import (
+    DeliverySchemaError, body_of, build_typed, parse_typed, serialize_artifact,
+)
+from strict_json import canonicalize
 from plan_store import (
     ConsumedPlan,
     IssuedPlan,
@@ -49,6 +52,15 @@ def issue(project, dry_run, snapshot, contract_digest, **overrides):
         soft_max_bytes=1048576,
         created_at=CREATED_AT,
     )
+
+
+def write_tampered_record(project, plan_id, record, *, object_key):
+    body = dict(body_of(record["plan"]))
+    body["object_key"] = object_key
+    tampered = dict(record, plan=build_typed("s3-upload.plan", body))
+    path = project.state_root / "plans" / plan_id / "record.json"
+    path.write_bytes(canonicalize(tampered))
+    path.chmod(0o600)
 
 
 def test_new_plan_id_is_unguessable_hex():
@@ -120,6 +132,15 @@ def test_plan_hash_changes_when_any_bound_fact_changes(project, dry_run, snapsho
     assert plan_hash(body) != plan_hash(dict(body, state_root="/elsewhere"))
 
 
+def test_build_plan_body_deep_copies_the_target_contract_snapshot(
+    project, dry_run, snapshot, contract_digest
+):
+    body = make_body(project, dry_run, snapshot, contract_digest)
+    original_bucket = snapshot["bucket"]
+    snapshot["bucket"] = "attacker-bucket"
+    assert body["target_contract"]["bucket"] == original_bucket
+
+
 def test_spool_rejects_a_source_larger_than_the_soft_limit(project, dry_run, snapshot, contract_digest):
     store = PlanStore(str(project.state_root))
     body = make_body(project, dry_run, snapshot, contract_digest)
@@ -135,6 +156,28 @@ def test_spool_rejects_a_source_that_does_not_match_the_planned_identity(
     store = PlanStore(str(project.state_root))
     body = make_body(project, dry_run, snapshot, contract_digest)
     body["source"] = dict(body["source"], sha256="0" * 64)
+    with pytest.raises(PlanStoreError):
+        store.issue(body, source_path=str(project.source), soft_max_bytes=1048576,
+                    created_at=CREATED_AT)
+
+
+def test_load_record_rejects_a_record_whose_plan_hash_no_longer_matches_its_body(
+    project, dry_run, snapshot, contract_digest
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    record = store.load_record(issued.plan_id)
+    write_tampered_record(project, issued.plan_id, record, object_key="images/other.png")
+    with pytest.raises(PlanStoreError):
+        store.load_record(issued.plan_id)
+
+
+def test_reissuing_the_same_plan_id_raises_plan_store_error(
+    project, dry_run, snapshot, contract_digest
+):
+    store = PlanStore(str(project.state_root))
+    body = make_body(project, dry_run, snapshot, contract_digest)
+    store.issue(body, source_path=str(project.source), soft_max_bytes=1048576,
+               created_at=CREATED_AT)
     with pytest.raises(PlanStoreError):
         store.issue(body, source_path=str(project.source), soft_max_bytes=1048576,
                     created_at=CREATED_AT)
@@ -165,6 +208,19 @@ def test_consume_rejects_replay_across_identity(project, dry_run, snapshot, cont
     kwargs.update(overrides)
     with pytest.raises(PlanStoreError):
         store.consume(issued.token, **kwargs)
+
+
+def test_consume_rejects_when_the_recorded_state_root_disagrees_with_the_store(
+    project, dry_run, snapshot, contract_digest
+):
+    store, issued = issue(
+        project, dry_run, snapshot, contract_digest, state_root="/elsewhere/state-root",
+    )
+    with pytest.raises(PlanStoreError):
+        store.consume(
+            issued.token, caller=CALLER, executable_path="/usr/bin/python3",
+            cwd=str(project.root), state_root=str(project.state_root),
+        )
 
 
 def test_consume_rejects_replay_against_another_state_root(project, dry_run, snapshot, contract_digest, tmp_path):
@@ -198,18 +254,17 @@ def test_consume_rejects_a_token_for_an_absent_record(project, dry_run, snapshot
         )
 
 
-def test_editing_the_displayed_plan_copy_does_not_change_execution(
+def test_consume_takes_its_facts_only_from_the_on_disk_record_not_a_caller_supplied_artifact(
     project, dry_run, snapshot, contract_digest
 ):
     store, issued = issue(project, dry_run, snapshot, contract_digest)
-    tampered = dict(issued.artifact)
-    tampered["object_key"] = "images/attacker.png"
-    consumed = store.consume(
-        issued.token, caller=CALLER, executable_path="/usr/bin/python3",
-        cwd=str(project.root), state_root=str(project.state_root),
-    )
-    assert body_of(consumed.record["plan"])["object_key"] == issued.artifact["object_key"]
-    assert body_of(consumed.record["plan"])["object_key"] != tampered["object_key"]
+    record = store.load_record(issued.plan_id)
+    write_tampered_record(project, issued.plan_id, record, object_key="images/attacker.png")
+    with pytest.raises(PlanStoreError):
+        store.consume(
+            issued.token, caller=CALLER, executable_path="/usr/bin/python3",
+            cwd=str(project.root), state_root=str(project.state_root),
+        )
 
 
 def test_spool_bytes_verifies_size_and_digest(project, dry_run, snapshot, contract_digest):
@@ -233,11 +288,135 @@ def test_spool_bytes_rejects_a_tampered_spool(project, dry_run, snapshot, contra
         )
 
 
+def make_operation_record(**overrides):
+    value = {
+        "checkpoint_id": "checkpoint-1",
+        "operation_id": "operation-1",
+        "recovery_id": "recovery-1",
+        "result_out": "/tmp/result.json",
+        "root_recovery_id": "recovery-1",
+    }
+    value.update(overrides)
+    return value
+
+
+def test_operation_record_is_absent_until_written(project, dry_run, snapshot, contract_digest):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    assert store.operation_record(issued.plan_id) is None
+
+
+def test_write_operation_record_then_read_it_back(project, dry_run, snapshot, contract_digest):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    value = make_operation_record()
+    store.write_operation_record(issued.plan_id, value)
+    assert store.operation_record(issued.plan_id) == value
+
+
+def test_write_operation_record_is_idempotent_for_the_same_value(
+    project, dry_run, snapshot, contract_digest
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    value = make_operation_record()
+    store.write_operation_record(issued.plan_id, value)
+    store.write_operation_record(issued.plan_id, value)
+    assert store.operation_record(issued.plan_id) == value
+
+
+def test_write_operation_record_rejects_a_conflicting_rewrite(
+    project, dry_run, snapshot, contract_digest
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    store.write_operation_record(issued.plan_id, make_operation_record())
+    with pytest.raises(PlanStoreError):
+        store.write_operation_record(issued.plan_id, make_operation_record(operation_id="operation-2"))
+
+
+def test_acknowledge_then_consume_returns_the_tombstone(
+    project, dry_run, snapshot, contract_digest
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    result_hash = "sha256:" + "0" * 64
+    tombstone = store.acknowledge(issued.plan_id, result_hash=result_hash)
+    assert tombstone["acknowledged"] is True
+    assert tombstone["plan_id"] == issued.plan_id
+    assert tombstone["result_hash"] == result_hash
+    consumed = store.consume(
+        issued.token, caller=CALLER, executable_path="/usr/bin/python3",
+        cwd=str(project.root), state_root=str(project.state_root),
+    )
+    assert consumed.state == "acknowledged"
+    assert consumed.record is None
+    assert consumed.tombstone == tombstone
+    directory = project.state_root / "plans" / issued.plan_id
+    assert not (directory / "spool").exists()
+    assert not (directory / "record.json").exists()
+
+
+def test_repeated_invalidate_returns_the_existing_tombstone(
+    project, dry_run, snapshot, contract_digest
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    first = store.invalidate(issued.plan_id)
+    second = store.invalidate(issued.plan_id)
+    assert first == second
+    assert first["acknowledged"] is False
+    assert first["result_hash"] is None
+
+
+def test_invalidate_after_acknowledge_does_not_overwrite_the_tombstone(
+    project, dry_run, snapshot, contract_digest
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+    result_hash = "sha256:" + "1" * 64
+    acknowledged = store.acknowledge(issued.plan_id, result_hash=result_hash)
+    invalidated = store.invalidate(issued.plan_id)
+    assert invalidated == acknowledged
+    assert invalidated["acknowledged"] is True
+    assert invalidated["result_hash"] == result_hash
+
+
+def test_prepare_wraps_a_guard_write_failure_as_plan_store_error(
+    project, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store = PlanStore(str(project.state_root))
+    body = make_body(project, dry_run, snapshot, contract_digest)
+
+    def failing_atomic_write(path, data, *, mode=0o600, replace=True):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(plan_store, "atomic_write", failing_atomic_write)
+    with pytest.raises(PlanStoreError):
+        store.issue(body, source_path=str(project.source), soft_max_bytes=1048576,
+                    created_at=CREATED_AT)
+
+
 def test_plans_directory_carries_a_git_ignore_guard(project, dry_run, snapshot, contract_digest):
     issue(project, dry_run, snapshot, contract_digest)
     guard = project.state_root / "plans" / ".gitignore"
     assert guard.read_bytes() == b"*\n!.gitignore\n"
     assert stat.S_IMODE(guard.stat().st_mode) == 0o600
+
+
+def test_finish_wraps_a_directory_open_failure_as_plan_store_error(
+    project, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue(project, dry_run, snapshot, contract_digest)
+
+    def failing_open_directory(path):
+        raise OSError("boom")
+
+    monkeypatch.setattr(plan_store, "open_directory", failing_open_directory)
+    with pytest.raises(PlanStoreError):
+        store.acknowledge(issued.plan_id, result_hash="sha256:" + "0" * 64)
+
+
+def test_lock_validates_the_name_before_touching_the_filesystem(tmp_path):
+    state_root = tmp_path / "state-root"
+    store = PlanStore(str(state_root))
+    with pytest.raises(PlanStoreError):
+        with store.lock("../escape"):
+            pass
+    assert not state_root.exists()
 
 
 def test_lock_is_exclusive(project, dry_run, snapshot, contract_digest):
@@ -271,6 +450,38 @@ def test_token_is_generated_only_after_the_spool_is_durably_fsynced(
     store, issued = issue(project, dry_run, snapshot, contract_digest)
     assert events == ["spool_fsynced", "token_generated"]
     assert issued.token is not None
+
+
+def test_spool_and_record_are_fsynced_before_the_token_reaches_the_caller(
+    project, dry_run, snapshot, contract_digest, monkeypatch
+):
+    events = []
+    real_fsync = plan_store.os.fsync
+    real_token = plan_store.secrets.token_urlsafe
+
+    def fsync_spy(fd):
+        info = os.fstat(fd)
+        events.append(("dir" if stat.S_ISDIR(info.st_mode) else "file", info.st_ino))
+        return real_fsync(fd)
+
+    def token_spy(count):
+        events.append(("token", None))
+        return real_token(count)
+
+    monkeypatch.setattr(plan_store.os, "fsync", fsync_spy)
+    monkeypatch.setattr(plan_store.secrets, "token_urlsafe", token_spy)
+    _, issued = issue(project, dry_run, snapshot, contract_digest)
+    monkeypatch.undo()
+
+    directory = project.state_root / "plans" / issued.plan_id
+    spool_ino = (directory / "spool").stat().st_ino
+    record_ino = (directory / "record.json").stat().st_ino
+    dir_ino = directory.stat().st_ino
+    token_at = events.index(("token", None))
+
+    assert ("file", spool_ino) in events[:token_at]
+    assert ("dir", dir_ino) in events[:token_at]
+    assert ("file", record_ino) in events[token_at:]
 
 
 def test_spool_digest_is_computed_from_bytes_read_during_the_copy(
