@@ -1,11 +1,14 @@
 """Command-level contracts for Doc2X conversion attempts."""
 
 import hashlib
+import io
 import json
 import os
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import fitz
 import pytest
@@ -3753,3 +3756,376 @@ def test_flat_state_migration_agrees_with_the_live_conversion_state_projection()
         ):
             continue
         assert ca._conversion_state_for_attempt(flat) == top_level, flat
+
+
+# --- Task 1.3: characterization of the pre-fold flat state projections -----
+#
+# Everything below pins the *observable* (conversion_state,
+# conversion_attempt_state, outcome, action_required) quadruple each flat
+# state produces through main()'s public boundary today, before task 2.1c
+# folds 18 flat states down to 7. drive_to_flat_state and
+# FLAT_STATE_OBSERVABLES are produced here for 2.1c/4.3 to reuse.
+
+
+class _CapturedIO:
+    """Ambient stdout/stderr capture that duck-types capsys's readouterr()
+    (an object with .out/.err) without requiring the real capsys fixture.
+
+    drive_to_flat_state runs inside a parametrized test that only requests
+    (tmp_path, flat_state) -- matching the reusable interface task 2.1c/4.3
+    are meant to call -- so it cannot receive capsys via fixture injection.
+    invoke()/ready_staged_bundle() already assume an object shaped like
+    capsys, so this swaps sys.stdout/sys.stderr for plain StringIO buffers
+    (the same technique capsys itself uses under the hood) and hands that
+    back out, letting every existing helper run completely unmodified.
+    """
+
+    def __init__(self):
+        self._out = io.StringIO()
+        self._err = io.StringIO()
+        self._real_out = sys.stdout
+        self._real_err = sys.stderr
+        sys.stdout = self._out
+        sys.stderr = self._err
+
+    def readouterr(self):
+        out = self._out.getvalue()
+        err = self._err.getvalue()
+        self._out.seek(0)
+        self._out.truncate(0)
+        self._err.seek(0)
+        self._err.truncate(0)
+        return SimpleNamespace(out=out, err=err)
+
+    def close(self):
+        sys.stdout = self._real_out
+        sys.stderr = self._real_err
+
+
+def drive_to_flat_state(tmp_path, flat_state):
+    """Drive a fresh work bundle to `flat_state` through main()'s public
+    CLI boundary and return the machine result JSON of the call that lands
+    on it.
+
+    Reuses the existing fixture classes (StatusCreate, PollStatus,
+    CrashAfterCreate) and ready_staged_bundle exactly as today's other
+    tests do; the only new mechanism is _CapturedIO, which stands in for
+    the capsys fixture (see its docstring).
+
+    Each call gets its own subdirectory of tmp_path -- callers (this
+    module's invisible-branches test included) may drive more than one
+    flat_state off a single tmp_path fixture, and ready_staged_bundle's
+    install_preflight_dependencies() would otherwise collide creating the
+    same python-packages/bs4 stub twice under one shared directory.
+    """
+    call_root = tmp_path / f"drive-{flat_state}"
+    call_root.mkdir()
+    capture = _CapturedIO()
+    try:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+                ready_staged_bundle(call_root, capture, monkeypatch)
+            )
+            create_environ = {**dependencies, "AIHUB_API_KEY": key}
+
+            def _resume(transport, *, expected_generation, environ=None, now=NOW):
+                _rc, result, _stderr = invoke(
+                    capture,
+                    [
+                        "resume",
+                        "--work-bundle",
+                        str(bundle),
+                        "--expected-generation",
+                        str(expected_generation),
+                    ],
+                    cwd=call_root,
+                    environ=create_environ if environ is None else environ,
+                    transport=transport,
+                    now=now,
+                )
+                return result
+
+            if flat_state == "not_started":
+                unknown = _resume(
+                    StatusCreate(401), expected_generation=staged["generation"]
+                )
+                _rc, authorized, _stderr = invoke(
+                    capture,
+                    [
+                        "record",
+                        "conversion",
+                        "--work-bundle",
+                        str(bundle),
+                        "--expected-generation",
+                        str(unknown["generation"]),
+                        "--action-id",
+                        unknown["action_id"],
+                        "--evidence-hash",
+                        unknown["evidence_hash"],
+                        "--decision",
+                        "retry",
+                        "--basis",
+                        "characterization drive to not_started.",
+                    ],
+                    cwd=call_root,
+                    environ=dependencies,
+                    transport=NeverNetwork(),
+                )
+                return authorized
+
+            if flat_state == "submission_unknown":
+                return _resume(
+                    StatusCreate(401), expected_generation=staged["generation"]
+                )
+
+            if flat_state == "submitting":
+                # begin_attempt commits the "submitting" checkpoint to disk
+                # before create_task is called; a crash there (simulating a
+                # killed process, same as the existing crash-recovery
+                # tests) leaves that checkpoint on disk without workflow.py
+                # ever getting to print a result for this call. inspect
+                # (not resume) then reads the bundle back without running
+                # any further recovery/business logic, which is the only
+                # way this flat state is observable through main().
+                with pytest.raises(SimulatedProcessCrash):
+                    workflow.main(
+                        [
+                            "resume",
+                            "--work-bundle",
+                            str(bundle),
+                            "--expected-generation",
+                            str(staged["generation"]),
+                        ],
+                        environ=create_environ,
+                        cwd=str(call_root),
+                        config_home=str(call_root / "config-home"),
+                        transport=CrashAfterCreate(),
+                        now=NOW,
+                    )
+                capture.readouterr()
+                _rc, inspected, _stderr = invoke(
+                    capture,
+                    ["inspect", "--work-bundle", str(bundle)],
+                    cwd=call_root,
+                    environ=dependencies,
+                    transport=NeverNetwork(),
+                )
+                return inspected
+
+            task_id = f"task-{flat_state}"
+            submitted = _resume(
+                SuccessfulCreate(task_id), expected_generation=staged["generation"]
+            )
+
+            if flat_state == "submitted":
+                return submitted
+            if flat_state == "pending":
+                return _resume(
+                    PollStatus(task_id, "pending"),
+                    expected_generation=submitted["generation"],
+                )
+            if flat_state == "processing":
+                return _resume(
+                    PollStatus(task_id, "processing"),
+                    expected_generation=submitted["generation"],
+                )
+            if flat_state == "result_pending":
+                return _resume(
+                    PollStatus(task_id, "completed", results=[]),
+                    expected_generation=submitted["generation"],
+                )
+            if flat_state == "result_ready":
+                return _resume(
+                    PollStatus(
+                        task_id,
+                        "completed",
+                        results=[
+                            {
+                                "url": (
+                                    "https://results.aihubmax.com/ready.zip"
+                                    "?token=one"
+                                )
+                            }
+                        ],
+                    ),
+                    expected_generation=submitted["generation"],
+                )
+            if flat_state == "unsafe_result_url":
+                return _resume(
+                    PollStatus(
+                        task_id,
+                        "completed",
+                        results=[
+                            {"url": "http://results.aihubmax.com/unsafe.zip"}
+                        ],
+                    ),
+                    expected_generation=submitted["generation"],
+                )
+            if flat_state == "unexpected_result_count":
+                return _resume(
+                    PollStatus(
+                        task_id,
+                        "completed",
+                        results=[
+                            {"url": "https://results.aihubmax.com/a.zip?token=one"},
+                            {"url": "https://results.aihubmax.com/b.zip?token=two"},
+                        ],
+                    ),
+                    expected_generation=submitted["generation"],
+                )
+            if flat_state == "failed":
+                return _resume(
+                    PollStatus(
+                        task_id,
+                        "failed",
+                        error={"message": "characterization failure"},
+                    ),
+                    expected_generation=submitted["generation"],
+                )
+            if flat_state == "poll_transient":
+                return _resume(
+                    StatusCreate(429), expected_generation=submitted["generation"]
+                )
+            if flat_state == "poll_unauthorized":
+                return _resume(
+                    StatusCreate(401), expected_generation=submitted["generation"]
+                )
+            if flat_state == "task_unavailable":
+                return _resume(
+                    StatusCreate(404), expected_generation=submitted["generation"]
+                )
+            if flat_state == "credential_source_missing":
+                return _resume(
+                    NeverNetwork(),
+                    expected_generation=submitted["generation"],
+                    environ=dependencies,
+                )
+            if flat_state == "credential_source_changed":
+                return _resume(
+                    NeverNetwork(),
+                    expected_generation=submitted["generation"],
+                    environ={**dependencies, "AIHUB_API_KEY": "a-different-key"},
+                )
+            if flat_state == "poll_timeout":
+                processing = _resume(
+                    PollStatus(task_id, "processing"),
+                    expected_generation=submitted["generation"],
+                    now=NOW,
+                )
+                return _resume(
+                    NeverNetwork(),
+                    expected_generation=processing["generation"],
+                    now=datetime(2024, 1, 2, 3, 16, 5, tzinfo=timezone.utc),
+                )
+            if flat_state == "result_pending_timeout":
+                pending = _resume(
+                    PollStatus(task_id, "completed", results=[]),
+                    expected_generation=submitted["generation"],
+                    now=NOW,
+                )
+                return _resume(
+                    NeverNetwork(),
+                    expected_generation=pending["generation"],
+                    now=datetime(2024, 1, 2, 3, 16, 5, tzinfo=timezone.utc),
+                )
+            raise AssertionError(
+                f"drive_to_flat_state: unknown flat_state {flat_state!r}"
+            )
+    finally:
+        capture.close()
+
+
+FLAT_STATE_OBSERVABLES = {
+    # not_started/pending/processing/submitting corrected from the
+    # illustrative plan values to what main() actually returns (task 1.3
+    # characterization runs the real CLI and records its output, not what
+    # the plan predicted):
+    #  - not_started: the record path's outcome literal is
+    #    "conversion_retry_authorized" (workflow.py's only
+    #    "conversion_authorized"-shaped literal is
+    #    "conversion_retry_authorized"; plain "conversion_authorized" is
+    #    not a string this codebase ever prints).
+    #  - pending/processing: an ordinary poll's outcome falls through
+    #    workflow.py's `f"conversion_{poll_result.state}"` default (the same
+    #    rule result_pending's sibling result_ready overrides but pending/
+    #    processing do not), so the printed outcome is
+    #    "conversion_pending"/"conversion_processing", not the bare state
+    #    name.
+    #  - submitting: only reachable by crashing the process between
+    #    begin_attempt's checkpoint write and create_task's completion
+    #    (CrashAfterCreate, same fixture the existing crash-recovery tests
+    #    use), then reading the bundle back with `inspect` -- the one
+    #    command that returns a result without also recovering the
+    #    crash forward past "submitting". `inspect` always reports outcome
+    #    "inspected"; "conversion_submitting" is not a string any production
+    #    code path prints.
+    "not_started": (
+        "ready_to_submit", "not_started", "conversion_retry_authorized", None
+    ),
+    "submitting": ("submitting", "submitting", "inspected", None),
+    "submitted": ("submitted", "submitted", "conversion_submitted", None),
+    "submission_unknown": (
+        "submission_unknown", "submission_unknown", "submission_unknown",
+        "resolve_submission_unknown",
+    ),
+    "pending": ("submitted", "pending", "conversion_pending", None),
+    "processing": ("submitted", "processing", "conversion_processing", None),
+    "result_pending": ("submitted", "result_pending", "result_pending", None),
+    "result_ready": ("result_downloading", "result_ready", "result_ready", None),
+    "unsafe_result_url": (
+        "terminal_error", "unsafe_result_url", "unsafe_result_url", None
+    ),
+    "unexpected_result_count": (
+        "terminal_error", "unexpected_result_count", "unexpected_result_count",
+        "resolve_unexpected_result_count",
+    ),
+    "failed": ("awaiting_user", "failed", "task_failed", "resolve_task_failed"),
+    "poll_transient": ("recoverable_error", "poll_transient", "poll_transient", None),
+    "poll_unauthorized": (
+        "recoverable_error", "poll_unauthorized", "poll_unauthorized", None
+    ),
+    "task_unavailable": (
+        "recoverable_error", "task_unavailable", "task_unavailable", None
+    ),
+    "credential_source_missing": (
+        "recoverable_error", "credential_source_missing",
+        "credential_source_missing", None,
+    ),
+    "credential_source_changed": (
+        "recoverable_error", "credential_source_changed",
+        "credential_source_changed", None,
+    ),
+    "poll_timeout": ("recoverable_error", "poll_timeout", "poll_timeout", None),
+    "result_pending_timeout": (
+        "recoverable_error", "result_pending_timeout", "result_pending_timeout", None,
+    ),
+}
+
+
+@pytest.mark.parametrize("flat_state", sorted(FLAT_STATE_OBSERVABLES))
+def test_flat_state_observable_projection_is_pinned(tmp_path, flat_state):
+    import conversion_attempt as ca
+
+    result = drive_to_flat_state(tmp_path, flat_state)
+    expected = FLAT_STATE_OBSERVABLES[flat_state]
+    assert (
+        result["conversion_state"],
+        result["conversion_attempt_state"],
+        result["outcome"],
+        result.get("action_required"),
+    ) == expected
+    assert set(FLAT_STATE_OBSERVABLES) == ca.FLAT_STATE_DOMAIN
+
+
+def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_path):
+    """迁移前的观测盲区：两个多分支 state 的分支信息不出现在机器结果里。
+
+    任务 2.2 会让这个断言反转；它在此处的作用是把「盲区确实存在」钉死，
+    使 2.2 的可观测性净增可被证明，而不是被声称。
+    """
+    result = drive_to_flat_state(tmp_path, "submission_unknown")
+    assert "conversion_attempt_reason" not in result
+    assert "conversion_attempt_reason_detail" not in result
+    result = drive_to_flat_state(tmp_path, "poll_transient")
+    assert "conversion_attempt_reason" not in result
+    assert "conversion_attempt_reason_detail" not in result
