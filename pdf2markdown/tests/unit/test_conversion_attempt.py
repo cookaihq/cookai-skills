@@ -3529,6 +3529,66 @@ def test_poll_admission_counts_the_bytes_its_crash_recovery_would_append(
     assert _bundle_state_snapshot(bundle) == before
 
 
+def test_private_ceiling_exhaustion_stops_before_intent(
+    tmp_path, capsys, monkeypatch
+):
+    # worst_case_admission_for_unknown_response judges the three files against
+    # three separate ceilings, so each of them has to be able to stop an
+    # operation on its own. The manifest ceiling is driven by
+    # test_capacity_exhaustion_stops_before_intent_and_leaves_bytes_untouched
+    # and the history ceiling by
+    # test_poll_admission_counts_the_bytes_its_crash_recovery_would_append;
+    # this is the private.json one, so a wiring mistake that leaves the private
+    # verdict out of the refusal cannot hide behind the other two.
+    bundle, environ, generation, at = _capacity_exhaustion_bundle(
+        "ordinary_poll", tmp_path, capsys, monkeypatch
+    )
+    before = _bundle_state_snapshot(bundle)
+    monkeypatch.setattr(conversion_attempt, "MAX_PRIVATE_CANDIDATE_BYTES", 1)
+
+    never = CountingNeverNetwork()
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=never,
+        now=at,
+    )
+
+    assert rc != 0, json.dumps(result, sort_keys=True)
+    assert result["outcome"] == "error"
+    assert [error["code"] for error in result["errors"]] == [
+        "local_state_capacity_exhausted"
+    ]
+    assert result["action_required"] == "preserve_work_bundle_and_stop"
+    assert never.calls == []
+    assert _bundle_state_snapshot(bundle) == before
+
+
+def test_capacity_admission_refuses_an_operation_it_cannot_size():
+    # assert_local_state_capacity picks the candidate builder from `operation`.
+    # An operation it does not recognise has no worst case it can compute, so
+    # it must refuse rather than fall through to "nothing exceeded anything" --
+    # otherwise adding a fourth writing path and forgetting its candidates
+    # would silently produce an admission that always admits.
+    with pytest.raises(conversion_attempt.ConversionAttemptError) as refused:
+        conversion_attempt.assert_local_state_capacity(
+            operation="conversion_retry",
+            manifest={},
+            private_state={},
+            history_bytes=0,
+            at="2024-01-02T03:04:05Z",
+        )
+    assert refused.value.code == "integrity_violation"
+
+
 def test_capacity_admission_reads_history_at_the_history_ceiling(
     tmp_path, capsys, monkeypatch
 ):
