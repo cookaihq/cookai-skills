@@ -1848,3 +1848,78 @@ def test_atomic_write_json_and_append_history_use_shared_canonical_encoder(tmp_p
     assert history_path.read_bytes() == expected_bytes + (
         workflow.bundle_module.canonical_json_bytes(second_event)
     )
+
+
+def test_error_path_actions_are_a_closed_vocabulary():
+    import workflow
+
+    assert workflow.ERROR_PATH_ACTIONS == {
+        "configure_aihub_api_key",
+        "correct_command_arguments",
+        "correct_correction_record",
+        "correct_settings_override",
+        "inspect_current_generation",
+        "inspect_preflight_failure",
+        "inspect_runtime_error",
+        "preserve_work_bundle_and_stop",
+        "provide_public_https_pdf",
+        "provide_valid_local_pdf",
+        "repair_or_restore_work_bundle",
+        "repair_settings",
+        "restore_preflight_dependencies",
+        "resume_same_conversion_result",
+        "correct_preflight_record",
+        "correct_review_record",
+        "restore_review_dependencies",
+        "retry_after_writer_finishes",
+        "retry_settings_write",
+    }
+
+
+def test_workflow_error_rejects_an_action_outside_the_error_path_vocabulary():
+    import workflow
+
+    try:
+        workflow.WorkflowError(
+            "invalid_bundle",
+            "message",
+            return_code=4,
+            action_required="adopt_conversion_result",
+        )
+    except ValueError as exc:
+        assert "adopt_conversion_result" in str(exc)
+    else:
+        raise AssertionError(
+            "WorkflowError accepted a conversion-vocabulary action"
+        )
+
+
+def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
+    import ast
+    from pathlib import Path
+    import workflow
+
+    # 必须用 AST 而不是正则：action_required 有三种写法，其中链式三元表达式
+    # 的 else 兜底分支（workflow.py:2965 / :2991 / :1790）任何正则都抓不到。
+    source = Path(workflow.__file__).read_text(encoding="utf-8")
+
+    def _strings(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value
+        elif isinstance(node, ast.IfExp):
+            yield from _strings(node.body)
+            yield from _strings(node.orelse)
+
+    literals = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.keyword) and node.arg == "action_required":
+            literals.update(_strings(node.value))
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and key.value == "action_required":
+                    literals.update(_strings(value))
+
+    assert literals
+    # 等值而非子集：表既然声称闭合，就不允许存在表外字面量，也不允许
+    # 表里留着已经没人用的死值。
+    assert literals == set(workflow.ERROR_PATH_ACTIONS)

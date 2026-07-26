@@ -54,6 +54,34 @@ SUPPORTED_CONVERSION_STATES = frozenset(
 )
 SUPPORTED_PUBLICATION_STATES = frozenset({"not_requested", "blocked"})
 
+# design.md Decision 5 -- the error-path action vocabulary. It is disjoint from
+# the closed conversion action vocabulary; the two only ever meet in the
+# serialized action_required key, where rc != 0 means this table and rc == 0
+# means the conversion table.
+ERROR_PATH_ACTIONS = frozenset(
+    {
+        "configure_aihub_api_key",
+        "correct_command_arguments",
+        "correct_correction_record",
+        "correct_settings_override",
+        "inspect_current_generation",
+        "inspect_preflight_failure",
+        "inspect_runtime_error",
+        "preserve_work_bundle_and_stop",
+        "provide_public_https_pdf",
+        "provide_valid_local_pdf",
+        "repair_or_restore_work_bundle",
+        "repair_settings",
+        "restore_preflight_dependencies",
+        "resume_same_conversion_result",
+        "correct_preflight_record",
+        "correct_review_record",
+        "restore_review_dependencies",
+        "retry_after_writer_finishes",
+        "retry_settings_write",
+    }
+)
+
 
 class WorkflowError(Exception):
     def __init__(
@@ -65,6 +93,10 @@ class WorkflowError(Exception):
         action_required: str,
         context=None,
     ):
+        if action_required is not None and action_required not in ERROR_PATH_ACTIONS:
+            raise ValueError(
+                f"action_required {action_required!r} is not an error-path action"
+            )
         super().__init__(message)
         self.code = code
         self.message = message
