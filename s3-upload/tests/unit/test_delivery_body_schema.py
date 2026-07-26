@@ -5,6 +5,7 @@ import pytest
 from action_registry import ACTIONS
 from delivery_schema import (
     ACK_FIELDS,
+    ARTIFACT_TYPES,
     BLOCKING_REASONS,
     BODY_FIELDS,
     DeliverySchemaError,
@@ -92,6 +93,7 @@ def test_body_fields_cover_exactly_four_artifact_types():
         "s3-upload.result",
         "s3-upload.ack",
     }
+    assert set(BODY_FIELDS) | {"s3-upload.probe", "s3-upload.object-reference"} == ARTIFACT_TYPES
     assert BODY_FIELDS["s3-upload.plan"] == PLAN_FIELDS
     assert BODY_FIELDS["s3-upload.recovery-descriptor"] == RECOVERY_FIELDS
     assert BODY_FIELDS["s3-upload.result"] == RESULT_FIELDS
@@ -173,7 +175,7 @@ def test_parse_typed_round_trips_canonical_bytes():
 def test_parse_typed_rejects_extra_body_field():
     raw = serialize_artifact(
         build_typed("s3-upload.plan", plan_body())
-    ).decode("utf-8").replace('"caller"', '"caller_extra"', 1)
+    ).decode("utf-8").replace('"caller":', '"caller_extra":"x","caller":', 1)
     with pytest.raises(DeliverySchemaError):
         parse_typed(raw, expected_type="s3-upload.plan")
 
