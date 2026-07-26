@@ -415,13 +415,21 @@ class PlanStore:
             raise PlanStoreError("invalid lock name")
         self._prepare()
         path = os.path.join(self.locks_dir, name + ".lock")
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            os.fchmod(descriptor, 0o600)
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError as exc:
+            raise PlanStoreError("plan store lock path is unsafe") from exc
+        try:
+            try:
+                os.fchmod(descriptor, 0o600)
+            except OSError as exc:
+                raise PlanStoreError("plan store lock could not be secured") from exc
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise PlanStoreError("plan store lock is held") from exc
+            except OSError as exc:
+                raise PlanStoreError("plan store lock could not be acquired") from exc
             yield
         finally:
             try:

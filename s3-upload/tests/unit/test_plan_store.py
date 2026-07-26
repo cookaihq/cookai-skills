@@ -136,9 +136,9 @@ def test_build_plan_body_deep_copies_the_target_contract_snapshot(
     project, dry_run, snapshot, contract_digest
 ):
     body = make_body(project, dry_run, snapshot, contract_digest)
-    original_bucket = snapshot["bucket"]
-    snapshot["bucket"] = "attacker-bucket"
-    assert body["target_contract"]["bucket"] == original_bucket
+    original_access_mode = snapshot["access"]["mode"]
+    snapshot["access"]["mode"] = "attacker-mode"
+    assert body["target_contract"]["access"]["mode"] == original_access_mode
 
 
 def test_spool_rejects_a_source_larger_than_the_soft_limit(project, dry_run, snapshot, contract_digest):
@@ -167,7 +167,7 @@ def test_load_record_rejects_a_record_whose_plan_hash_no_longer_matches_its_body
     store, issued = issue(project, dry_run, snapshot, contract_digest)
     record = store.load_record(issued.plan_id)
     write_tampered_record(project, issued.plan_id, record, object_key="images/other.png")
-    with pytest.raises(PlanStoreError):
+    with pytest.raises(PlanStoreError, match="plan record plan_hash does not match its bound facts"):
         store.load_record(issued.plan_id)
 
 
@@ -192,6 +192,9 @@ def test_consume_accepts_the_issued_token(project, dry_run, snapshot, contract_d
     assert isinstance(consumed, ConsumedPlan)
     assert consumed.state == "active"
     assert consumed.plan_id == issued.plan_id
+    assert consumed.tombstone is None
+    assert consumed.record is not None
+    assert body_of(consumed.record["plan"])["object_key"] == body_of(issued.artifact)["object_key"]
 
 
 @pytest.mark.parametrize("overrides", [
@@ -260,7 +263,7 @@ def test_consume_takes_its_facts_only_from_the_on_disk_record_not_a_caller_suppl
     store, issued = issue(project, dry_run, snapshot, contract_digest)
     record = store.load_record(issued.plan_id)
     write_tampered_record(project, issued.plan_id, record, object_key="images/attacker.png")
-    with pytest.raises(PlanStoreError):
+    with pytest.raises(PlanStoreError, match="plan record plan_hash does not match its bound facts"):
         store.consume(
             issued.token, caller=CALLER, executable_path="/usr/bin/python3",
             cwd=str(project.root), state_root=str(project.state_root),
@@ -428,7 +431,17 @@ def test_lock_is_exclusive(project, dry_run, snapshot, contract_digest):
                 pass
 
 
-def test_token_is_generated_only_after_the_spool_is_durably_fsynced(
+def test_lock_wraps_a_symlinked_lock_path_as_plan_store_error(tmp_path):
+    state_root = tmp_path / "state-root"
+    store = PlanStore(str(state_root))
+    store._prepare()
+    (state_root / "locks" / "escape.lock").symlink_to(state_root / "locks" / "elsewhere")
+    with pytest.raises(PlanStoreError):
+        with store.lock("escape"):
+            pass
+
+
+def test_token_is_generated_only_after_the_spool_method_returns(
     project, dry_run, snapshot, contract_digest, monkeypatch
 ):
     events = []
