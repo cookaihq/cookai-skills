@@ -248,20 +248,32 @@ class _LegalTriple(NamedTuple):
 # (attempt state, reason, conversion_state) triple. It does NOT own wire
 # values, HTTP statuses or upstream statuses.
 #
-# The reason columns of the two tables therefore disagree on exactly two rows,
-# and that is by design, not drift:
+# Restricted to the 14 contract rows (POLL_STATE_CONTRACT's domain), the
+# reason columns of the two tables disagree on exactly two of them, and that
+# is by design, not drift:
 #
 #   flat state                  | LEGAL_TRIPLES.reason_code   | FLAT_STATE_MIGRATION reason
 #   ----------------------------+-----------------------------+-----------------------------
 #   poll_unauthorized           | poll_unauthorized           | poll_authentication_rejected
 #   credential_source_changed   | credential_source_changed   | credential_fingerprint_changed
 #
-# To read today's on-the-wire value, read LEGAL_TRIPLES.reason_code. To read
-# the folded target value -- which is what the schema v2 attempt field
-# `reason` carries from task 2.1b onward -- read FLAT_STATE_MIGRATION. Merging
-# the two would produce a table whose columns describe different points in
-# time, and task 2.1c would have to split it again once the fold lands. The
-# known cost is that task 3.2's uniqueness proof spans both tables.
+# Outside that domain, two more rows also disagree: submission_unknown and
+# poll_transient are _NON_CONTRACT_STATES placeholders, so LEGAL_TRIPLES
+# carries None for them by construction (see _LegalTriple's docstring), while
+# FLAT_STATE_MIGRATION carries their real folded reason ("no_task_id" /
+# "poll_transient"). Their on-the-wire value never lived in
+# LEGAL_TRIPLES.reason_code to begin with -- from schema v2 on it lives in the
+# attempt's `reason_detail` field (SUBMISSION_UNKNOWN_REASON_CODES /
+# POLL_TRANSIENT_REASON_CODES), not in this table.
+#
+# To read today's on-the-wire value for a contract row, read
+# LEGAL_TRIPLES.reason_code; for submission_unknown/poll_transient, read
+# reason_detail instead. To read the folded target value -- which is what the
+# schema v2 attempt field `reason` carries from task 2.1b onward -- read
+# FLAT_STATE_MIGRATION. Merging the two would produce a table whose columns
+# describe different points in time, and task 2.1c would have to split it
+# again once the fold lands. The known cost is that task 3.2's uniqueness
+# proof spans both tables.
 LEGAL_TRIPLES = (
     _LegalTriple("ready_to_submit", "not_started", None, None, None),
     _LegalTriple("submitting", "submitting", None, None, None),
@@ -367,9 +379,14 @@ _MANIFEST_STATE_BY_ATTEMPT_STATE = {
 # folded `reason` -- is enforced against FLAT_STATE_MIGRATION instead. The two
 # checks are equally tight, because both columns are single-valued functions
 # of the state (they agree row for row apart from the two renames documented
-# on LEGAL_TRIPLES). The reason_code element stays in this tuple because it is
-# still the owner of what a *poll observation* may carry on the wire, which is
-# what _poll_response_branches and the 2.1a owner test read.
+# on LEGAL_TRIPLES). The reason_code element has no production reader left
+# after schema v2: _poll_response_branches (below) builds its worst-case
+# observations from _LEGAL_TRIPLE_BY_ATTEMPT_STATE directly, never from this
+# tuple. Keeping it here is test-only from this task onward -- the 2.1a owner
+# test (test_legal_triples_is_the_single_owner_of_state_legality) still
+# compares the whole three-element tuple against a literal oracle -- which
+# strengthens, rather than weakens, task 2.1c's case for folding this column
+# away.
 POLL_STATE_CONTRACT = {
     row.attempt_state: (row.http_status, row.upstream_status, row.reason_code)
     for row in LEGAL_TRIPLES
@@ -402,15 +419,24 @@ POLL_TRANSIENT_REASON_CODES = frozenset(
 # also owns the top-level conversion_state each flat state projects to
 # *today*, which valid_private_state enforces.
 #
-# The two reason columns disagree on exactly two rows, by design:
+# Restricted to the 14 contract rows, the two reason columns disagree on
+# exactly two of them, by design:
 #
 #   flat state                  | LEGAL_TRIPLES.reason_code   | reason here
 #   ----------------------------+-----------------------------+-----------------------------
 #   poll_unauthorized           | poll_unauthorized           | poll_authentication_rejected
 #   credential_source_changed   | credential_source_changed   | credential_fingerprint_changed
 #
-# To read today's on-the-wire value, read LEGAL_TRIPLES.reason_code. To read
-# the folded target value, read this table.
+# Outside that domain, two more rows also disagree -- submission_unknown and
+# poll_transient, the _NON_CONTRACT_STATES placeholders where
+# LEGAL_TRIPLES.reason_code is None by construction but this table carries
+# the real folded reason. See LEGAL_TRIPLES' own comment above for the full
+# four-row account and where each placeholder's on-the-wire value actually
+# lives (reason_detail, not LEGAL_TRIPLES.reason_code).
+#
+# To read today's on-the-wire value, read LEGAL_TRIPLES.reason_code (or
+# reason_detail for the two placeholders). To read the folded target value,
+# read this table.
 FLAT_STATE_MIGRATION = {
     # flat state: (attempt state, reason, top-level conversion_state)
     "not_started": ("authorized", None, "ready_to_submit"),
@@ -444,18 +470,16 @@ FLAT_STATE_MIGRATION = {
 }
 FLAT_STATE_DOMAIN = frozenset(FLAT_STATE_MIGRATION)
 
-# The wire reason codes that survive into the schema v2 `reason_detail` field.
-# They are exactly the codes of the two states whose wire value ranges over a
-# set instead of being a single-valued function of the state: every other
-# state's wire code is recoverable from the state alone (LEGAL_TRIPLES owns
-# that mapping), so keeping it in reason_detail would store a second copy of
-# something already implied.
-_REASON_DETAIL_CODES = SUBMISSION_UNKNOWN_REASON_CODES | POLL_TRANSIENT_REASON_CODES
-
 # Which states may carry a non-null reason_detail, and the closed set each one
-# may draw from. Anything else must be None -- _valid_reason_detail enforces
-# this and _attempt_reason_columns produces it, so the writer and the
-# validator read one table rather than two agreeing conditionals.
+# may draw from. The two domained states are exactly the ones whose wire
+# value ranges over a set instead of being a single-valued function of the
+# state: every other state's wire code is recoverable from the state alone
+# (LEGAL_TRIPLES owns that mapping), so keeping it in reason_detail would
+# store a second copy of something already implied. Anything outside the
+# domain must be None -- _valid_reason_detail enforces this and
+# _attempt_reason_columns produces it by reading this same dict (via
+# `.get(state, frozenset())`), so the writer and the validator read one table
+# rather than two agreeing conditionals.
 _REASON_DETAIL_DOMAIN = {
     "submission_unknown": SUBMISSION_UNKNOWN_REASON_CODES,
     "poll_transient": POLL_TRANSIENT_REASON_CODES,
@@ -483,7 +507,9 @@ def _attempt_reason_columns(state: str, reason_code: str | None) -> dict:
     return {
         "reason": FLAT_STATE_MIGRATION[state][1],
         "reason_detail": (
-            reason_code if reason_code in _REASON_DETAIL_CODES else None
+            reason_code
+            if reason_code in _REASON_DETAIL_DOMAIN.get(state, frozenset())
+            else None
         ),
         "authorization_kind": None,
         "result_refresh_round_count": 0,

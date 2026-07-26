@@ -3994,6 +3994,53 @@ def test_the_non_contract_state_exclusion_domain_has_a_single_owner():
     assert set(ca._LEGAL_TRIPLE_BY_ATTEMPT_STATE) == contract_domain
 
 
+def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
+    """Review fix (Important #2, task 2.1b).
+
+    `_attempt_reason_columns` (the writer) and `_valid_reason_detail` (the
+    validator) must derive `reason_detail`'s legality from the same table,
+    `_REASON_DETAIL_DOMAIN`, rather than from two independently listed
+    constants that only happened to agree today (the writer used to read a
+    separate module-level `_REASON_DETAIL_CODES`, defined as the union of
+    `_REASON_DETAIL_DOMAIN`'s values -- nothing enforced that the two stayed
+    equal as the vocabulary grows in 2.2/2.3, and that constant has since
+    been removed in favour of this single table).
+
+    Proof of "one table" is that widening `_REASON_DETAIL_DOMAIN` alone,
+    without touching the writer, changes what the writer emits. A writer that
+    reads a separate constant would not move: it would keep dropping the
+    newly-domained code as `None`, and a validator that then accepted it
+    would drift the two apart -- reproducing, one level down, exactly the
+    two-tables-that-must-agree shape task 2.1a already removed from
+    `POLL_STATE_CONTRACT` and `expected_manifest_state`.
+    """
+    import conversion_attempt as ca
+
+    probe_state = "poll_timeout"
+    probe_code = "poll_timeout"
+    # Today `poll_timeout` is not in `_REASON_DETAIL_DOMAIN`, so both sides
+    # must drop the code.
+    assert (
+        ca._attempt_reason_columns(probe_state, probe_code)["reason_detail"]
+        is None
+    )
+    assert ca._valid_reason_detail(probe_state, probe_code) is False
+
+    monkeypatch.setitem(
+        ca._REASON_DETAIL_DOMAIN, probe_state, frozenset({probe_code})
+    )
+
+    # The validator reading the widened table is not interesting on its own
+    # -- `_valid_reason_detail` already reads `_REASON_DETAIL_DOMAIN`
+    # directly. The writer moving in lockstep, with no code of its own
+    # touched, is the evidence the two share one table.
+    assert (
+        ca._attempt_reason_columns(probe_state, probe_code)["reason_detail"]
+        == probe_code
+    )
+    assert ca._valid_reason_detail(probe_state, probe_code) is True
+
+
 def _schema_v1_attempt(attempt, wire_reason_code_by_state):
     """The exact schema v1 record a v1 implementation would have written for
     this v2 attempt.
@@ -4087,21 +4134,54 @@ def test_a_schema_version_one_attempt_fails_closed(tmp_path, capsys, monkeypatch
     (bundle / "manifest.json").write_text(
         json.dumps(v1_manifest, sort_keys=True, separators=(",", ":"))
     )
-    before = _bundle_state_snapshot(bundle)
-    transport = CountingNeverNetwork()
 
     rc, result, _stderr = invoke(
         capsys,
         ["inspect", "--work-bundle", str(bundle)],
         cwd=tmp_path,
         environ=dependencies,
-        transport=transport,
     )
 
     assert rc == 4, json.dumps(result, sort_keys=True)
     assert result["errors"][0]["code"] == "invalid_bundle"
-    assert transport.calls == []
-    assert _bundle_state_snapshot(bundle) == before
+
+    # `inspect` cannot demonstrate the "nothing written, nothing sent" half of
+    # fail-closed: workflow._inspect's signature (`def _inspect(args, *, cwd:
+    # Path)`) never receives a transport at all, and _inspect_bundle only
+    # reads manifest.json -- so `transport.calls == []` and an unchanged byte
+    # snapshot would hold here for *any* bundle, valid or not, regardless of
+    # whether the schema check works. Drive the same v1 bundle through
+    # `resume` instead: it does receive a transport, and does write when it
+    # has work to do (the same pattern
+    # test_capacity_exhaustion_stops_before_intent_and_leaves_bytes_untouched
+    # uses transport/byte-snapshot assertions for). resume's recovery chain
+    # (recover_pending_operation / recover_interrupted_adoption /
+    # conversion_attempt_module.recover_interrupted_attempt / ...) runs ahead
+    # of the schema check (workflow._resume calls _inspect_bundle only after
+    # those), so seeing zero transport calls and zero byte drift here is real
+    # evidence the v1 rejection happens before any of that recovery machinery
+    # could reach the network or the disk -- not a tautology of the command's
+    # shape.
+    resume_before = _bundle_state_snapshot(bundle)
+    resume_transport = CountingNeverNetwork()
+    resume_rc, resume_result, _resume_stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(submitted["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=resume_transport,
+    )
+
+    assert resume_rc == 4, json.dumps(resume_result, sort_keys=True)
+    assert resume_result["errors"][0]["code"] == "invalid_bundle"
+    assert resume_transport.calls == []
+    assert _bundle_state_snapshot(bundle) == resume_before
 
 
 # --- Task 1.3: characterization of the pre-fold flat state projections -----
