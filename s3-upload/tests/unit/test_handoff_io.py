@@ -3,6 +3,7 @@ import stat
 
 import pytest
 
+import delivery_schema
 import handoff_io
 import safe_io
 from handoff_io import (
@@ -255,7 +256,7 @@ def test_commit_write_stays_inside_the_preflight_verified_parent_when_swapped(pr
 
     monkeypatch.setattr(handoff_io, "atomic_write", swapping_atomic_write)
     target = preflight_for(project, project.result_out)
-    commit(target, PAYLOAD)
+    assert commit(target, PAYLOAD) == "created"
     assert not (project.out / "result.json").exists()
     assert (tmp_path / "moved-out" / "result.json").read_bytes() == PAYLOAD
 
@@ -331,14 +332,14 @@ def test_handoff_error_reasons_are_exactly_the_two_declared_codes(project):
         return excinfo.value.reason
 
     def trigger_commit_immutable():
-        target = preflight_for(project, project.result_out)
+        target = preflight_for(project, str(project.out / "immutable-check.json"))
         commit(target, PAYLOAD)
         with pytest.raises(HandoffError) as excinfo:
             commit(target, b"other")
         return excinfo.value.reason
 
     def trigger_commit_bad_payload():
-        target = preflight_for(project, project.result_out)
+        target = preflight_for(project, str(project.out / "bad-payload-check.json"))
         with pytest.raises(HandoffError) as excinfo:
             commit(target, "not-bytes")
         return excinfo.value.reason
@@ -353,3 +354,9 @@ def test_handoff_error_reasons_are_exactly_the_two_declared_codes(project):
         reasons.add(scenario())
 
     assert reasons == {HANDOFF_UNSAFE, HANDOFF_WRITE_FAILED}
+
+
+def test_handoff_reason_codes_are_declared_delivery_blocking_reasons():
+    assert HANDOFF_UNSAFE == "handoff_unsafe"
+    assert HANDOFF_WRITE_FAILED == "handoff_write_failed"
+    assert {HANDOFF_UNSAFE, HANDOFF_WRITE_FAILED} <= set(delivery_schema.BLOCKING_REASONS)
