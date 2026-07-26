@@ -10,6 +10,7 @@ import pytest
 import conversion_attempt
 import raw_conversion
 import workflow
+from test_raw_conversion import ArchiveTransport, make_zip
 
 
 NOW = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
@@ -2214,6 +2215,207 @@ def test_poll_result_journal_recovers_each_write_boundary_without_leaking_result
         assert private_state["result_urls"] == []
     else:
         assert private_state["result_urls"][-1]["url"] == result_url
+
+
+REFRESH_TASK_ID = "task-refresh-crash"
+REFRESH_FIRST_URL = "https://results.example/refresh.zip?token=refresh-first"
+REFRESH_SECOND_URL = "https://results.example/refresh.zip?token=refresh-second"
+REFRESH_EXPIRY = datetime(2024, 1, 3, 3, 4, 5, tzinfo=timezone.utc)
+
+
+def _refresh_ready_bundle(tmp_path, capsys, monkeypatch):
+    """Drive one attempt to a result reference that is about to expire."""
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+
+    def resume(expected_generation, *, transport, now=NOW):
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(expected_generation),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=transport,
+            now=now,
+        )
+        assert rc == 0, json.dumps(result, sort_keys=True)
+        return result
+
+    submitted = resume(
+        staged["generation"], transport=SuccessfulCreate(REFRESH_TASK_ID)
+    )
+    ready = resume(
+        submitted["generation"],
+        transport=PollStatus(
+            REFRESH_TASK_ID, "completed", results=[{"url": REFRESH_FIRST_URL}]
+        ),
+    )
+    assert ready["outcome"] == "result_ready"
+    return bundle, environ, resume, ready
+
+
+def _crash_resume(tmp_path, bundle, environ, generation, *, transport, now):
+    with pytest.raises(SimulatedProcessCrash):
+        workflow.main(
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(generation),
+            ],
+            environ=environ,
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=transport,
+            now=now,
+        )
+
+
+@pytest.mark.parametrize("boundary", ["intent", "prepared", "private", "manifest"])
+def test_expired_refresh_crash_boundaries_recover_without_new_task_or_get(
+    tmp_path, capsys, monkeypatch, boundary
+):
+    # A locally expired result reference is refreshed by re-polling the same
+    # Doc2X task. Crashing anywhere along that journey must never cost a
+    # second conversion (a new, billable attempt) and must never repeat the
+    # result GET: recovery has to finish the interrupted operation from the
+    # durable journal alone.
+    bundle, environ, resume, ready = _refresh_ready_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    request_filename = json.loads((bundle / "manifest.json").read_text())[
+        "conversion_attempts"
+    ][-1]["request_summary"]["filename"]
+    generation = ready["generation"]
+
+    if boundary == "intent":
+        # Crash after raw_conversion_intent, before the expiry rejection.
+        original_commit_rejection = raw_conversion._commit_rejection
+
+        def crash_before_rejection(**_kwargs):
+            raise SimulatedProcessCrash
+
+        monkeypatch.setattr(
+            raw_conversion, "_commit_rejection", crash_before_rejection
+        )
+        _crash_resume(
+            tmp_path,
+            bundle,
+            environ,
+            generation,
+            transport=CountingNeverNetwork(),
+            now=REFRESH_EXPIRY,
+        )
+        monkeypatch.setattr(
+            raw_conversion, "_commit_rejection", original_commit_rejection
+        )
+    else:
+        expired = resume(
+            generation, transport=CountingNeverNetwork(), now=REFRESH_EXPIRY
+        )
+        assert expired["outcome"] == "result_url_unavailable"
+        generation = expired["generation"]
+        refresh_poll = PollStatus(
+            REFRESH_TASK_ID, "completed", results=[{"url": REFRESH_SECOND_URL}]
+        )
+        if boundary in {"private", "manifest"}:
+            # Crash while committing the refreshed poll result.
+            (
+                original_atomic_write,
+                original_append_history,
+            ) = _install_conversion_journal_crash(
+                monkeypatch,
+                event="conversion_poll_result_committed",
+                boundary=boundary,
+            )
+            _crash_resume(
+                tmp_path,
+                bundle,
+                environ,
+                generation,
+                transport=refresh_poll,
+                now=REFRESH_EXPIRY,
+            )
+            monkeypatch.setattr(
+                conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+            )
+            monkeypatch.setattr(
+                conversion_attempt.bundle, "append_history", original_append_history
+            )
+        else:
+            # Crash after the refreshed archive is extracted, before the
+            # raw_conversion_prepared event is durable.
+            renewed = resume(
+                generation, transport=refresh_poll, now=REFRESH_EXPIRY
+            )
+            assert renewed["outcome"] == "result_ready"
+            generation = renewed["generation"]
+            original_append_prepared = raw_conversion._append_prepared
+
+            def crash_before_prepared(**_kwargs):
+                raise SimulatedProcessCrash
+
+            monkeypatch.setattr(
+                raw_conversion, "_append_prepared", crash_before_prepared
+            )
+            _crash_resume(
+                tmp_path,
+                bundle,
+                environ,
+                generation,
+                transport=ArchiveTransport(
+                    make_zip([(f"{request_filename}.md", b"# Refresh\n")])
+                ),
+                now=REFRESH_EXPIRY,
+            )
+            monkeypatch.setattr(
+                raw_conversion, "_append_prepared", original_append_prepared
+            )
+    capsys.readouterr()
+
+    never = CountingNeverNetwork()
+    recovered_rc, recovered, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=never,
+        now=REFRESH_EXPIRY,
+    )
+
+    # No repeated result GET: recovery is decided from durable state alone.
+    assert never.calls == [], (boundary, never.calls)
+    assert recovered_rc == 0, (boundary, json.dumps(recovered, sort_keys=True))
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    history = [
+        json.loads(line)
+        for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
+    ]
+    # No new (billable) conversion attempt was created by the recovery.
+    assert len(manifest["conversion_attempts"]) == 1
+    assert manifest["conversion_attempts"][-1]["task_id"] == REFRESH_TASK_ID
+    assert sum(
+        event.get("event") == "conversion_submit_intent" for event in history
+    ) == 1
+    public_state = (bundle / "manifest.json").read_text() + (
+        bundle / ".state" / "history.ndjson"
+    ).read_text()
+    assert REFRESH_FIRST_URL not in public_state
+    assert REFRESH_SECOND_URL not in public_state
 
 
 @pytest.mark.parametrize("boundary", ["private", "manifest", "commit"])
