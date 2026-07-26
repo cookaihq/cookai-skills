@@ -3000,13 +3000,6 @@ def test_worst_case_admission_uses_upper_bounds_for_unknown_response():
         )
         == 2 + 16384 * 6
     )
-    assert conversion_attempt.WORST_CASE_TASK_ID_JSON_BYTES == (
-        conversion_attempt.worst_case_json_string_bytes(4096)
-    )
-    assert conversion_attempt.WORST_CASE_RESULT_URL_JSON_BYTES == (
-        conversion_attempt.worst_case_json_string_bytes(16384)
-    )
-
     assert conversion_attempt.MAX_MANIFEST_CANDIDATE_BYTES == 8 * 1024 * 1024
     assert conversion_attempt.MAX_PRIVATE_CANDIDATE_BYTES == 8 * 1024 * 1024
     assert conversion_attempt.bundle.MAX_STATE_BYTES == 64 * 1024 * 1024
@@ -3254,6 +3247,42 @@ def test_worst_case_admission_counts_whole_candidate_not_just_unknown_values():
         private_unreceived_result_url_count=1,
         history_unreceived_task_id_count=1,
     ) == {"manifest": True, "private": True, "history": True}
+
+
+def test_worst_case_admission_reads_every_bound_and_ceiling_at_call_time(monkeypatch):
+    # design.md:305: "ceiling 以可注入常量测试；生产值保持 8/8/64 MiB". plan.md 2.3
+    # drives its boundary cases by shrinking these numbers, so every value the
+    # verdict depends on -- the two upper bounds as well as the three ceilings
+    # -- must be read from the module when the function runs. A bound folded
+    # into an import-time constant would ignore the injected value and quietly
+    # keep judging against the production number.
+    monkeypatch.setattr(conversion_attempt, "TASK_ID_UPPER_BOUND_BYTES", 1)
+    monkeypatch.setattr(conversion_attempt, "RESULT_URL_UPPER_BOUND_BYTES", 2)
+    monkeypatch.setattr(conversion_attempt, "MAX_MANIFEST_CANDIDATE_BYTES", 100)
+    monkeypatch.setattr(conversion_attempt, "MAX_PRIVATE_CANDIDATE_BYTES", 100)
+    monkeypatch.setattr(conversion_attempt.bundle, "MAX_STATE_BYTES", 100)
+
+    # Injected bounds: one unknown task_id now costs 6*1 bytes and one unknown
+    # result URL 6*2 bytes, so a 94-byte candidate lands exactly on the
+    # injected 100-byte ceiling and a 95-byte one overruns it.
+    assert conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=94,
+        private_candidate_bytes=88,
+        history_candidate_bytes=82,
+        manifest_unreceived_task_id_count=1,
+        private_unreceived_result_url_count=1,
+        history_unreceived_task_id_count=1,
+        history_unreceived_result_url_count=1,
+    ) == {"manifest": True, "private": True, "history": True}
+    assert conversion_attempt.worst_case_admission_for_unknown_response(
+        manifest_candidate_bytes=95,
+        private_candidate_bytes=89,
+        history_candidate_bytes=83,
+        manifest_unreceived_task_id_count=1,
+        private_unreceived_result_url_count=1,
+        history_unreceived_task_id_count=1,
+        history_unreceived_result_url_count=1,
+    ) == {"manifest": False, "private": False, "history": False}
 
 
 def test_result_url_upper_bound_matches_doc2x_valid_https_url_boundary():

@@ -213,11 +213,14 @@ JSON_STRING_ESCAPE_MAX_BYTES_PER_UTF8_BYTE = 6
 # The wrapping `"..."` quote bytes json.dumps always adds around a string.
 _JSON_STRING_QUOTE_BYTES = 2
 
-# manifest.json / private.json read ceiling (workflow.py:34, workflow._read_json's
-# default max_bytes). conversion_attempt.py cannot import workflow.py (workflow.py
-# already imports this module), so this reuses the same already-established 8 MiB
-# value rather than inventing a third constant; pinned equal to workflow.MAX_STATE_BYTES
-# by test_manifest_and_private_candidate_ceilings_match_workflow_read_ceiling.
+# manifest.json / private.json candidate ceiling. workflow.py:34 already fixes
+# 8 MiB as workflow._read_json's default max_bytes for both files, so admitting
+# a candidate above it would only produce a file workflow can no longer read.
+# conversion_attempt.py cannot import workflow.py (workflow.py already imports
+# this module), so these are two further *definitions* of that 8 MiB -- only the
+# number is shared, not its definition. Nothing but
+# test_manifest_and_private_candidate_ceilings_match_workflow_read_ceiling keeps
+# the copies equal; collapsing all three onto one owner is tracked separately.
 MAX_MANIFEST_CANDIDATE_BYTES = 8 * 1024 * 1024
 MAX_PRIVATE_CANDIDATE_BYTES = 8 * 1024 * 1024
 # history.ndjson's ceiling is bundle.MAX_STATE_BYTES (bundle.py:16, 64 MiB) itself --
@@ -238,10 +241,13 @@ def worst_case_json_string_bytes(raw_utf8_byte_length: int) -> int:
     )
 
 
-WORST_CASE_TASK_ID_JSON_BYTES = worst_case_json_string_bytes(TASK_ID_UPPER_BOUND_BYTES)
-WORST_CASE_RESULT_URL_JSON_BYTES = worst_case_json_string_bytes(
-    RESULT_URL_UPPER_BOUND_BYTES
-)
+# The worst-case JSON sizes of a task_id and a result URL are deliberately
+# *not* module constants: evaluated at import they would freeze whatever
+# TASK_ID_UPPER_BOUND_BYTES / RESULT_URL_UPPER_BOUND_BYTES said at that moment,
+# so injecting smaller bounds to drive boundary cases (design.md:305, "ceiling
+# 以可注入常量测试") would not reach the verdict. They are computed inside
+# worst_case_admission_for_unknown_response from the module globals, the same
+# way the three ceilings already are.
 
 
 def worst_case_admission_for_unknown_response(

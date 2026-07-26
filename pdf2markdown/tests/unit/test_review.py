@@ -472,7 +472,16 @@ def test_review_and_correction_artifact_budgets_are_checked_before_commit(
     history.chmod(0o600)
     state_descriptor = os.open(state_dir, os.O_RDONLY)
     event = {"schema_version": 1, "event": "test"}
-    maximum = len(history.read_bytes()) + len(review_module._json_bytes(event)) - 1
+    # Derive the threshold with the same encoder the code under test now uses
+    # (bundle.canonical_json_bytes, which is also what bundle.append_history
+    # writes). review._json_bytes happens to produce identical bytes today,
+    # but deriving the expectation from a second implementation of the same
+    # encoding is exactly the accounting/writer split this work removes.
+    maximum = (
+        len(history.read_bytes())
+        + len(review_module.bundle.canonical_json_bytes(event))
+        - 1
+    )
     monkeypatch.setattr(review_module.bundle, "MAX_STATE_BYTES", maximum)
     try:
         with pytest.raises(correction_module.CorrectionError) as history_error:
