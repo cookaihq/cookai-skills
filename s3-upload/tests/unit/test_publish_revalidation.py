@@ -6,6 +6,7 @@ import pytest
 from conftest import CALLER, SOURCE_BYTES, write_target
 from delivery_schema import body_of
 from delivery_workflow import TransportGate, TransportSealed, publish
+from operations import OperationError
 from plan_store import PlanStore, PlanStoreError, build_plan_body, new_plan_id
 from planning import build_upload_dry_run, derive_contract_key, registry_for_target
 from resolver import resolve_target
@@ -77,10 +78,26 @@ def test_sealed_gate_refuses_before_arming():
         gate("PUT", "https://example.invalid/a", {}, b"")
     assert raw.calls == []
     assert gate.calls == 0
+    assert gate.sealed_violations == 1
     gate.arm()
     gate("PUT", "https://example.invalid/a", {}, b"")
     assert len(raw.calls) == 1
     assert gate.calls == 1
+    assert gate.sealed_violations == 1
+
+
+class FakeOutcome:
+    def __init__(self, result):
+        self.result = result
+
+
+def leaky_execute(*, transport, checkpoint_notice, **kwargs):
+    try:
+        transport("PUT", "https://example.invalid/early", {}, b"")
+    except Exception:
+        pass
+    checkpoint_notice("00000000000000000000000000000001")
+    return FakeOutcome({"status": "ambiguous"})
 
 
 def test_publish_hard_fails_when_a_request_precedes_the_durable_handoff(
@@ -88,24 +105,56 @@ def test_publish_hard_fails_when_a_request_precedes_the_durable_handoff(
 ):
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     raw = Recorder()
+    monkeypatch.setattr("delivery_workflow.execute_single_put", leaky_execute)
+    with pytest.raises(TransportSealed):
+        run(project, resolved, store, issued.token, raw)
+    assert raw.calls == []
 
-    class FakeOutcome:
-        def __init__(self, result):
-            self.result = result
 
-    def leaky_execute(*, transport, checkpoint_notice, **kwargs):
+def test_publish_leaves_no_result_artifact_when_the_seal_is_broken(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    monkeypatch.setattr("delivery_workflow.execute_single_put", leaky_execute)
+    with pytest.raises(TransportSealed):
+        run(project, resolved, store, issued.token, Recorder())
+    assert os.path.exists(project.recovery_out)
+    assert not os.path.exists(project.result_out)
+
+
+def test_publish_reports_the_broken_seal_when_execution_raises(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+
+    def leaky_then_failing(*, transport, checkpoint_notice, **kwargs):
         try:
             transport("PUT", "https://example.invalid/early", {}, b"")
         except Exception:
             pass
         checkpoint_notice("00000000000000000000000000000001")
-        transport("PUT", "https://example.invalid/late", {}, b"")
-        return FakeOutcome({"status": "ok"})
+        raise OperationError("unsupported single Put collision policy")
+
+    monkeypatch.setattr("delivery_workflow.execute_single_put", leaky_then_failing)
+    with pytest.raises(TransportSealed):
+        run(project, resolved, store, issued.token, Recorder())
+
+
+def test_publish_reports_the_broken_seal_when_a_boundary_crashes(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+
+    class Crash(RuntimeError):
+        pass
+
+    def crash(name):
+        if name == "before_request":
+            raise Crash("the process died between the handoff and the first request")
 
     monkeypatch.setattr("delivery_workflow.execute_single_put", leaky_execute)
     with pytest.raises(TransportSealed):
-        run(project, resolved, store, issued.token, raw)
-    assert [call[1] for call in raw.calls] == ["https://example.invalid/late"]
+        run(project, resolved, store, issued.token, Recorder(), on_boundary=crash)
 
 
 def test_publish_succeeds_and_sends_exactly_one_request(project, resolved, dry_run, snapshot, contract_digest):

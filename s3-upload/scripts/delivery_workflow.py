@@ -168,28 +168,29 @@ def publish(*, resolved, store: PlanStore, token: str, transport: Callable[..., 
             predecessor_operation_id: Optional[str] = None,
             predecessor_result_hash: Optional[str] = None) -> PublishOutcome:
     gate = TransportGate(transport)
-    outcome = _publish(
-        resolved=resolved,
-        store=store,
-        token=token,
-        gate=gate,
-        project_root=project_root,
-        config_home=config_home,
-        caller=caller,
-        executable_path=executable_path,
-        cwd=cwd,
-        now=now,
-        on_boundary=on_boundary,
-        uuid_factory=uuid_factory,
-        root_recovery_id=root_recovery_id,
-        predecessor_operation_id=predecessor_operation_id,
-        predecessor_result_hash=predecessor_result_hash,
-    )
-    if gate.sealed_violations:
-        raise TransportSealed(
-            "a remote request preceded the durable recovery handoff"
+    try:
+        return _publish(
+            resolved=resolved,
+            store=store,
+            token=token,
+            gate=gate,
+            project_root=project_root,
+            config_home=config_home,
+            caller=caller,
+            executable_path=executable_path,
+            cwd=cwd,
+            now=now,
+            on_boundary=on_boundary,
+            uuid_factory=uuid_factory,
+            root_recovery_id=root_recovery_id,
+            predecessor_operation_id=predecessor_operation_id,
+            predecessor_result_hash=predecessor_result_hash,
         )
-    return outcome
+    finally:
+        if gate.sealed_violations:
+            raise TransportSealed(
+                "a remote request preceded the durable recovery handoff"
+            )
 
 
 def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
@@ -378,6 +379,10 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             return stop(["handoff_write_failed"], state="known_not_applied", plan=plan,
                         contract=digest, checkpoint_id=handoff["checkpoint_id"],
                         recovery=handoff["recovery"])
+        if gate.sealed_violations:
+            raise TransportSealed(
+                "a remote request preceded the durable recovery handoff"
+            )
         hook("after_request")
         state, reasons = STATE_BY_STATUS.get(
             outcome.result["status"], ("blocked", ("unclassified_outcome",))
