@@ -1899,27 +1899,58 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
     from pathlib import Path
     import workflow
 
-    # 必须用 AST 而不是正则：action_required 有三种写法，其中链式三元表达式
-    # 的 else 兜底分支（workflow.py:2965 / :2991 / :1790）任何正则都抓不到。
+    # 采集口径必须与运行时真正强制的面一致：WorkflowError.__init__ 只校验
+    # 构造参数，因此这里只收 WorkflowError(...) 调用点的 action_required。
+    # 必须用 AST 而非正则——action_required 有链式三元写法，值藏在 else
+    # 兜底分支里（correct_preflight_record / correct_review_record /
+    # restore_review_dependencies 三个值即如此），任何正则都抓不到。
     source = Path(workflow.__file__).read_text(encoding="utf-8")
 
-    def _strings(node):
+    def _leaves(node):
+        """逐分支产出 (是否静态字符串, 值)，穿透三元表达式的全部分支。"""
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            yield node.value
+            yield True, node.value
         elif isinstance(node, ast.IfExp):
-            yield from _strings(node.body)
-            yield from _strings(node.orelse)
+            yield from _leaves(node.body)
+            yield from _leaves(node.orelse)
+        else:
+            yield False, ast.dump(node)
 
-    literals = set()
+    constructed, dynamic = set(), set()
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.keyword) and node.arg == "action_required":
-            literals.update(_strings(node.value))
-        elif isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values):
-                if isinstance(key, ast.Constant) and key.value == "action_required":
-                    literals.update(_strings(value))
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "WorkflowError"
+        ):
+            for keyword in node.keywords:
+                if keyword.arg == "action_required":
+                    for is_static, value in _leaves(keyword.value):
+                        (constructed if is_static else dynamic).add(value)
 
-    assert literals
-    # 等值而非子集：表既然声称闭合，就不允许存在表外字面量，也不允许
-    # 表里留着已经没人用的死值。
-    assert literals == set(workflow.ERROR_PATH_ACTIONS)
+    # 动态传参必须显式暴露而不是被静默吞掉：静默返回空正是「表看起来闭合、
+    # 运行时却在未覆盖分支抛 ValueError」的成因。
+    assert not dynamic, f"dynamic action_required at a WorkflowError call site: {dynamic}"
+
+    # ERROR_PATH_ACTIONS 中唯一不经 WorkflowError 构造、而是直接序列化输出的
+    # 成员（workflow.py 里 runtime-error 结果字典的 "action_required" 键）。
+    # 这里用显式白名单而不是扫描全部 dict 字面量：任务 2.4 会把 conversion
+    # 词汇表的值写进同一个 action_required 键，扫全部 dict 会把它们误收进来，
+    # 让本断言在 2.4 变红，而 Global Constraints 又禁止 2.4 改写既有断言。
+    SERIALIZED_ONLY = {"inspect_runtime_error"}
+
+    assert constructed | SERIALIZED_ONLY == set(workflow.ERROR_PATH_ACTIONS)
+
+
+def test_workflow_error_accepts_a_null_action_required():
+    import workflow
+
+    # 「action_required=None 仍合法」是本任务明写的接口契约，但今天 85 个
+    # 构造点没有一处传 None，若无此断言，有人删掉 __init__ 里的 is not None
+    # 短路全量回归依然全绿。
+    error = workflow.WorkflowError("invalid_bundle", "message", return_code=4)
+    assert error.action_required is None
+    explicit = workflow.WorkflowError(
+        "invalid_bundle", "message", return_code=4, action_required=None
+    )
+    assert explicit.action_required is None

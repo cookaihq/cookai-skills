@@ -55,9 +55,16 @@ SUPPORTED_CONVERSION_STATES = frozenset(
 SUPPORTED_PUBLICATION_STATES = frozenset({"not_requested", "blocked"})
 
 # design.md Decision 5 -- the error-path action vocabulary. It is disjoint from
-# the closed conversion action vocabulary; the two only ever meet in the
-# serialized action_required key, where rc != 0 means this table and rc == 0
-# means the conversion table.
+# the closed conversion action vocabulary. The two are separated by PRODUCTION
+# MECHANISM, not by return code: values here are produced by constructing a
+# WorkflowError (or re-serializing one); the conversion table is produced by
+# project_conversion_action. They only meet in the serialized action_required
+# key.
+#
+# Do NOT restate this as an rc-based split -- rc == 0 results can and do carry
+# a member of this table: preflight.dependency_result() sets
+# "restore_preflight_dependencies" on a normal return (pinned by
+# tests/unit/test_preflight.py:475-479).
 ERROR_PATH_ACTIONS = frozenset(
     {
         "configure_aihub_api_key",
@@ -90,7 +97,7 @@ class WorkflowError(Exception):
         message: str,
         *,
         return_code: int,
-        action_required: str,
+        action_required: str | None = None,
         context=None,
     ):
         if action_required is not None and action_required not in ERROR_PATH_ACTIONS:
