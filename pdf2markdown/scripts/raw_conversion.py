@@ -288,7 +288,7 @@ def _desired_state(
 
 
 def _rejection_record(intent: dict, *, reason_code: str, detected_by: str) -> dict:
-    return {
+    record = {
         "schema_version": SCHEMA_VERSION,
         "operation_id": intent["operation_id"],
         "state": "rejected",
@@ -300,9 +300,33 @@ def _rejection_record(intent: dict, *, reason_code: str, detected_by: str) -> di
         "staging_path": (
             f"03-converted/attempts/{intent['staging_name']}"
         ),
+        "pending_action": None,
         "limits": deepcopy(intent["limits"]),
         "rejected_at": intent["at"],
     }
+    # Decision 9.3 / task 3.1c -- a `result_url_not_renewed` verdict means the
+    # same task has already proven it cannot replace this reference (see
+    # LEDGER_RESULT_REJECTIONS' docstring): the conversion is closed for
+    # good, but not without recourse. In confirm mode this offers the same
+    # confirmable exit `_prepared_record` offers for
+    # `unexpected_result_layout` -- authorize a new, separately charged
+    # attempt -- via RETRY_AUTHORIZABLE_TRIPLES' shared
+    # ("terminal_error", "result_ready", None) row (see its docstring for
+    # why that row is deliberately not split further). Auto mode gets no
+    # pending_action: there is nothing left to auto-resume, and offering an
+    # action only interaction_mode="confirm" call sites can ever authorize
+    # would be a dead action_required value.
+    if (
+        reason_code in LEDGER_RESULT_REJECTIONS
+        and intent.get("interaction_mode") == "confirm"
+    ):
+        record["pending_action"] = {
+            "kind": conversion_attempt.AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
+            "action_id": f"conversion-decision-{secrets.token_hex(16)}",
+            "generation": intent["new_generation"],
+            "evidence_hash": object_hash(record),
+        }
+    return record
 
 
 # Task 2.2c review round 2, Minor #5 -- single-element unpacking of
@@ -399,7 +423,10 @@ def apply_settings_override_transition(previous: dict, updated: dict) -> dict:
     records = transitioned.get("raw_conversions")
     if (
         not isinstance(record, dict)
-        or record.get("reason_code") != "unexpected_result_layout"
+        or (
+            record.get("reason_code") != "unexpected_result_layout"
+            and record.get("reason_code") not in LEDGER_RESULT_REJECTIONS
+        )
         or not isinstance(records, list)
         or not records
         or not isinstance(records[-1], dict)
@@ -1527,6 +1554,36 @@ def _valid_rejection(record: dict, intent: dict) -> bool:
     # change ships, that change must bump SCHEMA_VERSION -- unlike today,
     # there would then be real committed bundles whose old shape needs a
     # version signal to distinguish from a merely-corrupt one.
+    # Task 3.1c -- the same confirmable pending_action shape _valid_record
+    # checks for a prepared "converted"-or-rejected outcome, narrowed to the
+    # one rejection domain that may ever carry one: LEDGER_RESULT_REJECTIONS
+    # (result_url_not_renewed), and only when the bundle's interaction mode
+    # is "confirm" (see _rejection_record's docstring). Every other
+    # rejection -- any DETERMINISTIC_ARCHIVE_REJECTIONS /
+    # RECOVERABLE_ARCHIVE_REJECTIONS member, or a LEDGER_RESULT_REJECTIONS
+    # member under interaction_mode="auto" -- must carry pending_action=None.
+    pending = record.get("pending_action") if isinstance(record, dict) else None
+    reason = record.get("reason_code") if isinstance(record, dict) else None
+    evidence_record = deepcopy(record) if isinstance(record, dict) else {}
+    evidence_record["pending_action"] = None
+    pending_valid = (
+        pending is None
+        if reason not in LEDGER_RESULT_REJECTIONS
+        or intent.get("interaction_mode") != "confirm"
+        else (
+            isinstance(pending, dict)
+            and set(pending) == conversion_attempt.PENDING_ACTION_KEYS
+            and pending.get("kind")
+            == conversion_attempt.AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND
+            and isinstance(pending.get("action_id"), str)
+            and re.fullmatch(
+                r"conversion-decision-[0-9a-f]{32}", pending["action_id"]
+            )
+            is not None
+            and pending.get("generation") == intent.get("new_generation")
+            and pending.get("evidence_hash") == object_hash(evidence_record)
+        )
+    )
     return (
         isinstance(record, dict)
         and set(record)
@@ -1540,6 +1597,7 @@ def _valid_rejection(record: dict, intent: dict) -> bool:
             "task_id",
             "result_url_sha256",
             "staging_path",
+            "pending_action",
             "limits",
             "rejected_at",
         }
@@ -1564,6 +1622,7 @@ def _valid_rejection(record: dict, intent: dict) -> bool:
         == f"03-converted/attempts/{intent.get('staging_name')}"
         and record.get("limits") == intent.get("limits") == result_archive.limits_record()
         and record.get("rejected_at") == intent.get("at")
+        and pending_valid
     )
 
 

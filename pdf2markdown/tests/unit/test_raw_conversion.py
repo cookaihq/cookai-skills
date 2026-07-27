@@ -3242,3 +3242,343 @@ def test_converted_bundle_keeps_recoverable_settings_overrides(
     assert resumed_rc == 0, resumed
     assert resumed["outcome"] == "converted"
     assert resumed["generation"] == inspected["generation"]
+
+
+def _drive_to_result_url_not_renewed(
+    case_root, capsys, monkeypatch, *, interaction_mode
+):
+    """Drive a ready result through an archive-host rejection (HTTP 403),
+    then a repoll of the same Doc2X task that answers with the identical
+    result URL. The final resume must close on `result_url_not_renewed`
+    entirely from the bundle ledger (`_reference_already_unavailable`
+    matching this exact attempt_id/task_id/result_url_sha256 triple against
+    the 403 rejection already on record) -- no further network contact, so
+    the transport used for that resume must never be touched (Decision
+    9.3)."""
+    case_root.mkdir()
+    bundle, ready, dependencies, key, result_url = ready_result_bundle(
+        case_root, capsys, monkeypatch, interaction_mode=interaction_mode
+    )
+    rejected_rc, rejected, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=case_root,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=ArchiveTransport(response=ArchiveResponse(b"", status=403)),
+    )
+    assert rejected_rc == 0, rejected
+    assert rejected["outcome"] == "result_url_unavailable"
+    assert rejected["conversion_state"] == "recoverable_error"
+
+    # The same task answers again with the exact same URL: it neither
+    # extends the local validity window nor appends a new ledger version.
+    repoll = JsonResponse(
+        {"status": "completed", "results": [{"url": result_url}]}
+    )
+    unrenewed_ready_rc, unrenewed_ready, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(rejected["generation"]),
+        ],
+        cwd=case_root,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=repoll,
+    )
+    assert unrenewed_ready_rc == 0, unrenewed_ready
+    assert unrenewed_ready["outcome"] == "result_ready"
+    assert unrenewed_ready["conversion_state"] == "result_downloading"
+
+    final_rc, final_result, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unrenewed_ready["generation"]),
+        ],
+        cwd=case_root,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=NeverNetwork(),
+    )
+    assert final_rc == 0, final_result
+    assert final_result["outcome"] == "result_url_not_renewed"
+    assert final_result["conversion_state"] == "terminal_error"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_state"] == "terminal_error"
+    assert manifest["raw_conversion"]["reason_code"] == "result_url_not_renewed"
+    assert manifest["raw_conversion"]["detected_by"] == "local_ledger"
+    return bundle, dependencies
+
+
+def test_an_unrenewed_result_url_offers_a_confirm_exit(
+    tmp_path, capsys, monkeypatch
+):
+    bundle, dependencies = _drive_to_result_url_not_renewed(
+        tmp_path / "unrenewed-confirm-exit",
+        capsys,
+        monkeypatch,
+        interaction_mode="confirm",
+    )
+    inspect_rc, result, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert inspect_rc == 0, result
+    assert result["conversion_state"] == "terminal_error"
+    assert result["action_required"] == "authorize_new_conversion_attempt"
+    assert result["action_id"]
+
+    # Authorization must actually be usable: recording the retry decision
+    # must not raise conversion_action_mismatch, and must really open a new,
+    # separately charged attempt.
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(result["generation"]),
+            "--action-id",
+            result["action_id"],
+            "--evidence-hash",
+            result["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "The archive host will not renew this reference; a fresh "
+            "conversion attempt is needed.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, authorized
+    assert authorized["outcome"] == "conversion_retry_authorized"
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_state"] == "ready_to_submit"
+    assert manifest["conversion_attempts"][-1]["state"] == "authorized"
+    assert manifest["conversion_attempts"][-1]["authorization_kind"] == "retry"
+
+
+def test_an_unrenewed_result_url_in_auto_mode_still_stops_without_an_action(
+    tmp_path, capsys, monkeypatch
+):
+    bundle, dependencies = _drive_to_result_url_not_renewed(
+        tmp_path / "unrenewed-auto-stop",
+        capsys,
+        monkeypatch,
+        interaction_mode="auto",
+    )
+    inspect_rc, result, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert inspect_rc == 0, result
+    assert result["conversion_state"] == "terminal_error"
+    assert result["action_required"] is None
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["raw_conversion"]["pending_action"] is None
+
+
+def test_unrenewed_confirm_exit_is_removed_when_override_switches_to_auto(
+    tmp_path, capsys, monkeypatch
+):
+    bundle, dependencies = _drive_to_result_url_not_renewed(
+        tmp_path / "unrenewed-override-to-auto",
+        capsys,
+        monkeypatch,
+        interaction_mode="confirm",
+    )
+    inspect_rc, terminal, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert inspect_rc == 0, terminal
+    assert terminal["action_required"] == "authorize_new_conversion_attempt"
+
+    override_rc, overridden, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(terminal["generation"]),
+            "--interaction-mode",
+            "auto",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert override_rc == 0, overridden
+    assert overridden["outcome"] == "settings_overridden"
+    assert overridden["action_required"] is None
+    assert overridden["action_id"] is None
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["raw_conversion"]["pending_action"] is None
+
+
+def test_unrenewed_confirm_exit_rebinds_across_settings_override(
+    tmp_path, capsys, monkeypatch
+):
+    bundle, dependencies = _drive_to_result_url_not_renewed(
+        tmp_path / "unrenewed-confirm-rebind",
+        capsys,
+        monkeypatch,
+        interaction_mode="confirm",
+    )
+    inspect_rc, terminal, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert inspect_rc == 0, terminal
+    assert terminal["action_required"] == "authorize_new_conversion_attempt"
+
+    override_rc, overridden, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(terminal["generation"]),
+            "--publish-mode",
+            "upload",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert override_rc == 0, overridden
+    assert overridden["outcome"] == "settings_overridden"
+    assert overridden["action_required"] == "authorize_new_conversion_attempt"
+    assert overridden["action_id"] == terminal["action_id"]
+
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(overridden["generation"]),
+            "--action-id",
+            overridden["action_id"],
+            "--evidence-hash",
+            overridden["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "The archive host will not renew this reference; a fresh "
+            "conversion attempt is needed.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, authorized
+    assert authorized["outcome"] == "conversion_retry_authorized"
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_state"] == "ready_to_submit"
+    assert manifest["conversion_attempts"][-1]["state"] == "authorized"
+    assert manifest["conversion_attempts"][-1]["authorization_kind"] == "retry"
+
+
+def test_unrenewed_auto_mode_gains_a_confirm_exit_after_settings_override(
+    tmp_path, capsys, monkeypatch
+):
+    bundle, dependencies = _drive_to_result_url_not_renewed(
+        tmp_path / "unrenewed-auto-to-confirm",
+        capsys,
+        monkeypatch,
+        interaction_mode="auto",
+    )
+    inspect_rc, terminal, _stderr = invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert inspect_rc == 0, terminal
+    assert terminal["action_required"] is None
+
+    override_rc, overridden, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(terminal["generation"]),
+            "--interaction-mode",
+            "confirm",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert override_rc == 0, overridden
+    assert overridden["outcome"] == "settings_overridden"
+    assert overridden["action_required"] == "authorize_new_conversion_attempt"
+    assert overridden["action_id"]
+
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(overridden["generation"]),
+            "--action-id",
+            overridden["action_id"],
+            "--evidence-hash",
+            overridden["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "The archive host will not renew this reference; a fresh "
+            "conversion attempt is needed.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, authorized
+    assert authorized["outcome"] == "conversion_retry_authorized"
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_state"] == "ready_to_submit"
+    assert manifest["conversion_attempts"][-1]["state"] == "authorized"
+    assert manifest["conversion_attempts"][-1]["authorization_kind"] == "retry"
