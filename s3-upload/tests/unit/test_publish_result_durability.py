@@ -272,6 +272,13 @@ def test_a_definitive_no_write_lands_a_terminal_result(
     assert body["recovery_state"] == "known_not_applied"
     assert body["allowed_actions"] == ["inspect"]
     assert body["authorization_required"] == []
+    # Records the state as of today, not a desired one: the definitive no-write
+    # exit says nothing about *how* the remote refused. This predates the
+    # vocabulary work and is not a regression from it. Once Task 11 wires
+    # DefinitiveNoWrite(reason=) to the remote_rejected_* dimension, this must
+    # be flipped to a non-empty assertion (400 -> invalid, 403 -> denied,
+    # 404 -> absent), not deleted.
+    assert body["blocking_reasons"] == []
     assert open(project.result_out, "rb").read() == serialize_artifact(outcome.result)
     assert durable(project.result_out, "s3-upload.result") == body
     record = operation_record(project, issued.plan_id)

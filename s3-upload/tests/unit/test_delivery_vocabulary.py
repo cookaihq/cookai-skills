@@ -1,5 +1,6 @@
 import pytest
 
+import action_registry
 from action_registry import (
     ACTIONS, NO_REMOTE_EFFECT_ACTIONS, RECOVERY_STATES, allowed_actions, retry_safe,
 )
@@ -109,6 +110,18 @@ def test_retry_safe_default_keeps_the_pre_existing_answer():
     assert retry_safe("known_not_applied") is True
     assert retry_safe("in_flight_unknown") is False
     assert retry_safe("blocked") is False
+
+
+def test_retry_safe_follows_the_action_table_not_only_the_retry_table(monkeypatch):
+    # test_retry_safe_implies_a_mutation_action_is_actually_available reads the
+    # same allowed_actions/NO_REMOTE_EFFECT_ACTIONS pair the implementation
+    # subtracts, so that half of its assertion is an identity; what it really
+    # pins is the _RETRY_SAFE literal. Replacing the derivation with a lookup
+    # of _RETRY_SAFE survived the whole suite. This case moves the action table
+    # out from under retry_safe and asserts a literal answer instead, so the
+    # injected value is not something the assertion reads back.
+    monkeypatch.setitem(action_registry._TABLE, "not_started", ("inspect",))
+    assert retry_safe("not_started", capabilities_ok=True) is False
 
 
 def test_verify_public_is_authorized_but_never_a_caller_action():
