@@ -147,6 +147,13 @@ OUTCOME_WRITE_CERTAINTY: Dict[str, Optional[bool]] = {
     "unknown": None,
 }
 
+OBJECT_REFERENCE_FIELDS: Tuple[str, ...] = (
+    "access", "content", "content_stability", "disposition", "location",
+    "object_written", "operation_id", "plan_hash", "plan_id", "retention",
+    "root_recovery_id", "target_contract", "target_contract_hash", "target_ref",
+    "verifications",
+)
+
 PLAN_FIELDS: Tuple[str, ...] = (
     "access", "blocking_reasons", "caller", "collision", "contract_key", "cwd",
     "executable", "executable_path", "object_headers", "object_key", "plan_hash",
@@ -174,6 +181,7 @@ ACK_FIELDS: Tuple[str, ...] = (
 )
 
 BODY_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "s3-upload.object-reference": OBJECT_REFERENCE_FIELDS,
     "s3-upload.plan": PLAN_FIELDS,
     "s3-upload.recovery-descriptor": RECOVERY_FIELDS,
     "s3-upload.result": RESULT_FIELDS,

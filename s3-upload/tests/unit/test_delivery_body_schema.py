@@ -9,6 +9,7 @@ from delivery_schema import (
     BLOCKING_REASONS,
     BODY_FIELDS,
     DeliverySchemaError,
+    OBJECT_REFERENCE_FIELDS,
     OPERATIONS,
     PLAN_FIELDS,
     RECOVERY_FIELDS,
@@ -99,14 +100,19 @@ def test_blocking_reasons_vocabulary_is_locked():
     )
 
 
-def test_body_fields_cover_exactly_four_artifact_types():
+def test_body_fields_cover_exactly_five_artifact_types():
     assert set(BODY_FIELDS) == {
+        "s3-upload.object-reference",
         "s3-upload.plan",
         "s3-upload.recovery-descriptor",
         "s3-upload.result",
         "s3-upload.ack",
     }
-    assert set(BODY_FIELDS) | {"s3-upload.probe", "s3-upload.object-reference"} == ARTIFACT_TYPES
+    # s3-upload.probe stays outside on purpose: it is the only registered type
+    # with no field set, which is what
+    # test_build_typed_rejects_type_without_registered_field_set relies on.
+    assert set(BODY_FIELDS) | {"s3-upload.probe"} == ARTIFACT_TYPES
+    assert BODY_FIELDS["s3-upload.object-reference"] == OBJECT_REFERENCE_FIELDS
     assert BODY_FIELDS["s3-upload.plan"] == PLAN_FIELDS
     assert BODY_FIELDS["s3-upload.recovery-descriptor"] == RECOVERY_FIELDS
     assert BODY_FIELDS["s3-upload.result"] == RESULT_FIELDS
