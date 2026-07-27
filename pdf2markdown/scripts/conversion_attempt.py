@@ -634,9 +634,20 @@ _WIRE_MANIFEST_STATE_BY_FOLDED_STATE = {
 # unpacking guard, which is the production-side counterpart already raising
 # at import time: a colliding addition here must fail exactly the same way,
 # not just when the test suite happens to run.
-assert not (
-    frozenset(LOCALLY_DETECTED_PAIRS) & frozenset(_WIRE_MANIFEST_STATE_BY_FOLDED_STATE)
-), "LOCALLY_DETECTED_PAIRS collides with a wire-derived (state, reason) pair"
+#
+# Minor fix (review round 1): a bare `assert` is stripped under `python -O`,
+# which would silently drop this guard in exactly the deployment mode where
+# import-time invariants matter most. `raise` is what actually makes this
+# symmetric with the unpacking guard above -- that guard is an unconditional
+# ValueError, not an `assert`.
+_LOCALLY_DETECTED_WIRE_COLLISION = frozenset(LOCALLY_DETECTED_PAIRS) & frozenset(
+    _WIRE_MANIFEST_STATE_BY_FOLDED_STATE
+)
+if _LOCALLY_DETECTED_WIRE_COLLISION:
+    raise ValueError(
+        "LOCALLY_DETECTED_PAIRS collides with a wire-derived (state, reason) "
+        f"pair: {sorted(_LOCALLY_DETECTED_WIRE_COLLISION)!r}"
+    )
 _MANIFEST_STATE_BY_FOLDED_STATE = (
     _WIRE_MANIFEST_STATE_BY_FOLDED_STATE | LOCALLY_DETECTED_PAIRS
 )
@@ -840,6 +851,24 @@ _POLL_DEADLINE_PAIRS = frozenset(
 # untouched (reset_window stays False for the new pair) and last_polled_at
 # (set to the refresh's own `at`) ends up past the untouched poll_deadline_at,
 # failing _valid_poll_fields' `last > deadline` check.
+#
+# Flow-debt record (review round 1, Important #3): this extension is a
+# production-semantics change, made under a prompt-level authorization that
+# covered "no new livelock" but not this deeper change, and was correctly
+# flagged as owed a BLOCKED report that the round-1 implementation skipped.
+# The stronger argument that survived review: before this change, the exact
+# physical path this pair now names (a re-poll observation applied to a
+# stored ("result_ready", ...) attempt) was already routed through this same
+# `active_pair in _POLL_WINDOW_RESET_PAIRS` check via ("result_ready", None)
+# -- the only member of POLL_ACTIVE_ATTEMPT_PAIRS a result_ready attempt
+# could ever carry pre-2.2c. Adding ("result_ready", "result_url_expired")
+# does not admit a new physical path into window-reset handling; it keeps
+# the *same* path reachable after 2.2c renamed that attempt's reason without
+# changing its state. Relation preserved, not extended -- and in particular
+# it does not widen the livelock surface task 2.1d closed (see
+# LEDGER_RESULT_REJECTIONS / raw_conversion._reference_already_unavailable),
+# since that surface is about a rejection record repeating forever, not
+# about which pairs restart a poll window.
 _POLL_WINDOW_RESET_PAIRS = frozenset(
     {
         ("failed", "poll_timeout"),
@@ -859,11 +888,17 @@ _POLL_WINDOW_RESET_PAIRS = frozenset(
 # across multiple rules or call sites -- the way `_POLL_TRANSIENT_PAIR` is
 # spelled out five times -- where a typo in one copy would silently diverge
 # from the others. A pair literal compared exactly once, inline, at its own
-# call site (conversion_attempt.py's `elif active_pair == ("result_ready",
-# None):`; workflow.py's `== ("failed", "task_failed")` and
+# call site (workflow.py's `== ("failed", "task_failed")` and
 # `== ("failed", "unsafe_result_url")`) has only one reader: a typo there
 # breaks that call site's own behaviour and its own test directly, not
 # silently, so it does not need this registry's cross-copy protection.
+#
+# (Review round 1, Minor #6: this used to also cite conversion_attempt.py's
+# own `elif active_pair == ("result_ready", None):` as a single-reader
+# example. That branch was generalized to `elif active.get("state") ==
+# "result_ready":` -- see the Important #3 flow-debt note at its definition
+# -- so it is no longer a `(state, reason)` pair comparison at all and the
+# citation is removed rather than updated to a non-example.)
 _REFOLDED_PAIR_SETS = {
     "POLL_ACTIVE_ATTEMPT_PAIRS": POLL_ACTIVE_ATTEMPT_PAIRS,
     "CONFIRMABLE_PAIRS": CONFIRMABLE_PAIRS,
@@ -2905,6 +2940,21 @@ def _poll_transition(
         # very same poll_transient/credential/timeout branches a wire
         # ("result_ready", None) attempt is, and the non-result_ready branch
         # of _valid_attempt requires these three fields to be None.
+        #
+        # Flow-debt record (review round 1, Important #3): generalizing this
+        # branch from `elif active_pair == ("result_ready", None):` to
+        # `elif active.get("state") == "result_ready":` is a production-
+        # semantics change made under a prompt-level authorization that
+        # covered "no new livelock" but not this deeper change, and was
+        # correctly flagged as owed a BLOCKED report the round-1
+        # implementation skipped. The stronger argument that survived
+        # review: pre-2.2c, ("result_ready", None) was the *only* pair a
+        # result_ready attempt could ever carry, so keying on the pair or on
+        # the bare state named the identical set of records. The
+        # generalization is a relation-preserving rewrite of that
+        # coincidence into its true condition, not new semantics -- it lets
+        # the field-clearing keep firing on the same physical attempts after
+        # 2.2c added a second, differently-reasoned result_ready member.
         updated_attempt["result_url_sha256"] = None
         updated_attempt["result_observed_at"] = None
         updated_attempt["result_validity_hours"] = None

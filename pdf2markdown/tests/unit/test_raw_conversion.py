@@ -2082,10 +2082,20 @@ def test_locally_expired_attempt_resumes_to_a_successful_repoll(
     assert "task-result-001" in refresh.calls[0][1]
 
     manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
     # The successful re-poll folds the attempt back onto its wire-observed
     # pair -- reason clears, this is no longer the locally-detected member.
     assert manifest["conversion_attempts"][-1]["reason"] is None
-    assert old_result_url not in json.dumps(manifest)
+    # Review round 1, Important #2 -- `old_result_url not in json.dumps(manifest)`
+    # was a tautology: the manifest never stores a result URL in cleartext
+    # (only its sha256; the URL itself lives in private.json), so it would
+    # pass whether or not the refresh actually replaced the reference. Assert
+    # the real replacement evidence instead, following the same pattern as
+    # test_expired_result_url_refreshes_the_same_task_then_adopts.
+    assert len(private_state["result_urls"]) == 2
+    assert private_state["result_urls"][-1]["url"] == new_result_url
+    new_sha256 = "sha256:" + hashlib.sha256(new_result_url.encode("utf-8")).hexdigest()
+    assert manifest["conversion_attempts"][-1]["result_url_sha256"] == new_sha256
 
 
 def test_second_raw_operation_recovers_after_prepared_without_network(

@@ -44,12 +44,24 @@ RECOVERABLE_ARCHIVE_REJECTIONS = frozenset({"result_url_unavailable"})
 # result host. They close a result reference that the same Doc2X task has
 # already proven it cannot replace.
 LEDGER_RESULT_REJECTIONS = frozenset({"result_url_not_renewed"})
-# Task 2.2c -- which code path decided a rejection. Decision 9.1: the local
-# expiry check (_reference_rejection, no network) and the archive host itself
-# (a ResultArchiveError raised while actually fetching) can both land on the
-# very same reason_code (result_url_unavailable), so this is the only field
-# that tells a resume replaying the record which one produced it.
-DETECTED_BY_VALUES = frozenset({"local_expiry", "archive_host"})
+# Task 2.2c -- which code path decided a rejection, and (review round 1) why
+# it is a three-value closed set rather than two. `_reference_rejection` has
+# two distinct no-network outcomes, not one:
+#   - the local validity-window check (result_reference_is_expired) can land
+#     on the very same reason_code the archive host itself reports
+#     (result_url_unavailable, Decision 9.1) -- "local_expiry" names that
+#     branch, to disambiguate it from "archive_host" for the same reason_code.
+#   - the bundle-ledger check (_reference_already_unavailable) is a different
+#     judgment on a different reason_code (result_url_not_renewed, a
+#     LEDGER_RESULT_REJECTIONS member with no archive-host counterpart at
+#     all) -- "local_ledger" names that branch. Reusing "local_expiry" for it
+#     was the review-round-1 Critical bug: it made the ledger verdict fold
+#     onto LOCALLY_DETECTED_PAIRS' recoverable, resumable member
+#     ("result_ready", "result_url_expired") instead of leaving the attempt's
+#     reason untouched, and reported a fabricated expiry for a reference that
+#     may never have expired at all (it can also close on a stale-URL-forever
+#     verdict, see LEDGER_RESULT_REJECTIONS).
+DETECTED_BY_VALUES = frozenset({"local_expiry", "local_ledger", "archive_host"})
 
 
 class RawConversionError(ValueError):
@@ -289,14 +301,35 @@ def _desired_rejection(
         deepcopy(record),
     ]
     desired_manifest["raw_conversion"] = deepcopy(record)
-    if record.get("detected_by") == "local_expiry":
-        # design.md Decision 4 / task 2.2c -- the local-expiry branch is the
-        # one wire-independent source of LOCALLY_DETECTED_PAIRS' member
-        # ("result_ready", "result_url_expired"): an archive-host-reported
-        # rejection leaves the attempt's reason untouched (still None),
-        # because no wire classification produced *that* rejection at all.
+    # design.md Decision 4 / task 2.2c, narrowed by review round 1's Critical
+    # fix -- LOCALLY_DETECTED_PAIRS' member ("result_ready",
+    # "result_url_expired") exists only for the recoverable, resumable
+    # rejection (RECOVERABLE_ARCHIVE_REJECTIONS' result_url_unavailable) that
+    # the local validity-window check ("local_expiry") produced. Folding on
+    # `detected_by == "local_expiry"` alone used to also catch
+    # "local_ledger"'s terminal result_url_not_renewed record before that
+    # value existed as its own DETECTED_BY_VALUES member (both were spelled
+    # "local_expiry" then) -- see DETECTED_BY_VALUES' comment for why that was
+    # wrong. The reason_code check makes the pairing with
+    # RECOVERABLE_ARCHIVE_REJECTIONS explicit instead of relying on
+    # detected_by alone to imply it forever. The attempt-state check guards
+    # the one shape LOCALLY_DETECTED_PAIRS actually admits: today the
+    # rejection call sites only ever reach this branch with
+    # attempts[-1]["state"] == "result_ready" (POLL_ACTIVE_ATTEMPT_PAIRS has
+    # no other pair this rejection could observe), but the check makes that a
+    # checked invariant instead of a coincidence future call sites could
+    # silently break by writing an illegal ("failed", "result_url_expired")
+    # pair (POLL_ACTIVE_ATTEMPT_PAIRS has no such member).
+    if (
+        record.get("detected_by") == "local_expiry"
+        and record.get("reason_code") in RECOVERABLE_ARCHIVE_REJECTIONS
+    ):
         attempts = desired_manifest.get("conversion_attempts")
-        if isinstance(attempts, list) and attempts:
+        if (
+            isinstance(attempts, list)
+            and attempts
+            and attempts[-1].get("state") == "result_ready"
+        ):
             active_attempt = deepcopy(attempts[-1])
             active_attempt["reason"] = "result_url_expired"
             desired_manifest["conversion_attempts"] = [
@@ -826,6 +859,22 @@ def _reference_rejection(manifest: dict, attempt: dict, *, at: str) -> str | Non
     return "result_url_unavailable" if reference_expired else None
 
 
+def _local_rejection_detected_by(reason_code: str) -> str:
+    """The `detected_by` value for a `_reference_rejection` verdict.
+
+    Review round 1's Critical fix: `_reference_rejection` has two distinct
+    no-network branches (see its body) and they must not share one
+    `detected_by` value -- `_reference_already_unavailable`'s ledger verdict
+    (LEDGER_RESULT_REJECTIONS' result_url_not_renewed) is "local_ledger", not
+    "local_expiry", which is reserved for the validity-window branch
+    (result_reference_is_expired). Both of `_reference_rejection`'s call
+    sites route through this one function so they cannot drift apart on that
+    distinction the way the pre-fix inline `detected_by="local_expiry"`
+    literal did.
+    """
+    return "local_ledger" if reason_code in LEDGER_RESULT_REJECTIONS else "local_expiry"
+
+
 def adopt_ready_result(
     *,
     descriptors: dict,
@@ -857,7 +906,7 @@ def adopt_ready_result(
             private_state=private_state,
             intent=intent,
             reason_code=reason_code,
-            detected_by="local_expiry",
+            detected_by=_local_rejection_detected_by(reason_code),
             at=at,
         )
     _assert_directory_identity(
@@ -1160,7 +1209,7 @@ def recover_interrupted_adoption(
                 private_state=prefix[1],
                 intent=intent,
                 reason_code=reason_code,
-                detected_by="local_expiry",
+                detected_by=_local_rejection_detected_by(reason_code),
                 at=at,
             )
         try:
@@ -1396,6 +1445,20 @@ def _valid_record(record: dict, intent: dict) -> bool:
 
 
 def _valid_rejection(record: dict, intent: dict) -> bool:
+    # Version-stance record (review round 1, Important #4): this exact key
+    # set includes "detected_by", so a rejection record shaped by a raw
+    # bundle written before "detected_by" existed replays here as a generic
+    # invalid_bundle, with no reason_code-specific signal that the shape is
+    # merely stale. That is a deliberate hard break, not an oversight:
+    # raw_conversion.SCHEMA_VERSION stays at 1 because this change (like
+    # conversion_attempt's schema v2 break) has not shipped yet -- no commit
+    # in this change has been pushed, so there is no real bundle anywhere
+    # carrying the old rejection shape for a migrator to read. Consistent
+    # with the change's no-migrator, fail-closed posture throughout. If a
+    # later change alters this rejection record's shape again *after* this
+    # change ships, that change must bump SCHEMA_VERSION -- unlike today,
+    # there would then be real committed bundles whose old shape needs a
+    # version signal to distinguish from a merely-corrupt one.
     return (
         isinstance(record, dict)
         and set(record)

@@ -1104,6 +1104,14 @@ def test_unrenewed_result_reference_stops_refreshing_the_same_task(
     ]
     assert len(manifest["conversion_attempts"]) == 1
     assert manifest["conversion_attempts"][-1]["state"] == "result_ready"
+    # Critical fix (task 2.2c review round 1): the terminal ledger verdict is
+    # detected locally, but not by the expiry check -- it must not be folded
+    # onto LOCALLY_DETECTED_PAIRS' ("result_ready", "result_url_expired"),
+    # which is reserved for the recoverable, resumable member. Decision 9.3's
+    # exit for this reason code belongs to a later task (3.1c); until then the
+    # attempt's reason stays untouched (None).
+    assert manifest["raw_conversion"]["detected_by"] == "local_ledger"
+    assert manifest["conversion_attempts"][-1]["reason"] is None
 
 
 def test_result_url_not_renewed_is_classified_only_as_a_ledger_rejection():
