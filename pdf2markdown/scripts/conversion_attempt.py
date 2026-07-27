@@ -1019,7 +1019,16 @@ CONVERSION_ACTIONS = frozenset(
 # raw_conversion.py's layout-ambiguity writer -- reads the same value instead
 # of repeating the string literal.
 AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND = "authorize_new_conversion_attempt"
-assert AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND in CONVERSION_ACTIONS
+# Minor fix (task 3.1a fix round 1, carried from the 2.4 review's M4): a bare
+# `assert` is stripped under `python -O`, silently dropping this import-time
+# guard in exactly the deployment mode where it matters most -- the same
+# reasoning the 4-kind loop just below (and _MANIFEST_STATE_BY_FOLDED_STATE's
+# collision guard above) already apply. `raise` makes this unconditional.
+if AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND not in CONVERSION_ACTIONS:
+    raise ValueError(
+        f"{AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND!r} is not a member of "
+        "CONVERSION_ACTIONS"
+    )
 
 CONFIRMABLE_PENDING_KINDS = {
     ("submission_unknown", "no_task_id"): AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
@@ -1051,7 +1060,6 @@ CONFIRMABLE_PAIRS = frozenset(CONFIRMABLE_PENDING_KINDS)
 # function of that pair (_MANIFEST_STATE_BY_FOLDED_STATE), so re-reading it
 # from the manifest would only ever repeat information the pair already
 # carries, never add new information a guard could act on.
-_PENDING_CONVERSION_OPERATION_KEY = "_pending_conversion_operation"
 
 
 class _ActionContext(NamedTuple):
@@ -1065,14 +1073,25 @@ class _ActionContext(NamedTuple):
     interaction_mode: str | None
 
 
-def _action_context(manifest: dict) -> _ActionContext:
+def _action_context(
+    manifest: dict, *, pending_conversion_operation: bool = False
+) -> _ActionContext:
     """Build the guard-visible view of `manifest` project_conversion_action
     scans ACTION_RULES against.
 
     `pending_conversion_operation` is not a persisted manifest field -- it is
-    a signal the caller sets on an in-memory copy of the manifest, under
-    `_PENDING_CONVERSION_OPERATION_KEY`, before calling the projector. This
-    task (3.1a) lands the projector able to honor that flag; wiring a real
+    a signal the caller passes as an explicit keyword-only argument, not a
+    key written onto the manifest dict. Task 3.1a fix round 1 (I5) closes a
+    sentinel key (`manifest["_pending_conversion_operation"]`) this used to
+    read instead: bundle.py / workflow.py's exact-key-set comparisons
+    (`set(manifest) == <closed key set>`) would fold a manifest carrying
+    that key into `invalid_bundle`, and nothing structurally stopped a
+    `deepcopy(manifest)` call along some future path from writing it to
+    disk. A keyword-only parameter cannot leak into the persisted manifest
+    key set at all, closing that illegal state at the type level rather than
+    trusting every caller to strip the key back out.
+
+    Task 3.1a lands the projector able to honor this flag; wiring a real
     producer of it -- `inspect`'s pending-boundary detection, design.md
     Decision 8.1 -- is a separate task (3.1b/c). It is never written to
     manifest.json: nothing in this module or its callers persists it.
@@ -1105,9 +1124,7 @@ def _action_context(manifest: dict) -> _ActionContext:
     )
     settings_snapshot = manifest.get("settings_snapshot")
     return _ActionContext(
-        pending_conversion_operation=bool(
-            manifest.get(_PENDING_CONVERSION_OPERATION_KEY, False)
-        ),
+        pending_conversion_operation=pending_conversion_operation,
         staging_pending_action=(
             staging.get("pending_action") if isinstance(staging, dict) else None
         ),
@@ -1298,15 +1315,35 @@ _EVIDENCE_SOURCE_BY_TIER: dict[str, Callable[[_ActionContext], dict | None]] = {
     "4a-raw": lambda context: context.raw_pending_action,
     "4b-attempt": lambda context: context.attempt_pending_action,
 }
+# Minor fix (task 3.1a fix round 1): _EVIDENCE_SOURCE_BY_TIER's keys must
+# name real ACTION_RULES rows -- a typo'd or stale tier name here would
+# silently never fire (dict.get returns None, same as "this tier has no
+# evidence source") rather than raising, which is indistinguishable from an
+# intentionally informational tier. `raise`, not a bare `assert`, for the
+# same `python -O` reason as every other import-time guard in this module.
+_ACTION_RULE_TIERS = frozenset(rule.tier for rule in ACTION_RULES)
+_evidence_source_tier_overreach = frozenset(_EVIDENCE_SOURCE_BY_TIER) - _ACTION_RULE_TIERS
+if _evidence_source_tier_overreach:
+    raise ValueError(
+        "_EVIDENCE_SOURCE_BY_TIER has keys outside ACTION_RULES' tier "
+        f"domain: {sorted(_evidence_source_tier_overreach)!r}"
+    )
+del _evidence_source_tier_overreach
 
 
-def project_conversion_action(manifest: dict) -> dict | None:
+def project_conversion_action(
+    manifest: dict, *, pending_conversion_operation: bool = False
+) -> dict | None:
     """The single source of `action_required` / `action_id` / `evidence_hash`
     for the closed conversion action vocabulary (design.md Decision 5).
 
     Scans ACTION_RULES in order and returns the first match's projection
     (`None` when only the trailing catch-all matches). This replaces the
     four `result_from_manifest` wrappers' sequential override chain.
+
+    `pending_conversion_operation` is the tier-1 signal, passed straight
+    through to `_action_context` -- see that function's docstring for why it
+    is a keyword-only argument rather than a manifest key.
 
     Only conversion_attempt.result_from_manifest and raw_conversion.
     result_from_manifest call this -- preflight.py and source_staging.py
@@ -1328,7 +1365,9 @@ def project_conversion_action(manifest: dict) -> dict | None:
     implementation of the same rule -- it is the only reachable case, and
     it was already correct.
     """
-    context = _action_context(manifest)
+    context = _action_context(
+        manifest, pending_conversion_operation=pending_conversion_operation
+    )
     rule = next(candidate for candidate in ACTION_RULES if candidate.matches(context))
     if rule.kind is _KIND_FROM_STAGING_PENDING_ACTION:
         pending = context.staging_pending_action
@@ -5135,6 +5174,22 @@ def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> d
     # when this function is entered directly -- raw_conversion.result_from_
     # manifest now relies on this call instead of repeating its own
     # override; see project_conversion_action's docstring.
+    #
+    # I2 (task 3.1a fix round 1): evidence_hash is overridden only when the
+    # projection actually binds a stored pending_action (a non-None
+    # evidence). project_conversion_action returns evidence_hash=None for
+    # every informational tier (1/3/4c/4d and the catch-all) -- those tiers
+    # answer "what should the caller do next", not "which prior decision
+    # does this respond to", so they were never meant to have their own
+    # evidence at all. Blanket-copying that None onto `result` was an
+    # unauthorized narrowing of what callers upstream in the chain already
+    # receive: `source` is already settled by the time preflight.py's
+    # result_from_manifest is entered (SKILL.md:58 promises evidence_hash
+    # stays populated), so preflight.py:3759-3763 fills it with
+    # `sha256:<source sha256>` whenever there is no pending_action at its own
+    # layer -- and every wrapper up the chain, this one included, is
+    # expected to leave that fallback alone unless it has a real
+    # pending_action's evidence to replace it with.
     projected = project_conversion_action(manifest)
     if projected is None:
         result["action_required"] = None
@@ -5142,5 +5197,6 @@ def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> d
     else:
         result["action_required"] = projected["action_required"]
         result["action_id"] = projected["action_id"]
-        result["evidence_hash"] = projected["evidence_hash"]
+        if projected["evidence_hash"] is not None:
+            result["evidence_hash"] = projected["evidence_hash"]
     return result

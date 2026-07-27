@@ -7298,18 +7298,24 @@ def _flat_state_manifest(tmp_path, flat_state):
 
 
 def _pending_conversion_operation_manifest(tmp_path, capsys, monkeypatch):
-    """A real "failed"/"task_failed"/confirm manifest -- which would
-    otherwise project tier 4b's authorize_new_conversion_attempt on its own
-    (see test_pending_operation_outranks_a_stable_conversion_action) -- with
-    the pending-operation signal set on top. Task 3.1a lands the projector
-    able to honor this flag; nothing in production sets it yet (see
-    _action_context's docstring), so this is the only way to exercise tier 1
+    """A real "failed"/"task_failed"/confirm manifest -- which otherwise
+    projects tier 4b's authorize_new_conversion_attempt on its own (see
+    test_pending_operation_outranks_a_stable_conversion_action) -- used to
+    exercise tier 1 through project_conversion_action's
+    `pending_conversion_operation` keyword-only argument. Task 3.1a fix
+    round 1 (I5) closes the sentinel key
+    (`manifest["_pending_conversion_operation"]`) this fixture used to write
+    onto the manifest dict itself -- bundle.py / workflow.py's exact-key-set
+    comparisons would fold a manifest carrying that key into
+    `invalid_bundle`. The caller now passes the signal as an explicit
+    argument at the call site instead (see ACTION_PRECEDENCE_CASES and
+    test_pending_operation_outranks_a_stable_conversion_action below).
+    Nothing in production sets this flag yet (see _action_context's
+    docstring), so the keyword argument is the only way to exercise tier 1
     until design.md Decision 8.1's `inspect` wiring (task 3.1b/c) lands.
     """
     del capsys, monkeypatch
-    manifest = _flat_state_manifest(tmp_path, "failed")
-    manifest[conversion_attempt._PENDING_CONVERSION_OPERATION_KEY] = True
-    return manifest
+    return _flat_state_manifest(tmp_path, "failed")
 
 
 def _source_staging_pending_manifest(tmp_path, capsys, monkeypatch):
@@ -7557,53 +7563,82 @@ ACTION_PRECEDENCE_CASES = [
         "1-pending",
         _pending_conversion_operation_manifest,
         "resume_pending_conversion_operation",
+        {"pending_conversion_operation": True},
     ),
-    ("2-staging", _source_staging_pending_manifest, "resolve_source_upload_unknown"),
+    (
+        "2-staging",
+        _source_staging_pending_manifest,
+        "resolve_source_upload_unknown",
+        {},
+    ),
     (
         "3-credential-missing",
         _credential_missing_manifest,
         "restore_recorded_aihub_credential",
+        {},
     ),
     (
         "3-credential-drift",
         _credential_drift_manifest,
         "restore_recorded_aihub_credential",
+        {},
     ),
     (
         "3-credential-poll-401",
         _credential_poll_401_manifest,
         "restore_recorded_aihub_credential",
+        {},
     ),
-    ("4a-raw", _raw_layout_pending_manifest, "authorize_new_conversion_attempt"),
+    (
+        "4a-raw",
+        _raw_layout_pending_manifest,
+        "authorize_new_conversion_attempt",
+        {},
+    ),
     (
         "4b-task-failed",
         _task_failed_confirm_manifest,
         "authorize_new_conversion_attempt",
+        {},
     ),
-    ("4b-auto-mode-is-silent", _task_failed_auto_manifest, None),
-    ("4c-recoverable", _poll_transient_manifest, "resume_same_conversion_task"),
-    ("4c-expired-url", _result_url_expired_manifest, "resume_same_conversion_task"),
-    ("4d-ready", _result_ready_manifest, "adopt_conversion_result"),
-    ("none", _processing_manifest, None),
+    ("4b-auto-mode-is-silent", _task_failed_auto_manifest, None, {}),
+    (
+        "4c-recoverable",
+        _poll_transient_manifest,
+        "resume_same_conversion_task",
+        {},
+    ),
+    (
+        "4c-expired-url",
+        _result_url_expired_manifest,
+        "resume_same_conversion_task",
+        {},
+    ),
+    ("4d-ready", _result_ready_manifest, "adopt_conversion_result", {}),
+    ("none", _processing_manifest, None, {}),
 ]
 
 
 @pytest.mark.parametrize(
-    ("label", "build", "expected"),
+    ("label", "build", "expected", "call_kwargs"),
     ACTION_PRECEDENCE_CASES,
     ids=[case[0] for case in ACTION_PRECEDENCE_CASES],
 )
 def test_action_precedence_projects_the_expected_action(
-    tmp_path, capsys, monkeypatch, label, build, expected
+    tmp_path, capsys, monkeypatch, label, build, expected, call_kwargs
 ):
     """design.md Decision 5's four-tier precedence table, end to end: every
     case builds a real, driven-or-validator-checked manifest and asserts
     conversion_attempt.project_conversion_action projects exactly the
     action Decision 5 assigns that tier (or None for the catch-all / the
-    auto-mode-silences-4b case).
+    auto-mode-silences-4b case). `call_kwargs` carries tier 1's
+    pending_conversion_operation=True -- the only case that needs anything
+    beyond the manifest itself (I5, task 3.1a fix round 1: this used to be a
+    manifest key the fixture injected; it is now a keyword-only call
+    argument, so it belongs at the call site, not baked into the manifest).
     """
     manifest = build(tmp_path, capsys, monkeypatch)
-    projected = conversion_attempt.project_conversion_action(manifest)
+    projected = conversion_attempt.project_conversion_action(manifest, **call_kwargs)
     actual = None if projected is None else projected["action_required"]
     assert actual == expected, label
 
@@ -7617,22 +7652,28 @@ def test_pending_operation_outranks_a_stable_conversion_action(
     project authorize_new_conversion_attempt on its own. Today's four-layer
     override chain has no such precedence at all -- tier 1 has no consumer
     in it (design.md's Context section).
+
+    I5 (task 3.1a fix round 1): the signal is now
+    project_conversion_action's `pending_conversion_operation` keyword-only
+    argument rather than a manifest key, so "the flag is absent" is simply
+    "the argument is omitted" -- calling with the bare manifest (its default,
+    False) is what proves the manifest really would hit tier 4b on its own.
     """
     manifest = _pending_conversion_operation_manifest(tmp_path, capsys, monkeypatch)
     pending_action = manifest["conversion_attempts"][-1]["pending_action"]
 
-    # Confirm the manifest really would hit tier 4b if the flag were absent
+    # Confirm the manifest really would hit tier 4b when the flag is absent
     # -- otherwise "tier 1 wins" would be true only because nothing else
     # could ever have matched.
-    without_flag = dict(manifest)
-    del without_flag[conversion_attempt._PENDING_CONVERSION_OPERATION_KEY]
-    assert conversion_attempt.project_conversion_action(without_flag) == {
+    assert conversion_attempt.project_conversion_action(manifest) == {
         "action_required": "authorize_new_conversion_attempt",
         "action_id": pending_action["action_id"],
         "evidence_hash": pending_action["evidence_hash"],
     }
 
-    projected = conversion_attempt.project_conversion_action(manifest)
+    projected = conversion_attempt.project_conversion_action(
+        manifest, pending_conversion_operation=True
+    )
     assert projected["action_required"] == "resume_pending_conversion_operation"
 
 
@@ -7696,11 +7737,25 @@ def test_no_result_from_manifest_wrapper_writes_action_required_directly():
     # action's own return value, never by reading a pending_action object
     # directly the way both wrappers used to (the anti-pattern this task
     # removes: `result["action_required"] = pending["kind"]` et al).
+    # Minor fix (task 3.1a fix round 1): the three patterns below used to
+    # anchor on the exact local variable name `pending` -- a future
+    # implementation that renamed that local (to `action`, `decision`, ...)
+    # while still reading a raw pending_action object directly would slip
+    # past unnoticed. Matching any identifier except `projected` (the one
+    # name this function is actually allowed to read these three keys off
+    # of, per the assertion above and project_conversion_action's own return
+    # value) keeps the anti-pattern check variable-name-agnostic without
+    # flagging the legitimate `projected["evidence_hash"]` read the I2 fix
+    # (evidence_hash's fallback-preserving branch) added.
     attempt_source = inspect.getsource(conversion_attempt.result_from_manifest)
     assert "project_conversion_action(manifest)" in attempt_source
-    assert re.search(r'=\s*pending(\.get\(|\[)"kind"', attempt_source) is None
-    assert re.search(r'=\s*pending(\.get\(|\[)"action_id"', attempt_source) is None
-    assert re.search(r'=\s*pending(\.get\(|\[)"evidence_hash"', attempt_source) is None
+    for key in ("kind", "action_id", "evidence_hash"):
+        assert (
+            re.search(
+                r'=\s*(?!projected\b)\w+(\.get\(|\[)"' + key + r'"', attempt_source
+            )
+            is None
+        ), key
 
 
 def test_action_rules_kind_domain_matches_conversion_actions_or_the_staging_sentinel():
@@ -7732,3 +7787,64 @@ def test_project_conversion_action_fails_loud_on_an_unknown_staging_kind(
     manifest["source_staging"]["pending_action"]["kind"] = "not_a_real_kind"
     with pytest.raises(ValueError):
         conversion_attempt.project_conversion_action(manifest)
+
+
+def test_evidence_hash_preserves_the_preflight_fallback_when_the_projection_carries_none(
+    tmp_path, capsys, monkeypatch
+):
+    """I2 (task 3.1a fix round 1): project_conversion_action returns
+    evidence_hash=None for every informational tier -- one with no stored
+    pending_action to bind evidence to (1/3/4c/4d, and the catch-all). The
+    pre-fix conversion_attempt.result_from_manifest blanket-copied that None
+    onto `result["evidence_hash"]`, discarding preflight.py's own
+    bottom-of-the-chain fallback (`sha256:<source sha256>`,
+    preflight.py:3759-3763) that every wrapper above it is supposed to leave
+    alone absent a real pending_action -- an unauthorized narrowing of what
+    SKILL.md:58 promises callers (evidence_hash stays populated whenever no
+    pending_action is bound).
+
+    Locks both shapes the old chain got wrong: `processing` (no action at
+    all) and `result_ready` (tier 4d's informational
+    adopt_conversion_result, still not bound to a stored decision).
+    """
+    processing_manifest = _processing_manifest(tmp_path, capsys, monkeypatch)
+    processing_result = conversion_attempt.result_from_manifest(
+        processing_manifest,
+        work_bundle="evidence-hash-fallback-probe",
+        outcome="evidence_hash_fallback_probe",
+    )
+    assert processing_result["action_required"] is None
+    assert processing_result["evidence_hash"] == (
+        f"sha256:{processing_manifest['source']['sha256']}"
+    )
+
+    ready_manifest = _result_ready_manifest(tmp_path, capsys, monkeypatch)
+    ready_result = conversion_attempt.result_from_manifest(
+        ready_manifest,
+        work_bundle="evidence-hash-fallback-probe",
+        outcome="evidence_hash_fallback_probe",
+    )
+    assert ready_result["action_required"] == "adopt_conversion_result"
+    assert ready_result["evidence_hash"] == (
+        f"sha256:{ready_manifest['source']['sha256']}"
+    )
+
+
+def test_evidence_hash_reflects_the_bound_pending_action_when_tier_4b_matches(
+    tmp_path, capsys, monkeypatch
+):
+    """I2's other side: when a tier does bind a stored pending_action (4b
+    here), evidence_hash must be that pending_action's own evidence_hash,
+    not the preflight fallback -- the fix must not blanket-preserve the
+    fallback for every tier, only the ones with no bound evidence at all.
+    """
+    manifest = _task_failed_confirm_manifest(tmp_path, capsys, monkeypatch)
+    pending_action = manifest["conversion_attempts"][-1]["pending_action"]
+    result = conversion_attempt.result_from_manifest(
+        manifest,
+        work_bundle="evidence-hash-fallback-probe",
+        outcome="evidence_hash_fallback_probe",
+    )
+    assert result["action_required"] == "authorize_new_conversion_attempt"
+    assert result["evidence_hash"] == pending_action["evidence_hash"]
+    assert result["evidence_hash"] != f"sha256:{manifest['source']['sha256']}"

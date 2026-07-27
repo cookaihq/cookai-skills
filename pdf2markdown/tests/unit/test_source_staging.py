@@ -8,6 +8,7 @@ from pathlib import Path
 import fitz
 import pytest
 import aihub_upload
+import conversion_attempt
 import doc2x
 import source_staging
 import workflow
@@ -1855,3 +1856,191 @@ def test_aihub_upload_valid_https_url_agrees_with_doc2x_valid_https_url():
     for case in fail_closed_cases:
         assert aihub_upload.valid_https_url(case) is False
         assert doc2x.valid_https_url(case) is False
+
+
+# --- I3 (task 3.1a fix round 1): tier-2 dual-implementation equivalence lock
+#
+# source_staging.result_from_manifest and conversion_attempt.
+# project_conversion_action are two independent implementations of tier 2's
+# three keys (action_required/action_id/evidence_hash) until task 3.1d wires
+# project_conversion_action's own return value through the real
+# result_from_manifest call chain (conversion_attempt.result_from_manifest
+# today calls source_staging.result_from_manifest first and lets its tier-2
+# write stand -- see project_conversion_action's own docstring for why that
+# split is still correct as of this task, not a leftover). The review round
+# that produced this fix brief falsified "an attempt's existence structurally
+# rules out a non-empty staging pending_action": the retry placeholder and the
+# credential-gate placeholder both project onto design.md's `not_started`
+# row, the only precondition expire_ready_attempt checks, so the two tier-2
+# implementations diverging while an attempt also exists is not ruled out by
+# design -- it is merely unreached today because an unrelated bug (backlog
+# issue #1) independently blocks that path. Until 3.1d's wiring removes the
+# second implementation, this lock is what stands between that drift and
+# production; it holds the two implementations to the same answer on every
+# staging-pending shape reachable today (no conversion_attempts yet), and
+# keeps paying for itself as a regression guard once 3.1d lands.
+
+
+def _staging_pending_manifest_unknown(tmp_path, capsys, monkeypatch):
+    """source_upload_unknown (PENDING_ACTION_KIND_BY_STATE's
+    resolve_source_upload_unknown kind): any non-403 abnormal status.
+    """
+    bundle, ready, dependencies, _source_bytes = ready_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": "tier-2-equivalence-unknown-key"},
+        transport=StatusUpload(500),
+    )
+    assert rc == 0
+    assert result["source_upload_state"] == "source_upload_unknown"
+    return json.loads((bundle / "manifest.json").read_text())
+
+
+def _staging_pending_manifest_rejected(tmp_path, capsys, monkeypatch):
+    """source_upload_rejected (PENDING_ACTION_KIND_BY_STATE's
+    retry_source_upload kind): the documented capacity-limit 403.
+    """
+    bundle, ready, dependencies, _source_bytes = ready_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": "tier-2-equivalence-rejected-key"},
+        transport=StatusUpload(403),
+    )
+    assert rc == 0
+    assert result["source_upload_state"] == "source_upload_rejected"
+    return json.loads((bundle / "manifest.json").read_text())
+
+
+def _staging_pending_manifest_expired(tmp_path, capsys, monkeypatch):
+    """source_upload_expired (PENDING_ACTION_KIND_BY_STATE's
+    retry_expired_source_upload kind): a successful upload whose 72h local
+    expiry window (source_staging.py's own check) has since closed, detected
+    without any network access on the following resume -- the same shape
+    test_ready_url_is_reused_until_expiry_then_confirm_requires_a_new_bound_action
+    drives above, trimmed to just the expiry step.
+    """
+    bundle, ready, dependencies, _source_bytes = ready_bundle(
+        tmp_path, capsys, monkeypatch, interaction_mode="confirm"
+    )
+    staged_url = (
+        "https://files.aihubmax.com/tier-2-equivalence-expiry.pdf?token=keep-private"
+    )
+    ready_rc, staged, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": "tier-2-equivalence-expiry-key"},
+        transport=SuccessfulUpload(staged_url),
+    )
+    assert ready_rc == 0
+
+    expired_rc, expired, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": "must-not-be-read"},
+        transport=NeverNetwork(),
+        now=datetime(2024, 1, 5, 3, 4, 5, tzinfo=timezone.utc),
+    )
+    assert expired_rc == 0
+    assert expired["source_upload_state"] == "source_upload_expired"
+    return json.loads((bundle / "manifest.json").read_text())
+
+
+STAGING_PENDING_MANIFEST_BUILDERS = {
+    "source_upload_unknown": _staging_pending_manifest_unknown,
+    "source_upload_rejected": _staging_pending_manifest_rejected,
+    "source_upload_expired": _staging_pending_manifest_expired,
+}
+
+
+def test_staging_pending_manifest_builders_cover_every_pending_action_kind():
+    """The equivalence lock below is only as strong as its coverage: this
+    pins the builder table's key set to source_staging.
+    PENDING_ACTION_KIND_BY_STATE's own domain (not a hand-copied literal), so
+    a future fourth staging state fails this loudly instead of the lock
+    quietly staying at three-of-four.
+    """
+    assert set(STAGING_PENDING_MANIFEST_BUILDERS) == set(
+        source_staging.PENDING_ACTION_KIND_BY_STATE
+    )
+
+
+@pytest.mark.parametrize(
+    "state",
+    sorted(STAGING_PENDING_MANIFEST_BUILDERS),
+    ids=sorted(STAGING_PENDING_MANIFEST_BUILDERS),
+)
+def test_tier_2_projection_agrees_with_source_staging_result_from_manifest(
+    tmp_path, capsys, monkeypatch, state
+):
+    """I3 (task 3.1a fix round 1): locks source_staging.result_from_manifest
+    and conversion_attempt.project_conversion_action's tier-2 row to the same
+    answer on every staging-pending shape production can reach today (see
+    the module comment above this block for why the two are still
+    independent implementations and why that is a real drift channel, not
+    dead code). A future edit that changes one implementation without the
+    other fails here rather than shipping silently.
+    """
+    manifest = STAGING_PENDING_MANIFEST_BUILDERS[state](tmp_path, capsys, monkeypatch)
+    pending = manifest["source_staging"]["pending_action"]
+    assert pending["kind"] == source_staging.PENDING_ACTION_KIND_BY_STATE[state]
+    assert manifest["conversion_attempts"] == []
+
+    direct = source_staging.result_from_manifest(
+        manifest,
+        work_bundle="tier-2-equivalence-probe",
+        outcome="tier_2_equivalence_probe",
+    )
+    projected = conversion_attempt.project_conversion_action(manifest)
+
+    assert projected is not None
+    assert (
+        direct["action_required"],
+        direct["action_id"],
+        direct["evidence_hash"],
+    ) == (
+        projected["action_required"],
+        projected["action_id"],
+        projected["evidence_hash"],
+    )
