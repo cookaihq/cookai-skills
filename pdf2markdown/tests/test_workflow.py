@@ -1935,11 +1935,19 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
         node = call.args[0]
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
-        # 唯一允许的间接写法：模块级字符串常量名。窄口那条构造点读的就是
-        # workflow.HISTORY_CHECK_ERROR_CODE——它必须和窄口表的 import 时
-        # 自校验读同一个符号，否则「表里的 code」和「真被抛出的 code」可以
-        # 各说各话。局部变量名在这里取不到模块属性，照旧落到 dump 分支。
-        if isinstance(node, ast.Name):
+        # 唯一允许的间接写法：全大写的模块级字符串常量名。窄口那条构造点读的
+        # 就是 workflow.HISTORY_CHECK_ERROR_CODE，窄口表本身也直接用这个符号
+        # 构造（任务 3.1d 遗留项 3 之后不再靠一次单独的 import 时自校验比对
+        # 两者，一致性由「同一个符号」这件事本身保证）。任务 3.1d 审查遗留项
+        # 2：把这条间接写法收窄到全大写白名单，而不是任意 Name 都拿
+        # getattr(workflow, node.id, None) 去解析——workflow.py 里以局部变量
+        # （如 code）作第一位参数的构造点（当前 :1643、:1878、:2908、
+        # :3067、:3511）不受任何全局约束保证「不会撞上某个模块级同名字符串
+        # 常量」；若将来真出现一个模块级 `code = "..."`，未收窄的分支会把这
+        # 些局部变量静默错解成那个常量的值，而不是照旧落到下面的 dump 分支
+        # ——静默漏检正是这条测试要堵的洞。局部变量名不是全大写，照旧落到
+        # dump 分支。
+        if isinstance(node, ast.Name) and node.id.isupper():
             resolved = getattr(workflow, node.id, None)
             if isinstance(resolved, str):
                 return resolved

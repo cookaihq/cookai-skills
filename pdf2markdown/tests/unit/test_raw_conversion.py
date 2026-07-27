@@ -2096,6 +2096,27 @@ def test_valid_rejection_rejects_combinations_no_detection_branch_produces(
     assert not raw_conversion._valid_rejection(record, intent)
 
 
+def test_a_non_dict_rejection_record_is_rejected_without_crashing():
+    """Task 3.1d review follow-up #1 -- `_valid_rejection` guards its first
+    `record.get(...)` read with `isinstance(record, dict)` (raw_conversion.py
+    ~1566) specifically so a non-dict `record` returns False instead of
+    raising AttributeError. `resolve_history_state`'s except tuple
+    (raw_conversion.py ~1902) is (KeyError, TypeError, ValueError,
+    RawConversionError) -- it does not include AttributeError -- so without
+    this guard the exception escapes to workflow.py's blanket fallback and
+    turns an rc=4 invalid_bundle (with full diagnostic fields) into an rc=1
+    internal_error (with every diagnostic field null). Nothing else in the
+    suite calls `_valid_rejection` with a non-dict record, so this guard had
+    no regression coverage before this test: a future refactor of the
+    `pending_valid` expression could fold the guard away and all other 587
+    tests would stay green. Mutation-tested by hand: reverting the guarded
+    read back to unguarded `record.get("reason_code")` turns this test red
+    with AttributeError; restoring the guard turns it green again."""
+    intent = _minimal_rejection_intent()
+    for bad in (None, "rejected", 7, [], ()):
+        assert raw_conversion._valid_rejection(bad, intent) is False
+
+
 def test_local_rejection_detected_by_raises_for_a_reason_code_no_local_branch_owns():
     """Task 2.2c review round 2, Important #2 -- the pre-fix
     `"local_ledger" if reason_code in LEDGER_RESULT_REJECTIONS else

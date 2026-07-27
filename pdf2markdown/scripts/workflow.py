@@ -123,6 +123,13 @@ RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
 )
 
 
+# The code `_inspect_open_bundle`'s history check reports under. Spelled once
+# and read both by that construction site and by CONVERSION_ACTION_EXCEPTIONS
+# below, so the pair's code half cannot drift from the code the history check
+# actually raises -- there is no separate literal for a future edit to catch
+# out of sync.
+HISTORY_CHECK_ERROR_CODE = "invalid_bundle"
+
 # The only (code, action_required) pairs a WorkflowError may carry from
 # outside ERROR_PATH_ACTIONS. Task 3.1b (design.md Decision 1) is the whole of
 # it: `inspect` parked on an unclosed conversion intent still reports
@@ -140,48 +147,49 @@ RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
 # tests/test_workflow.py::
 # test_the_workflow_error_conversion_gate_admits_exactly_one_pair pins both
 # halves of that.
+#
+# The code half is built from HISTORY_CHECK_ERROR_CODE rather than a literal
+# "invalid_bundle" (task 3.1d review follow-up #3): there is no closed
+# vocabulary of WorkflowError codes to test membership against, so an
+# import-time check that compared this table's code to that constant would
+# only ever be comparing the constant to itself -- not verifying an
+# invariant, just restating today's single-entry design decision as a check.
+# Constructing the pair from the symbol instead makes literal drift between
+# "the code this table admits" and "the code the history check reports"
+# structurally unrepresentable, without an import-time crash gating every
+# command whenever a second, legitimately different-code pair is added later.
 CONVERSION_ACTION_EXCEPTIONS = frozenset(
-    {("invalid_bundle", "resume_pending_conversion_operation")}
+    {(HISTORY_CHECK_ERROR_CODE, "resume_pending_conversion_operation")}
 )
-
-# The code `_inspect_open_bundle`'s history check reports under, and the only
-# code the gate above may admit a conversion action beneath. Spelled once and
-# read by both that construction site and the import-time check below: there is
-# no closed vocabulary of WorkflowError codes to test membership against, so
-# the code half's reality anchor has to be the one site the exception exists to
-# serve. Without it the pair's code half is unchecked, and a table entry naming
-# a code nothing raises would leave the gate looking guarded while admitting a
-# pair no construction site can produce.
-HISTORY_CHECK_ERROR_CODE = "invalid_bundle"
 
 
 def _check_conversion_action_exceptions_are_real() -> None:
-    """Every admitted pair must be live on both halves.
+    """Every admitted pair's action half must be live.
 
-    Without the action half the exception list survives a rename of the action
-    it admits: the gate would keep letting a string through that no producer
+    Without this check the exception list survives a rename of the action it
+    admits: the gate would keep letting a string through that no producer
     writes any more, and the WorkflowError check would look closed while
-    quietly guarding nothing. Without the code half the same is true one field
-    over -- the gate matches (code, action) whole, so an admitted code no
-    construction site reports is a dead entry that nothing can trip over.
-    `raise`, not `assert`, so `python -O` cannot strip either check (same
-    stance as conversion_attempt.py's own import-time table guards).
+    quietly guarding nothing. `raise`, not `assert`, so `python -O` cannot
+    strip the check (same stance as conversion_attempt.py's own import-time
+    table guards).
+
+    The code half needs no matching runtime check: CONVERSION_ACTION_EXCEPTIONS
+    is built directly from HISTORY_CHECK_ERROR_CODE above, so a table entry
+    whose code has drifted from the history check's code is not a state this
+    module can construct in the first place.
 
     What this does *not* check is that the construction site still produces the
     pair at all; that is behaviour, and
-    test_inspect_at_a_pending_conversion_boundary_points_at_resume owns it.
+    tests/test_workflow.py::test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary's
+    outside_table == set(CONVERSION_ACTION_EXCEPTIONS) assertion owns it --
+    it statically resolves every WorkflowError(...) call site's own
+    action_required literal back to the code passed at that same call site.
     """
     for code, action in CONVERSION_ACTION_EXCEPTIONS:
         if action not in conversion_attempt_module.CONVERSION_ACTIONS:
             raise ValueError(
                 f"CONVERSION_ACTION_EXCEPTIONS admits {action!r} for {code!r}, "
                 "which is not a conversion action"
-            )
-        if code != HISTORY_CHECK_ERROR_CODE:
-            raise ValueError(
-                f"CONVERSION_ACTION_EXCEPTIONS admits {action!r} under {code!r}, "
-                "which is not the code the history check reports "
-                f"({HISTORY_CHECK_ERROR_CODE!r})"
             )
 
 
