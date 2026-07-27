@@ -4156,6 +4156,43 @@ def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
     assert ca._valid_reason_detail(probe_reason, probe_code) is True
 
 
+def test_locally_detected_pairs_reason_matches_the_closed_vocabularys_extra_member():
+    """Task 2.2a / design.md Decision 4 -- the pair-set equality assertion
+    that used to live inside test_conversion_reason_vocabulary_is_closed_to_
+    twelve_values, split into its own test (2.2b front-loaded fix #2, 2.2a
+    review Minor) so a mutation on either side is reported against this
+    assertion directly instead of being potentially masked by assertion
+    order inside a shared test with the twelve-value literal check below.
+
+    What this actually pins (corrected from the original docstring, 2.2b
+    front-loaded fix #1): the *eleven* migration-derived reasons on both
+    sides come from the same FLAT_STATE_MIGRATION expression --
+    `{reason for _state, reason in LEGAL_STATE_REASON_PAIRS if reason is not
+    None}`'s eleven wire-derived members and CONVERSION_REASONS'
+    `_REASONS_FROM_FLAT_STATE_MIGRATION` component are both literally derived
+    from FLAT_STATE_MIGRATION.values(), so a reason added to (or removed
+    from) the migration table moves *both* sides in lockstep and this
+    equality stays green regardless -- it does NOT detect "a reason was added
+    to the migration table but not to the vocabulary" (that scenario cannot
+    even arise: the vocabulary's migration-derived component is not a second,
+    independently-maintained literal to drift out of sync).
+
+    What this assertion actually is weight-bearing for is narrower: it pins
+    that LOCALLY_DETECTED_PAIRS' one non-wire reason (`result_url_expired`)
+    is exactly CONVERSION_REASONS' one literal member beyond those eleven.
+    Drift that only this assertion (and not the twelve-value literal below)
+    would catch: a locally-detected pair added to LOCALLY_DETECTED_PAIRS
+    without adding its reason to CONVERSION_REASONS' literal splice, or vice
+    versa.
+    """
+    import conversion_attempt as ca
+
+    assert {
+        reason for _state, reason in ca.LEGAL_STATE_REASON_PAIRS
+        if reason is not None
+    } == ca.CONVERSION_REASONS
+
+
 def test_conversion_reason_vocabulary_is_closed_to_twelve_values():
     """Task 2.2a / design.md Decision 4 -- the closed reason vocabulary a
     stored attempt's `reason` column may take.
@@ -4168,16 +4205,15 @@ def test_conversion_reason_vocabulary_is_closed_to_twelve_values():
     stay at their measured 18 rows. Equality against LEGAL_TRIPLES would
     therefore be wrong, today and permanently.
 
-    Equality against the *pair* set, however, must hold -- and that assertion
-    is what stops CONVERSION_REASONS from being a dead symbol nothing reads
-    (review Important #2). The two sides are built from different material:
-    the left is the reason column of LEGAL_STATE_REASON_PAIRS (derived from
-    FLAT_STATE_MIGRATION, spliced with LOCALLY_DETECTED_PAIRS' keys), the
-    right is the eleven migration-table reasons plus one literal. Drift on
-    either side -- a reason added to the migration table but not to the
-    vocabulary, a locally-detected pair added without its reason, the literal
-    edited -- turns this red. It is not self-证明: neither expression can be
-    rewritten into the other without going through a different table.
+    The hand-typed literal equality below is what actually stops
+    CONVERSION_REASONS from silently drifting off FLAT_STATE_MIGRATION
+    (2.2b front-loaded fix #1, correcting this docstring's earlier claim that
+    the pair-set equality -- now
+    test_locally_detected_pairs_reason_matches_the_closed_vocabularys_extra_
+    member above -- was what did this): CONVERSION_REASONS' eleven-reason
+    component recomputes off FLAT_STATE_MIGRATION at import time, so nothing
+    besides a literal comparison can catch it drifting from what this test
+    expects the migration table to still produce.
     """
     import conversion_attempt as ca
 
@@ -4189,10 +4225,30 @@ def test_conversion_reason_vocabulary_is_closed_to_twelve_values():
         "unsafe_result_url", "unexpected_result_count",
     }
     assert {row.reason for row in ca.LEGAL_TRIPLES} - {None} <= ca.CONVERSION_REASONS
-    assert {
-        reason for _state, reason in ca.LEGAL_STATE_REASON_PAIRS
-        if reason is not None
-    } == ca.CONVERSION_REASONS
+
+
+def test_locally_detected_pairs_have_no_wire_row_key_collision():
+    """2.2b front-loaded fix #3 (2.2a review Minor) -- symmetric to
+    _locally_detected_observations' single-element-unpacking guard above,
+    which turns a future ambiguous re-labelling into an import-time
+    ValueError instead of silently widening its gate.
+
+    `_MANIFEST_STATE_BY_FOLDED_STATE` splices LOCALLY_DETECTED_PAIRS into a
+    plain dict via `|`, whose right operand silently wins on a key collision.
+    If a future locally-detected pair ever shared a key with a wire-derived
+    (attempt_state, reason) pair, the union would silently overwrite that
+    pair's conversion_state projection instead of raising -- there is no
+    unpacking or other loud failure guarding this particular splice today.
+    This test pins today's disjointness between the two operands, so a
+    colliding addition turns this red instead of leaving the silent-overwrite
+    risk undetected.
+    """
+    import conversion_attempt as ca
+
+    assert not (
+        frozenset(ca.LOCALLY_DETECTED_PAIRS)
+        & {(row.attempt_state, row.reason) for row in ca.LEGAL_TRIPLES}
+    )
 
 
 def test_reason_detail_is_a_total_refinement_of_exactly_two_reasons():
@@ -4297,6 +4353,16 @@ def test_the_locally_detected_result_url_expired_pair_is_legal(
     suite -- every other test reaches it end-to-end through drive/resume --
     and therefore the first assertion that pins its `_valid_reason_detail`
     delegation from the outside.
+
+    2.2b front-loaded fix #4 (2.2a review Minor): the earlier version of this
+    test stopped at `_valid_attempt` on a single record. `_MANIFEST_STATE_BY_
+    FOLDED_STATE[pair]` (asserted as a bare dict lookup above) is actually
+    consumed one level up, by `valid_private_state`'s `expected_manifest_state`
+    check (conversion_attempt.py, comparing `manifest["conversion_state"]`
+    against the pair's projection) -- so the bundle-level acceptance check
+    at the bottom of this test flips the manifest's top-level
+    `conversion_state` to that same projection and calls `valid_private_state`
+    directly, pinning derivation 2 at the layer that actually reads it.
     """
     import conversion_attempt as ca
 
@@ -4376,6 +4442,15 @@ def test_the_locally_detected_result_url_expired_pair_is_legal(
         )
         is False
     )
+
+    # Bundle-level acceptance (2.2b front-loaded fix #4): the same re-labelled
+    # record, at the layer that actually consumes _MANIFEST_STATE_BY_FOLDED_
+    # STATE -- valid_private_state's expected_manifest_state check -- rather
+    # than only the bare dict lookup asserted above.
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    manifest["conversion_attempts"][-1] = expired
+    manifest["conversion_state"] = ca._MANIFEST_STATE_BY_FOLDED_STATE[pair]
+    assert ca.valid_private_state(private_state, manifest) is True
 
 
 def _schema_v1_attempt(attempt, wire_reason_code_by_state):
@@ -4917,20 +4992,295 @@ FLAT_STATE_OBSERVABLES = {
 # 无损性断言唯一的对照物，覆写或删除它就等于销毁证据。
 
 
-def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_path):
-    """迁移前的观测盲区：两个多分支 state 的分支信息不出现在机器结果里。
+def _drive_submission_unknown_detail(tmp_path, capsys, monkeypatch, detail):
+    """Drive a fresh work bundle to `submission_unknown` through the specific
+    create-classification (or crash-recovery) branch named by `detail`, and
+    return the machine result of the call that lands on it.
 
-    任务 2.2 会让这个断言反转；它在此处的作用是把「盲区确实存在」钉死，
-    使 2.2 的可观测性净增可被证明，而不是被声称。
+    The four `detail` values are driven by four genuinely different
+    mechanisms (doc2x._classify's status/task_id checks for the first two,
+    create_task's broad `except Exception` for the third, and
+    recover_interrupted_attempt's "conversion_submit_started with no
+    completion" branch for the fourth) -- not by a single parametrized
+    transport, because no single fixture produces all four.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
 
-    先把前提钉到底：只断言字段缺席的话，四条 not in 可以空过——驱动路径
-    一旦漂到别的 state（甚至漂到一个本就不带 reason 字段的 state），断言
-    依然全绿，而 2.2 的可观测性净增正建立在这条基线上。
+    if detail == "interrupted_before_result_commit":
+        # A crash during/after the create call, with the process never
+        # reaching the point where it commits a definite create outcome,
+        # leaves a durable `conversion_submit_started` checkpoint that the
+        # next resume's recover_interrupted_attempt folds onto
+        # ("submission_unknown", "no_task_id") with this detail --
+        # regardless of whether the crash happened before or after the
+        # network call itself (test_a_crash_after_submit_intent_recovers_..
+        # above exercises the "before" boundary and asserts the identical
+        # pairing; CrashAfterCreate exercises the "during" one here).
+        create = CrashAfterCreate()
+        with pytest.raises(SimulatedProcessCrash):
+            workflow.main(
+                [
+                    "resume",
+                    "--work-bundle",
+                    str(bundle),
+                    "--expected-generation",
+                    str(staged["generation"]),
+                ],
+                environ=environ,
+                cwd=str(tmp_path),
+                config_home=str(tmp_path / "config-home"),
+                transport=create,
+                now=NOW,
+            )
+        capsys.readouterr()
+        recovered_rc, recovered, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"] + 1),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=NeverNetwork(),
+        )
+        assert recovered_rc == 0
+        return recovered
 
-    复用 FLAT_STATE_OBSERVABLES 做整四元组比对，而不是只钉
-    conversion_attempt_state：后者仍放过「state 正确但命令换了」的漂移
-    （`submitting` 那一行正好证明「用 inspect 也能读到某个 state」这条替代
-    路径客观存在）。整元组比对一行到底，且与钉表共用同一份真相。
+    # The other three details are all decided synchronously inside a single
+    # create_task call, off the shape of the (simulated) HTTP response:
+    #   - no_task_id: a well-formed status the wire actually uses (401) that
+    #     carries no task id -- doc2x._classify's fallback branch.
+    #   - invalid_transport_result: a response whose `.status` is not an int
+    #     in 100..599 at all -- _classify's very first guard. StatusCreate
+    #     accepts any status value verbatim (see its __init__ above), so
+    #     StatusCreate(None) exercises this without a new fixture class.
+    #   - network_result_unknown: the transport raises before a Response
+    #     ever comes back -- create_task's `except Exception` catches it.
+    #     LostPoll raises a plain OSError (Exception, not
+    #     SimulatedProcessCrash's BaseException) regardless of which step
+    #     calls it; used here as the *create* transport it exercises this
+    #     branch, distinct from its usual role driving poll_transient.
+    transport = {
+        "no_task_id": StatusCreate(401),
+        "invalid_transport_result": StatusCreate(None),
+        "network_result_unknown": LostPoll(),
+    }[detail]
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+    assert rc == 0
+    return result
+
+
+@pytest.mark.parametrize("detail", sorted({
+    "no_task_id", "invalid_transport_result",
+    "network_result_unknown", "interrupted_before_result_commit",
+}))
+def test_submission_unknown_branches_are_visible_to_callers(
+    tmp_path, capsys, monkeypatch, detail
+):
+    result = _drive_submission_unknown_detail(tmp_path, capsys, monkeypatch, detail)
+    assert result["conversion_attempt_state"] == "submission_unknown"
+    assert result["conversion_attempt_reason"] == "no_task_id"
+    assert result["conversion_attempt_reason_detail"] == detail
+
+
+def test_reason_and_detail_keys_always_exist_even_when_null(tmp_path):
+    """Decision 3: the two fields are unconditional -- present and null for
+    a single-valued state, not merely absent."""
+    result = drive_to_flat_state(tmp_path, "submitted")
+    assert result["conversion_attempt_reason"] is None
+    assert result["conversion_attempt_reason_detail"] is None
+
+
+def _drive_and_run_command(tmp_path, capsys, monkeypatch, command):
+    """Drive a bundle to a state where a conversion attempt with a non-null
+    reason exists, then run `command` against it, returning the machine
+    result of that call.
+
+    Each of the four commands reaches conversion_attempt.result_from_manifest
+    (directly, or through a wrapper that calls it) by a different route:
+    resume/inspect read it straight off the manifest; record replays a
+    decision through it; advance's recovery path
+    (conversion_attempt_module.recover_interrupted_attempt, workflow.py:1541)
+    is exercised the same way _drive_submission_unknown_detail's
+    interrupted_before_result_commit branch exercises resume's recovery path.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+
+    if command == "resume":
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=StatusCreate(401),
+        )
+        assert rc == 0
+        return result
+
+    if command == "inspect":
+        _resume_rc, _unknown, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=StatusCreate(401),
+        )
+        rc, result, _stderr = invoke(
+            capsys,
+            ["inspect", "--work-bundle", str(bundle)],
+            cwd=tmp_path,
+            environ=environ,
+            transport=NeverNetwork(),
+        )
+        assert rc == 0
+        return result
+
+    if command == "record":
+        _resume_rc, unknown, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=StatusCreate(401),
+        )
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "record",
+                "conversion",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(unknown["generation"]),
+                "--action-id",
+                unknown["action_id"],
+                "--evidence-hash",
+                unknown["evidence_hash"],
+                "--decision",
+                "retry",
+                "--basis",
+                "task 2.2b four-command projection coverage.",
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=NeverNetwork(),
+        )
+        assert rc == 0
+        return result
+
+    if command == "advance":
+        create = CrashAfterCreate()
+        with pytest.raises(SimulatedProcessCrash):
+            workflow.main(
+                [
+                    "resume",
+                    "--work-bundle",
+                    str(bundle),
+                    "--expected-generation",
+                    str(staged["generation"]),
+                ],
+                environ=environ,
+                cwd=str(tmp_path),
+                config_home=str(tmp_path / "config-home"),
+                transport=create,
+                now=NOW,
+            )
+        capsys.readouterr()
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "advance",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"] + 1),
+                "--visual-capability",
+                "available",
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=NeverNetwork(),
+        )
+        assert rc == 0
+        return result
+
+    raise AssertionError(f"_drive_and_run_command: unknown command {command!r}")
+
+
+@pytest.mark.parametrize("command", ["inspect", "advance", "resume", "record"])
+def test_all_four_commands_expose_the_same_reason_fields(
+    tmp_path, capsys, monkeypatch, command
+):
+    result = _drive_and_run_command(tmp_path, capsys, monkeypatch, command)
+    assert "conversion_attempt_reason" in result
+    assert "conversion_attempt_reason_detail" in result
+
+
+def test_submission_unknown_and_poll_transient_branches_are_visible_after_closure(
+    tmp_path, capsys, monkeypatch
+):
+    """任务 2.2b 反转（本计划唯一明许的断言反转）。
+
+    这是 task 1.3 的 test_submission_unknown_and_poll_transient_branches_are_
+    invisible_today 就地反转：那条测试把「盲区确实存在」钉死，好让这里的
+    可观测性净增可被证明而不是被声称；`conversion_attempt.result_from_manifest`
+    现在无条件写入 conversion_attempt_reason / conversion_attempt_reason_detail
+    （Decision 3：恒存在，值可为 null），两个多分支 state 的分支信息不再对调用
+    方不可见。
+
+    整四元组比对沿用不变（与钉表 FOLDED_STATE_OBSERVABLES 共用同一份真相，
+    "submitting" 那一行的 outcome discount 同样适用）——本步骤只在同一驱动路径
+    上新增对两个 reason 字段"存在且非空"的断言，不放松四元组本身。
+
+    旧账（1.3 复审 Minor #7，转派到本子步骤）：poll_transient 折叠自两个不同
+    reason_detail——"poll_transient"（drive_to_flat_state 走的
+    StatusCreate(429) 分支）与 "result_private_payload_lost"（仅
+    recover_interrupted_attempt 在崩溃恢复时，找到一个 result_ready 决定的
+    durable conversion_poll_result_intent 但其 private payload 从未落盘时才会
+    产生——见 conversion_attempt.py 的 recover_interrupted_attempt 与
+    test_poll_result_journal_recovers_each_write_boundary_without_leaking_
+    result_url 的 boundary="private" 分支）。只覆盖前者，「可观测性净增」就只
+    证明了一半：本测试在主循环之后额外驱动崩溃恢复分支，把两个 reason 都摆到
+    可观测这一侧。
     """
     for flat_state in ("submission_unknown", "poll_transient"):
         result = drive_to_flat_state(tmp_path, flat_state)
@@ -4943,8 +5293,82 @@ def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_
             result["outcome"],
             result.get("action_required"),
         ) == FOLDED_STATE_OBSERVABLES[flat_state], flat_state
-        assert "conversion_attempt_reason" not in result
-        assert "conversion_attempt_reason_detail" not in result
+        assert result["conversion_attempt_reason"] is not None, flat_state
+        assert result["conversion_attempt_reason_detail"] is not None, flat_state
+
+    # poll_transient's second reason_detail, result_private_payload_lost, is
+    # never reached through drive_to_flat_state (which only exercises the
+    # StatusCreate(429) branch above) -- it is a crash-recovery-only outcome,
+    # so it needs its own drive through the same private-write-boundary crash
+    # test_poll_result_journal_recovers_each_write_boundary_without_leaking_
+    # result_url already exercises with boundary="private".
+    lost_payload_root = tmp_path / "poll-transient-payload-lost"
+    lost_payload_root.mkdir()
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(lost_payload_root, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+    create_rc, submitted, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=lost_payload_root,
+        environ=environ,
+        transport=SuccessfulCreate("task-lost-private-payload"),
+    )
+    assert create_rc == 0
+    result_url = "https://results.aihubmax.com/lost-payload.zip?token=lost"
+    original_atomic_write, original_append_history = _install_conversion_journal_crash(
+        monkeypatch,
+        event="conversion_poll_result_committed",
+        boundary="private",
+    )
+    with pytest.raises(SimulatedProcessCrash):
+        workflow.main(
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(submitted["generation"]),
+            ],
+            environ=environ,
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=PollStatus(
+                "task-lost-private-payload", "completed", results=[{"url": result_url}]
+            ),
+            now=NOW,
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+    )
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "append_history", original_append_history
+    )
+    recovered_rc, recovered, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(submitted["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=NeverNetwork(),
+    )
+    assert recovered_rc == 0
+    assert recovered["conversion_attempt_state"] == "failed"
+    assert recovered["conversion_attempt_reason"] == "poll_transient"
+    assert recovered["conversion_attempt_reason_detail"] == "result_private_payload_lost"
 
 
 def test_drive_to_flat_state_can_be_called_twice_for_the_same_state(tmp_path):

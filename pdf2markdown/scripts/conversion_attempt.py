@@ -678,10 +678,13 @@ def _locally_detected_observations():
     Single-element unpacking (rather than a `for` that yields one quadruple
     per matching row) is what keeps that inheritance honest. It is well
     defined only while the re-labelled state has exactly one wire row --
-    true of `result_ready`, false of `failed`, which ten reasons share. A
-    future locally-detected pair re-labelling `failed` must state which row
-    it inherits from; unpacking makes that an import-time ValueError instead
-    of silently widening the gate by ten quadruples.
+    true of `result_ready`, false of `failed`, which nine non-transient wire
+    rows share (ten flat states fold onto `failed`, but `poll_transient` is
+    filtered out by the `_NON_CONTRACT_STATES` check above, leaving nine
+    candidates for the set this unpacks). A future locally-detected pair
+    re-labelling `failed` must state which row it inherits from; unpacking
+    makes that an import-time ValueError instead of silently widening the
+    gate by nine quadruples.
     """
     for state, reason in LOCALLY_DETECTED_PAIRS:
         (wire_row,) = {
@@ -3653,6 +3656,8 @@ def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> d
     )
     attempt = manifest["conversion_attempts"][-1]
     result["conversion_attempt_state"] = attempt["state"]
+    result["conversion_attempt_reason"] = attempt["reason"]
+    result["conversion_attempt_reason_detail"] = attempt["reason_detail"]
     pending = attempt.get("pending_action")
     if isinstance(pending, dict):
         result["action_required"] = pending["kind"]
