@@ -1580,6 +1580,8 @@ def test_ready_url_is_reused_until_expiry_then_confirm_requires_a_new_bound_acti
         transport=SuccessfulUpload(staged_url),
     )
     assert ready_rc == 0
+    staged_manifest = json.loads((bundle / "manifest.json").read_text())
+    staged_private = json.loads((bundle / ".state" / "private.json").read_text())
 
     reusable_rc, reusable, _stderr = invoke(
         capsys,
@@ -1599,7 +1601,18 @@ def test_ready_url_is_reused_until_expiry_then_confirm_requires_a_new_bound_acti
     )
     assert reusable_rc == 0
     assert reusable["source_upload_state"] == "source_upload_ready"
-    assert reusable["generation"] == staged["generation"]
+    # This step reaches the recorded-credential gate (AIHUB_API_KEY is absent
+    # from `environ`), which is how it stops short of a create. Task 2.3c
+    # turned that gate from a zero-write return into a persisted initial
+    # authorization, so the *bundle* generation now moves by one here. What
+    # this test is about is unchanged and asserted directly below: the staged
+    # URL is reused, not re-uploaded -- source_staging's own records are
+    # byte-for-byte what the upload left behind.
+    assert reusable["generation"] == staged["generation"] + 1
+    reused_manifest = json.loads((bundle / "manifest.json").read_text())
+    reused_private = json.loads((bundle / ".state" / "private.json").read_text())
+    assert reused_manifest["source_staging"] == staged_manifest["source_staging"]
+    assert reused_private["source_uploads"] == staged_private["source_uploads"]
 
     expired_rc, expired, _stderr = invoke(
         capsys,
@@ -1608,7 +1621,7 @@ def test_ready_url_is_reused_until_expiry_then_confirm_requires_a_new_bound_acti
             "--work-bundle",
             str(bundle),
             "--expected-generation",
-            str(staged["generation"]),
+            str(reusable["generation"]),
             "--visual-capability",
             "available",
         ],

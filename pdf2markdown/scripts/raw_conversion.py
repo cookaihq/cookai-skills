@@ -1601,14 +1601,13 @@ RAW_COMMITTED_KEYS = frozenset(
         "private_hash",
     }
 )
-CONVERSION_INTENTS = frozenset(
-    {
-        "conversion_submit_intent",
-        "conversion_submit_result_intent",
-        "conversion_retry_intent",
-        "conversion_poll_result_intent",
-    }
-)
+# The conversion intents this reducer hands back to
+# conversion_attempt.apply_committed_operations. Task 2.3c makes
+# conversion_attempt the single owner of the list: it used to be a second copy
+# of that function's own branch names here, so a new conversion event pair
+# (2.3c adds one) would have replayed correctly in unit isolation and then
+# failed to reduce inside a raw-bearing bundle, silently.
+CONVERSION_INTENTS = conversion_attempt.CONVERSION_INTENTS
 
 
 def _valid_reservation_shape(reservation: dict) -> bool:

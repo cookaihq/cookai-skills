@@ -841,6 +841,14 @@ def test_the_first_attempt_may_carry_an_initial_authorization(
     authorization forward into "submitting" while rebuilding
     authorization_kind back to None, and valid_private_state re-validates the
     whole attempt history on every read.
+
+    Task 2.3c strengthening: the injected authorization's `evidence_hash` is
+    now the frozen source/preflight hash the production writer stores, not
+    the arbitrary AN_INITIAL_AUTHORIZATION literal this test used under
+    2.3b's shape-only rule. That literal is now refused -- by design, and by
+    test_an_initial_authorization_is_bound_to_the_frozen_source_evidence,
+    which owns that half. What this test asserts is unchanged and no weaker:
+    attempt #1 may carry an initial authorization.
     """
     import conversion_attempt as ca
 
@@ -851,7 +859,13 @@ def test_the_first_attempt_may_carry_an_initial_authorization(
     # attributed to the injected authorization.
     assert ca.valid_private_state(private_state, manifest) is True
 
-    initial = _with_first_authorization(manifest, AN_INITIAL_AUTHORIZATION)
+    initial = _with_first_authorization(
+        manifest,
+        {
+            **AN_INITIAL_AUTHORIZATION,
+            "evidence_hash": ca.frozen_source_evidence_hash(manifest),
+        },
+    )
     assert ca.valid_private_state(private_state, initial) is True
 
 
@@ -951,6 +965,427 @@ def test_a_later_attempt_still_has_to_match_its_predecessor_pending_action(
         json.dumps(AN_INITIAL_AUTHORIZATION)
     )
     assert ca.valid_private_state(private_state, downgraded) is False
+
+
+def _gate_advance(
+    tmp_path, capsys, bundle, generation, *, environ, transport, now=NOW
+):
+    """One `advance` on a source-ready bundle, quoting `generation`.
+
+    The recorded-credential gate is reached by simply leaving AIHUB_API_KEY
+    out of `environ`: config.read_exact_api_key then raises ConfigError with
+    code credential_source_missing, which is the branch task 2.3c turns from
+    a read-only return into a persisted initial authorization.
+    """
+    return invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+        now=now,
+    )
+
+
+def test_a_blocked_credential_gate_appends_exactly_one_initial_attempt(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.3c: the blocked recorded-credential gate stops being a
+    zero-write path and records what it observed.
+
+    Until this task, `advance` on a source-ready bundle whose recorded
+    credential cannot be read returned outcome `source_upload_ready` without
+    touching a single byte -- indistinguishable from "a create was never
+    attempted". It now appends exactly one `authorized` attempt carrying
+    `authorization_kind == "initial"` and the credential reason, and repeated
+    calls reuse that attempt rather than appending a second one or bumping
+    the generation again.
+    """
+    bundle, staged, dependencies, _key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    never = CountingNeverNetwork()
+
+    rc, first, _stderr = _gate_advance(
+        tmp_path,
+        capsys,
+        bundle,
+        staged["generation"],
+        # AIHUB_API_KEY is deliberately absent: this is the gate.
+        environ=dependencies,
+        transport=never,
+    )
+    assert rc == 0, json.dumps(first, sort_keys=True)
+
+    manifest = read_manifest(bundle)
+    assert len(manifest["conversion_attempts"]) == 1
+    attempt = manifest["conversion_attempts"][0]
+    assert attempt["attempt_id"] == "conversion-attempt-0001"
+    assert attempt["state"] == "authorized"
+    assert attempt["authorization_kind"] == "initial"
+    assert attempt["reason"] == "credential_source_missing"
+    assert attempt["reason_detail"] is None
+    assert set(attempt["authorization"]) == INITIAL_AUTHORIZATION_KEYS
+    assert attempt["authorization"][
+        "evidence_hash"
+    ] == conversion_attempt.frozen_source_evidence_hash(manifest)
+    # The gate never reached the network, and the record it left is what the
+    # caller is told about.
+    assert never.calls == []
+    assert first["outcome"] == "credential_source_missing"
+    assert first["conversion_attempt_state"] == "authorized"
+    assert first["conversion_attempt_reason"] == "credential_source_missing"
+    generation_after_first = first["generation"]
+    assert generation_after_first == staged["generation"] + 1
+
+    # Idempotent: two further gated calls reuse the same attempt. Neither a
+    # second attempt nor a second generation bump, and still no network.
+    for _round in range(2):
+        again_rc, again, _stderr = _gate_advance(
+            tmp_path,
+            capsys,
+            bundle,
+            generation_after_first,
+            environ=dependencies,
+            transport=never,
+        )
+        assert again_rc == 0, json.dumps(again, sort_keys=True)
+        assert again["generation"] == generation_after_first
+    manifest = read_manifest(bundle)
+    assert len(manifest["conversion_attempts"]) == 1
+    assert manifest["generation"] == generation_after_first
+    assert never.calls == []
+
+
+def test_the_initial_authorization_write_is_capacity_admitted(
+    tmp_path, capsys, monkeypatch
+):
+    """Decision 9.4: the write task 2.3c adds is a *new* write path, so it
+    must pass the same local-state capacity admission every other conversion
+    write does -- before its first history append, and therefore before a
+    single byte of the bundle can change.
+
+    Same injected-ceiling technique and same byte-level oracle as
+    test_capacity_exhaustion_stops_before_intent_and_leaves_bytes_untouched.
+    """
+    bundle, staged, dependencies, _key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    before = _bundle_state_snapshot(bundle)
+    monkeypatch.setattr(conversion_attempt, "MAX_MANIFEST_CANDIDATE_BYTES", 1)
+    never = CountingNeverNetwork()
+
+    rc, result, _stderr = _gate_advance(
+        tmp_path,
+        capsys,
+        bundle,
+        staged["generation"],
+        environ=dependencies,
+        transport=never,
+    )
+
+    assert rc != 0, json.dumps(result, sort_keys=True)
+    assert result["outcome"] == "error"
+    assert [error["code"] for error in result["errors"]] == [
+        "local_state_capacity_exhausted"
+    ]
+    assert result["action_required"] == "preserve_work_bundle_and_stop"
+    assert never.calls == []
+    assert _bundle_state_snapshot(bundle) == before
+
+
+def test_a_recovered_credential_reuses_the_initial_attempt_without_a_new_one(
+    tmp_path, capsys, monkeypatch
+):
+    """The initial authorization is a placeholder, not a dead end: once the
+    recorded credential can be read again, the very same `advance` branch
+    consumes it into `submitting` through `_submit_state`'s existing
+    placeholder path. No second attempt, and the initial authorization rides
+    along on the record it authorized.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    gate_rc, gated, _stderr = _gate_advance(
+        tmp_path,
+        capsys,
+        bundle,
+        staged["generation"],
+        environ=dependencies,
+        transport=CountingNeverNetwork(),
+    )
+    assert gate_rc == 0, json.dumps(gated, sort_keys=True)
+
+    create = SuccessfulCreate("task-credential-recovered")
+    recovered_rc, recovered, _stderr = _gate_advance(
+        tmp_path,
+        capsys,
+        bundle,
+        gated["generation"],
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=create,
+    )
+    assert recovered_rc == 0, json.dumps(recovered, sort_keys=True)
+
+    manifest = read_manifest(bundle)
+    assert len(manifest["conversion_attempts"]) == 1
+    attempt = manifest["conversion_attempts"][0]
+    assert attempt["attempt_id"] == "conversion-attempt-0001"
+    assert attempt["state"] == "submitted"
+    assert attempt["authorization_kind"] is None
+    assert set(attempt["authorization"]) == INITIAL_AUTHORIZATION_KEYS
+    assert len(create.calls) == 1
+
+
+def test_an_initial_authorization_is_bound_to_the_frozen_source_evidence(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.3c's root fix for the `initial ⊊ retry` residue.
+
+    "initial"'s key set is a proper subset of "retry"'s, so a retry
+    authorization with its three retry-only keys stripped off has a key set
+    *identical* to a genuine initial one -- shape discrimination alone
+    cannot tell them apart, and a damaged retry would be accepted on attempt
+    #1 while an intact one is refused. Binding the evidence turns the shape
+    check into a content check: an initial authorization's `evidence_hash`
+    must equal the hash of the frozen source/preflight evidence it claims to
+    have been authorized against, which a stripped retry's (a pending
+    action's evidence hash) never is.
+    """
+    import conversion_attempt as ca
+
+    manifest, private_state = _submitted_first_attempt_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    bound = {
+        "evidence_hash": ca.frozen_source_evidence_hash(manifest),
+        "authorized_at": "2024-01-02T03:04:05Z",
+    }
+    assert set(bound) == INITIAL_AUTHORIZATION_KEYS
+    assert (
+        ca.valid_private_state(
+            private_state, _with_first_authorization(manifest, bound)
+        )
+        is True
+    )
+
+    stripped_retry = {
+        key: value
+        for key, value in A_RETRY_AUTHORIZATION.items()
+        if key in INITIAL_AUTHORIZATION_KEYS
+    }
+    # The mutant is indistinguishable from `bound` by key set alone...
+    assert set(stripped_retry) == set(bound)
+    # ...and differs only in the one field the binding reads.
+    assert stripped_retry["evidence_hash"] != bound["evidence_hash"]
+    assert (
+        ca.valid_private_state(
+            private_state, _with_first_authorization(manifest, stripped_retry)
+        )
+        is False
+    )
+
+
+def test_an_authorized_records_kind_pins_which_reason_it_may_carry(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.3c widens authorization_kind's authorized-state domain from
+    {"retry"} to {"retry", "initial"}. Widened without a second lock, that
+    also admits two records no writer produces and no reader could interpret:
+    an "initial" record carrying reason None -- a credential-gate record that
+    records no gate -- and a "retry" placeholder carrying a credential reason
+    it never observed. AUTHORIZED_STATE_REASONS_BY_KIND refuses both.
+
+    Both mutants are built from *genuine* records (the gate's, and a real
+    `record conversion --decision retry` round trip), so the only difference
+    from an accepted record is the one column under test.
+    """
+    import conversion_attempt as ca
+
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    gate_rc, _gated, _stderr = _gate_advance(
+        tmp_path,
+        capsys,
+        bundle,
+        staged["generation"],
+        environ=dependencies,
+        transport=CountingNeverNetwork(),
+    )
+    assert gate_rc == 0
+    gate_manifest = read_manifest(bundle)
+    gate_record = gate_manifest["conversion_attempts"][-1]
+    gate_generation = gate_manifest["generation"]
+    # Control: the genuine gate record validates.
+    assert (
+        ca._valid_attempt(
+            gate_record, manifest=gate_manifest, generation=gate_generation
+        )
+        is True
+    )
+    # Mutant: kind "initial" with no reason recorded.
+    assert (
+        ca._valid_attempt(
+            dict(gate_record, reason=None),
+            manifest=gate_manifest,
+            generation=gate_generation,
+        )
+        is False
+    )
+
+    # The retry half needs a real retry placeholder, which only exists after a
+    # failed create and a confirmed decision.
+    _rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(gate_generation),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=StatusCreate(401),
+    )
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unknown["generation"]),
+            "--action-id",
+            unknown["action_id"],
+            "--evidence-hash",
+            unknown["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "I accept the possible duplicate conversion charge.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, json.dumps(authorized, sort_keys=True)
+    retry_manifest = read_manifest(bundle)
+    retry_record = retry_manifest["conversion_attempts"][-1]
+    retry_generation = retry_manifest["generation"]
+    assert retry_record["authorization_kind"] == "retry"
+    # Control: the genuine retry placeholder validates.
+    assert (
+        ca._valid_attempt(
+            retry_record, manifest=retry_manifest, generation=retry_generation
+        )
+        is True
+    )
+    # Mutant: kind "retry" wearing a credential reason. The pair itself is
+    # legal (the gate writes it) -- only the kind makes it wrong here.
+    assert ("authorized", "credential_source_missing") in (
+        ca.LEGAL_STATE_REASON_PAIRS
+    )
+    assert (
+        ca._valid_attempt(
+            dict(retry_record, reason="credential_source_missing"),
+            manifest=retry_manifest,
+            generation=retry_generation,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("boundary", ["private", "manifest", "commit"])
+def test_the_initial_authorization_journal_recovers_each_write_boundary(
+    tmp_path, capsys, monkeypatch, boundary
+):
+    """The gate's write is a two-event durable transaction like every other
+    conversion write, so a crash at any of its three boundaries has to be
+    finishable on the next command -- and finishable *idempotently*, leaving
+    one attempt and one intent, not two.
+
+    Same three boundaries and same crash harness as
+    test_conversion_retry_journal_recovers_each_write_boundary_idempotently.
+    This is the test that would catch the gate's new event pair being written
+    but not taught to recover_interrupted_attempt: without that, a crash here
+    wedges the bundle for good.
+    """
+    bundle, staged, dependencies, _key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    argv = [
+        "advance",
+        "--work-bundle",
+        str(bundle),
+        "--expected-generation",
+        str(staged["generation"]),
+        "--visual-capability",
+        "available",
+    ]
+    original_atomic_write, original_append_history = _install_conversion_journal_crash(
+        monkeypatch,
+        event="conversion_authorize_initial_committed",
+        boundary=boundary,
+    )
+
+    with pytest.raises(SimulatedProcessCrash):
+        workflow.main(
+            argv,
+            environ=dependencies,
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=CountingNeverNetwork(),
+            now=NOW,
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+    )
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "append_history", original_append_history
+    )
+
+    recovered_rc, recovered, _stderr = invoke(
+        capsys,
+        argv,
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=CountingNeverNetwork(),
+    )
+
+    assert recovered_rc == 0, json.dumps(recovered, sort_keys=True)
+    manifest = read_manifest(bundle)
+    assert [attempt["state"] for attempt in manifest["conversion_attempts"]] == [
+        "authorized"
+    ]
+    assert manifest["conversion_attempts"][0]["authorization_kind"] == "initial"
+    events = [
+        json.loads(line)
+        for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
+    ]
+    assert [
+        event
+        for event in events
+        if event.get("event") == "conversion_authorize_initial_intent"
+    ] != []
+    assert len(
+        [
+            event
+            for event in events
+            if event.get("event") == "conversion_authorize_initial_intent"
+        ]
+    ) == 1
 
 
 def test_a_process_crash_after_create_recovers_unknown_and_two_resumes_do_not_replay(

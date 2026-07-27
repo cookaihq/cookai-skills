@@ -2316,11 +2316,70 @@ def _advance(
                                 config_home=config_home,
                                 use_local_key=getattr(args, "use_local_key", False),
                             )
-                        except config_module.ConfigError:
-                            result = source_staging_module.result_from_manifest(
+                        except config_module.ConfigError as exc:
+                            # design.md Decision 2 / task 2.3c. This branch used
+                            # to return without touching a byte, which made "the
+                            # recorded credential could not be read" and "a
+                            # create was never attempted" indistinguishable to
+                            # the caller. It now records the gate as an
+                            # `authorized` attempt carrying authorization_kind
+                            # "initial" and the credential reason.
+                            if exc.code not in (
+                                conversion_attempt_module
+                                .CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR
+                            ):
+                                # A locator this module cannot even interpret is
+                                # not a credential gate; it is a broken bundle,
+                                # and the poll path already reports it that way.
+                                raise WorkflowError(
+                                    "configuration_invalid",
+                                    "The recorded Doc2X credential locator is invalid.",
+                                    return_code=6,
+                                    action_required="repair_or_restore_work_bundle",
+                                    context=inspected,
+                                ) from None
+                            if not conversion_attempt_module.initial_authorization_is_recorded(
+                                manifest
+                            ):
+                                authorized_at = _isoformat(_moment(now))
+                                # The admission has to precede
+                                # authorize_initial_attempt's first history
+                                # append -- that append is what makes the write
+                                # durable, so a refusal here is the only point
+                                # at which every byte is still untouched. There
+                                # is no external call on this path to precede.
+                                _assert_conversion_capacity(
+                                    operation=(
+                                        conversion_attempt_module
+                                        .AUTHORIZE_INITIAL_OPERATION
+                                    ),
+                                    descriptors=descriptors,
+                                    manifest=manifest,
+                                    private_state=ready_private,
+                                    at=authorized_at,
+                                    context=inspected,
+                                    config_error_code=exc.code,
+                                )
+                                try:
+                                    manifest = conversion_attempt_module.authorize_initial_attempt(
+                                        descriptors=descriptors,
+                                        manifest=manifest,
+                                        private_state=ready_private,
+                                        config_error_code=exc.code,
+                                        at=authorized_at,
+                                    )
+                                except conversion_attempt_module.ConversionAttemptError as error:
+                                    raise WorkflowError(
+                                        error.code,
+                                        error.message,
+                                        return_code=4,
+                                        action_required="repair_or_restore_work_bundle",
+                                        context=inspected,
+                                    ) from None
+                            result = conversion_attempt_module.result_from_manifest(
                                 manifest,
                                 work_bundle=str(bundle),
-                                outcome="source_upload_ready",
+                                outcome=exc.code,
                             )
                             print(
                                 f"[pdf2markdown] {result['outcome']} for work bundle {bundle.name}",

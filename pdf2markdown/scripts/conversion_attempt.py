@@ -275,7 +275,12 @@ SUBMIT_INTENT_KEYS = frozenset(
     }
 )
 RESULT_INTENT_KEYS = frozenset(SUBMIT_INTENT_KEYS - {"previous_attempt"})
-RETRY_INTENT_KEYS = frozenset(
+# The shell every authorization intent carries, whatever kind it authorizes:
+# the operation's identity and generations, the placeholder attempt it appends
+# and the two hashes it is conditioned on. The per-kind evidence fields are
+# added on top in AUTHORIZE_INTENT_KEYS_BY_KIND below (task 2.3c), which is
+# defined next to AUTHORIZATION_KEYS_BY_KIND's other consumers.
+_AUTHORIZE_INTENT_BASE_KEYS = frozenset(
     {
         "schema_version",
         "event",
@@ -283,13 +288,13 @@ RETRY_INTENT_KEYS = frozenset(
         "expected_generation",
         "new_generation",
         "at",
-        "action_id",
-        "evidence_hash",
-        "basis_sha256",
         "attempt",
         "previous_manifest_hash",
         "previous_private_hash",
     }
+)
+RETRY_INTENT_KEYS = _AUTHORIZE_INTENT_BASE_KEYS | frozenset(
+    {"action_id", "evidence_hash", "basis_sha256"}
 )
 COMMITTED_EVENT_KEYS = frozenset(
     {
@@ -395,17 +400,64 @@ LOCALLY_DETECTED_PAIRS = {
     ("result_ready", "result_url_expired"): "recoverable_error",
 }
 
+# --- The recorded-credential gate's own pairs (task 2.3c) ------------------
+#
+# design.md Decision 2's `initial` branch. Like LOCALLY_DETECTED_PAIRS these
+# are locally detected -- no wire classification produces them -- but they
+# cannot join that table: _locally_detected_observations below *inherits* the
+# wire columns of the single non-placeholder LEGAL_TRIPLES row that shares the
+# re-labelled state, and `authorized`'s only row is `not_started`, which is a
+# _NON_CONTRACT_STATES placeholder. The single-element unpacking would raise
+# at import. The reason it cannot inherit is the same reason it does not need
+# to: an authorized record is not a poll observation at all, so it never
+# reaches the _LEGAL_POLL_OBSERVATIONS gate (_valid_attempt's "authorized"
+# branch returns before it).
+#
+# The two ConfigError codes the gate can fail with are FLAT_STATE_MIGRATION
+# keys, so design Decision 4's boundary rename (credential_source_changed ->
+# credential_fingerprint_changed) is *read off* the migration table here
+# rather than restated -- this dict is the one place the create-path gate's
+# code -> reason mapping lives, and _CREDENTIAL_ERROR_PAIRS below is derived
+# from it instead of carrying a second copy of the two folded names.
+CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR = {
+    config_error_code: FLAT_STATE_MIGRATION[config_error_code][1]
+    for config_error_code in ("credential_source_missing", "credential_source_changed")
+}
+
+# The top-level conversion_state a gate record projects to: `ready_to_submit`,
+# the same value the `retry` placeholder's ("authorized", None) pair projects
+# to via FLAT_STATE_MIGRATION's `not_started` row.
+#
+# It is *not* `recoverable_error`, which is what FLAT_STATE_MIGRATION rows 15
+# and 16 give the credential reasons. Those two rows describe a different
+# pair: a credential failure observed while polling an already-submitted task,
+# whose attempt state is `failed`. This pair's attempt has never been
+# submitted, and design Decision 2 fixes its top-level state by requiring that
+# "credential 恢复后走同一条路径进入 submitting" through _submit_state's
+# placeholder consumption -- and _submit_state only admits a manifest in
+# `ready_to_submit`. Projecting to `recoverable_error` would take the bundle
+# out of the branch that both reuses the record and later consumes it.
+_CREDENTIAL_GATE_CONVERSION_STATE = "ready_to_submit"
+CREDENTIAL_GATE_AUTHORIZED_PAIRS = {
+    ("authorized", reason): _CREDENTIAL_GATE_CONVERSION_STATE
+    for reason in CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR.values()
+}
+
 # The legal `(state, reason)` pairs a stored attempt may carry. 18 wire rows
 # collapse onto 16 pairs (pending/processing/result_pending all fold onto
-# ("processing", None)), plus LOCALLY_DETECTED_PAIRS' keys. This replaces
-# schema v2's per-state `reason == FLAT_STATE_MIGRATION[state][1]` check: for
-# the wire-derived pairs the set of legal (state, reason) combinations is
-# identical, it is just no longer indexed by a name the record has stopped
-# carrying.
-LEGAL_STATE_REASON_PAIRS = frozenset(
-    (state, reason)
-    for state, reason, _conversion_state in FLAT_STATE_MIGRATION.values()
-) | frozenset(LOCALLY_DETECTED_PAIRS)
+# ("processing", None)), plus LOCALLY_DETECTED_PAIRS' keys and task 2.3c's
+# CREDENTIAL_GATE_AUTHORIZED_PAIRS. This replaces schema v2's per-state
+# `reason == FLAT_STATE_MIGRATION[state][1]` check: for the wire-derived pairs
+# the set of legal (state, reason) combinations is identical, it is just no
+# longer indexed by a name the record has stopped carrying.
+LEGAL_STATE_REASON_PAIRS = (
+    frozenset(
+        (state, reason)
+        for state, reason, _conversion_state in FLAT_STATE_MIGRATION.values()
+    )
+    | frozenset(LOCALLY_DETECTED_PAIRS)
+    | frozenset(CREDENTIAL_GATE_AUTHORIZED_PAIRS)
+)
 
 # design.md Decision 4 / task 2.2a -- the closed twelve-value domain a stored
 # attempt's `reason` column may take. Eleven of the twelve are already the
@@ -729,21 +781,28 @@ _WIRE_MANIFEST_STATE_BY_FOLDED_STATE = {
 # import-time invariants matter most. `raise` is what actually makes this
 # symmetric with the unpacking guard above -- that guard is an unconditional
 # ValueError, not an `assert`.
-_LOCALLY_DETECTED_WIRE_COLLISION = frozenset(LOCALLY_DETECTED_PAIRS) & frozenset(
-    _WIRE_MANIFEST_STATE_BY_FOLDED_STATE
-)
-if _LOCALLY_DETECTED_WIRE_COLLISION:
-    raise ValueError(
-        "LOCALLY_DETECTED_PAIRS collides with a wire-derived (state, reason) "
-        f"pair: {sorted(_LOCALLY_DETECTED_WIRE_COLLISION)!r}"
-    )
-# Task 2.2c review round 2, Minor #7 -- this name has no reader past the
-# guard above; deleting it keeps it from lingering as a module-level
-# attribute someone could mistake for a maintained constant.
-del _LOCALLY_DETECTED_WIRE_COLLISION
-_MANIFEST_STATE_BY_FOLDED_STATE = (
-    _WIRE_MANIFEST_STATE_BY_FOLDED_STATE | LOCALLY_DETECTED_PAIRS
-)
+#
+# Task 2.3c adds a second locally-owned table (CREDENTIAL_GATE_AUTHORIZED_PAIRS)
+# to splice in, so the guard is written once over both rather than copied: two
+# spliced tables must also not collide with *each other*, which a per-table
+# copy of the wire check would not have noticed.
+_LOCALLY_OWNED_PAIR_TABLES = {
+    "LOCALLY_DETECTED_PAIRS": LOCALLY_DETECTED_PAIRS,
+    "CREDENTIAL_GATE_AUTHORIZED_PAIRS": CREDENTIAL_GATE_AUTHORIZED_PAIRS,
+}
+_MANIFEST_STATE_BY_FOLDED_STATE = dict(_WIRE_MANIFEST_STATE_BY_FOLDED_STATE)
+for _table_name, _table in _LOCALLY_OWNED_PAIR_TABLES.items():
+    _collision = frozenset(_table) & frozenset(_MANIFEST_STATE_BY_FOLDED_STATE)
+    if _collision:
+        raise ValueError(
+            f"{_table_name} collides with an already-owned (state, reason) "
+            f"pair: {sorted(_collision)!r}"
+        )
+    _MANIFEST_STATE_BY_FOLDED_STATE.update(_table)
+# Task 2.2c review round 2, Minor #7 -- these names have no reader past the
+# guard above; deleting them keeps them from lingering as module-level
+# attributes someone could mistake for maintained constants.
+del _table_name, _table, _collision
 
 # The (http_status, upstream_status) pair each non-transient wire
 # classification must carry.
@@ -829,17 +888,23 @@ _POLL_TRANSIENT_PAIR = ("failed", "poll_transient")
 # `failed`, so the reason is now the whole of the discrimination.
 _BACKOFF_PAIRS = frozenset({("failed", "task_unavailable"), _POLL_TRANSIENT_PAIR})
 
-# The two pairs a *local* credential failure produces. These never reached the
-# network, so they are exempt from the poll accounting the other observations
-# must satisfy (poll_count > 0, consecutive_transient_count reset,
-# next_poll_at cleared). Pre-fold this was the flat set
+# The two pairs a *local* credential failure produces on the poll path. These
+# never reached the network, so they are exempt from the poll accounting the
+# other observations must satisfy (poll_count > 0, consecutive_transient_count
+# reset, next_poll_at cleared). Pre-fold this was the flat set
 # {"credential_source_missing", "credential_source_changed"}; note the second
 # reason is `credential_fingerprint_changed`, the folded rename.
+#
+# Task 2.3c derives the two reasons from CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR
+# rather than restating them: that table already owns "which ConfigError codes
+# are credential failures, and what each one folds to", and a second literal of
+# the folded rename here is exactly the drift
+# test_every_refolded_pair_set_names_a_legal_pair exists to catch. The `failed`
+# first element is what distinguishes these from the create-path gate's
+# ("authorized", <same reason>) pairs.
 _CREDENTIAL_ERROR_PAIRS = frozenset(
-    {
-        ("failed", "credential_source_missing"),
-        ("failed", "credential_fingerprint_changed"),
-    }
+    ("failed", reason)
+    for reason in CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR.values()
 )
 
 # The one pair the fold left ambiguous, plus the discriminator that resolves
@@ -1003,6 +1068,86 @@ _REFOLDED_PAIR_SETS = {
     "_POLL_TRANSIENT_PAIR": frozenset({_POLL_TRANSIENT_PAIR}),
     "_RESULT_PENDING_TIMEOUT_PAIR": frozenset({_RESULT_PENDING_TIMEOUT_PAIR}),
 }
+
+# Task 2.3c -- the `reason` column each authorization kind may pair with on an
+# "authorized" record. Widening authorization_kind's authorized-state domain
+# from {"retry"} to {"retry", "initial"} (see _valid_attempt) is not enough on
+# its own: without this table an "initial" record could carry reason None (a
+# gate record that records no gate) and a "retry" placeholder could carry a
+# credential reason it never observed. Both are refused here.
+#
+# Keyed by kind and pinned to AUTHORIZATION_KEYS_BY_KIND's key set below, so a
+# third kind cannot be added to that table without either giving it a reason
+# domain here or failing at import -- rather than silently inheriting one.
+AUTHORIZED_STATE_REASONS_BY_KIND = {
+    "retry": frozenset({None}),
+    "initial": frozenset(
+        reason for _state, reason in CREDENTIAL_GATE_AUTHORIZED_PAIRS
+    ),
+}
+if set(AUTHORIZED_STATE_REASONS_BY_KIND) != set(AUTHORIZATION_KEYS_BY_KIND):
+    raise ValueError(
+        "AUTHORIZED_STATE_REASONS_BY_KIND must name exactly the kinds "
+        "AUTHORIZATION_KEYS_BY_KIND names: "
+        f"{sorted(AUTHORIZATION_KEYS_BY_KIND)!r}"
+    )
+# The whole of authorization_kind's authorized-state domain, derived from the
+# kind table rather than spelled out, so the validator's widening and the two
+# shapes it dispatches on can never name different sets.
+AUTHORIZED_STATE_KINDS = frozenset(AUTHORIZATION_KEYS_BY_KIND)
+
+# The durable journal each kind of authorization writes. Task 2.3c gives the
+# initial authorization its own event names rather than reusing the retry
+# pair: the event name is the one part of an append-only record that can never
+# be corrected later, and calling a first-attempt credential gate a "retry"
+# would be a permanent lie in the ledger. The three sites that consume these
+# events -- _authorize_state_from_intent, recover_interrupted_attempt's
+# dangling-intent branch and apply_committed_operations' reducer -- all read
+# these tables instead of a literal, so the pair stays a two-line addition.
+AUTHORIZE_INTENT_EVENT_BY_KIND = {
+    "retry": "conversion_retry_intent",
+    "initial": "conversion_authorize_initial_intent",
+}
+AUTHORIZE_COMMITTED_EVENT_BY_KIND = {
+    "retry": "conversion_retry_committed",
+    "initial": "conversion_authorize_initial_committed",
+}
+# The intent key set each kind carries: the shared shell plus exactly that
+# kind's evidence, minus `authorized_at` (which the intent already carries as
+# `at`) and `accepted_risk` (a constant of the retry shape, not evidence).
+AUTHORIZE_INTENT_KEYS_BY_KIND = {
+    "retry": RETRY_INTENT_KEYS,
+    "initial": _AUTHORIZE_INTENT_BASE_KEYS | frozenset({"evidence_hash"}),
+}
+for _kind_table_name, _kind_table in (
+    ("AUTHORIZE_INTENT_EVENT_BY_KIND", AUTHORIZE_INTENT_EVENT_BY_KIND),
+    ("AUTHORIZE_COMMITTED_EVENT_BY_KIND", AUTHORIZE_COMMITTED_EVENT_BY_KIND),
+    ("AUTHORIZE_INTENT_KEYS_BY_KIND", AUTHORIZE_INTENT_KEYS_BY_KIND),
+):
+    if set(_kind_table) != AUTHORIZED_STATE_KINDS:
+        raise ValueError(
+            f"{_kind_table_name} must name exactly the authorization kinds "
+            f"{sorted(AUTHORIZED_STATE_KINDS)!r}"
+        )
+del _kind_table_name, _kind_table
+
+_AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT = {
+    AUTHORIZE_INTENT_EVENT_BY_KIND[kind]: AUTHORIZE_COMMITTED_EVENT_BY_KIND[kind]
+    for kind in AUTHORIZED_STATE_KINDS
+}
+
+# Every event name a conversion authorization/submission/poll operation can
+# open or close a durable transaction with. raw_conversion.py's reducer reads
+# the intent half of this to decide which events to hand back to
+# apply_committed_operations; owning it here means a new conversion event pair
+# cannot be added without that reducer learning about it.
+CONVERSION_INTENTS = frozenset(
+    {
+        "conversion_submit_intent",
+        "conversion_submit_result_intent",
+        "conversion_poll_result_intent",
+    }
+) | frozenset(AUTHORIZE_INTENT_EVENT_BY_KIND.values())
 
 
 class ConversionAttemptError(ValueError):
@@ -1187,6 +1332,12 @@ CREATE_OPERATION = "create"
 ORDINARY_POLL_OPERATION = "ordinary_poll"
 RESULT_REFRESH_OPERATION = "result_refresh"
 POLL_OPERATIONS = frozenset({ORDINARY_POLL_OPERATION, RESULT_REFRESH_OPERATION})
+# Task 2.3c / design Decision 9.4. The recorded-credential gate is the one
+# admitted operation that never talks to the network: it is admitted anyway
+# because admission is about local state, not about the response -- this
+# change turns a zero-write path into a writing one, and a write path without
+# admission is exactly what Decision 9.4 forbids.
+AUTHORIZE_INITIAL_OPERATION = "authorize_initial"
 
 # Stand-ins for the two bounded strings an operation has not received yet when
 # admission runs. Each is the *shortest* legal value of its kind, so the
@@ -1479,10 +1630,46 @@ def _poll_capacity_candidates(
     }
 
 
+def _authorize_initial_capacity_candidates(
+    *, manifest: dict, private_state: dict, history_bytes: int,
+    config_error_code: str, at: str
+) -> dict:
+    """Exactly what the recorded-credential gate would write.
+
+    The only admitted operation with no unreceived value to bound: the gate
+    never sends a request, so there is no task ID and no result URL still to
+    come, and every byte of the two documents and the two events is already
+    known here. That is why this returns no `*_unreceived_*_count` -- not an
+    omission, an absence.
+    """
+    state = _initial_authorization_state(
+        manifest=manifest,
+        private_state=private_state,
+        config_error_code=config_error_code,
+        at=at,
+    )
+    intent, committed = _initial_authorization_events(state)
+    return {
+        "manifest_candidate_bytes": max(
+            canonical_state_byte_length(manifest),
+            canonical_state_byte_length(state["updated_manifest"]),
+        ),
+        "private_candidate_bytes": max(
+            canonical_state_byte_length(private_state),
+            canonical_state_byte_length(state["updated_private"]),
+        ),
+        "history_candidate_bytes": (
+            history_bytes
+            + canonical_state_byte_length(intent)
+            + canonical_state_byte_length(committed)
+        ),
+    }
+
+
 def assert_local_state_capacity(
     *, operation: str, manifest: dict, private_state: dict, history_bytes: int,
     at: str, credential: dict | None = None, request: dict | None = None,
-    request_summary: dict | None = None
+    request_summary: dict | None = None, config_error_code: str | None = None
 ) -> None:
     """Fail closed before the first intent when local state cannot hold the
     operation's worst-case result.
@@ -1509,6 +1696,14 @@ def assert_local_state_capacity(
             manifest=manifest,
             private_state=private_state,
             history_bytes=history_bytes,
+            at=at,
+        )
+    elif operation == AUTHORIZE_INITIAL_OPERATION:
+        candidates = _authorize_initial_capacity_candidates(
+            manifest=manifest,
+            private_state=private_state,
+            history_bytes=history_bytes,
+            config_error_code=config_error_code,
             at=at,
         )
     else:
@@ -1723,6 +1918,53 @@ def _valid_authorization(value) -> bool:
     )
 
 
+def frozen_source_evidence_hash(manifest: dict) -> str:
+    """The evidence an `initial` authorization is authorized against.
+
+    design.md Decision 2: an initial authorization accepts no
+    duplicate-charge risk and answers no pending action, so the only thing it
+    can be bound to is the frozen evidence that already exists when the
+    recorded-credential gate blocks -- the manifest's `source` record (the
+    frozen input and its digest) and its `preflight` record (the page
+    baseline, dependency inventory and decision). Both are settled before the
+    bundle can reach `ready_to_submit` and neither is rewritten between the
+    gate and the create that consumes the placeholder, so the hash a gate
+    record stores stays computable from the manifest for the placeholder's
+    whole life.
+    """
+    return object_hash(
+        {"source": manifest.get("source"), "preflight": manifest.get("preflight")}
+    )
+
+
+def _valid_authorized_evidence(kind, authorization, manifest: dict) -> bool:
+    """Whether an authorization's evidence is bound to something real.
+
+    Task 2.3c's root fix for the residue task 2.3b left behind: "initial"'s
+    key set is a *proper subset* of "retry"'s, so a retry authorization
+    stripped of action_id / basis_sha256 / accepted_risk has a key set
+    identical to a genuine initial one. `_authorization_kind_of` reads it as
+    "initial" and every shape check passes -- a damaged retry is accepted on
+    attempt #1 while an intact one is refused. Shape cannot separate them;
+    content can, which is what `evidence_hash` is in the initial key set for.
+
+    Exhaustive over AUTHORIZATION_KEYS_BY_KIND and fail-closed outside it: a
+    third kind added without a rule here is refused, not waved through.
+    """
+    if kind == "initial":
+        return authorization.get("evidence_hash") == frozen_source_evidence_hash(
+            manifest
+        )
+    if kind == "retry":
+        # A retry's evidence_hash is bound by valid_private_state's
+        # predecessor check instead: it must equal, field for field, the
+        # pending action of the attempt before it. That check has nothing to
+        # compare against on attempt #1, which is exactly why a retry
+        # authorization is illegal there.
+        return True
+    return False
+
+
 def _valid_pending_action(value, *, attempt: dict, generation: int) -> bool:
     if value is None:
         return True
@@ -1809,16 +2051,23 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     # below total.
     if (state, reason) not in LEGAL_STATE_REASON_PAIRS:
         return False
-    # Task 2.3a gives authorization_kind its first real value: "retry", the
-    # only kind commit_retry_decision's placeholder ever writes, and the only
-    # state that placeholder ever folds to is "authorized" (see
-    # _attempt_state_columns's "not_started" caller). Every other state's
-    # attempt is still built through a write path that leaves the field at
-    # its _attempt_reason_columns default of None (see that function's
-    # docstring), so the two-way split below -- "authorized" requires exactly
-    # "retry", every other state still requires None -- is exhaustive over
-    # ATTEMPT_STATES today and fails closed on anything else (in particular
-    # "initial", which task 2.3b/2.3c have not yet introduced).
+    # Task 2.3a gave authorization_kind its first real value, "retry"; task
+    # 2.3c adds the second, "initial", written only by the recorded-credential
+    # gate (authorize_initial_attempt). Both live only on "authorized"
+    # records. Every other state's attempt is still built through a write path
+    # that leaves the field at its _attempt_reason_columns default of None (see
+    # that function's docstring), so the two-way split below -- "authorized"
+    # requires a member of AUTHORIZED_STATE_KINDS, every other state still
+    # requires None -- is exhaustive over ATTEMPT_STATES and fails closed on
+    # anything else.
+    #
+    # The domain is read off AUTHORIZATION_KEYS_BY_KIND rather than spelled
+    # out, and is immediately narrowed twice more, so widening it is not a
+    # blanket admission: the reason column must belong to that kind's domain
+    # (AUTHORIZED_STATE_REASONS_BY_KIND), and the authorization's own shape
+    # must equal the kind (the cross-check in the authorized branch below,
+    # which task 2.3b put there for exactly this widening -- it makes the
+    # shape follow the kind automatically, with no second place to update).
     #
     # Version stance (same shape as task 2.2c's): this is a deliberate hard
     # break *inside an unreleased change*, not a compatible widening. The
@@ -1834,25 +2083,24 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     # column's value domain -- task 2.3c's "initial" included, if it lands
     # after release -- must bump SCHEMA_VERSION instead.
     #
-    # Task 2.3b deliberately does NOT widen this domain. The opening it adds
-    # runs along two other dimensions instead: index (attempt #1 only, where
-    # valid_private_state's predecessor check has nothing to match against)
-    # and the authorization's own shape (discriminated by key set, see
-    # AUTHORIZATION_KEYS_BY_KIND) -- neither of which is this column. For
-    # the "authorized" state, the cross-check in the authorized branch below
-    # (_authorization_kind_of(authorization) == authorization_kind) pins
-    # kind and shape to agree with each other, so an "authorized" record can
-    # only ever carry kind "retry" paired with a "retry"-shaped
-    # authorization -- an "initial" shape stays illegal here even though
-    # _valid_authorization alone would accept it. Task 2.3c's blocked
-    # credential gate record is itself state "authorized" paired with kind
-    # "initial" (per the delta spec and design Decision 2), so admitting it
-    # is exactly widening authorization_kind's authorized-state domain to
-    # {"retry", "initial"} -- that widening, and the seam that absorbs it
-    # below, are that task's job, not this one's.
+    # Task 2.3b opened two other dimensions ahead of this one: index (attempt
+    # #1 only, where valid_private_state's predecessor check has nothing to
+    # match against) and the authorization's own shape (discriminated by key
+    # set, see AUTHORIZATION_KEYS_BY_KIND). Task 2.3c widens this column to
+    # match, and the seam 2.3b left below absorbs the widening.
     authorization_kind = attempt.get("authorization_kind")
     valid_authorization_kind = (
-        authorization_kind == "retry"
+        (
+            authorization_kind in AUTHORIZED_STATE_KINDS
+            # An authorized record's kind and its reason column are not free
+            # of each other: only the credential gate writes "initial", and
+            # it always writes a credential reason, while the retry
+            # placeholder records no observation at all. Without this the
+            # widened domain would also admit an "initial" record carrying
+            # reason None -- a gate record that records no gate.
+            and reason
+            in AUTHORIZED_STATE_REASONS_BY_KIND[authorization_kind]
+        )
         if state == "authorized"
         else authorization_kind is None
     )
@@ -1876,18 +2124,24 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     if state == "authorized":
         return (
             # Cross-check kind against the authorization's own declared
-            # shape: valid_authorization_kind above only pins the *column*
-            # to "retry", and _valid_authorization only checks the
-            # *authorization* is one of the two legal shapes on its own
-            # merits -- neither ties the two together, so a record could
-            # otherwise claim kind "retry" while carrying a legal "initial"
-            # authorization (or vice versa). This is also 2.3c's natural
-            # seam: once that task widens authorization_kind's authorized-
-            # state domain to {"retry", "initial"}, this same equality
-            # makes the shape follow the kind automatically, with no second
-            # place to update.
+            # shape: valid_authorization_kind above only pins the *column*,
+            # and _valid_authorization only checks the *authorization* is one
+            # of the two legal shapes on its own merits -- neither ties the
+            # two together, so a record could otherwise claim kind "retry"
+            # while carrying a legal "initial" authorization (or vice versa).
+            # This is the seam task 2.3b left for 2.3c's widening of
+            # authorization_kind's authorized-state domain: the equality makes
+            # the shape follow the kind automatically, with no second place to
+            # update.
             _authorization_kind_of(authorization) == authorization_kind
             and _valid_authorization(authorization)
+            # ...and shape agreeing with kind is still not enough on its own,
+            # because "initial"'s key set is a proper subset of "retry"'s (see
+            # _valid_authorized_evidence). The evidence has to be bound to
+            # something the manifest can recompute.
+            and _valid_authorized_evidence(
+                authorization_kind, authorization, manifest
+            )
             and attempt.get("api_base") is None
             and attempt.get("poll_count") == 0
             and attempt.get("consecutive_transient_count") == 0
@@ -1898,11 +2152,22 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
             # the same way poll_count/consecutive_transient_count are on the
             # two lines above.
             and attempt.get("result_refresh_round_count") == 0
-            # authorization_kind is excluded from the all-None sweep below,
-            # not because it can be anything, but because it is pinned to
-            # exactly "retry" by valid_authorization_kind above -- the same
-            # reason "authorization" itself is excluded rather than checked
-            # for None here.
+            # The four columns below are excluded from the all-None sweep not
+            # because they can be anything, but because each is already
+            # pinned tighter than "is None" would be:
+            #   * authorization_kind -- to AUTHORIZED_STATE_KINDS, by
+            #     valid_authorization_kind above;
+            #   * authorization -- to its kind's exact shape and bound
+            #     evidence, by the three checks above;
+            #   * reason (task 2.3c) -- to AUTHORIZED_STATE_REASONS_BY_KIND's
+            #     domain for this record's kind, which is {None} for "retry"
+            #     and the two credential-gate reasons for "initial", and is
+            #     additionally inside LEGAL_STATE_REASON_PAIRS;
+            #   * reason_detail (task 2.3c) -- to None for every authorized
+            #     record, by _valid_reason_detail: neither credential reason
+            #     is a REASON_DETAILS key, and neither is None.
+            # Leaving reason/reason_detail in the sweep would refuse every
+            # gate record outright, since the sweep demands None.
             and all(
                 attempt.get(key) is None
                 for key in ATTEMPT_KEYS
@@ -1910,6 +2175,8 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
                     "schema_version",
                     "attempt_id",
                     "state",
+                    "reason",
+                    "reason_detail",
                     "authorization",
                     "authorization_kind",
                     "poll_count",
@@ -2642,14 +2909,29 @@ def recover_interrupted_attempt(
             "integrity_violation", "Conversion history cannot be recovered safely."
         ) from exc
     final = history[-1] if history else None
-    if isinstance(final, dict) and final.get("event") == "conversion_retry_intent":
+    # Both authorization kinds land here: their intents differ only in the
+    # event name and the evidence fields, and _authorize_state_from_intent
+    # replays either. The committed event name is read back from the same
+    # table the writer used, keyed by the intent that is being finished.
+    authorize_committed_event = next(
+        (
+            AUTHORIZE_COMMITTED_EVENT_BY_KIND[kind]
+            for kind, intent_event in AUTHORIZE_INTENT_EVENT_BY_KIND.items()
+            if isinstance(final, dict) and final.get("event") == intent_event
+        ),
+        None,
+    )
+    if authorize_committed_event is not None:
         intent_expected = final.get("expected_generation")
         intent_new = final.get("new_generation")
         _assert_recovery_generation(
             expected_generation,
             intent_expected,
             intent_new,
-            message="Expected generation does not match the pending conversion retry.",
+            message=(
+                "Expected generation does not match the pending conversion "
+                "authorization."
+            ),
         )
         previous = resolve_history(
             history[:-1],
@@ -2659,10 +2941,10 @@ def recover_interrupted_attempt(
         if previous is None:
             raise ConversionAttemptError(
                 "integrity_violation",
-                "A pending conversion retry has no valid history prefix.",
+                "A pending conversion authorization has no valid history prefix.",
             )
         previous_manifest, previous_private = previous
-        desired_manifest, desired_private = _retry_state_from_intent(
+        desired_manifest, desired_private = _authorize_state_from_intent(
             previous_manifest, previous_private, final
         )
         manifest_is_previous = manifest == previous_manifest
@@ -2676,7 +2958,7 @@ def recover_interrupted_attempt(
         ):
             raise ConversionAttemptError(
                 "integrity_violation",
-                "A pending conversion retry is partially inconsistent.",
+                "A pending conversion authorization is partially inconsistent.",
             )
         if private_is_previous:
             bundle.atomic_write_json(
@@ -2689,7 +2971,7 @@ def recover_interrupted_attempt(
         bundle.append_history(
             {
                 "schema_version": SCHEMA_VERSION,
-                "event": "conversion_retry_committed",
+                "event": authorize_committed_event,
                 "operation_id": final["operation_id"],
                 "previous_generation": intent_expected,
                 "generation": intent_new,
@@ -3269,6 +3551,218 @@ def commit_poll_result(
     return updated_manifest, updated_private
 
 
+def _credential_gate_state_columns(config_error_code: str) -> dict:
+    """The five folded columns a recorded-credential gate record stores.
+
+    The state half and the reason half are read off two *different*
+    FLAT_STATE_MIGRATION rows, which is exactly what a gate record is: the
+    folded state of a not-yet-submitted authorized attempt (`not_started`'s
+    target state) paired with the reason the credential wire row folds to.
+    Neither half is restated here, so design Decision 4's boundary rename
+    (credential_source_changed -> credential_fingerprint_changed) is applied
+    by the same single producer every other write site goes through -- pass
+    the ConfigError code in as both the classification and the wire reason
+    code and `_attempt_reason_columns` performs the rename and correctly
+    derives a null reason_detail (neither credential reason is a
+    REASON_DETAILS key).
+    """
+    return {
+        "state": FLAT_STATE_MIGRATION["not_started"][0],
+        **_attempt_reason_columns(
+            config_error_code, config_error_code, authorization_kind="initial"
+        ),
+        "result_refresh_round_count": 0,
+    }
+
+
+def initial_authorization_is_recorded(manifest: dict) -> bool:
+    """Whether the recorded-credential gate has already authorized this
+    bundle's first attempt.
+
+    The idempotence judgement design Decision 2 requires ("重复调用 MUST 复用
+    该 attempt"), and the reason `authorize_initial_attempt` can be called
+    unconditionally. It reads the same two columns `_submit_state`'s
+    placeholder consumption reads, so the record this predicate calls "already
+    authorized" is exactly the record the next successful create consumes.
+
+    Note the predicate does not compare the *reason*: if the gate blocks a
+    second time for a different ConfigError code, the recorded reason stays
+    the one first observed. Rewriting it would mean mutating a durable attempt
+    in place, and appending a second one is structurally impossible -- attempt
+    #2 onwards may only carry a "retry" authorization (valid_private_state).
+    """
+    attempts = manifest.get("conversion_attempts")
+    if not isinstance(attempts, list) or not attempts:
+        return False
+    active = attempts[-1]
+    return (
+        isinstance(active, dict)
+        and active.get("state") == "authorized"
+        and active.get("authorization_kind") == "initial"
+    )
+
+
+def _initial_authorization_state(
+    *, manifest: dict, private_state: dict, config_error_code: str, at: str
+) -> dict:
+    """The in-memory state a blocked recorded-credential gate would commit.
+
+    Split out of `authorize_initial_attempt` for the same reason
+    `_submit_state` is split out of `begin_attempt`: the local-state capacity
+    admission has to size exactly the documents and events the writer is about
+    to append, without writing anything. It performs no I/O and mutates
+    nothing.
+    """
+    attempts = manifest.get("conversion_attempts")
+    staging = manifest.get("source_staging")
+    if (
+        config_error_code not in CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR
+        or manifest.get("conversion_state") != _CREDENTIAL_GATE_CONVERSION_STATE
+        or not isinstance(staging, dict)
+        or staging.get("state") != "source_upload_ready"
+        or not isinstance(attempts, list)
+        # The gate authorizes attempt #1 and only attempt #1: an "initial"
+        # authorization is legal nowhere else (valid_private_state's index
+        # branches), so a non-empty list here means the caller skipped the
+        # `initial_authorization_is_recorded` reuse check.
+        or attempts
+        or private_state.get("generation") != manifest.get("generation")
+    ):
+        raise ConversionAttemptError(
+            "invalid_state_transition",
+            "The work bundle cannot record an initial conversion authorization.",
+        )
+    expected_generation = manifest["generation"]
+    new_generation = expected_generation + 1
+    placeholder = {
+        "schema_version": SCHEMA_VERSION,
+        "attempt_id": "conversion-attempt-0001",
+        **_credential_gate_state_columns(config_error_code),
+        "api_base": None,
+        "request_summary": None,
+        "request_hash": None,
+        "credential": None,
+        "staging_identity": None,
+        "submitted_at": None,
+        "response_at": None,
+        "http_status": None,
+        "task_id": None,
+        "pending_action": None,
+        # No action_id, basis_sha256 or accepted_risk: not one create has been
+        # sent, so there is no duplicate charge to risk and no operator
+        # decision to record. The evidence is the frozen source/preflight
+        # record, and it is checked back by _valid_authorized_evidence.
+        "authorization": {
+            "evidence_hash": frozen_source_evidence_hash(manifest),
+            "authorized_at": at,
+        },
+        "poll_started_at": None,
+        "poll_deadline_at": None,
+        "last_polled_at": None,
+        "poll_count": 0,
+        "upstream_status": None,
+        "next_poll_at": None,
+        "consecutive_transient_count": 0,
+        "result_url_sha256": None,
+        "result_observed_at": None,
+        "result_validity_hours": None,
+        "result_pending_started_at": None,
+        "result_pending_deadline_at": None,
+    }
+    updated_manifest = deepcopy(manifest)
+    updated_manifest["generation"] = new_generation
+    updated_manifest["conversion_state"] = _MANIFEST_STATE_BY_FOLDED_STATE[
+        (placeholder["state"], placeholder["reason"])
+    ]
+    updated_manifest["conversion_attempts"] = [placeholder]
+    updated_private = deepcopy(private_state)
+    updated_private["generation"] = new_generation
+    if not _valid_attempt(
+        placeholder, manifest=updated_manifest, generation=new_generation
+    ):
+        raise ConversionAttemptError(
+            "integrity_violation",
+            "The initial conversion authorization is invalid.",
+        )
+    return {
+        "manifest": manifest,
+        "private_state": private_state,
+        "updated_manifest": updated_manifest,
+        "updated_private": updated_private,
+        "attempt": placeholder,
+        "kind": "initial",
+        "expected_generation": expected_generation,
+        "new_generation": new_generation,
+        "at": at,
+    }
+
+
+def _initial_authorization_events(state: dict) -> tuple[dict, dict]:
+    """The intent and committed events the gate appends around its two writes."""
+    placeholder = state["attempt"]
+    kind = state["kind"]
+    operation_id = f"{placeholder['attempt_id']}-authorize"
+    intent = {
+        "schema_version": SCHEMA_VERSION,
+        "event": AUTHORIZE_INTENT_EVENT_BY_KIND[kind],
+        "operation_id": operation_id,
+        "expected_generation": state["expected_generation"],
+        "new_generation": state["new_generation"],
+        "at": state["at"],
+        "evidence_hash": placeholder["authorization"]["evidence_hash"],
+        "attempt": placeholder,
+        "previous_manifest_hash": object_hash(state["manifest"]),
+        "previous_private_hash": object_hash(state["private_state"]),
+    }
+    committed = {
+        "schema_version": SCHEMA_VERSION,
+        "event": AUTHORIZE_COMMITTED_EVENT_BY_KIND[kind],
+        "operation_id": operation_id,
+        "previous_generation": state["expected_generation"],
+        "generation": state["new_generation"],
+        "at": state["at"],
+        "manifest_hash": object_hash(state["updated_manifest"]),
+        "private_hash": object_hash(state["updated_private"]),
+    }
+    return intent, committed
+
+
+def authorize_initial_attempt(
+    *,
+    descriptors: dict,
+    manifest: dict,
+    private_state: dict,
+    config_error_code: str,
+    at: str,
+) -> dict:
+    """Record that the recorded-credential gate blocked before any create.
+
+    Idempotent by construction: if the gate has already authorized this
+    bundle's first attempt, the manifest is returned untouched -- no second
+    attempt, no history event, no generation bump. Callers still have to ask
+    `initial_authorization_is_recorded` first, because only they can decide
+    whether to spend a capacity admission on a write that may not happen.
+    """
+    if initial_authorization_is_recorded(manifest):
+        return manifest
+    state = _initial_authorization_state(
+        manifest=manifest,
+        private_state=private_state,
+        config_error_code=config_error_code,
+        at=at,
+    )
+    intent, committed = _initial_authorization_events(state)
+    bundle.append_history(intent, state_fd=descriptors["state"])
+    bundle.atomic_write_json(
+        "private.json", state["updated_private"], dir_fd=descriptors["state"]
+    )
+    bundle.atomic_write_json(
+        "manifest.json", state["updated_manifest"], dir_fd=descriptors["root"]
+    )
+    bundle.append_history(committed, state_fd=descriptors["state"])
+    return state["updated_manifest"]
+
+
 def commit_retry_decision(
     *,
     descriptors: dict,
@@ -3373,14 +3867,23 @@ def commit_retry_decision(
     }
     updated_manifest = deepcopy(manifest)
     updated_manifest["generation"] = new_generation
-    updated_manifest["conversion_state"] = "ready_to_submit"
+    # Read off the projection table, not hardcoded: _authorize_state_from_intent
+    # replays this same write from the durable intent and derives the top-level
+    # state the same way, and a disagreement between the two would only ever
+    # surface as a manifest-hash mismatch during crash recovery.
+    updated_manifest["conversion_state"] = _MANIFEST_STATE_BY_FOLDED_STATE[
+        (placeholder["state"], placeholder["reason"])
+    ]
     updated_manifest["conversion_attempts"] = [*deepcopy(attempts), placeholder]
     updated_private = deepcopy(private_state)
     updated_private["generation"] = new_generation
     operation_id = f"{placeholder['attempt_id']}-authorize"
     intent = {
         "schema_version": SCHEMA_VERSION,
-        "event": "conversion_retry_intent",
+        # Read off the kind tables, like every other reader of these names:
+        # a literal here could be renamed apart from the reducer and the
+        # crash-recovery branch that have to recognise it.
+        "event": AUTHORIZE_INTENT_EVENT_BY_KIND["retry"],
         "operation_id": operation_id,
         "expected_generation": expected_generation,
         "new_generation": new_generation,
@@ -3402,7 +3905,7 @@ def commit_retry_decision(
     bundle.append_history(
         {
             "schema_version": SCHEMA_VERSION,
-            "event": "conversion_retry_committed",
+            "event": AUTHORIZE_COMMITTED_EVENT_BY_KIND["retry"],
             "operation_id": operation_id,
             "previous_generation": expected_generation,
             "generation": new_generation,
@@ -3509,27 +4012,68 @@ def _poll_state_from_intent(
     return desired_manifest, desired_private
 
 
-def _retry_state_from_intent(
+def _authorize_evidence_matches_kind(
+    kind, *, manifest: dict, attempts: list, intent: dict, authorization: dict
+) -> bool:
+    """The half of an authorization intent's consistency that is kind-specific.
+
+    Exhaustive over AUTHORIZATION_KEYS_BY_KIND and fail-closed outside it: a
+    third kind added without a rule here replays as inconsistent rather than
+    being admitted on the shared checks alone.
+    """
+    if kind == "retry":
+        active = attempts[-1] if attempts else None
+        attempt_pending = (
+            active.get("pending_action") if isinstance(active, dict) else None
+        )
+        raw_record = manifest.get("raw_conversion")
+        raw_pending = (
+            raw_record.get("pending_action") if isinstance(raw_record, dict) else None
+        )
+        pending = attempt_pending if isinstance(attempt_pending, dict) else raw_pending
+        return (
+            isinstance(pending, dict)
+            and intent.get("action_id") == pending.get("action_id")
+            and intent.get("evidence_hash") == pending.get("evidence_hash")
+            and authorization.get("action_id") == intent.get("action_id")
+            and authorization.get("basis_sha256") == intent.get("basis_sha256")
+        )
+    if kind == "initial":
+        # The gate authorizes attempt #1 only, against evidence the manifest
+        # can recompute rather than against a predecessor pending action.
+        return not attempts and intent.get(
+            "evidence_hash"
+        ) == frozen_source_evidence_hash(manifest)
+    return False
+
+
+def _authorize_state_from_intent(
     manifest: dict, private_state: dict, intent: dict
 ) -> tuple[dict, dict]:
+    """Replay a durable authorization intent of either kind.
+
+    The kind is taken from the placeholder authorization's own key set, the
+    same discriminator `_valid_attempt` cross-checks the `authorization_kind`
+    column against -- so an intent cannot claim one kind's event name while
+    carrying the other kind's evidence.
+    """
     expected_generation = intent.get("expected_generation")
     new_generation = intent.get("new_generation")
     placeholder = intent.get("attempt")
     attempts = manifest.get("conversion_attempts")
-    active = attempts[-1] if isinstance(attempts, list) and attempts else None
-    attempt_pending = active.get("pending_action") if isinstance(active, dict) else None
-    raw_record = manifest.get("raw_conversion")
-    raw_pending = (
-        raw_record.get("pending_action") if isinstance(raw_record, dict) else None
-    )
-    pending = attempt_pending if isinstance(attempt_pending, dict) else raw_pending
     authorization = (
         placeholder.get("authorization") if isinstance(placeholder, dict) else None
     )
+    kind = _authorization_kind_of(authorization)
     if (
-        set(intent) != RETRY_INTENT_KEYS
+        # `kind is None` covers every shape this function used to reject with
+        # `not isinstance(placeholder, dict)` / `not isinstance(authorization,
+        # dict)`, and short-circuits before any table lookup or attribute
+        # access below.
+        kind is None
+        or set(intent) != AUTHORIZE_INTENT_KEYS_BY_KIND[kind]
         or intent.get("schema_version") != SCHEMA_VERSION
-        or intent.get("event") != "conversion_retry_intent"
+        or intent.get("event") != AUTHORIZE_INTENT_EVENT_BY_KIND[kind]
         or type(expected_generation) is not int
         or new_generation != expected_generation + 1
         or manifest.get("generation") != expected_generation
@@ -3537,25 +4081,31 @@ def _retry_state_from_intent(
         or object_hash(manifest) != intent.get("previous_manifest_hash")
         or object_hash(private_state) != intent.get("previous_private_hash")
         or not isinstance(attempts, list)
-        or not isinstance(placeholder, dict)
         or placeholder.get("state") != "authorized"
-        or not isinstance(pending, dict)
-        or not isinstance(authorization, dict)
-        or intent.get("action_id") != pending.get("action_id")
-        or intent.get("evidence_hash") != pending.get("evidence_hash")
-        or authorization.get("action_id") != intent.get("action_id")
         or authorization.get("evidence_hash") != intent.get("evidence_hash")
-        or authorization.get("basis_sha256") != intent.get("basis_sha256")
         or authorization.get("authorized_at") != intent.get("at")
         or intent.get("operation_id")
         != f"{placeholder.get('attempt_id')}-authorize"
+        or not _authorize_evidence_matches_kind(
+            kind,
+            manifest=manifest,
+            attempts=attempts,
+            intent=intent,
+            authorization=authorization,
+        )
     ):
         raise ConversionAttemptError(
-            "integrity_violation", "A conversion retry intent is inconsistent."
+            "integrity_violation", "A conversion authorization intent is inconsistent."
         )
     desired_manifest = deepcopy(manifest)
     desired_manifest["generation"] = new_generation
-    desired_manifest["conversion_state"] = "ready_to_submit"
+    # Read off the projection table rather than hardcoded, so this replay and
+    # the two writers (commit_retry_decision, _initial_authorization_state)
+    # cannot disagree about the top-level state -- a disagreement would only
+    # ever surface as a manifest-hash mismatch during crash recovery.
+    desired_manifest["conversion_state"] = _MANIFEST_STATE_BY_FOLDED_STATE[
+        (placeholder.get("state"), placeholder.get("reason"))
+    ]
     desired_manifest["conversion_attempts"] = [
         *deepcopy(attempts),
         deepcopy(placeholder),
@@ -3566,7 +4116,8 @@ def _retry_state_from_intent(
         placeholder, manifest=desired_manifest, generation=new_generation
     ):
         raise ConversionAttemptError(
-            "integrity_violation", "A conversion retry placeholder is invalid."
+            "integrity_violation",
+            "A conversion authorization placeholder is invalid.",
         )
     return desired_manifest, desired_private
 
@@ -3644,11 +4195,13 @@ def apply_committed_operations(
                     current_manifest, current_private, intent
                 )
                 expected_events = {"conversion_submit_result_committed"}
-            elif event == "conversion_retry_intent":
-                desired_manifest, desired_private = _retry_state_from_intent(
+            elif event in _AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT:
+                desired_manifest, desired_private = _authorize_state_from_intent(
                     current_manifest, current_private, intent
                 )
-                expected_events = {"conversion_retry_committed"}
+                expected_events = {
+                    _AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT[event]
+                }
             elif event == "conversion_poll_result_intent":
                 recovered = (
                     isinstance(committed, dict)
@@ -3707,24 +4260,49 @@ def _reduce_history(
     history: list[dict], *, private_template: dict
 ) -> tuple[dict, dict] | None:
     try:
+        # Where this module's segment of the history begins. Task 2.3c widens
+        # this from the literal "conversion_submit_intent" to any member of
+        # CONVERSION_INTENTS -- the same set apply_committed_operations
+        # branches on -- because the recorded-credential gate's authorization
+        # intent can now be the *first* conversion event a bundle ever
+        # appends. It is a no-op for every pre-2.3c bundle: the retry intent
+        # is only ever written after a submit, so conversion_submit_intent was
+        # necessarily first.
         first = next(
             (
                 index
                 for index, event in enumerate(history)
                 if isinstance(event, dict)
-                and event.get("event") == "conversion_submit_intent"
+                and event.get("event") in CONVERSION_INTENTS
             ),
             None,
         )
-        if first is None or not isinstance(private_template, dict):
+        if not isinstance(private_template, dict):
             return None
         prefix_private = deepcopy(private_template)
         prefix_private["result_urls"] = []
         reduced_prefix = source_staging.resolve_history_state(
-            history[:first], manifest_template={}, private_template=prefix_private
+            history[: len(history) if first is None else first],
+            manifest_template={},
+            private_template=prefix_private,
         )
         if reduced_prefix is None:
             return None
+        if first is None:
+            # A history with no conversion operation in it at all. Task 2.3c
+            # makes that reachable through this module: the gate's
+            # authorization intent can be the first conversion event a bundle
+            # ever appends, and recover_interrupted_attempt reduces
+            # `history[:-1]` -- which then holds nothing but source staging.
+            # Returning None here reported "a pending conversion
+            # authorization has no valid history prefix" for a prefix that is
+            # perfectly valid, wedging every crash boundary of that write.
+            #
+            # This does not weaken valid_history: its caller only reaches this
+            # module when the manifest already carries a conversion attempt,
+            # and a source-staging-only reduction cannot produce one, so such
+            # a bundle still compares unequal and is still refused.
+            return reduced_prefix
         return apply_committed_operations(
             history[first:],
             manifest=reduced_prefix[0],
@@ -3813,7 +4391,21 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
                 # action_id and evidence_hash that must equal a predecessor
                 # that does not exist, so it stays refused here, exactly as
                 # every non-None authorization was before this task.
-                if authorization is not None and authorization_shape != "initial":
+                #
+                # Task 2.3c adds the content half. Shape alone cannot separate
+                # a genuine initial authorization from a retry one stripped of
+                # its three retry-only keys -- the two key sets are then
+                # identical -- so the evidence itself is checked here, over
+                # the attempt's whole life rather than only while it is still
+                # in the "authorized" state (_valid_attempt's authorized
+                # branch stops applying the moment _submit_state folds the
+                # record to "submitting", but the authorization rides along).
+                if authorization is not None and (
+                    authorization_shape != "initial"
+                    or not _valid_authorized_evidence(
+                        authorization_shape, authorization, manifest
+                    )
+                ):
                     return False
             else:
                 previous_pending = attempts[index - 2].get("pending_action")
