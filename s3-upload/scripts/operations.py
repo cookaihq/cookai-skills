@@ -4,12 +4,15 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from typing import Any, Callable, Dict, Optional, Union
+from urllib.error import HTTPError, URLError
 
 from artifacts import (
     ArtifactError, CheckpointStore, ReferenceOutputSnapshot, build_object_reference,
     preflight_reference_output, write_reference_output,
 )
+from body_verifier import VerificationError, verify_body
 from capabilities import EXECUTABLE_CAPABILITY_STATES
 from config import Connection
 from planning import (
@@ -20,8 +23,8 @@ from response_parser import parse_operation_response
 from resolver import ResolvedTarget
 from results import build_result
 from s3 import (
-    Response, TransportError, build_signed_request, parse_provider_identifier,
-    presign_get, public_url,
+    Response, TransportError, build_signed_request, open_body_stream,
+    parse_provider_identifier, presign_get, public_url,
 )
 from source_file import SourceError, VerifiedSource
 
@@ -133,6 +136,68 @@ def _new_uuid(factory: Callable[[], uuid.UUID], *excluded: str) -> str:
     raise OperationError("could not allocate an independent operation identifier")
 
 
+# The verification GET must carry a positive signed lifetime even when the
+# Target never presigns caller-facing URLs (public access mode leaves
+# presign_expires_seconds null). It only has to outlive one full-body read.
+ADOPTION_PRESIGN_SECONDS = 300
+
+
+def _adopt_planned_content(*, resolved: ResolvedTarget, connection: Connection,
+                           registry: Any, contract_key: Any,
+                           checkpoint: Dict[str, Any], now: ClockInput,
+                           open_stream: Callable[..., Any]) -> bool:
+    """Prove the colliding remote object already is the planned content.
+
+    One presigned full-body GET, folded through body_verifier.verify_body
+    against the checkpointed source size and SHA-256. True is only returned
+    on a double match; anything else -- different bytes, different length, a
+    body that could not be read in full, or a signing/credential problem --
+    returns False and leaves the caller with the conservative collision.
+    HEAD and ETag never participate.
+    """
+    # URL construction, parameter derivation and the verifying read share one
+    # try: a failure anywhere in the three is the same non-answer.
+    # VerificationError carries verify_body's own wrapped read failures
+    # (http.client.HTTPException included -- IncompleteRead descends from it
+    # and from neither OSError nor ValueError), and _signed_moment raises
+    # OperationError. The raw transport families are named defensively
+    # alongside them, covering any raise from this function's own segments
+    # outside verify_body's wrapping.
+    try:
+        if registry.lookup(contract_key, "PresignGetObject").state \
+                not in EXECUTABLE_CAPABILITY_STATES:
+            return False
+        moment = _signed_moment(resolved, now)
+        requested = checkpoint["upload_plan"]["presign_expires_seconds"]
+        if not isinstance(requested, int) or isinstance(requested, bool) \
+                or requested < 1:
+            requested = ADOPTION_PRESIGN_SECONDS
+        effective = resolved.presign_effective_seconds(requested, moment)
+        if not isinstance(effective, int) or isinstance(effective, bool) \
+                or effective < 1:
+            return False
+        url = presign_get(
+            connection,
+            checkpoint["object_reference_draft"]["location"]["key"],
+            effective,
+            moment,
+        )
+        verify_body(
+            open_stream=open_stream,
+            url=url,
+            headers={},
+            channel="authenticated_full_get",
+            url_scope="current-key",
+            expected_size=checkpoint["source"]["size"],
+            expected_sha256=checkpoint["source"]["sha256"],
+            now=moment,
+        )
+        return True
+    except (VerificationError, OperationError, HTTPError, URLError,
+            TransportError, HTTPException, OSError, ValueError):
+        return False
+
+
 def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                        transport: Callable[..., Response], project_root: str,
                        config_home: str, now: ClockInput,
@@ -140,7 +205,8 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                        source: VerifiedSource,
                        checkpoint_created: Optional[Callable[[str], None]] = None,
                        retain_definitive_checkpoint: bool = False,
-                       uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4) -> OperationOutcome:
+                       uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4,
+                       open_stream: Optional[Callable[..., Any]] = None) -> OperationOutcome:
     if not plan["executable"] or plan["upload_mode"] != "single-put":
         raise OperationError("single Put execution requires an executable single-Put plan")
     moment = _moment(now)
@@ -226,6 +292,7 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
         )
         notice_sent = False
         version = None
+        adopted = False
         while True:
             checkpoint = _set_state(checkpoint, "put_in_flight", request_moment)
             store.replace(checkpoint)
@@ -290,6 +357,25 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                 return OperationOutcome(result, store, checkpoint_id, True)
             if parsed.classification == "precondition":
                 attempt = checkpoint["collision"]["attempt"]
+                if policy == "reject":
+                    # The key is taken. Before calling that a collision, one
+                    # presigned full-body read may prove the object already
+                    # is the planned content; only that proof turns the
+                    # outcome into adoption, and no second Put is ever sent.
+                    if _adopt_planned_content(
+                        resolved=resolved,
+                        connection=connection,
+                        registry=registry,
+                        contract_key=contract_key,
+                        checkpoint=checkpoint,
+                        now=now,
+                        open_stream=(
+                            open_body_stream if open_stream is None else open_stream
+                        ),
+                    ):
+                        adopted = True
+                        version = None
+                        break
                 if policy != "unique" or attempt >= maximum:
                     result = build_result(
                         "upload", "collision", object_written=False,
@@ -370,7 +456,7 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
             )
     except Exception:
         result = build_result(
-            "upload", "partial_success", object_written=True,
+            "upload", "partial_success", object_written=not adopted,
             object_reference=reference, url_kind=("public" if target.access.mode == "public" else "presigned"),
             retention=target.retention.result(),
             checkpoint_id=checkpoint_id,
@@ -381,14 +467,15 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
             write_reference_output(reference_snapshot, reference)
         except ArtifactError:
             result = build_result(
-                "upload", "partial_success", object_written=True,
+                "upload", "partial_success", object_written=not adopted,
                 object_reference=reference, url=url, url_kind=url_kind,
                 expires_at=expires_at, retention=target.retention.result(),
                 checkpoint_id=checkpoint_id,
             )
             return OperationOutcome(result, store, checkpoint_id, True)
     result = build_result(
-        "upload", "ok", object_written=True, object_reference=reference,
+        "upload", "adopted" if adopted else "ok",
+        object_written=not adopted, object_reference=reference,
         url=url, url_kind=url_kind, expires_at=expires_at,
         retention=target.retention.result(),
     )

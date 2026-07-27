@@ -101,6 +101,32 @@ def test_reject_single_put_uses_one_conditional_request_and_reports_collision(
     source = tmp_path / "report.bin"
     source.write_bytes(b"content")
     enable(monkeypatch, "PutObject", "ConditionalPutObject", "PresignGetObject")
+
+    # The adoption read after the 412 (minimal caller contract, task 1.2)
+    # finds an object that is not the planned content, so the outcome stays
+    # a collision and never becomes a retry.
+    class _ForeignObject:
+        status = 200
+        headers = {"content-length": "20"}
+        _at = 0
+
+        def read(self, size):
+            body = b"someone-elses-object"
+            chunk = body[self._at:self._at + size]
+            self._at += len(chunk)
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(
+        operations,
+        "open_body_stream",
+        lambda method, url, headers, timeout=30: _ForeignObject(),
+    )
     calls = []
 
     rc = upload.main(

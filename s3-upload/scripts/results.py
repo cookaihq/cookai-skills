@@ -9,8 +9,8 @@ from artifacts import ArtifactError, serialize_object_reference
 
 OPERATIONS = {"upload", "url", "delete", "resume", "reconcile", "abort"}
 STATUSES = {
-    "ok", "dry_run", "partial_success", "not_started", "collision", "deleted",
-    "not_deleted", "aborted", "ambiguous",
+    "ok", "adopted", "dry_run", "partial_success", "not_started", "collision",
+    "deleted", "not_deleted", "aborted", "ambiguous",
 }
 UUID4_RE = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}\Z")
 RFC3339_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
@@ -114,6 +114,10 @@ def validate_result(result: Any, *, validate_reference: bool = True) -> Dict[str
             raise ResultError("ambiguous result must not claim an object or URL")
     if result["status"] == "collision" and result["object_written"] is not False:
         raise ResultError("collision requires object_written=false")
+    if result["status"] == "adopted" and (
+        result["operation"] != "upload" or result["object_written"] is not False
+    ):
+        raise ResultError("adopted requires an upload with object_written=false")
     if result["status"] == "aborted" and result["operation"] not in {"abort", "reconcile"}:
         raise ResultError("aborted status requires abort or reconcile operation")
     return result
@@ -153,6 +157,6 @@ def exit_code_for_result(result: Dict[str, Any]) -> int:
         return 0 if result["plan"]["executable"] else 2
     if result["status"] == "collision":
         return 4
-    if result["status"] in {"ok", "deleted", "aborted"}:
+    if result["status"] in {"ok", "adopted", "deleted", "aborted"}:
         return 0
     return 1
