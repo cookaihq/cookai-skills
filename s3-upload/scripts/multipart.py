@@ -321,10 +321,22 @@ def _complete_result(
         try:
             write_reference_output(snapshot, reference)
         except ArtifactError:
-            result = dict(generated)
-            result["status"] = "partial_success"
-            result["checkpoint_id"] = checkpoint_id
-            result = validate_result(result)
+            # Rebuilt through build_result rather than mutated in place:
+            # checkpoint, next_action and retry_safety are derived from the
+            # status and the retained checkpoint, and only the constructor
+            # rederives them.
+            result = build_result(
+                operation,
+                "partial_success",
+                object_written=True,
+                object_reference=generated["object_reference"],
+                url=generated["url"],
+                url_kind=generated["url_kind"],
+                expires_at=generated["expires_at"],
+                retention=generated["retention"],
+                checkpoint_id=checkpoint_id,
+                remote=dict(generated["remote"]),
+            )
             return MultipartOutcome(result, store, checkpoint_id, True)
     return MultipartOutcome(generated, store, checkpoint_id, False)
 

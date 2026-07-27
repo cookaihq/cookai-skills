@@ -79,6 +79,7 @@ def test_private_baseline_dry_run_has_complete_v2_plan_and_no_side_effect(tmp_pa
         "schema_version", "operation", "status", "object_written", "object_reference",
         "url", "url_kind", "expires_at", "retention", "delete_scope",
         "deleted_version_id", "checkpoint_id", "plan",
+        "remote", "checkpoint", "next_action", "retry_safety",
     }
     assert result["operation"] == "upload"
     assert result["status"] == "dry_run"

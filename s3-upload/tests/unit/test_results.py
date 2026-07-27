@@ -20,6 +20,7 @@ def test_upload_dry_run_has_all_keys_and_exit_depends_on_plan():
         "schema_version", "operation", "status", "object_written", "object_reference",
         "url", "url_kind", "expires_at", "retention", "delete_scope",
         "deleted_version_id", "checkpoint_id", "plan",
+        "remote", "checkpoint", "next_action", "retry_safety",
     ]
     assert exit_code_for_result(result) == 0
     result["plan"] = {"executable": False}

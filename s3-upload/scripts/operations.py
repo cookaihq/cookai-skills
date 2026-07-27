@@ -21,7 +21,7 @@ from planning import (
 from provider_candidates import build_candidate_put_request
 from response_parser import parse_operation_response
 from resolver import ResolvedTarget
-from results import build_result
+from results import build_result, validate_result
 from s3 import (
     Response, TransportError, build_signed_request, open_body_stream,
     parse_provider_identifier, presign_get, public_url,
@@ -432,6 +432,14 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
         checkpoint, "complete", request_moment, object_reference_draft=reference
     )
     store.replace(checkpoint)
+    # The remote identity in every terminal upload result is the planned
+    # content the checkpoint recorded: written by this Put, or proven equal
+    # by the adoption read.
+    remote = {
+        "key": reference["location"]["key"],
+        "size": checkpoint["source"]["size"],
+        "sha256": checkpoint["source"]["sha256"],
+    }
     try:
         if target.access.mode == "public":
             url = public_url(
@@ -459,7 +467,7 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
             "upload", "partial_success", object_written=not adopted,
             object_reference=reference, url_kind=("public" if target.access.mode == "public" else "presigned"),
             retention=target.retention.result(),
-            checkpoint_id=checkpoint_id,
+            checkpoint_id=checkpoint_id, remote=remote,
         )
         return OperationOutcome(result, store, checkpoint_id, True)
     if reference_snapshot is not None:
@@ -470,14 +478,14 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                 "upload", "partial_success", object_written=not adopted,
                 object_reference=reference, url=url, url_kind=url_kind,
                 expires_at=expires_at, retention=target.retention.result(),
-                checkpoint_id=checkpoint_id,
+                checkpoint_id=checkpoint_id, remote=remote,
             )
             return OperationOutcome(result, store, checkpoint_id, True)
     result = build_result(
         "upload", "adopted" if adopted else "ok",
         object_written=not adopted, object_reference=reference,
         url=url, url_kind=url_kind, expires_at=expires_at,
-        retention=target.retention.result(),
+        retention=target.retention.result(), remote=remote,
     )
     return OperationOutcome(result, store, checkpoint_id, False)
 
@@ -757,6 +765,12 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
             )
             return OperationOutcome(result, store, checkpoint_id, True)
     if state == "complete":
+        source = checkpoint["source"]
+        remote = {
+            "key": reference["location"]["key"],
+            "size": source["size"],
+            "sha256": source["sha256"],
+        }
         try:
             generated = generate_object_url(
                 resolved=resolved, reference=checkpoint["object_reference_draft"],
@@ -774,9 +788,12 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                     else "presigned"
                 ),
                 retention=retention,
+                remote=remote,
             )
             return OperationOutcome(result, store, checkpoint_id, False)
         generated["operation"] = "reconcile"
+        generated["remote"] = remote
+        validate_result(generated, validate_reference=False)
         if checkpoint["reference_out"] is not None:
             source = checkpoint["source"]
             identity = (
@@ -802,6 +819,7 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                     expires_at=generated["expires_at"],
                     retention=retention,
                     checkpoint_id=checkpoint_id,
+                    remote=remote,
                 )
                 return OperationOutcome(result, store, checkpoint_id, True)
         return OperationOutcome(generated, store, checkpoint_id, False)

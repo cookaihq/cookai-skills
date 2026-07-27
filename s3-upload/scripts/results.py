@@ -14,11 +14,27 @@ STATUSES = {
 }
 UUID4_RE = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}\Z")
 RFC3339_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+# The nine-field caller contract extends the v1 key set in place: the
+# original thirteen keys keep their names and meaning, and the four keys
+# below close the contract (remote identity, checkpoint mirror, and the
+# next_action + retry_safety pair). Every key is always present; a value
+# that does not apply is an explicit null, never an omission.
 RESULT_KEYS = (
     "schema_version", "operation", "status", "object_written", "object_reference",
     "url", "url_kind", "expires_at", "retention", "delete_scope",
     "deleted_version_id", "checkpoint_id", "plan",
+    "remote", "checkpoint", "next_action", "retry_safety",
 )
+# retry_safety is a function of the status alone: null when a retry is not a
+# meaningful question (the operation reached its goal or was a plan-only
+# run), "safe" when provably nothing was written or deleted, "unsafe" when a
+# write may have happened or provably did and a blind re-run could double it.
+RETRY_SAFETY_BY_STATUS = {
+    "ok": None, "adopted": None, "dry_run": None, "deleted": None, "aborted": None,
+    "not_started": "safe", "collision": "safe", "not_deleted": "safe",
+    "ambiguous": "unsafe", "partial_success": "unsafe",
+}
 
 
 class ResultError(ValueError):
@@ -44,6 +60,44 @@ def _retention(value: Any) -> None:
             raise ResultError("invalid expiring policy result")
     else:
         raise ResultError("invalid retention mode")
+
+
+def _reference_key(reference: Any) -> Optional[str]:
+    # The Object Reference carries the remote key at location.key. Tests may
+    # pass placeholder references under validate_reference=False; a shape
+    # without a readable key simply contributes no binding.
+    if not isinstance(reference, dict):
+        return None
+    location = reference.get("location")
+    if not isinstance(location, dict):
+        return None
+    key = location.get("key")
+    return key if isinstance(key, str) and key else None
+
+
+def _remote(value: Any, reference: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"key", "size", "sha256"}:
+        raise ResultError("remote must be the closed key/size/sha256 container")
+    key, size, sha256 = value["key"], value["size"], value["sha256"]
+    if key is not None and (not isinstance(key, str) or not key):
+        raise ResultError("remote key must be a non-empty string or null")
+    if size is not None and (
+        not isinstance(size, int) or isinstance(size, bool) or size < 0
+    ):
+        raise ResultError("remote size must be a non-negative integer or null")
+    if sha256 is not None and (
+        not isinstance(sha256, str) or not SHA256_RE.fullmatch(sha256)
+    ):
+        raise ResultError("remote sha256 must be lowercase hex sha256 or null")
+    if key is None and (size is not None or sha256 is not None):
+        raise ResultError("remote size and sha256 require a remote key")
+    if reference is None:
+        if key is not None:
+            raise ResultError("remote key requires an Object Reference")
+    else:
+        planned = _reference_key(reference)
+        if planned is not None and key != planned:
+            raise ResultError("remote key must match the Object Reference key")
 
 
 def _timestamp(value: str) -> None:
@@ -114,12 +168,30 @@ def validate_result(result: Any, *, validate_reference: bool = True) -> Dict[str
             raise ResultError("ambiguous result must not claim an object or URL")
     if result["status"] == "collision" and result["object_written"] is not False:
         raise ResultError("collision requires object_written=false")
+    if result["status"] == "ok":
+        if result["object_written"] is False:
+            raise ResultError("ok must not carry object_written=false")
+        if result["operation"] == "upload" and result["object_written"] is not True:
+            raise ResultError("upload ok requires object_written=true")
     if result["status"] == "adopted" and (
         result["operation"] != "upload" or result["object_written"] is not False
     ):
         raise ResultError("adopted requires an upload with object_written=false")
     if result["status"] == "aborted" and result["operation"] not in {"abort", "reconcile"}:
         raise ResultError("aborted status requires abort or reconcile operation")
+    # An ambiguous result never carries an Object Reference (enforced above),
+    # so _remote's reference-binding rule already forces its remote identity
+    # to stay fully null.
+    _remote(result["remote"], result["object_reference"])
+    if result["checkpoint"] != result["checkpoint_id"]:
+        raise ResultError("checkpoint must mirror checkpoint_id")
+    expected_action = "reconcile" if result["checkpoint_id"] is not None else None
+    if result["next_action"] != expected_action:
+        raise ResultError(
+            "next_action must be reconcile exactly when a checkpoint is retained"
+        )
+    if result["retry_safety"] != RETRY_SAFETY_BY_STATUS[result["status"]]:
+        raise ResultError("retry_safety contradicts the result status")
     return result
 
 
@@ -132,7 +204,18 @@ def build_result(operation: str, status: str, *, object_written: Optional[bool] 
                  deleted_version_id: Optional[str] = None,
                  checkpoint_id: Optional[str] = None,
                  plan: Optional[Dict[str, Any]] = None,
+                 remote: Optional[Dict[str, Any]] = None,
                  validate_reference: bool = True) -> Dict[str, Any]:
+    # remote is the only caller-suppliable field of the four contract
+    # additions: size and sha256 exist outside the result's other inputs.
+    # checkpoint, next_action and retry_safety are pure functions of
+    # checkpoint_id and status, so they are derived here and never accepted
+    # as arguments -- a caller cannot construct the contradiction that
+    # validate_result would then have to reject.
+    if remote is None:
+        remote = {"key": _reference_key(object_reference), "size": None, "sha256": None}
+    else:
+        remote = dict(remote)
     result = {
         "schema_version": 1,
         "operation": operation,
@@ -147,6 +230,10 @@ def build_result(operation: str, status: str, *, object_written: Optional[bool] 
         "deleted_version_id": deleted_version_id,
         "checkpoint_id": checkpoint_id,
         "plan": plan,
+        "remote": remote,
+        "checkpoint": checkpoint_id,
+        "next_action": "reconcile" if checkpoint_id is not None else None,
+        "retry_safety": RETRY_SAFETY_BY_STATUS.get(status),
     }
     return validate_result(result, validate_reference=validate_reference)
 
