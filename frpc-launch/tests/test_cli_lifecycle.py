@@ -85,6 +85,52 @@ def test_config_change_requires_confirmation(tmp_path):
         run_cli(home, cwd, "stop")
 
 
+def test_stop_terminates_and_cleans(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    assert run_cli(home, cwd, "start", "--wait", "10").returncode == 0
+    pid = json.loads(run_cli(home, cwd, "status").stdout)["modes"]["official"]["pid"]
+    r = run_cli(home, cwd, "stop")
+    assert r.returncode == 0
+    assert not (home / "run" / "official.pid").exists()
+    time.sleep(0.3)
+    with __import__("pytest").raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_stop_stale_pid_does_not_kill_unrelated(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (home / "run").mkdir(exist_ok=True)
+        (home / "run" / "official.pid").write_text(json.dumps({
+            "pid": bystander.pid, "exe": "/managed/bin/frpc",
+            "mode": "official", "config_digest": "x", "started_at": "t"}))
+        r = run_cli(home, cwd, "stop")
+        assert r.returncode == 0
+        assert not (home / "run" / "official.pid").exists()
+        assert bystander.poll() is None   # 无关进程仍存活，未被误杀
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_status_reports_not_running(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    out = json.loads(run_cli(home, cwd, "status").stdout)
+    assert out["modes"]["official"]["running"] is False
+
+
+def test_logs_masks_secrets(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    (home / "frpc.toml").write_text(
+        'serverAddr = "example.com"\nserverPort = 7000\nauth.token = "supersecrettoken99"\n')
+    (home / "run").mkdir(exist_ok=True)
+    (home / "run" / "official.log").write_text("auth with supersecrettoken99 done\n")
+    r = run_cli(home, cwd, "logs", "--mode", "official")
+    assert "supersecrettoken99" not in r.stdout
+    assert "supe****en99" in r.stdout
+
+
 def test_unconfigured_start_exits_4(tmp_path):
     home = tmp_path / "empty_home"
     cwd = tmp_path / "proj2"

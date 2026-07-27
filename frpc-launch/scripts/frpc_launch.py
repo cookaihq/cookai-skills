@@ -509,7 +509,112 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "start":
             sp.add_argument("--wait", type=float, default=15.0,
                             help="启动验证的有界等待秒数（默认 15）")
+        if name == "logs":
+            sp.add_argument("-n", type=int, default=50, dest="lines",
+                            help="输出日志尾部行数（默认 50）")
     return p
+
+
+# ---------------------------------------------------------------------------
+# stop / status / logs
+# ---------------------------------------------------------------------------
+
+
+def _collect_secrets(layered: dict, home: Path) -> list:
+    secrets = []
+    o_path, _ = official_config_path(layered, home)
+    if o_path is not None and o_path.is_file():
+        try:
+            secrets += _extract_official_secrets(o_path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+    s_cfg, _ = sakura_config(layered)
+    if s_cfg:
+        secrets.append(s_cfg["key"])
+    return secrets
+
+
+def cmd_stop(args) -> int:
+    import signal
+    import time as _time
+    home = args.home
+    modes = [args.mode] if args.mode else ["official", "sakura"]
+    results = {}
+    for mode in modes:
+        pid_file, _ = pid_paths(home, mode)
+        record = read_pid_record(pid_file)
+        if not record:
+            results[mode] = {"result": "not_running"}
+            continue
+        if not pid_identity_ok(record):
+            pid_file.unlink(missing_ok=True)
+            results[mode] = {"result": "stale_pid_cleaned",
+                             "detail": "pid 记录身份核对不通过（进程号可能被复用），"
+                                       "只清理 pid 文件，未发送任何信号"}
+            continue
+        pid = record["pid"]
+        os.kill(pid, signal.SIGTERM)
+        deadline = _time.monotonic() + 10
+        while pid_alive(pid) and _time.monotonic() < deadline:
+            _time.sleep(0.2)
+        if pid_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+        pid_file.unlink(missing_ok=True)
+        results[mode] = {"result": "stopped", "pid": pid}
+    human = "; ".join("%s: %s" % (m, r["result"]) for m, r in results.items())
+    _emit(args, {"modes": results}, human)
+    return 0
+
+
+def cmd_status(args) -> int:
+    home = args.home
+    layered = resolve_layered(dict(os.environ), Path.cwd(), home)
+    secrets = _collect_secrets(layered, home)
+    o_path, o_source = official_config_path(layered, home)
+    _, s_source = sakura_config(layered)
+    source_map = {"official": o_source, "sakura": s_source}
+    try:
+        _, os_subdir, _ = detect_platform()
+    except FrpcLaunchError:
+        os_subdir = ""
+    modes = {}
+    for mode in ([args.mode] if args.mode else ["official", "sakura"]):
+        pid_file, log_file = pid_paths(home, mode)
+        record = read_pid_record(pid_file)
+        running = bool(record) and pid_identity_ok(record)
+        binary_name = "frpc" if mode == "official" else "frpc-sakura"
+        meta = read_meta(home / "bin" / os_subdir / (binary_name + ".meta.json")) \
+            if os_subdir else {}
+        modes[mode] = {
+            "running": running,
+            "pid": record.get("pid") if running else None,
+            "config_source": source_map.get(mode, ""),
+            "binary_version": meta.get("version", ""),
+            "log_tail": mask_text(read_log_tail(log_file, 5), secrets),
+        }
+    human = "\n".join(
+        "%s: %s%s" % (m, "运行中 (pid %s)" % v["pid"] if v["running"] else "未运行",
+                      "，配置来源: %s" % v["config_source"] if v["config_source"] else "")
+        for m, v in modes.items())
+    _emit(args, {"modes": modes}, human)
+    return 0
+
+
+def cmd_logs(args) -> int:
+    home = args.home
+    layered = resolve_layered(dict(os.environ), Path.cwd(), home)
+    secrets = _collect_secrets(layered, home)
+    modes = [args.mode] if args.mode else ["official", "sakura"]
+    chunks = []
+    for mode in modes:
+        _, log_file = pid_paths(home, mode)
+        tail = read_log_tail(log_file, args.lines)
+        if not tail and not args.mode:
+            continue
+        header = "===== %s =====" % mode if not args.mode else ""
+        chunks.append((header + "\n" if header else "") + mask_text(tail, secrets))
+    print("\n".join(chunks))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +834,9 @@ def main(argv=None) -> int:
         return 0
     handlers = {
         "start": cmd_start,
+        "stop": cmd_stop,
+        "status": cmd_status,
+        "logs": cmd_logs,
         "install": cmd_install,
         "update": cmd_update,
     }

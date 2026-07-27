@@ -18,5 +18,10 @@ def test_help_lists_subcommands():
 
 
 def test_unimplemented_subcommand_exits_2():
-    r = run_cli("status")
+    r = run_cli("guide-init")
     assert r.returncode == 2
+
+
+def test_status_runs_normally(tmp_path):
+    r = run_cli("--home", str(tmp_path / "h"), "status")
+    assert r.returncode == 0
