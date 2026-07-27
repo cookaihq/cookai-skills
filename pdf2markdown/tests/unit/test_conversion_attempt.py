@@ -639,6 +639,104 @@ A_RETRY_AUTHORIZATION = {
 }
 
 
+def test_an_authorized_records_kind_must_match_its_authorizations_own_shape(
+    tmp_path, capsys, monkeypatch
+):
+    """Review fix (task 2.3b, Important #1): an "authorized" record's
+    `authorization_kind` and its `authorization`'s own shape must agree, not
+    merely each pass its own isolated check.
+
+    Before this fix, the "authorized" branch of `_valid_attempt` checked
+    `authorization_kind == "retry"` (via `valid_authorization_kind` above)
+    and `_valid_authorization(authorization)` side by side, with nothing
+    tying the two together. Task 2.3b's widening of `_valid_authorization`
+    to also accept the "initial" shape made the second check pass for an
+    "initial"-shaped authorization on its own -- so a record claiming kind
+    "retry" while its `authorization` actually carries two-key "initial"
+    evidence slipped through with no cross-check catching the mismatch. No
+    real writer has ever produced this combination -- `commit_retry_decision`
+    always pairs kind "retry" with a full five-key "retry" authorization --
+    but the validator has to refuse it on its own, not rely on writers never
+    trying.
+
+    The base record is the genuine one `_valid_attempt` already accepts
+    (kind "retry", full five-key authorization, from a real `record
+    conversion --decision retry` round trip -- the same setup
+    `test_retry_authorization_is_a_pure_rename_with_a_kind_discriminator`
+    above uses). The mutant swaps only `authorization` for the legal
+    two-key "initial" shape, leaving `authorization_kind == "retry"`
+    untouched: kind still says "retry", the authorization it is paired
+    with does not.
+    """
+    import conversion_attempt as ca
+
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    _rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=StatusCreate(401),
+    )
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unknown["generation"]),
+            "--action-id",
+            unknown["action_id"],
+            "--evidence-hash",
+            unknown["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "I accept the possible duplicate conversion charge.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, json.dumps(authorized, sort_keys=True)
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    attempt = manifest["conversion_attempts"][-1]
+    assert attempt["state"] == "authorized"
+    assert attempt["authorization_kind"] == "retry"
+    generation = manifest["generation"]
+    # Control: the genuine record validates.
+    assert (
+        ca._valid_attempt(attempt, manifest=manifest, generation=generation)
+        is True
+    )
+
+    # Mutant: authorization_kind still says "retry", but authorization
+    # itself is now the legal two-key "initial" shape. This combination is
+    # matched by neither the state-vs-index rule ("initial" is only ever
+    # legal on attempt #1, enforced by valid_private_state, not exercised
+    # here) nor -- until this fix -- by any check inside `_valid_attempt`
+    # itself: `_valid_authorization` alone accepts the "initial" shape on
+    # its own merits, without knowing what `authorization_kind` claims.
+    kind_shape_mismatch = dict(attempt, authorization=AN_INITIAL_AUTHORIZATION)
+    assert (
+        ca._valid_attempt(
+            kind_shape_mismatch, manifest=manifest, generation=generation
+        )
+        is False
+    )
+
+
 def _submitted_first_attempt_bundle(tmp_path, capsys, monkeypatch):
     """A real, valid one-attempt bundle whose attempt #1 carries no
     authorization -- the shape every first attempt has had until task 2.3b.
@@ -774,6 +872,11 @@ def test_a_first_attempt_authorization_of_any_other_shape_stays_forbidden(
     manifest, private_state = _submitted_first_attempt_bundle(
         tmp_path, capsys, monkeypatch
     )
+    # Control: the untouched bundle is valid, so a False below can only be
+    # attributed to the injected "retry" authorization (same control shape
+    # as test_the_first_attempt_may_carry_an_initial_authorization above).
+    assert ca.valid_private_state(private_state, manifest) is True
+
     retry_on_first = _with_first_authorization(manifest, A_RETRY_AUTHORIZATION)
     assert ca.valid_private_state(private_state, retry_on_first) is False
 

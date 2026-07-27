@@ -1834,13 +1834,20 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     # column's value domain -- task 2.3c's "initial" included, if it lands
     # after release -- must bump SCHEMA_VERSION instead.
     #
-    # Task 2.3b deliberately does NOT widen this domain. It admits initial
-    # *authorizations*, discriminated by their key set
-    # (AUTHORIZATION_KEYS_BY_KIND), on records whose kind column is already
-    # None -- which is every state past "authorized". The only writer that
-    # would ever need kind == "initial" here is task 2.3c's blocked
-    # credential gate, so extending this split is that task's job, not this
-    # one's.
+    # Task 2.3b deliberately does NOT widen this domain. The opening it adds
+    # runs along two other dimensions instead: index (attempt #1 only, where
+    # valid_private_state's predecessor check has nothing to match against)
+    # and the authorization's own shape (discriminated by key set, see
+    # AUTHORIZATION_KEYS_BY_KIND) -- neither of which is this column. For
+    # the "authorized" state, the cross-check just above
+    # (_authorization_kind_of(authorization) == authorization_kind) pins
+    # kind and shape to agree with each other, so an "authorized" record can
+    # only ever carry kind "retry" paired with a "retry"-shaped
+    # authorization -- an "initial" shape stays illegal here even though
+    # _valid_authorization alone would accept it. The only writer that would
+    # ever need kind == "initial" is task 2.3c's blocked credential gate,
+    # and its states are not "authorized", so widening authorization_kind's
+    # value domain to admit it is that task's job, not this one's.
     authorization_kind = attempt.get("authorization_kind")
     valid_authorization_kind = (
         authorization_kind == "retry"
@@ -1866,7 +1873,19 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
         return False
     if state == "authorized":
         return (
-            _valid_authorization(authorization)
+            # Cross-check kind against the authorization's own declared
+            # shape: valid_authorization_kind above only pins the *column*
+            # to "retry", and _valid_authorization only checks the
+            # *authorization* is one of the two legal shapes on its own
+            # merits -- neither ties the two together, so a record could
+            # otherwise claim kind "retry" while carrying a legal "initial"
+            # authorization (or vice versa). This is also 2.3c's natural
+            # seam: once that task widens authorization_kind's authorized-
+            # state domain to {"retry", "initial"}, this same equality
+            # makes the shape follow the kind automatically, with no second
+            # place to update.
+            _authorization_kind_of(authorization) == authorization_kind
+            and _valid_authorization(authorization)
             and attempt.get("api_base") is None
             and attempt.get("poll_count") == 0
             and attempt.get("consecutive_transient_count") == 0
