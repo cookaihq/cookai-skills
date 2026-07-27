@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -17,6 +18,48 @@ VAR_NAMES = [
 
 class FrpcLaunchError(Exception):
     """用户可读的失败，message 已掩码，退出码 1。"""
+
+
+# ---------------------------------------------------------------------------
+# 凭证掩码与 .env 极简解析
+# ---------------------------------------------------------------------------
+
+_ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return "(未设置)"
+    if len(value) <= 8:
+        return "****"
+    return value[:4] + "****" + value[-4:]
+
+
+def mask_text(text: str, secrets: list) -> str:
+    for s in secrets:
+        if s:
+            text = text.replace(s, mask_secret(s))
+    return text
+
+
+def parse_env_file(path: Path) -> dict:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    result = {}
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = _ENV_LINE.match(line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        result[key] = value
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
