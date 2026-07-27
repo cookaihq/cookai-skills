@@ -1608,6 +1608,13 @@ def test_ready_url_is_reused_until_expiry_then_confirm_requires_a_new_bound_acti
     # this test is about is unchanged and asserted directly below: the staged
     # URL is reused, not re-uploaded -- source_staging's own records are
     # byte-for-byte what the upload left behind.
+    #
+    # For the record: by the end of this test the bundle carries that
+    # authorized initial attempt and then moves on to a source-upload expiry
+    # (asserted below), which leaves the bundle parked in a state
+    # (`recoverable_error` / `retry_expired_source_upload`) that cannot be
+    # advanced further without an operator decision. This test does not
+    # exercise, and makes no claim about, resuming past that point.
     assert reusable["generation"] == staged["generation"] + 1
     reused_manifest = json.loads((bundle / "manifest.json").read_text())
     reused_private = json.loads((bundle / ".state" / "private.json").read_text())

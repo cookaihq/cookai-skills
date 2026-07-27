@@ -2056,10 +2056,30 @@ def _advance(
                             use_local_key=getattr(args, "use_local_key", False),
                         )
                     except config_module.ConfigError as exc:
-                        if exc.code not in {
-                            "credential_source_missing",
-                            "credential_source_changed",
-                        }:
+                        # Review fix (2.3c round 1, Important #4): read the
+                        # gate's code domain off
+                        # CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR's keys
+                        # instead of restating the same two literals here --
+                        # this was the poll path's own second copy of the
+                        # value domain the create path's gate (below) already
+                        # derives from that table.
+                        #
+                        # Known defect, pre-existing and shared with the
+                        # create path's mirror of this branch (see the
+                        # comment there): for a non-gate ConfigError caused
+                        # by a pure environment condition (a symlinked
+                        # `.env`, insufficient permissions, a truncated or
+                        # non-UTF-8 dotenv file -- see config.py:49-102),
+                        # `action_required="repair_or_restore_work_bundle"`
+                        # is misleading. The work bundle is intact; the
+                        # correct action would point at credential
+                        # configuration, not bundle repair. Left to the
+                        # 4.2/final-review backlog; not fixed here.
+                        if (
+                            exc.code
+                            not in conversion_attempt_module
+                            .CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR
+                        ):
                             raise WorkflowError(
                                 "configuration_invalid",
                                 "The recorded Doc2X credential locator is invalid.",
@@ -2330,7 +2350,24 @@ def _advance(
                             ):
                                 # A locator this module cannot even interpret is
                                 # not a credential gate; it is a broken bundle,
-                                # and the poll path already reports it that way.
+                                # and the poll path already reports it that way
+                                # -- this branch faithfully copies that poll
+                                # path precedent (workflow.py:2058-2069)
+                                # rather than inventing a second rule for the
+                                # same non-gate ConfigError domain.
+                                #
+                                # Known defect, pre-existing and shared with
+                                # that poll path branch, not introduced or
+                                # fixed here: for a non-gate ConfigError
+                                # caused by a pure environment condition (a
+                                # symlinked `.env`, insufficient permissions,
+                                # a truncated or non-UTF-8 dotenv file -- see
+                                # config.py:49-102), `action_required=
+                                # "repair_or_restore_work_bundle"` is
+                                # misleading -- the work bundle is intact, and
+                                # the correct action would point at credential
+                                # configuration, not bundle repair. Left to
+                                # the 4.2/final-review backlog.
                                 raise WorkflowError(
                                     "configuration_invalid",
                                     "The recorded Doc2X credential locator is invalid.",
@@ -2338,7 +2375,19 @@ def _advance(
                                     action_required="repair_or_restore_work_bundle",
                                     context=inspected,
                                 ) from None
-                            if not conversion_attempt_module.initial_authorization_is_recorded(
+                            # Review fix (2.3c round 1, Critical #1): reuse is
+                            # decided by whether the active attempt is already
+                            # an authorized placeholder of *any* kind, not
+                            # just an "initial" one. An authorized "retry"
+                            # placeholder (left by commit_retry_decision) has
+                            # just as much nothing left to authorize as an
+                            # "initial" one does -- both are the same record
+                            # from _submit_state's (conversion_attempt.py:
+                            # 2427) point of view: the next create consumes
+                            # it in place rather than appending past it. See
+                            # active_attempt_is_authorized's docstring for the
+                            # false-corruption verdict this replaces.
+                            if not conversion_attempt_module.active_attempt_is_authorized(
                                 manifest
                             ):
                                 authorized_at = _isoformat(_moment(now))

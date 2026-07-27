@@ -1145,6 +1145,114 @@ def test_a_recovered_credential_reuses_the_initial_attempt_without_a_new_one(
     assert len(create.calls) == 1
 
 
+def test_a_blocked_credential_gate_reuses_an_authorized_retry_placeholder(
+    tmp_path, capsys, monkeypatch
+):
+    """Review fix (2.3c round 1, Critical #1): the recorded-credential
+    gate's reuse guard, `initial_authorization_is_recorded`, only recognizes
+    an "authorized" placeholder tagged `authorization_kind == "initial"`. A
+    *retry* placeholder -- `authorization_kind == "retry"`, left behind by
+    `record conversion --decision retry` after a 401 create -- reads as "not
+    yet authorized" to that guard, so the gate tried to author a *second*
+    "initial" authorization on top of a bundle that already carries one
+    authorized attempt. `_initial_authorization_state`'s `or attempts`
+    fail-closed guard (the gate authorizes attempt #1 and only attempt #1)
+    correctly refused that -- but the caller reported the refusal as
+    `invalid_state_transition` / `repair_or_restore_work_bundle`: a false
+    corruption verdict against a perfectly valid, already-authorized bundle.
+
+    Repro: source ready -> create 401 -> `record conversion --decision
+    retry` (leaves an authorized "retry" placeholder, conversion_state
+    "ready_to_submit") -> the recorded credential becomes unreadable again
+    (AIHUB_API_KEY removed) -> advance hits the gate a second time.
+
+    Fix: workflow.py's reuse check is widened to "the active attempt is
+    already an authorized placeholder of *any* kind" -- the same criterion
+    `_submit_state` (conversion_attempt.py:2427,
+    `attempts[-1].get("state") == "authorized"`) uses to decide whether the
+    next create should consume a placeholder rather than append a new one.
+    Both readings mean the same thing: "the next create will consume this
+    record, so nothing more needs to be authorized here." When the gate is
+    hit again the workflow now reports the current state as-is: no new
+    attempt, no capacity admission, zero bytes written.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    _rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=StatusCreate(401),
+    )
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unknown["generation"]),
+            "--action-id",
+            unknown["action_id"],
+            "--evidence-hash",
+            unknown["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "I accept the possible duplicate conversion charge.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, json.dumps(authorized, sort_keys=True)
+    manifest = read_manifest(bundle)
+    assert manifest["conversion_attempts"][-1]["state"] == "authorized"
+    assert manifest["conversion_attempts"][-1]["authorization_kind"] == "retry"
+    before = _bundle_state_snapshot(bundle)
+
+    never = CountingNeverNetwork()
+    gate_rc, gated, _stderr = _gate_advance(
+        tmp_path,
+        capsys,
+        bundle,
+        authorized["generation"],
+        # AIHUB_API_KEY is deliberately absent again: the gate blocks a
+        # second time, now against a bundle whose active attempt is already
+        # an authorized "retry" placeholder rather than a fresh bundle.
+        environ=dependencies,
+        transport=never,
+    )
+
+    assert gate_rc == 0, json.dumps(gated, sort_keys=True)
+    assert gated["outcome"] == "credential_source_missing"
+    assert gated["generation"] == authorized["generation"]
+    assert never.calls == []
+    assert _bundle_state_snapshot(bundle) == before
+
+    after_manifest = read_manifest(bundle)
+    # Two attempts: the 401 create's submission_unknown record, then the
+    # retry placeholder record conversion --decision retry authorized. The
+    # gate must not append a third.
+    assert [item["state"] for item in after_manifest["conversion_attempts"]] == [
+        "submission_unknown",
+        "authorized",
+    ]
+    assert (
+        after_manifest["conversion_attempts"][-1]["authorization_kind"] == "retry"
+    )
+    assert after_manifest == manifest
+
+
 def test_an_initial_authorization_is_bound_to_the_frozen_source_evidence(
     tmp_path, capsys, monkeypatch
 ):

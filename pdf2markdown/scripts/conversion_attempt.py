@@ -582,11 +582,17 @@ def _attempt_state_columns(
     """The folded `state` a record for `flat_state` stores, plus its reason
     columns and a fresh `result_refresh_round_count` of 0.
 
-    The one place the fold is applied on the write side. Callers used to
-    write `"state": <wire classification>` next to a separate
-    _attempt_reason_columns call; going through one helper means the stored
-    state and the stored reason can never come from different rows of
-    FLAT_STATE_MIGRATION.
+    The one place the fold is applied on the write side for a *single*
+    FLAT_STATE_MIGRATION row. Callers used to write `"state": <wire
+    classification>` next to a separate _attempt_reason_columns call; going
+    through one helper means the stored state and the stored reason can
+    never come from different rows of FLAT_STATE_MIGRATION.
+
+    `_credential_gate_state_columns` (task 2.3c) is a deliberate exception,
+    not a second copy of this helper: a gate record's state and reason are
+    read off two *different* rows on purpose (the placeholder's own
+    "not_started" state paired with the config-error code's wire reason), so
+    it cannot be built by calling this helper with a single `flat_state`.
 
     Fresh-attempt creation and recovery reconstruction of the submitting
     predecessor both use this helper. In either case 0 is correct: no
@@ -1080,7 +1086,11 @@ _REFOLDED_PAIR_SETS = {
 # third kind cannot be added to that table without either giving it a reason
 # domain here or failing at import -- rather than silently inheriting one.
 AUTHORIZED_STATE_REASONS_BY_KIND = {
-    "retry": frozenset({None}),
+    # A retry placeholder's reason is read off the same row "not_started"'s
+    # own fold reads (FLAT_STATE_MIGRATION["not_started"] == ("authorized",
+    # None, "ready_to_submit")) rather than restated as a literal `None`, so
+    # this cell and the fold it describes cannot silently drift apart.
+    "retry": frozenset({FLAT_STATE_MIGRATION["not_started"][1]}),
     "initial": frozenset(
         reason for _state, reason in CREDENTIAL_GATE_AUTHORIZED_PAIRS
     ),
@@ -1112,6 +1122,21 @@ AUTHORIZE_COMMITTED_EVENT_BY_KIND = {
     "retry": "conversion_retry_committed",
     "initial": "conversion_authorize_initial_committed",
 }
+#
+# Version stance (same shape as task 2.2c's and _valid_attempt's below, at
+# its own authorization_kind widening): this new event pair is a
+# persisted-format extension, not a compatible widening.
+# It is a deliberate hard break *inside an unreleased change* -- there is no
+# migrator and no dual-write window, and SCHEMA_VERSION stays 2, because no
+# released version has ever written or read
+# conversion_authorize_initial_intent / conversion_authorize_initial_committed.
+# A bundle whose history is currently parked between one of these intents and
+# its matching committed event (a crash mid-write) can only be recovered by
+# the version of this module that knows this event pair -- an older reducer
+# would not recognize the event names and would fail closed rather than
+# silently misreading them. Once this change ships, adding a third event to
+# this vocabulary must bump SCHEMA_VERSION instead of extending these tables
+# in place.
 # The intent key set each kind carries: the shared shell plus exactly that
 # kind's evidence, minus `authorized_at` (which the intent already carries as
 # `at`) and `accepted_risk` (a constant of the retry shape, not evidence).
@@ -1119,17 +1144,29 @@ AUTHORIZE_INTENT_KEYS_BY_KIND = {
     "retry": RETRY_INTENT_KEYS,
     "initial": _AUTHORIZE_INTENT_BASE_KEYS | frozenset({"evidence_hash"}),
 }
-for _kind_table_name, _kind_table in (
-    ("AUTHORIZE_INTENT_EVENT_BY_KIND", AUTHORIZE_INTENT_EVENT_BY_KIND),
-    ("AUTHORIZE_COMMITTED_EVENT_BY_KIND", AUTHORIZE_COMMITTED_EVENT_BY_KIND),
-    ("AUTHORIZE_INTENT_KEYS_BY_KIND", AUTHORIZE_INTENT_KEYS_BY_KIND),
-):
-    if set(_kind_table) != AUTHORIZED_STATE_KINDS:
-        raise ValueError(
-            f"{_kind_table_name} must name exactly the authorization kinds "
-            f"{sorted(AUTHORIZED_STATE_KINDS)!r}"
-        )
-del _kind_table_name, _kind_table
+# Minor fix (2.3c round 1): run this check inside a function rather than as a
+# bare module-level `for` loop. A bare loop leaves its loop variables as
+# module attributes once it finishes, which the original version cleaned up
+# with a trailing `del _kind_table_name, _kind_table` -- a statement that
+# only holds together because the tuple it iterates is a fixed 3-element
+# literal above, and would raise NameError on either name if that literal
+# were ever emptied. A function has no such dependency: its locals are gone
+# the moment it returns, with nothing to `del` and nothing that can outlive
+# an empty iterable.
+def _check_authorize_kind_tables_are_complete() -> None:
+    for kind_table_name, kind_table in (
+        ("AUTHORIZE_INTENT_EVENT_BY_KIND", AUTHORIZE_INTENT_EVENT_BY_KIND),
+        ("AUTHORIZE_COMMITTED_EVENT_BY_KIND", AUTHORIZE_COMMITTED_EVENT_BY_KIND),
+        ("AUTHORIZE_INTENT_KEYS_BY_KIND", AUTHORIZE_INTENT_KEYS_BY_KIND),
+    ):
+        if set(kind_table) != AUTHORIZED_STATE_KINDS:
+            raise ValueError(
+                f"{kind_table_name} must name exactly the authorization kinds "
+                f"{sorted(AUTHORIZED_STATE_KINDS)!r}"
+            )
+
+
+_check_authorize_kind_tables_are_complete()
 
 _AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT = {
     AUTHORIZE_INTENT_EVENT_BY_KIND[kind]: AUTHORIZE_COMMITTED_EVENT_BY_KIND[kind]
@@ -3600,6 +3637,42 @@ def initial_authorization_is_recorded(manifest: dict) -> bool:
         and active.get("state") == "authorized"
         and active.get("authorization_kind") == "initial"
     )
+
+
+def active_attempt_is_authorized(manifest: dict) -> bool:
+    """Whether the active attempt is already an authorized placeholder --
+    of *any* kind -- that the next create will consume rather than append
+    past.
+
+    Review fix (2.3c round 1, Critical #1). `initial_authorization_is_
+    recorded` above answers a narrower question ("has the gate specifically
+    authorized attempt #1"), and workflow.py's recorded-credential gate used
+    to gate its reuse decision on that narrower predicate alone. A "retry"
+    placeholder -- left behind by `commit_retry_decision` after an operator
+    accepts a submission_unknown risk -- is just as much an already-
+    authorized, not-yet-submitted record as an "initial" one, but it read as
+    "not yet authorized" to the narrower check. The gate then tried to
+    author a *second* authorization on top of it, which
+    `_initial_authorization_state`'s `or attempts` guard correctly refuses
+    (the gate authorizes attempt #1 and only attempt #1) -- but a refusal
+    there is reported as `invalid_state_transition` /
+    `repair_or_restore_work_bundle`: a false corruption verdict against a
+    perfectly valid bundle that merely has nothing left to authorize.
+
+    This predicate reads the same two columns `_submit_state`
+    (conversion_attempt.py:2427, `attempts[-1].get("state") ==
+    "authorized"`) reads to decide whether the next create consumes a
+    placeholder in place rather than appending a new attempt -- the same
+    source, because both questions are the same question asked from two
+    sides: "is the active attempt a placeholder the next create will
+    consume?" A caller that finds this true has nothing to authorize and
+    nothing to write; it should report the bundle's current state as-is.
+    """
+    attempts = manifest.get("conversion_attempts")
+    if not isinstance(attempts, list) or not attempts:
+        return False
+    active = attempts[-1]
+    return isinstance(active, dict) and active.get("state") == "authorized"
 
 
 def _initial_authorization_state(
