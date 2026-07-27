@@ -86,6 +86,7 @@ def v2_parser() -> argparse.ArgumentParser:
     upload.add_argument("--content-type")
     upload.add_argument("--cache-control")
     upload.add_argument("--content-disposition")
+    upload.add_argument("--collision", choices=["replace", "unique", "reject"])
     upload.add_argument("--presign-expires", type=int)
     upload.add_argument("--reference-out")
     upload.add_argument("--json", action="store_true")
@@ -572,6 +573,7 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
             now=now,
             execution_mode=execution_mode,
             live_test_interlock=live_interlock,
+            collision_override=args.collision,
         )
         if args.dry_run:
             result = build_result(

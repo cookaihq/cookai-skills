@@ -111,7 +111,7 @@ def test_registry_rejects_duplicate_operations_for_one_contract():
         )
 
 
-def test_v2_baseline_enables_only_v1_put_and_presign_for_approved_contracts():
+def test_v2_baseline_enables_put_presign_and_preset_conditional_put():
     aws = contract_key()
     r2 = contract_key(
         provider="cloudflare-r2",
@@ -141,7 +141,22 @@ def test_v2_baseline_enables_only_v1_put_and_presign_for_approved_contracts():
         assert registry.lookup(key, "PresignGetObject") == Capability(
             "PresignGetObject", "enabled", evidence_prefix + "-presign"
         )
+        # The reviewed aws-s3 / cloudflare-r2 presets carry documented
+        # conditional-write support; an asserted custom contract has no such
+        # evidence and keeps ConditionalPutObject disabled.
+        preset = key is not custom
+        assert registry.lookup(key, "ConditionalPutObject") == (
+            Capability(
+                "ConditionalPutObject",
+                "enabled",
+                evidence_prefix + "-conditional-put",
+            )
+            if preset
+            else Capability("ConditionalPutObject", "disabled", "v2-baseline-disabled")
+        )
         for operation in BASELINE_DISABLED_OPERATIONS:
+            if preset and operation == "ConditionalPutObject":
+                continue
             assert registry.lookup(key, operation).state == "disabled"
 
 
@@ -227,8 +242,16 @@ def test_public_single_put_plan_does_not_require_presigning():
 
 @pytest.mark.parametrize("collision", ["unique", "reject"])
 def test_conditional_single_put_is_blocked_without_atomic_collision_evidence(collision):
-    key = contract_key()
-    registry = build_v2_baseline_registry(preset_contracts=(key,))
+    # An asserted custom contract has no documented conditional-write
+    # evidence, so its atomic collision policies stay blocked; the reviewed
+    # presets are covered by test_collision_reject.py.
+    key = contract_key(
+        provider="custom",
+        endpoint_family="exact-" + "6" * 64,
+        region_class="exact-" + "7" * 64,
+        addressing="path",
+    )
+    registry = build_v2_baseline_registry(asserted_custom_contracts=(key,))
 
     plan = plan_operation(
         OperationShape(

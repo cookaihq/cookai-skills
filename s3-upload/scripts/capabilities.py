@@ -309,16 +309,35 @@ def plan_operation(
     )
 
 
-def _baseline_capabilities(evidence_prefix: str) -> Tuple[Capability, ...]:
-    enabled = (
+def _baseline_capabilities(
+    evidence_prefix: str, *, conditional_put: bool = False
+) -> Tuple[Capability, ...]:
+    enabled = [
         Capability("PutObject", "enabled", evidence_prefix + "-put"),
         Capability("PresignGetObject", "enabled", evidence_prefix + "-presign"),
-    )
+    ]
+    if conditional_put:
+        # Atomic no-overwrite via `If-None-Match: *` on PutObject is official,
+        # documented behavior for both approved preset providers:
+        # - aws-s3: conditional writes (If-None-Match on PutObject, 412 on an
+        #   existing key) --
+        #   https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html
+        # - cloudflare-r2: PutObject conditional operations list If-None-Match
+        #   as implemented --
+        #   https://developers.cloudflare.com/r2/api/s3/api/
+        enabled.append(
+            Capability(
+                "ConditionalPutObject",
+                "enabled",
+                evidence_prefix + "-conditional-put",
+            )
+        )
     disabled = tuple(
         Capability(operation, "disabled", "v2-baseline-disabled")
         for operation in BASELINE_DISABLED_OPERATIONS
+        if not (conditional_put and operation == "ConditionalPutObject")
     )
-    return enabled + disabled
+    return tuple(enabled) + disabled
 
 
 def _preset_evidence_prefix(key: ContractKey) -> str:
@@ -367,7 +386,18 @@ def build_v2_baseline_registry(
 ) -> CapabilityRegistry:
     entries = []
     for key in preset_contracts:
-        entries.append((key, _baseline_capabilities(_preset_evidence_prefix(key))))
+        # Presets are only the reviewed aws-s3 / cloudflare-r2 public
+        # contracts (_preset_evidence_prefix rejects everything else), and
+        # both carry documented conditional-write support. Asserted custom
+        # contracts below get no such evidence and keep it disabled.
+        entries.append(
+            (
+                key,
+                _baseline_capabilities(
+                    _preset_evidence_prefix(key), conditional_put=True
+                ),
+            )
+        )
     for key in asserted_custom_contracts:
         _validate_asserted_custom(key)
         entries.append((key, _baseline_capabilities("v1-custom")))

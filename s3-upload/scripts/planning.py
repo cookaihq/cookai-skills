@@ -227,8 +227,15 @@ def build_upload_dry_run(*, resolved: ResolvedTarget, file_path: str,
                          project_root: str, config_home: str,
                          allow_insecure_http: bool, now: Optional[datetime] = None,
                          execution_mode: str = "normal",
-                         live_test_interlock: Optional[LiveTestInterlock] = None) -> UploadDryRun:
+                         live_test_interlock: Optional[LiveTestInterlock] = None,
+                         collision_override: Optional[str] = None) -> UploadDryRun:
     target = resolved.target
+    if collision_override is None:
+        collision = target.collision
+    elif collision_override in {"replace", "unique", "reject"}:
+        collision = collision_override
+    else:
+        raise PlanError("collision override must be replace, unique, or reject")
     source = _source(file_path, target.limits.soft_max_bytes)
     try:
         snapshot = source.snapshot
@@ -257,7 +264,7 @@ def build_upload_dry_run(*, resolved: ResolvedTarget, file_path: str,
                 operation="upload",
                 access_mode=target.access.mode,
                 upload_mode=upload_mode,
-                collision=target.collision,
+                collision=collision,
             ),
             contract_key=contract_key,
             registry=registry,
@@ -283,7 +290,7 @@ def build_upload_dry_run(*, resolved: ResolvedTarget, file_path: str,
                 "path": reference_snapshot.value["path"],
                 "state": reference_snapshot.value["final_snapshot"]["state"],
             }
-        if target.collision == "unique" and upload_mode == "single-put":
+        if collision == "unique" and upload_mode == "single-put":
             collision_attempts = target.retry.collision_max_attempts
         else:
             collision_attempts = 1
@@ -305,7 +312,7 @@ def build_upload_dry_run(*, resolved: ResolvedTarget, file_path: str,
             "remote_operations": list(capability_plan.remote_operations),
             "capabilities": [entry.as_dict() for entry in capability_plan.capabilities],
             "upload_mode": upload_mode,
-            "collision": {"policy": target.collision, "max_attempts": collision_attempts},
+            "collision": {"policy": collision, "max_attempts": collision_attempts},
             "headers": headers,
             "access": {
                 "mode": target.access.mode,

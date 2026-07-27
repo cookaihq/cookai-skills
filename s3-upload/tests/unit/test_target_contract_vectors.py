@@ -128,9 +128,10 @@ def test_contract_hash_matches_golden_vector():
     # independently specified) — pins CONTRACT_DOMAIN, CONTRACT_VERSION, the
     # digest algorithm, and the snapshot shape all at once, so any of those
     # silently changing fails loudly instead of only failing a relative
-    # (!=/==) comparison.
+    # (!=/==) comparison. Re-derived when the minimal caller contract enabled
+    # ConditionalPutObject in the aws-s3/cloudflare-r2 baseline presets.
     assert contract_hash(snapshot(target())) == (
-        "sha256:4b2831d0201e77b1004cad0761d9d9bb6646531042160c4b9b003fb81d1413c4"
+        "sha256:6ab3658d79e9867d0b853d6e8af89125b698fcd9e5e9d6e1fb315a4008b7fe25"
     )
 
 

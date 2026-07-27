@@ -14,7 +14,17 @@ CREATED_AT = "2026-07-26T00:00:00Z"
 
 
 def blocked_inputs(project):
-    write_target(project, collision="reject")
+    # An asserted custom contract carries no conditional-write evidence, so
+    # collision=reject still blocks there. (The aws-s3 preset used to be the
+    # blocked example until the minimal caller contract enabled
+    # ConditionalPutObject for the reviewed presets.)
+    write_target(
+        project,
+        collision="reject",
+        provider="custom",
+        endpoint="https://storage.internal.example",
+        addressing="path",
+    )
     resolved = resolve_target(
         cwd=str(project.root), config_home=str(project.home), environ={},
         cli_target=None, cli_caller=CALLER, use_local_key=False,
