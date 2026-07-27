@@ -13,10 +13,12 @@ echo "login to server success, get run id abc"
 sleep 60
 """
 
+# 真实 frp v0.70.1 在 token 错误时输出 [W] connect to server error: ... 并在重试窗口内保持存活
+# （E2E 实测；它从不打印 "login to server failed"）
 FAKE_FRPC_LOGIN_FAIL = """#!/bin/sh
 if [ "$1" = "verify" ]; then echo "syntax is ok"; exit 0; fi
-echo "login to server failed: token mismatch"
-exit 1
+echo "connect to server error: token in login doesn't match token from configuration"
+sleep 60
 """
 
 
@@ -58,8 +60,13 @@ def test_start_login_failure_not_reported_as_success(tmp_path):
     r = run_cli(home, cwd, "start", "--wait", "10")
     assert r.returncode == 1
     out = json.loads(r.stdout)
-    assert out["result"] in ("failed", "exited")
-    assert "login to server failed" in out["log_tail"]
+    assert out["result"] == "failed"
+    assert "connect to server error" in out["log_tail"]
+    # 启动失败后不留下孤儿进程（实现应清理已拉起的进程）
+    time.sleep(0.5)
+    with __import__("pytest").raises(ProcessLookupError):
+        os.kill(out["pid"], 0)
+    assert not (home / "run" / "official.pid").exists()
 
 
 def test_duplicate_start_protected(tmp_path):

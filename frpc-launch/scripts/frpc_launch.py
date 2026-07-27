@@ -780,10 +780,12 @@ def cmd_logs(args) -> int:
 # start：后台拉起、有界启动验证、重复保护、配置变更不静默替换
 # ---------------------------------------------------------------------------
 
+# 失败文案经 E2E 实测核对：frp v0.70.1 在 token 错误/服务端不可达时输出
+# "[W] connect to server error: ..." 并在重试窗口内保持存活，从不打印 "login to server failed"
 OFFICIAL_SUCCESS_MARKERS = ("login to server success",)
-OFFICIAL_FAILURE_MARKERS = ("login to server failed",)
+OFFICIAL_FAILURE_MARKERS = ("connect to server error:", "login to server failed")
 SAKURA_SUCCESS_MARKERS = ("login to server success", "start proxy success")
-SAKURA_FAILURE_MARKERS = ("login to server failed",)
+SAKURA_FAILURE_MARKERS = ("connect to server error:", "login to server failed")
 
 
 def spawn_daemon(argv: list, env: dict, log_path: Path) -> int:
@@ -897,6 +899,17 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
         result["exit_code"] = 0
     else:
         result["exit_code"] = 1
+        if state == "failed" and pid_alive(pid):
+            # 启动验证已判失败：清理刚拉起的进程，不留孤儿（该 pid 是本次 spawn 的，可安全终止）
+            import signal
+            import time as _time
+            os.kill(pid, signal.SIGTERM)
+            deadline = _time.monotonic() + 5
+            while pid_alive(pid) and _time.monotonic() < deadline:
+                _time.sleep(0.1)
+            if pid_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+            result["detail"] = "启动验证失败，已终止本次拉起的进程"
         if state == "timeout" and pid_alive(pid):
             write_pid_record(pid_file, {
                 "pid": pid, "exe": str(binary), "mode": mode,
