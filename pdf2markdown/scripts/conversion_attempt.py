@@ -982,12 +982,49 @@ POLL_ACTIVE_ATTEMPT_PAIRS = frozenset(
 # instantly invalidating every recoverable record (poll_transient,
 # task_unavailable, ...).
 #
-# The kind names are still the three `resolve_*` values; task 2.4 folds them
-# onto one authorize_new_conversion_attempt.
+# Task 2.4 (design.md Decision 5/9.3): the closed, workflow-facing action
+# vocabulary a conversion attempt or a raw_conversion record's pending_action
+# may carry. The four `resolve_*` kinds this replaces --
+# resolve_submission_unknown, resolve_task_failed,
+# resolve_unexpected_result_count (all three below) and
+# raw_conversion.py's resolve_unexpected_result_layout -- all asked the
+# operator for the exact same decision (authorize a new, separately charged
+# conversion attempt), so distinguishing them by kind name was spurious
+# detail, not real discrimination. Folding them here means
+# commit_retry_decision's old `pending.kind` comparison loses the (state,
+# reason) information it used to get for free from the kind name; that
+# information moves onto RETRY_AUTHORIZABLE_TRIPLES below, which
+# discriminates directly on (conversion_state, attempt state, reason)
+# instead.
+#
+# Disjoint from workflow.ERROR_PATH_ACTIONS by production mechanism, not by
+# value-clash avoidance -- workflow.py:57-66 spells out why the two tables
+# are allowed to share the action_required key without being each other's
+# complement. Some members (e.g. resume_pending_conversion_operation) have no
+# consumer yet; task 3.1 wires those up. This table only has to be closed and
+# disjoint from the error-path vocabulary now.
+CONVERSION_ACTIONS = frozenset(
+    {
+        "resume_pending_conversion_operation",
+        "restore_recorded_aihub_credential",
+        "resume_same_conversion_task",
+        "authorize_new_conversion_attempt",
+        "adopt_conversion_result",
+    }
+)
+
+# The single CONVERSION_ACTIONS member every confirmable pending_action now
+# carries. Named once so every producer -- CONFIRMABLE_PENDING_KINDS below,
+# the submission-result and poll-result writers further down, and
+# raw_conversion.py's layout-ambiguity writer -- reads the same value instead
+# of repeating the string literal.
+AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND = "authorize_new_conversion_attempt"
+assert AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND in CONVERSION_ACTIONS
+
 CONFIRMABLE_PENDING_KINDS = {
-    ("submission_unknown", "no_task_id"): "resolve_submission_unknown",
-    ("failed", "task_failed"): "resolve_task_failed",
-    ("failed", "unexpected_result_count"): "resolve_unexpected_result_count",
+    ("submission_unknown", "no_task_id"): AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
+    ("failed", "task_failed"): AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
+    ("failed", "unexpected_result_count"): AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
 }
 CONFIRMABLE_PAIRS = frozenset(CONFIRMABLE_PENDING_KINDS)
 
@@ -1703,10 +1740,55 @@ def _authorize_initial_capacity_candidates(
     }
 
 
+# Task 2.4/Decision 9.4: the local-state capacity admission operation shared
+# by commit_retry_decision's direct write and recover_interrupted_attempt's
+# retry-intent crash-recovery replay. Both write the same shape (one
+# placeholder attempt, one intent/committed event pair) -- see
+# _retry_decision_capacity_candidates.
+RETRY_DECISION_OPERATION = "retry_decision"
+
+
+def _retry_decision_capacity_candidates(
+    *,
+    manifest: dict,
+    private_state: dict,
+    history_bytes: int,
+    updated_manifest: dict,
+    updated_private: dict,
+    history_tail_bytes: int,
+) -> dict:
+    """Bytes a retry-decision write would add to each file.
+
+    Unlike create/poll admission, a retry decision is fully deterministic
+    given its inputs -- there is no unvalidated wire response to budget a
+    worst case for -- so this takes the already-built candidate documents
+    directly rather than rebuilding them from raw inputs the way
+    _authorize_initial_capacity_candidates does. `history_tail_bytes` is the
+    caller's own not-yet-durable-events sum: intent+committed for a fresh
+    commit_retry_decision call, or just the committed event for
+    recover_interrupted_attempt finishing an already-durable intent (whose
+    bytes `history_bytes` already counts) -- only the caller knows which half
+    of that pair is still ahead of it.
+    """
+    return {
+        "manifest_candidate_bytes": max(
+            canonical_state_byte_length(manifest),
+            canonical_state_byte_length(updated_manifest),
+        ),
+        "private_candidate_bytes": max(
+            canonical_state_byte_length(private_state),
+            canonical_state_byte_length(updated_private),
+        ),
+        "history_candidate_bytes": history_bytes + history_tail_bytes,
+    }
+
+
 def assert_local_state_capacity(
     *, operation: str, manifest: dict, private_state: dict, history_bytes: int,
     at: str, credential: dict | None = None, request: dict | None = None,
-    request_summary: dict | None = None, config_error_code: str | None = None
+    request_summary: dict | None = None, config_error_code: str | None = None,
+    updated_manifest: dict | None = None, updated_private: dict | None = None,
+    history_tail_bytes: int | None = None,
 ) -> None:
     """Fail closed before the first intent when local state cannot hold the
     operation's worst-case result.
@@ -1742,6 +1824,15 @@ def assert_local_state_capacity(
             history_bytes=history_bytes,
             config_error_code=config_error_code,
             at=at,
+        )
+    elif operation == RETRY_DECISION_OPERATION:
+        candidates = _retry_decision_capacity_candidates(
+            manifest=manifest,
+            private_state=private_state,
+            history_bytes=history_bytes,
+            updated_manifest=updated_manifest,
+            updated_private=updated_private,
+            history_tail_bytes=history_tail_bytes,
         )
     else:
         raise ConversionAttemptError(
@@ -2012,8 +2103,9 @@ def _valid_pending_action(value, *, attempt: dict, generation: int) -> bool:
         and set(value) == PENDING_ACTION_KEYS
         # Re-keyed by the fold: CONFIRMABLE_PENDING_KINDS replaces the local
         # `expected_kinds` dict that used to be keyed by flat state. `failed`
-        # alone would now name ten reasons, only one of which
-        # (`task_failed`) takes resolve_task_failed.
+        # alone would now name ten reasons, only two of which -- `task_failed`
+        # and `unexpected_result_count` -- take a pending action at all (task
+        # 2.4: both now take AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND).
         and value.get("kind")
         == CONFIRMABLE_PENDING_KINDS.get(
             (attempt.get("state"), attempt.get("reason"))
@@ -2718,7 +2810,7 @@ def _submission_result_state(
         manifest["settings_snapshot"]["interaction_mode"] == "confirm"
     ):
         completed["pending_action"] = {
-            "kind": "resolve_submission_unknown",
+            "kind": AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
             "action_id": f"conversion-decision-{secrets.token_hex(16)}",
             "generation": new_generation,
             "evidence_hash": object_hash(completed),
@@ -2997,6 +3089,45 @@ def recover_interrupted_attempt(
                 "integrity_violation",
                 "A pending conversion authorization is partially inconsistent.",
             )
+        committed_event = {
+            "schema_version": SCHEMA_VERSION,
+            "event": authorize_committed_event,
+            "operation_id": final["operation_id"],
+            "previous_generation": intent_expected,
+            "generation": intent_new,
+            "at": at,
+            "manifest_hash": object_hash(desired_manifest),
+            "private_hash": object_hash(desired_private),
+        }
+        # Task 2.4/Decision 9.4: this branch finishes either authorization
+        # kind (the initial credential gate or a retry decision), but only
+        # the retry kind has a capacity admission to enforce here --
+        # RETRY_DECISION_OPERATION's docstring explains why the initial kind
+        # is out of this task's scope. `final["attempt"]["authorization_kind"]`
+        # is the same discriminator _valid_attempt cross-checks the event name
+        # against (only commit_retry_decision's placeholder ever sets it to
+        # "retry"; the credential gate's placeholder leaves it at its default
+        # None), so no extra bookkeeping is needed to tell the two intents
+        # apart here. `history` already includes `final` (the durable intent)
+        # -- its bytes are already spent -- so only the not-yet-written
+        # committed event is sized on top, unlike commit_retry_decision's own
+        # admission, which still has both intent and committed ahead of it.
+        if (
+            isinstance(final.get("attempt"), dict)
+            and final["attempt"].get("authorization_kind") == "retry"
+        ):
+            assert_local_state_capacity(
+                operation=RETRY_DECISION_OPERATION,
+                manifest=manifest,
+                private_state=private_state,
+                history_bytes=sum(
+                    canonical_state_byte_length(event) for event in history
+                ),
+                updated_manifest=desired_manifest,
+                updated_private=desired_private,
+                history_tail_bytes=canonical_state_byte_length(committed_event),
+                at=at,
+            )
         if private_is_previous:
             bundle.atomic_write_json(
                 "private.json", desired_private, dir_fd=descriptors["state"]
@@ -3005,19 +3136,7 @@ def recover_interrupted_attempt(
             bundle.atomic_write_json(
                 "manifest.json", desired_manifest, dir_fd=descriptors["root"]
             )
-        bundle.append_history(
-            {
-                "schema_version": SCHEMA_VERSION,
-                "event": authorize_committed_event,
-                "operation_id": final["operation_id"],
-                "previous_generation": intent_expected,
-                "generation": intent_new,
-                "at": at,
-                "manifest_hash": object_hash(desired_manifest),
-                "private_hash": object_hash(desired_private),
-            },
-            state_fd=descriptors["state"],
-        )
+        bundle.append_history(committed_event, state_fd=descriptors["state"])
         return desired_manifest, desired_private
     if (
         isinstance(final, dict)
@@ -3468,9 +3587,16 @@ def _poll_transition(
         updated_attempt["result_url_sha256"] = None
         updated_attempt["result_observed_at"] = None
         updated_attempt["result_validity_hours"] = None
+    # Task 2.4: both wire states below folded onto the same
+    # AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND, so the dict's values are read off
+    # CONFIRMABLE_PENDING_KINDS rather than repeating the literal a second
+    # time; `.get(result.state)` still returns None for every other wire
+    # state, unchanged.
     pending_action_kind = {
-        "failed": "resolve_task_failed",
-        "unexpected_result_count": "resolve_unexpected_result_count",
+        "failed": CONFIRMABLE_PENDING_KINDS[("failed", "task_failed")],
+        "unexpected_result_count": CONFIRMABLE_PENDING_KINDS[
+            ("failed", "unexpected_result_count")
+        ],
     }.get(result.state)
     if pending_action_kind is not None and (
         manifest["settings_snapshot"]["interaction_mode"] == "confirm"
@@ -3843,6 +3969,39 @@ def authorize_initial_attempt(
     return state["updated_manifest"]
 
 
+# Task 2.4 (design.md Decision 5): commit_retry_decision's discriminator,
+# re-keyed off (conversion_state, active attempt state, active attempt
+# reason) now that every CONFIRMABLE_PENDING_KINDS/raw_conversion.py kind
+# folds onto the single AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND and can no
+# longer tell the four originating cases apart. Each row below is the
+# pre-fold triple with its old third element (a `resolve_*` kind) replaced by
+# the active record's own `reason` column -- the same rename
+# CONFIRMABLE_PENDING_KINDS' keys already carry, just with `conversion_state`
+# restored as the first element since commit_retry_decision (unlike
+# CONFIRMABLE_PENDING_KINDS) also has to pin the top-level manifest state.
+#
+# Known and accepted loss of discriminating granularity: the last row,
+# ("terminal_error", "result_ready", None), is shared by two distinct
+# originating cases -- a conversion attempt's own resolve_unexpected_result_count
+# never reaches "result_ready" (it stores onto "failed"), so this row is hit
+# only by raw_conversion.py's resolve_unexpected_result_layout (raw layout
+# ambiguity) and by task 3.1's result_url_not_renewed. Do not split this row:
+# both cases legitimately want the identical response (authorize a new,
+# separately charged attempt), and pending_action.evidence_hash -- computed
+# over the whole attempt with pending_action itself cleared -- already
+# uniquely binds a decision to the exact (state, reason) record it was issued
+# for, without needing kind's help. Splitting the row would only resurrect
+# the very discrimination this fold intentionally retired.
+RETRY_AUTHORIZABLE_TRIPLES = frozenset(
+    {
+        ("submission_unknown", "submission_unknown", "no_task_id"),
+        ("awaiting_user", "failed", "task_failed"),
+        ("terminal_error", "failed", "unexpected_result_count"),
+        ("terminal_error", "result_ready", None),
+    }
+)
+
+
 def commit_retry_decision(
     *,
     descriptors: dict,
@@ -3863,36 +4022,17 @@ def commit_retry_decision(
     )
     pending = attempt_pending if isinstance(attempt_pending, dict) else raw_pending
     if (
-        # Re-keyed by the fold: the middle element is the attempt's stored
-        # state, so `unexpected_result_count` became `failed`. Left alone the
-        # tuple could never match again and `record conversion` would reject
-        # every unexpected_result_count decision. The kind still separates the
-        # two terminal_error/failed rows (unsafe_result_url carries no pending
-        # action at all); design.md Decision 5 moves that discrimination onto
-        # the reason in task 2.4.
+        # Task 2.4: re-keyed off RETRY_AUTHORIZABLE_TRIPLES -- see its
+        # docstring for why the third element is now the active record's
+        # `reason` instead of the pending action's `kind`, which lost its
+        # discriminating power when every kind folded onto
+        # AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND.
         (
             manifest.get("conversion_state"),
             active.get("state") if isinstance(active, dict) else None,
-            pending.get("kind") if isinstance(pending, dict) else None,
+            active.get("reason") if isinstance(active, dict) else None,
         )
-        not in {
-            (
-                "submission_unknown",
-                "submission_unknown",
-                "resolve_submission_unknown",
-            ),
-            ("awaiting_user", "failed", "resolve_task_failed"),
-            (
-                "terminal_error",
-                "failed",
-                "resolve_unexpected_result_count",
-            ),
-            (
-                "terminal_error",
-                "result_ready",
-                "resolve_unexpected_result_layout",
-            ),
-        }
+        not in RETRY_AUTHORIZABLE_TRIPLES
         or manifest.get("generation") != expected_generation
         or private_state.get("generation") != expected_generation
         or manifest.get("settings_snapshot", {}).get("interaction_mode") != "confirm"
@@ -3975,6 +4115,34 @@ def commit_retry_decision(
         "previous_manifest_hash": object_hash(manifest),
         "previous_private_hash": object_hash(private_state),
     }
+    committed = {
+        "schema_version": SCHEMA_VERSION,
+        "event": AUTHORIZE_COMMITTED_EVENT_BY_KIND["retry"],
+        "operation_id": operation_id,
+        "previous_generation": expected_generation,
+        "generation": new_generation,
+        "at": at,
+        "manifest_hash": object_hash(updated_manifest),
+        "private_hash": object_hash(updated_private),
+    }
+    # Decision 9.4: this write must pass the same local-state capacity
+    # admission every other conversion write does, before its first history
+    # append and before a single byte of the bundle changes.
+    assert_local_state_capacity(
+        operation=RETRY_DECISION_OPERATION,
+        manifest=manifest,
+        private_state=private_state,
+        history_bytes=sum(
+            canonical_state_byte_length(event)
+            for event in bundle.read_history(state_fd=descriptors["state"])
+        ),
+        updated_manifest=updated_manifest,
+        updated_private=updated_private,
+        history_tail_bytes=(
+            canonical_state_byte_length(intent) + canonical_state_byte_length(committed)
+        ),
+        at=at,
+    )
     bundle.append_history(intent, state_fd=descriptors["state"])
     bundle.atomic_write_json(
         "private.json", updated_private, dir_fd=descriptors["state"]
@@ -3982,19 +4150,7 @@ def commit_retry_decision(
     bundle.atomic_write_json(
         "manifest.json", updated_manifest, dir_fd=descriptors["root"]
     )
-    bundle.append_history(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "event": AUTHORIZE_COMMITTED_EVENT_BY_KIND["retry"],
-            "operation_id": operation_id,
-            "previous_generation": expected_generation,
-            "generation": new_generation,
-            "at": at,
-            "manifest_hash": object_hash(updated_manifest),
-            "private_hash": object_hash(updated_private),
-        },
-        state_fd=descriptors["state"],
-    )
+    bundle.append_history(committed, state_fd=descriptors["state"])
     return updated_manifest
 
 

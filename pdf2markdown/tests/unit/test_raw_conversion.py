@@ -1578,7 +1578,7 @@ def test_confirmed_layout_retry_preserves_two_independent_raw_attempts(
     )
     assert first_rc == 0
     assert layout_error["outcome"] == "unexpected_result_layout"
-    assert layout_error["action_required"] == "resolve_unexpected_result_layout"
+    assert layout_error["action_required"] == "authorize_new_conversion_attempt"
 
     decision_rc, authorized, _stderr = invoke(
         capsys,
@@ -1765,7 +1765,7 @@ def test_layout_retry_action_rebinds_across_settings_override(
 
     assert override_rc == 0, overridden
     assert overridden["outcome"] == "settings_overridden"
-    assert overridden["action_required"] == "resolve_unexpected_result_layout"
+    assert overridden["action_required"] == "authorize_new_conversion_attempt"
     assert overridden["action_id"] == layout_error["action_id"]
     decision_rc, authorized, _stderr = invoke(
         capsys,

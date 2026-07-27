@@ -251,7 +251,10 @@ def _prepared_record(intent: dict, prepared: result_archive.PreparedArchive) -> 
         and intent["interaction_mode"] == "confirm"
     ):
         record["pending_action"] = {
-            "kind": "resolve_unexpected_result_layout",
+            # Task 2.4: folded onto the same kind every conversion attempt's
+            # confirmable pending action carries -- see
+            # conversion_attempt.CONVERSION_ACTIONS' docstring for why.
+            "kind": conversion_attempt.AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
             "action_id": f"conversion-decision-{secrets.token_hex(16)}",
             "generation": intent["new_generation"],
             "evidence_hash": object_hash(record),
@@ -420,7 +423,7 @@ def apply_settings_override_transition(previous: dict, updated: dict) -> dict:
                 f"settings-override:{transitioned['generation']}:{evidence_hash}"
             ).encode("ascii")
             record["pending_action"] = {
-                "kind": "resolve_unexpected_result_layout",
+                "kind": conversion_attempt.AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
                 "action_id": "conversion-decision-"
                 + hashlib.sha256(material).hexdigest()[:32],
                 "generation": transitioned["generation"],
@@ -1461,7 +1464,8 @@ def _valid_record(record: dict, intent: dict) -> bool:
         else isinstance(pending, dict)
         and set(pending)
         == {"kind", "action_id", "generation", "evidence_hash"}
-        and pending.get("kind") == "resolve_unexpected_result_layout"
+        and pending.get("kind")
+        == conversion_attempt.AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND
         and isinstance(pending.get("action_id"), str)
         and re.fullmatch(r"conversion-decision-[0-9a-f]{32}", pending["action_id"])
         is not None

@@ -405,7 +405,7 @@ def test_a_create_response_without_a_safe_id_is_unknown_and_resume_never_replays
     assert unknown["outcome"] == "submission_unknown"
     assert unknown["conversion_state"] == "submission_unknown"
     assert unknown["conversion_attempt_state"] == "submission_unknown"
-    assert unknown["action_required"] == "resolve_submission_unknown"
+    assert unknown["action_required"] == "authorize_new_conversion_attempt"
     assert unknown["action_id"]
     assert unknown["evidence_hash"].startswith("sha256:")
     assert create.calls == 1
@@ -1544,7 +1544,7 @@ def test_a_process_crash_after_create_recovers_unknown_and_two_resumes_do_not_re
     )
     assert recovered_rc == 0
     assert recovered["conversion_state"] == "submission_unknown"
-    assert recovered["action_required"] == "resolve_submission_unknown"
+    assert recovered["action_required"] == "authorize_new_conversion_attempt"
 
     second_rc, second, _stderr = invoke(
         capsys,
@@ -1616,7 +1616,7 @@ def test_a_crash_after_submit_intent_recovers_unknown_without_ever_sending_creat
 
     assert recovered_rc == 0
     assert recovered["conversion_state"] == "submission_unknown"
-    assert recovered["action_required"] == "resolve_submission_unknown"
+    assert recovered["action_required"] == "authorize_new_conversion_attempt"
     manifest = json.loads((bundle / "manifest.json").read_text())
     # schema v2 (task 2.1b): the folded `reason` is single-valued per state,
     # and the branch the wire actually took survives in `reason_detail`.
@@ -2316,7 +2316,7 @@ def test_completed_task_with_unsafe_or_ambiguous_results_stops_without_guessing(
         "conversion_attempts"
     ][-1]["reason"] == expected_state
     assert stopped["action_required"] == (
-        "resolve_unexpected_result_count"
+        "authorize_new_conversion_attempt"
         if expected_state == "unexpected_result_count"
         else None
     )
@@ -2520,7 +2520,7 @@ def test_failed_task_stops_with_a_bound_confirm_action_and_never_recreates_itsel
     assert failed["outcome"] == "task_failed"
     assert failed["conversion_state"] == "awaiting_user"
     assert failed["conversion_attempt_state"] == "failed"
-    assert failed["action_required"] == "resolve_task_failed"
+    assert failed["action_required"] == "authorize_new_conversion_attempt"
     assert failed["action_id"]
     public_state = (
         json.dumps(failed)
@@ -3690,7 +3690,7 @@ def test_layout_retry_journal_recovers_inside_a_raw_bearing_bundle(
     )
     assert layout_rc == 0, json.dumps(layout_error, sort_keys=True)
     assert layout_error["outcome"] == "unexpected_result_layout"
-    assert layout_error["action_required"] == "resolve_unexpected_result_layout"
+    assert layout_error["action_required"] == "authorize_new_conversion_attempt"
 
     argv = [
         "record",
@@ -6518,6 +6518,14 @@ def test_poll_admission_is_keyed_by_state_and_reason_not_state_alone():
 # FLAT_STATE_OBSERVABLES above is deliberately left untouched: it is task
 # 1.3's pre-fold baseline snapshot and the only material that can show the
 # fold lost nothing. Do not update its cells.
+#
+# Task 2.4 update: the three rows below whose action_required cell used to be
+# a distinct resolve_* name (submission_unknown, unexpected_result_count,
+# failed) now carry "authorize_new_conversion_attempt" -- the kind fold
+# test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else's
+# docstring used to defer to "not in this step". These three cells are the
+# only edit task 2.4 makes to this table; every other cell is still the
+# task-2.1c-era snapshot.
 FOLDED_STATE_OBSERVABLES = {
     "not_started": (
         "ready_to_submit", "authorized", "conversion_retry_authorized", None
@@ -6526,7 +6534,7 @@ FOLDED_STATE_OBSERVABLES = {
     "submitted": ("submitted", "submitted", "conversion_submitted", None),
     "submission_unknown": (
         "submission_unknown", "submission_unknown", "submission_unknown",
-        "resolve_submission_unknown",
+        "authorize_new_conversion_attempt",
     ),
     "pending": ("submitted", "processing", "conversion_pending", None),
     "processing": ("submitted", "processing", "conversion_processing", None),
@@ -6535,9 +6543,12 @@ FOLDED_STATE_OBSERVABLES = {
     "unsafe_result_url": ("terminal_error", "failed", "unsafe_result_url", None),
     "unexpected_result_count": (
         "terminal_error", "failed", "unexpected_result_count",
-        "resolve_unexpected_result_count",
+        "authorize_new_conversion_attempt",
     ),
-    "failed": ("awaiting_user", "failed", "task_failed", "resolve_task_failed"),
+    "failed": (
+        "awaiting_user", "failed", "task_failed",
+        "authorize_new_conversion_attempt",
+    ),
     "poll_transient": ("recoverable_error", "failed", "poll_transient", None),
     "poll_unauthorized": (
         "recoverable_error", "failed", "poll_unauthorized", None
@@ -6581,6 +6592,20 @@ def test_folded_state_observable_projection_is_pinned(tmp_path, flat_state):
 # other three cells are NOT discounted and are compared like every other row.
 _COMMAND_DERIVED_OUTCOME_ROWS = frozenset({"not_started", "submitting"})
 
+# Task 2.4 (等强翻译, equal-strength rewrite of the pre-2.4 unconditional
+# `after[3] == before[3]` assertion below): the three rows whose pre-fold
+# action_required cell was a distinct resolve_* name -- resolve_submission_unknown,
+# resolve_task_failed, resolve_unexpected_result_count -- and whose post-fold
+# cell is now the single authorize_new_conversion_attempt value. This is not a
+# weakening: the assertion below still requires every OTHER row's cell to
+# stay byte-identical, and additionally requires these three rows' post-fold
+# cell to equal the new folded value exactly (not merely "differ from
+# before"), so a row that silently reverted to its old resolve_* name, or
+# drifted to some other string, would still fail it.
+_ACTION_REQUIRED_FOLDED_ROWS = frozenset(
+    {"submission_unknown", "unexpected_result_count", "failed"}
+)
+
 
 def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
     """折叠无损性的正面证明。
@@ -6595,7 +6620,10 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
       - 第 1 格 conversion_attempt_state：折叠前必须是扁平值本身，折叠后必须
         恰好是迁移表第一列——这是唯一允许移动的一格；
       - 第 2 格 outcome：必须相等（两行命令派生的除外，见上方注释）；
-      - 第 3 格 action_required：必须相等（kind 折叠是任务 2.4，不在本步）。
+      - 第 3 格 action_required：任务 2.4 落地后，_ACTION_REQUIRED_FOLDED_ROWS
+        三行必须从各自的旧 resolve_* 名字精确变为
+        "authorize_new_conversion_attempt"；其余所有行仍必须与折叠前逐字节
+        相等（kind 折叠只碰这三行，一行不多一行不少）。
 
     两张表都是独立字面量，迁移表是生产代码，所以本断言不会退化成同义反复。
     """
@@ -6604,6 +6632,7 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
     assert set(FOLDED_STATE_OBSERVABLES) == set(FLAT_STATE_OBSERVABLES)
     assert set(FLAT_STATE_OBSERVABLES) == set(ca.FLAT_STATE_MIGRATION)
     moved = set()
+    action_required_folded = set()
     for flat in sorted(FLAT_STATE_OBSERVABLES):
         before = FLAT_STATE_OBSERVABLES[flat]
         after = FOLDED_STATE_OBSERVABLES[flat]
@@ -6614,15 +6643,24 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
         assert after[0] == folded_conversion_state, flat
         assert before[1] == flat, flat
         assert after[1] == folded_state, flat
-        assert after[3] == before[3], flat
+        if flat in _ACTION_REQUIRED_FOLDED_ROWS:
+            assert after[3] == "authorize_new_conversion_attempt", flat
+            assert after[3] != before[3], flat
+        else:
+            assert after[3] == before[3], flat
         if flat not in _COMMAND_DERIVED_OUTCOME_ROWS:
             assert after[2] == before[2], flat
+        if after[3] != before[3]:
+            action_required_folded.add(flat)
         if after[1] != before[1]:
             moved.add(flat)
     # 折叠确实发生了：18 个扁平值里有 12 个的 attempt state 变了名字。少了
     # 说明折叠没落地，多了说明迁移表被改动过。
     assert len(moved) == 12
     assert len({FOLDED_STATE_OBSERVABLES[f][1] for f in FLAT_STATE_OBSERVABLES}) == 7
+    # 任务 2.4 的 kind 折叠确实发生了，且**恰好**是这三行：不多不少，
+    # 与 _ACTION_REQUIRED_FOLDED_ROWS 精确相等（不是子集）。
+    assert action_required_folded == _ACTION_REQUIRED_FOLDED_ROWS
 
 
 # --- Task 2.1d: unconditional round accounting behind a disabled ceiling ---
@@ -6816,3 +6854,355 @@ def test_result_refresh_round_count_is_unchanged_when_the_same_result_url_is_red
     assert renewed["outcome"] == "result_ready"
     attempt = read_manifest(bundle)["conversion_attempts"][-1]
     assert attempt["result_refresh_round_count"] == 1
+
+
+# --- Task 2.4: close the conversion action vocabulary and re-key retry
+# discrimination onto (conversion_state, attempt state, reason) ------------
+
+
+def test_conversion_action_vocabulary_is_closed_and_disjoint_from_error_path():
+    import conversion_attempt as ca
+    import workflow
+
+    assert ca.CONVERSION_ACTIONS == {
+        "resume_pending_conversion_operation",
+        "restore_recorded_aihub_credential",
+        "resume_same_conversion_task",
+        "authorize_new_conversion_attempt",
+        "adopt_conversion_result",
+    }
+    assert not (ca.CONVERSION_ACTIONS & workflow.ERROR_PATH_ACTIONS)
+
+
+@pytest.mark.parametrize(
+    ("drive", "expected_reason"),
+    [
+        ("no_task_id", "no_task_id"),
+        ("task_failed", "task_failed"),
+        ("unexpected_result_count", "unexpected_result_count"),
+    ],
+)
+def test_every_attempt_pending_action_uses_the_single_authorize_kind(
+    tmp_path, capsys, monkeypatch, drive, expected_reason
+):
+    """Task 2.4: the three resolve_* kinds a confirm-mode attempt used to
+    write -- resolve_submission_unknown, resolve_task_failed,
+    resolve_unexpected_result_count -- collapse onto one
+    authorize_new_conversion_attempt. All three real drive paths (a create
+    response with no safe task id, a failed poll, and a poll answering with
+    more than one result) must leave that single kind on the record, not the
+    per-reason name the pre-2.4 producer wrote.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+    if drive == "no_task_id":
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=StatusCreate(401),
+        )
+    else:
+        task_id = f"task-{drive}"
+        _create_rc, submitted, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=SuccessfulCreate(task_id),
+        )
+        if drive == "task_failed":
+            poll = PollStatus(task_id, "failed", error={"message": "boom"})
+        else:
+            poll = PollStatus(
+                task_id,
+                "completed",
+                results=[
+                    {"url": "https://results.aihubmax.com/a.zip?token=one"},
+                    {"url": "https://results.aihubmax.com/b.zip?token=two"},
+                ],
+            )
+        rc, result, _stderr = invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(submitted["generation"]),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=poll,
+        )
+    assert rc == 0, json.dumps(result, sort_keys=True)
+    assert result["action_required"] == "authorize_new_conversion_attempt"
+    manifest = read_manifest(bundle)
+    attempt = manifest["conversion_attempts"][-1]
+    assert attempt["reason"] == expected_reason
+    assert attempt["pending_action"]["kind"] == "authorize_new_conversion_attempt"
+
+
+def test_retry_decision_discriminates_by_state_and_reason_not_by_kind():
+    import conversion_attempt as ca
+
+    assert ca.RETRY_AUTHORIZABLE_TRIPLES == {
+        ("submission_unknown", "submission_unknown", "no_task_id"),
+        ("awaiting_user", "failed", "task_failed"),
+        ("terminal_error", "failed", "unexpected_result_count"),
+        ("terminal_error", "result_ready", None),
+    }
+
+
+def test_a_retry_decision_for_the_wrong_state_is_still_rejected(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.4: pending_action.kind lost its discriminating power once every
+    resolve_* kind folded onto authorize_new_conversion_attempt. A retry
+    decision that quotes a *different* bundle's action_id/evidence_hash must
+    still be rejected -- the (conversion_state, attempt state, reason) triple
+    and the evidence_hash are the two locks left doing that job.
+    """
+    tmp_path_a = tmp_path / "bundle-a"
+    tmp_path_a.mkdir()
+    bundle_a, staged_a, dependencies_a, key_a, _source_url_a, _source_sha256_a = (
+        ready_staged_bundle(tmp_path_a, capsys, monkeypatch)
+    )
+    environ_a = {**dependencies_a, "AIHUB_API_KEY": key_a}
+    _create_rc, submitted_a, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle_a),
+            "--expected-generation",
+            str(staged_a["generation"]),
+        ],
+        cwd=tmp_path_a,
+        environ=environ_a,
+        transport=SuccessfulCreate("task-wrong-state-a"),
+    )
+    _poll_rc, failed_a, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle_a),
+            "--expected-generation",
+            str(submitted_a["generation"]),
+        ],
+        cwd=tmp_path_a,
+        environ=environ_a,
+        transport=PollStatus("task-wrong-state-a", "failed", error={"message": "boom"}),
+    )
+    assert failed_a["action_required"] == "authorize_new_conversion_attempt"
+
+    tmp_path_b = tmp_path / "bundle-b"
+    tmp_path_b.mkdir()
+    bundle_b, staged_b, dependencies_b, key_b, _source_url_b, _source_sha256_b = (
+        ready_staged_bundle(tmp_path_b, capsys, monkeypatch)
+    )
+    _rc_b, unknown_b, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle_b),
+            "--expected-generation",
+            str(staged_b["generation"]),
+        ],
+        cwd=tmp_path_b,
+        environ={**dependencies_b, "AIHUB_API_KEY": key_b},
+        transport=StatusCreate(401),
+    )
+    assert unknown_b["action_required"] == "authorize_new_conversion_attempt"
+
+    rc, mismatched, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle_a),
+            "--expected-generation",
+            str(failed_a["generation"]),
+            "--action-id",
+            unknown_b["action_id"],
+            "--evidence-hash",
+            unknown_b["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "Cross-bundle decision must not be accepted.",
+        ],
+        cwd=tmp_path_a,
+        environ=dependencies_a,
+        transport=NeverNetwork(),
+    )
+    assert rc != 0, json.dumps(mismatched, sort_keys=True)
+    assert mismatched["errors"][0]["code"] == "conversion_action_mismatch"
+
+
+def test_the_retry_decision_write_is_capacity_admitted(
+    tmp_path, capsys, monkeypatch
+):
+    """Decision 9.4: commit_retry_decision's write must pass the same
+    local-state capacity admission every other conversion write does, before
+    its first history append.
+    """
+    import conversion_attempt as ca
+
+    assert isinstance(ca.RETRY_DECISION_OPERATION, str) and ca.RETRY_DECISION_OPERATION
+
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+    _rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=StatusCreate(401),
+    )
+    assert unknown["action_required"] == "authorize_new_conversion_attempt"
+
+    before = _bundle_state_snapshot(bundle)
+    monkeypatch.setattr(conversion_attempt, "MAX_MANIFEST_CANDIDATE_BYTES", 1)
+    never = CountingNeverNetwork()
+
+    rc, result, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unknown["generation"]),
+            "--action-id",
+            unknown["action_id"],
+            "--evidence-hash",
+            unknown["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "I accept the possible duplicate conversion charge.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=never,
+    )
+
+    assert rc != 0, json.dumps(result, sort_keys=True)
+    assert [error["code"] for error in result["errors"]] == [
+        "local_state_capacity_exhausted"
+    ]
+    assert never.calls == []
+    assert _bundle_state_snapshot(bundle) == before
+
+
+def test_the_retry_decision_recovery_write_is_capacity_admitted(
+    tmp_path, capsys, monkeypatch
+):
+    """Decision 9.4's second new admission point: a crash that leaves a
+    durable conversion_retry_intent event with no committed pair finishes on
+    the next command through recover_interrupted_attempt's authorize-intent
+    branch, which writes private.json/manifest.json/the committed event just
+    like commit_retry_decision's own direct write -- and must refuse the
+    same way when local state is full, not just on the direct path.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+    _create_rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=StatusCreate(500),
+    )
+    argv = [
+        "record",
+        "conversion",
+        "--work-bundle",
+        str(bundle),
+        "--expected-generation",
+        str(unknown["generation"]),
+        "--action-id",
+        unknown["action_id"],
+        "--evidence-hash",
+        unknown["evidence_hash"],
+        "--decision",
+        "retry",
+        "--basis",
+        "I accept the possible duplicate conversion charge.",
+    ]
+    original_atomic_write, original_append_history = _install_conversion_journal_crash(
+        monkeypatch,
+        event="conversion_retry_committed",
+        boundary="private",
+    )
+    with pytest.raises(SimulatedProcessCrash):
+        workflow.main(
+            argv,
+            environ=dependencies,
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=NeverNetwork(),
+            now=NOW,
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+    )
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "append_history", original_append_history
+    )
+
+    before = _bundle_state_snapshot(bundle)
+    monkeypatch.setattr(conversion_attempt, "MAX_MANIFEST_CANDIDATE_BYTES", 1)
+    never = CountingNeverNetwork()
+
+    rc, result, _stderr = invoke(
+        capsys,
+        argv,
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=never,
+    )
+
+    assert rc != 0, json.dumps(result, sort_keys=True)
+    assert [error["code"] for error in result["errors"]] == [
+        "local_state_capacity_exhausted"
+    ]
+    assert never.calls == []
+    assert _bundle_state_snapshot(bundle) == before
