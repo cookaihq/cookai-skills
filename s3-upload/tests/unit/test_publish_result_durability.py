@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 
@@ -319,8 +320,10 @@ def test_an_internal_failure_after_the_request_is_reported_as_in_flight(
     assert open(project.result_out, "rb").read() == serialize_artifact(outcome.result)
     assert os.path.exists(project.recovery_out)
     assert operation_record(project, issued.plan_id) is not None
-    # The reported checkpoint is the one the checkpoint directory still holds,
-    # not merely the handle this process happens to be carrying.
+    # The reported checkpoint is the one the checkpoint directory still holds.
+    # publish reports the id it is carrying unless a stat proves the directory
+    # let go of it, so this pins the two against each other rather than merely
+    # observing that the process handed back the handle it was carrying.
     assert outcome.checkpoint_id is not None
     assert checkpoints_on_disk(project) == [outcome.checkpoint_id]
 
@@ -584,6 +587,69 @@ def test_a_failure_before_the_notice_strands_the_checkpoint_it_reports_as_absent
     assert operation_record(project, issued.plan_id) is None
     assert not os.path.exists(project.recovery_out)
     assert not os.path.exists(project.result_out)
+
+
+def fail_fstat_on(path, monkeypatch, *, limit=1):
+    """Fail os.fstat for one specific file, whichever descriptor reaches it.
+
+    handoff_io converts only the os.open of a handoff destination into a
+    HandoffError. The fstat that follows it -- the one that decides whether
+    the thing just opened is still a regular, single-linked, 0600 file -- is a
+    bare OSError, and this is how a read-back is made to fail after the file
+    has been opened.
+    """
+    info = os.stat(path)
+    identity = (info.st_dev, info.st_ino)
+    real = os.fstat
+    injected = []
+
+    def failing(fd):
+        current = real(fd)
+        if len(injected) < limit and (current.st_dev, current.st_ino) == identity:
+            injected.append(fd)
+            raise OSError(errno.EIO, "injected fstat failure")
+        return current
+
+    monkeypatch.setattr(os, "fstat", failing)
+    return injected
+
+
+def test_a_failed_read_back_never_escapes_over_an_answer_already_written(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    """A read-back that fails must not take the publish with it.
+
+    The descriptor read at the end of emit runs after the object may already
+    be on the remote and after result_out has been written. An OSError from it
+    -- an fstat or a read failing on the open descriptor, neither of which
+    handoff_io converts -- would escape publish as a traceback, so the caller
+    would be handed an exception instead of the in_flight_unknown that is
+    sitting on disk, and would have no way to learn a request had been sent.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    raw = Recorder(status=503)
+    state = {}
+
+    def wound(name):
+        if name == "after_recovery_fsync" and "injected" not in state:
+            state["injected"] = fail_fstat_on(project.recovery_out, monkeypatch)
+
+    outcome = run(project, resolved, store, issued.token, raw, on_boundary=wound)
+    body = body_of(outcome.result)
+    assert state["injected"]
+    assert len(raw.calls) == 1
+    assert outcome.transport_calls == 1
+    assert body["recovery_state"] == "in_flight_unknown"
+    assert body["allowed_actions"] == ["inspect", "reconcile"]
+    assert os.path.exists(project.result_out)
+    assert durable(project.result_out, "s3-upload.result") == body
+    # Reported as absent, never reconstructed: the descriptor is on disk and
+    # this process is holding bytes that would parse, but a read that failed
+    # has established nothing about what the destination now holds.
+    assert outcome.recovery is None
+    assert durable(project.recovery_out, "s3-upload.recovery-descriptor")[
+        "plan_id"
+    ] == issued.plan_id
 
 
 def test_an_unreadable_operation_record_keeps_the_checkpoint_it_could_not_clear(

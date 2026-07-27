@@ -1,7 +1,9 @@
 import errno
 import json
 import os
+import signal
 import stat
+from contextlib import contextmanager
 
 import pytest
 
@@ -41,6 +43,36 @@ def issue_plan(project, dry_run, snapshot, digest):
 
 class HardCrash(BaseException):
     pass
+
+
+class Wedged(BaseException):
+    """Raised out of a blocked syscall by the deadline below.
+
+    A BaseException so publish's own ``except Exception`` cannot swallow the
+    timeout and turn a wedged run into a structured result.
+    """
+
+
+@contextmanager
+def deadline(seconds):
+    """Bound a call that must not be able to block forever.
+
+    A publish that opens a handoff destination without O_NONBLOCK blocks in
+    os.open until a writer shows up on the FIFO, which never happens: no
+    assertion fails, the test never returns, and the whole suite stops. SIGALRM
+    interrupts the syscall and the handler raises, so the wedge surfaces as a
+    named failure in this test instead of a job that has to be killed.
+    """
+    def expire(signum, frame):
+        raise Wedged("the call did not return within %.1fs" % seconds)
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def operation_record_path(project, plan_id):
@@ -706,6 +738,54 @@ def test_a_failed_checkpoint_drop_reports_the_checkpoint_it_left_behind(
     assert reported[0] != reported[1]
 
 
+def test_a_checkpoint_the_directory_will_not_show_is_still_reported(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    """Only proven absence may drop a checkpoint id.
+
+    A checkpoint directory that has drifted off 0700 is one CheckpointStore
+    refuses to touch, so the checkpoint this call created is stranded there
+    and nothing will collect it. The publish reports the id it is carrying
+    unless a stat proves the directory let go of it, and here the stat is
+    refused rather than answered: a mode with no traversal bit fails every
+    lookup inside with EACCES. Answering None on that would tell the caller a
+    stranded checkpoint is gone.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    checkpoints = project.state_root / "checkpoints"
+    out_mode = stat.S_IMODE(os.stat(project.out).st_mode)
+
+    def wound(name):
+        if name == "checkpoint_durable":
+            os.chmod(project.out, 0o500)
+            os.chmod(checkpoints, 0o600)
+
+    recorder = Recorder()
+    try:
+        outcome = run(project, resolved, store, issued.token, recorder,
+                      on_boundary=wound)
+        # Pin the mechanism the assertions below rest on: while the directory
+        # is in this state, "is the checkpoint still there" cannot be answered.
+        with pytest.raises(PermissionError):
+            os.lstat(checkpoints / "probe.json")
+    finally:
+        os.chmod(project.out, out_mode)
+        os.chmod(checkpoints, 0o700)
+
+    body = body_of(outcome.result)
+    assert recorder.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "known_not_applied"
+    assert body["blocking_reasons"] == ["handoff_write_failed"]
+    assert durable_state(project, issued.plan_id)["operation_record"] is False
+    assert not os.path.exists(project.recovery_out)
+    assert outcome.checkpoint_id is not None
+    assert checkpoint_path(project, outcome.checkpoint_id).exists()
+    assert durable_state(project, issued.plan_id)["checkpoints"] == [
+        outcome.checkpoint_id + ".json"
+    ]
+
+
 def test_recovery_and_operation_identities_are_derived_from_the_plan(
     project, resolved, dry_run, snapshot, contract_digest
 ):
@@ -775,7 +855,12 @@ def test_a_descriptor_destination_that_turned_unsafe_reads_back_as_absent(
             os.mkfifo(project.recovery_out, 0o600)
 
     second = Recorder()
-    outcome = run(project, resolved, store, issued.token, second, on_boundary=wound)
+    try:
+        with deadline(5.0):
+            outcome = run(project, resolved, store, issued.token, second,
+                          on_boundary=wound)
+    except Wedged as exc:
+        pytest.fail("publish blocked on the %s destination: %s" % (swap, exc))
     assert second.calls == []
     assert body_of(outcome.result) == body_of(first.result)
     if swap == "none":
@@ -788,33 +873,115 @@ def test_a_descriptor_destination_that_turned_unsafe_reads_back_as_absent(
         assert open(project.out / "hidden.json", "rb").read() == descriptor
 
 
-@pytest.mark.parametrize("reason", ["source_drift", "handoff_unsafe"])
-def test_an_exit_before_the_handoff_preflight_reports_no_descriptor(
-    project, resolved, dry_run, snapshot, contract_digest, reason
+@pytest.mark.parametrize(
+    "damage", ["source_drift", "recovery_loosened", "recovery_symlinked"]
+)
+def test_an_exit_after_the_plan_is_bound_still_answers_with_the_durable_result(
+    project, resolved, dry_run, snapshot, contract_digest, damage
 ):
-    """Only a destination this call preflighted may be read back.
+    """A durable result outranks every exit taken once the plan is bound.
 
-    Every drift exit runs before preflight, and handoff_unsafe is the exit
-    that just judged one of the two destinations unsafe. Reading recovery_out
-    on those paths would report a descriptor through an unvetted path.
+    These exits all run before the recovery preflight -- two of them are the
+    preflight refusing recovery_out -- and each of them used to answer
+    "blocked" with allowed_actions=["inspect"], which is the one shape that
+    can never be acknowledged: the plan, the token and the spool stay behind
+    forever while a terminal_unacknowledged result sits on result_out. So
+    result_out is preflighted as soon as the plan is, and every exit from
+    there on reports what is durable rather than what this attempt hit.
+
+    The descriptor is a different matter: nothing preflighted recovery_out on
+    these paths, so it is not read at all and no descriptor is reported.
     """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     first = run(project, resolved, store, issued.token, Recorder())
     assert first.recovery is not None
-    if reason == "source_drift":
+    original = open(project.result_out, "rb").read()
+    if damage == "source_drift":
         project.source.write_bytes(b"different!!")
+    elif damage == "recovery_loosened":
+        os.chmod(project.recovery_out, 0o666)
     else:
-        os.chmod(project.result_out, 0o666)
+        os.rename(project.recovery_out, project.out / "hidden-recovery.json")
+        os.symlink("hidden-recovery.json", project.recovery_out)
 
     second = Recorder()
     outcome = run(project, resolved, store, issued.token, second)
     body = body_of(outcome.result)
     assert second.calls == []
     assert outcome.transport_calls == 0
-    assert body["blocking_reasons"] == [reason]
+    assert body == body_of(first.result)
+    assert body["recovery_state"] == "terminal_unacknowledged"
+    assert body["allowed_actions"] == ["inspect", "ack"]
+    assert body["blocking_reasons"] == []
+    assert outcome.recovery is None
+    assert open(project.result_out, "rb").read() == original
+
+
+def test_an_exit_whose_result_destination_is_unsafe_reports_no_answer(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    """The one exit that may still answer "blocked" is the unreadable one.
+
+    Loosening result_out is not the defect the test above closes: the durable
+    answer cannot be read through a destination that just failed preflight, so
+    there is nothing to report and blocked is the honest reply. Do NOT close
+    this by reading result_out anyway.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    first = run(project, resolved, store, issued.token, Recorder())
+    assert first.recovery is not None
+    os.chmod(project.result_out, 0o666)
+
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second)
+    body = body_of(outcome.result)
+    assert second.calls == []
+    assert outcome.transport_calls == 0
+    assert body["blocking_reasons"] == ["handoff_unsafe"]
     assert body["recovery_state"] == "blocked"
     assert outcome.recovery is None
     assert os.path.exists(project.recovery_out)
+
+
+def test_a_result_destination_that_cannot_be_read_still_reaches_its_exit(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    """Binding result_out early must not become a new way to raise.
+
+    The bind puts a filesystem read in front of exits that previously touched
+    nothing, so a read that fails there could stop those exits from being
+    reached at all: a source_drift that used to be answered would come back as
+    a traceback. preflight converts only the os.open of the destination; a
+    read failing after it comes out as a bare OSError, so the bind absorbs
+    that too, reports no durable result, and lets the exit below answer.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    run(project, resolved, store, issued.token, Recorder())
+    assert os.path.exists(project.result_out)
+    project.source.write_bytes(b"different!!")
+
+    info = os.stat(project.result_out)
+    identity = (info.st_dev, info.st_ino)
+    real_fstat, real_read = os.fstat, os.read
+    injected = []
+
+    def failing_read(fd, count):
+        current = real_fstat(fd)
+        if (current.st_dev, current.st_ino) == identity:
+            injected.append(fd)
+            raise OSError(errno.EIO, "injected result_out read failure")
+        return real_read(fd, count)
+
+    monkeypatch.setattr(os, "read", failing_read)
+    second = Recorder()
+    outcome = run(project, resolved, store, issued.token, second)
+    body = body_of(outcome.result)
+    assert injected
+    assert second.calls == []
+    assert outcome.transport_calls == 0
+    assert body["blocking_reasons"] == ["source_drift"]
+    assert body["recovery_state"] == "blocked"
+    assert outcome.recovery is None
 
 
 def test_already_handed_off_is_disjoint_from_the_handoff_error_hierarchy():
