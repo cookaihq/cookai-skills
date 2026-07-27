@@ -31,11 +31,15 @@ POLL_WINDOW_SECONDS = 8 * 90
 RESULT_PENDING_WINDOW_SECONDS = 8 * 90
 # The upper bound on result_refresh_round_count (task 2.1d). None is the
 # sentinel this change ships with -- unbounded -- so that
-# result_refresh_rounds_exhausted's gate stays fully short-circuited and
-# observable behaviour is byte-for-byte identical to before this constant
-# existed. Which finite value to use, and which state transition an
+# result_refresh_rounds_exhausted's gate stays fully short-circuited: the
+# default introduces no new decision branch. Which finite value to use, and
+# which state transition an
 # exhausted count feeds into, are Decision 10, deferred to a later change:
-# this substep only lands the accounting and the injectable gate.
+# this substep only lands the accounting and the injectable gate. The count
+# records distinct result URLs only: the first delivery is 1, so count k means
+# k - 1 genuine refreshes. Repeated delivery of the current URL and later
+# reappearance of an older URL do not increase it, so this accounting does not
+# bound a loop that continually returns one stale URL.
 #
 # Read from the module global inside result_refresh_rounds_exhausted at call
 # time, never baked into a derived value at import -- the same pattern
@@ -87,8 +91,8 @@ ATTEMPT_KEYS = frozenset(
         # give the authorization vocabulary meaning. It is carried now
         # because the field set may only change once (see the module
         # docstring above). result_refresh_round_count is no longer a
-        # placeholder as of task 2.1d: it is the cumulative count of result
-        # URL rotations _poll_transition has observed for this attempt (see
+        # placeholder as of task 2.1d: it is the cumulative count of distinct
+        # result URLs _poll_transition has observed for this attempt (see
         # RESULT_REFRESH_ROUND_CEILING and result_refresh_rounds_exhausted).
         "authorization_kind",
         "result_refresh_round_count",
@@ -149,11 +153,11 @@ RESULT_URL_KEYS = frozenset(
 # The keys _poll_state_from_intent (below) requires unchanged between the
 # attempt an intent's `updated_attempt` proposes and the attempt already on
 # file: identity/credential/authorization fields fixed at create/authorize
-# time. Every ATTEMPT_KEYS member absent here is expected to move within a
-# single poll transition -- state, reason(_detail), http_status,
-# upstream_status, poll_count, consecutive_transient_count, the poll/result
-# timestamps, and the result_url fields all legitimately change from one
-# poll observation to the next.
+# time. An ATTEMPT_KEYS member absent here is simply not constrained by this
+# comparison. Several such fields legitimately move within a single poll
+# transition -- state, reason(_detail), http_status, upstream_status,
+# poll_count, consecutive_transient_count, the poll/result timestamps, and
+# the result_url fields.
 #
 # task 2.1d decision: result_refresh_round_count stays OUT of this set, for
 # the same reason poll_count and consecutive_transient_count already are.
@@ -405,11 +409,9 @@ def _attempt_state_columns(flat_state: str) -> dict:
     state and the stored reason can never come from different rows of
     FLAT_STATE_MIGRATION.
 
-    Every _attempt_state_columns call is a genuinely new attempt (the
-    "authorized"/"not_started" placeholder) that has never polled, so 0 is
-    not a placeholder here the way it was in _attempt_reason_columns before
-    task 2.1d -- it is simply correct: no result URL rotation can have
-    happened yet.
+    Fresh-attempt creation and recovery reconstruction of the submitting
+    predecessor both use this helper. In either case 0 is correct: no
+    distinct result URL has yet been recorded for that attempt.
     """
     return {
         "state": FLAT_STATE_MIGRATION[flat_state][0],
@@ -1553,7 +1555,7 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
             and attempt.get("poll_count") == 0
             and attempt.get("consecutive_transient_count") == 0
             # A freshly authorized/not-yet-submitted attempt has never
-            # polled, so no result URL rotation can have happened yet. The
+            # polled, so no distinct result URL can have been recorded yet. The
             # general `<= poll_count` bound below never runs for this state
             # (it returns here first), so this has to be checked explicitly,
             # the same way poll_count/consecutive_transient_count are on the
@@ -2764,15 +2766,13 @@ def _poll_transition(
             "sha256:" + hashlib.sha256(result.url.encode("utf-8")).hexdigest()
         )
         if recorded_result is None:
-            # private_state has never recorded this URL for this attempt --
-            # by definition a new rotation, since the same task answered the
-            # GET with different content than it did before. The round count
-            # is a cumulative, monotonically-increasing tally of these
-            # rotations across the whole attempt's lifetime: it is never
-            # reset, so every other branch of this function (including the
-            # `recorded_result is not None` twin of this one, when the same
-            # URL is redelivered) leaves it exactly as `updated_attempt =
-            # deepcopy(active)` above already carried it in.
+            # private_state has never recorded this exact URL for this attempt.
+            # The first result delivery counts as 1; every later distinct URL
+            # adds one, so count k means k - 1 genuine refreshes. A repeated
+            # current URL or reappearance of an older URL does not increment
+            # this counter and therefore cannot bound a stale-URL loop. The
+            # count is never reset, so every other branch leaves it exactly as
+            # `updated_attempt = deepcopy(active)` above already carried it in.
             updated_attempt["result_refresh_round_count"] = (
                 active.get("result_refresh_round_count", 0) + 1
             )

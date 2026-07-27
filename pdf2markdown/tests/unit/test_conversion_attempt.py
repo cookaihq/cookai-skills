@@ -4222,8 +4222,9 @@ def test_a_schema_version_one_attempt_fails_closed(tmp_path, capsys, monkeypatch
 
     # Control: the v2 record this bundle actually holds is well formed, and
     # its four new columns carry their 2.1b values (`submitted` folds to no
-    # reason at all; authorization_kind/result_refresh_round_count are the
-    # placeholders 2.2/2.3 and 2.1d will give meaning to).
+    # reason at all; authorization_kind remains the placeholder 2.2/2.3 will
+    # give meaning to, while result_refresh_round_count starts at 0 before any
+    # result URL is observed).
     assert set(attempt) == set(SCHEMA_V2_ATTEMPT_KEYS)
     assert attempt["schema_version"] == 2
     assert attempt["reason"] is None
@@ -4935,10 +4936,10 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
 #
 # RESULT_REFRESH_ROUND_CEILING defaults to None: the round count is tallied
 # on every attempt regardless of whether a ceiling is configured, but the
-# (currently unwired) exhaustion check stays fully short-circuited so
-# today's observable behaviour is byte-for-byte unchanged. Which finite
-# ceiling to use, and which state transition an exhausted count feeds into,
-# are out of scope here (Decision 10, deferred to a later change).
+# (currently unwired) exhaustion check stays fully short-circuited, so the
+# default introduces no new decision branch. Which finite ceiling to use, and
+# which state transition an exhausted count feeds into, are out of scope here
+# (Decision 10, deferred to a later change).
 
 _drive_rotating_result_urls_call_counter = itertools.count()
 
@@ -4982,7 +4983,7 @@ def drive_through_rotating_result_urls(tmp_path, rounds):
             environ = {**dependencies, "AIHUB_API_KEY": key}
 
             def resume(expected_generation, *, transport, now=NOW):
-                _rc, result, _stderr = invoke(
+                rc, result, _stderr = invoke(
                     capture,
                     [
                         "resume",
@@ -4996,6 +4997,7 @@ def drive_through_rotating_result_urls(tmp_path, rounds):
                     transport=transport,
                     now=now,
                 )
+                assert rc == 0
                 return result
 
             task_id = "task-rotating-result"
@@ -5083,8 +5085,8 @@ def test_result_refresh_round_count_is_unchanged_when_the_same_result_url_is_red
     """`_attempt_reason_columns` recomputes reason/reason_detail/
     authorization_kind fresh from the wire classification on every poll
     observation. If result_refresh_round_count rode along in that same
-    producer (as task 2.1b's placeholder-only version did), it would reset
-    to 0 on this branch too: `_recorded_result_url` finds the redelivered
+    producer, it would reset to 0 on this branch too:
+    `_recorded_result_url` finds the redelivered
     URL already on file, so the new-URL increment branch in _poll_transition
     never runs to restore it. Outside that one branch, the count must be
     exactly what `updated_attempt = deepcopy(active)` already carried in --
@@ -5099,7 +5101,7 @@ def test_result_refresh_round_count_is_unchanged_when_the_same_result_url_is_red
         tmp_path, capsys, monkeypatch
     )
     assert (
-        json.loads((bundle / "manifest.json").read_text())["conversion_attempts"][-1][
+        read_manifest(bundle)["conversion_attempts"][-1][
             "result_refresh_round_count"
         ]
         == 1
@@ -5117,7 +5119,5 @@ def test_result_refresh_round_count_is_unchanged_when_the_same_result_url_is_red
         now=REFRESH_EXPIRY,
     )
     assert renewed["outcome"] == "result_ready"
-    attempt = json.loads((bundle / "manifest.json").read_text())["conversion_attempts"][
-        -1
-    ]
+    attempt = read_manifest(bundle)["conversion_attempts"][-1]
     assert attempt["result_refresh_round_count"] == 1
