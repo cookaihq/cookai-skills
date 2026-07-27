@@ -17,8 +17,8 @@ def test_help_lists_subcommands():
         assert sub in r.stdout
 
 
-def test_unimplemented_subcommand_exits_2():
-    r = run_cli("guide-init")
+def test_usage_error_exits_2():
+    r = run_cli("guide-init")   # 缺少必填 --scope/--source → argparse 用法错误
     assert r.returncode == 2
 
 

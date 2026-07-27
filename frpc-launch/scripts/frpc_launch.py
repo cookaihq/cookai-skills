@@ -512,7 +512,166 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "logs":
             sp.add_argument("-n", type=int, default=50, dest="lines",
                             help="输出日志尾部行数（默认 50）")
+        if name == "guide-init":
+            sp.add_argument("--scope", choices=["global", "project"], required=True)
+            sp.add_argument("--source", choices=["frps", "baota", "sakura"], required=True)
+            sp.add_argument("--server-addr", default="", dest="server_addr")
+            sp.add_argument("--server-port", type=int, default=0, dest="server_port")
+            sp.add_argument("--proxy", action="append", default=[], dest="proxies",
+                            help="代理规格，如 name=web;type=http;localPort=8080;"
+                                 "customDomains=a.com（可重复）")
+            sp.add_argument("--allow-tracked", action="store_true",
+                            help="显式允许写入未被 git 忽略的 Secret 文件")
     return p
+
+
+# ---------------------------------------------------------------------------
+# guide-init：引导流程落盘（作用域 + 三来源 + git 安全检查）
+# ---------------------------------------------------------------------------
+
+
+def parse_proxy_spec(spec: str) -> dict:
+    fields = {}
+    for part in spec.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise FrpcLaunchError("代理规格片段缺少 '=': %r（完整规格: %s）" % (part, spec))
+        k, v = part.split("=", 1)
+        fields[k.strip()] = v.strip()
+    for required in ("name", "type", "localPort"):
+        if not fields.get(required):
+            raise FrpcLaunchError("代理规格缺少必填字段 %s: %s" % (required, spec))
+    if fields["type"] not in ("tcp", "udp", "http", "https"):
+        raise FrpcLaunchError("代理 type 取值无效: %s（只接受 tcp/udp/http/https）"
+                              % fields["type"])
+    if fields["type"] in ("tcp", "udp") and not fields.get("remotePort"):
+        raise FrpcLaunchError("tcp/udp 代理必须提供 remotePort: %s" % spec)
+    if fields["type"] in ("http", "https") and not fields.get("customDomains"):
+        raise FrpcLaunchError("http/https 代理必须提供 customDomains: %s" % spec)
+    return fields
+
+
+def render_frpc_toml(server_addr: str, server_port: int, token: str, proxies: list) -> str:
+    lines = ["serverAddr = %s" % json.dumps(server_addr),
+             "serverPort = %d" % server_port]
+    if token:
+        lines.append("auth.token = %s" % json.dumps(token))
+    for p in proxies:
+        lines += ["", "[[proxies]]",
+                  "name = %s" % json.dumps(p["name"]),
+                  "type = %s" % json.dumps(p["type"]),
+                  "localPort = %d" % int(p["localPort"])]
+        if "remotePort" in p:
+            lines.append("remotePort = %d" % int(p["remotePort"]))
+        if "customDomains" in p:
+            domains = [d.strip() for d in p["customDomains"].split(",") if d.strip()]
+            lines.append("customDomains = [%s]" % ", ".join(json.dumps(d) for d in domains))
+    return "\n".join(lines) + "\n"
+
+
+def update_env_file(path: Path, updates: dict) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    remaining = dict(updates)
+    out = []
+    for line in lines:
+        m = _ENV_LINE.match(line)
+        if m and m.group(1) in remaining:
+            out.append("%s=%s" % (m.group(1), remaining.pop(m.group(1))))
+        else:
+            out.append(line)
+    for k, v in remaining.items():
+        out.append("%s=%s" % (k, v))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def _git_secret_check(cwd: Path, target: Path, allow_tracked: bool):
+    """project 作用域写 Secret 前的 git 安全检查；返回 (ok, reason)。"""
+    if allow_tracked:
+        return True, ""
+    r = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
+                       capture_output=True, text=True, cwd=str(cwd))
+    if r.returncode != 0 or r.stdout.strip() != "true":
+        return True, ""
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", str(target)],
+                             capture_output=True, text=True, cwd=str(cwd))
+    if tracked.returncode == 0:
+        return False, "%s 已被 git 跟踪，拒绝写入 Secret（可用 --allow-tracked 显式覆盖）" % target
+    ignored = subprocess.run(["git", "check-ignore", "-q", str(target)],
+                             capture_output=True, cwd=str(cwd))
+    if ignored.returncode != 0:
+        return False, ("%s 未被 .gitignore 忽略，拒绝写入 Secret"
+                       "（先把它加入 .gitignore，或用 --allow-tracked 显式覆盖）" % target)
+    return True, ""
+
+
+def cmd_guide_init(args) -> int:
+    home = args.home
+    cwd = Path.cwd()
+    written = []
+    token_masked = ""
+    if args.source in ("frps", "baota"):
+        token = os.environ.get("FRPC_LAUNCH_INIT_TOKEN", "")
+        token_masked = mask_secret(token)
+        if not args.server_addr or not args.server_port:
+            raise FrpcLaunchError("official 引导必须提供 --server-addr 与 --server-port")
+        proxies = [parse_proxy_spec(s) for s in args.proxies]
+        toml_text = render_frpc_toml(args.server_addr, args.server_port, token, proxies)
+        if args.scope == "global":
+            ensure_home_layout(home)
+            target = home / "frpc.toml"
+        else:
+            target = cwd / "frpc.toml"
+            if token:
+                ok, reason = _git_secret_check(cwd, target, args.allow_tracked)
+                if not ok:
+                    print("错误: %s" % reason, file=sys.stderr)
+                    return 6
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(toml_text, encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+        os.chmod(target, 0o600)
+        written.append(str(target))
+        if not token:
+            print("提示: 未设置 FRPC_LAUNCH_INIT_TOKEN，生成的配置不含 auth.token 行；"
+                  "若服务端启用了 token 认证请补充", file=sys.stderr)
+        if args.scope == "project":
+            env_target = cwd / ".env.local"
+            update_env_file(env_target, {"FRPC_LAUNCH_CONFIG": str(target.resolve())})
+            written.append(str(env_target))
+    else:
+        key = os.environ.get("FRPC_LAUNCH_SAKURA_KEY", "")
+        tunnels = os.environ.get("FRPC_LAUNCH_SAKURA_TUNNELS", "")
+        token_masked = mask_secret(key)
+        if not key or not tunnels:
+            raise FrpcLaunchError(
+                "sakura 引导必须经环境变量提供 FRPC_LAUNCH_SAKURA_KEY 与 "
+                "FRPC_LAUNCH_SAKURA_TUNNELS（不接受命令行参数，防泄露）")
+        updates = {"FRPC_LAUNCH_SAKURA_KEY": key, "FRPC_LAUNCH_SAKURA_TUNNELS": tunnels}
+        if args.scope == "global":
+            ensure_home_layout(home)
+            target = home / ".env"
+        else:
+            target = cwd / ".env.local"
+            ok, reason = _git_secret_check(cwd, target, args.allow_tracked)
+            if not ok:
+                print("错误: %s" % reason, file=sys.stderr)
+                return 6
+        update_env_file(target, updates)
+        written.append(str(target))
+    _emit(args, {"written": written, "scope": args.scope, "source": args.source,
+                 "token": token_masked},
+          "已写入: %s（token/key 回显掩码: %s）" % (", ".join(written), token_masked))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -839,6 +998,7 @@ def main(argv=None) -> int:
         "logs": cmd_logs,
         "install": cmd_install,
         "update": cmd_update,
+        "guide-init": cmd_guide_init,
     }
     handler = handlers.get(args.command)
     if handler is None:
