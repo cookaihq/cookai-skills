@@ -29,6 +29,21 @@ SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 POLL_RETRY_BASE_SECONDS = 8
 POLL_WINDOW_SECONDS = 8 * 90
 RESULT_PENDING_WINDOW_SECONDS = 8 * 90
+# The upper bound on result_refresh_round_count (task 2.1d). None is the
+# sentinel this change ships with -- unbounded -- so that
+# result_refresh_rounds_exhausted's gate stays fully short-circuited and
+# observable behaviour is byte-for-byte identical to before this constant
+# existed. Which finite value to use, and which state transition an
+# exhausted count feeds into, are Decision 10, deferred to a later change:
+# this substep only lands the accounting and the injectable gate.
+#
+# Read from the module global inside result_refresh_rounds_exhausted at call
+# time, never baked into a derived value at import -- the same pattern
+# worst_case_admission_for_unknown_response's docstring establishes for
+# TASK_ID_UPPER_BOUND_BYTES / RESULT_URL_UPPER_BOUND_BYTES, so a test can
+# monkeypatch a small ceiling and reach the exhausted branch (design.md:305,
+# "ceiling 以可注入常量测试").
+RESULT_REFRESH_ROUND_CEILING = None
 API_BASE = "https://api.aihubmax.com"
 ATTEMPT_ID_PATTERN = re.compile(r"conversion-attempt-(0*[1-9][0-9]*)")
 ACTION_ID_PATTERN = re.compile(r"conversion-decision-[0-9a-f]{32}")
@@ -55,8 +70,8 @@ ATTEMPT_KEYS = frozenset(
         # via its reason column -- not of the stored, folded `state` alone:
         # post-fold, `state == "failed"` alone spans ten distinct `reason`
         # values (task 2.1c changes `state`, not this field). It is *not*
-        # the wire reason code -- it disagrees with the wire on the two rows
-        # named in LEGAL_TRIPLES' docstring.
+        # the wire reason code -- it disagrees with the wire on the two
+        # *renamed* contract rows named in LEGAL_TRIPLES' docstring.
         "reason",
         # The branch the wire actually took, kept only where `reason` cannot
         # carry it: `no_task_id` and `poll_transient` are the two *reasons*
@@ -68,11 +83,13 @@ ATTEMPT_KEYS = frozenset(
         # value is recoverable from that pair via LEGAL_TRIPLES' reason_code
         # column, not from `state` alone.
         "reason_detail",
-        # Placeholders this substep: authorization_kind is always None until
-        # task 2.2/2.3 give the authorization vocabulary meaning, and
-        # result_refresh_round_count is always 0 until task 2.1d introduces
-        # RESULT_REFRESH_ROUND_CEILING and the round accounting that feeds it.
-        # They are carried now because the field set may only change once.
+        # authorization_kind is a placeholder: always None until task 2.2/2.3
+        # give the authorization vocabulary meaning. It is carried now
+        # because the field set may only change once (see the module
+        # docstring above). result_refresh_round_count is no longer a
+        # placeholder as of task 2.1d: it is the cumulative count of result
+        # URL rotations _poll_transition has observed for this attempt (see
+        # RESULT_REFRESH_ROUND_CEILING and result_refresh_rounds_exhausted).
         "authorization_kind",
         "result_refresh_round_count",
         "task_id",
@@ -129,6 +146,33 @@ RESULT_URL_KEYS = frozenset(
         "validity_window_hours",
     }
 )
+# The keys _poll_state_from_intent (below) requires unchanged between the
+# attempt an intent's `updated_attempt` proposes and the attempt already on
+# file: identity/credential/authorization fields fixed at create/authorize
+# time. Every ATTEMPT_KEYS member absent here is expected to move within a
+# single poll transition -- state, reason(_detail), http_status,
+# upstream_status, poll_count, consecutive_transient_count, the poll/result
+# timestamps, and the result_url fields all legitimately change from one
+# poll observation to the next.
+#
+# task 2.1d decision: result_refresh_round_count stays OUT of this set, for
+# the same reason poll_count and consecutive_transient_count already are.
+# It is not "the value at intent-write time must still hold at recovery
+# time" (that window is never actually open -- once an intent is durable in
+# history it cannot be tampered with; recovery only ever replays it) but
+# "does this key change within the one poll transition the intent/active
+# comparison spans". result_refresh_round_count is incremented by
+# _poll_transition inside that very transition whenever a new result URL is
+# observed, exactly like poll_count increments on every polling transition
+# and consecutive_transient_count resets or increments on every one --
+# putting it in POLL_IMMUTABLE_ATTEMPT_KEYS would turn every legitimate
+# refresh into a spurious integrity_violation.
+#
+# authorization_kind's membership is deliberately left undecided here: it is
+# still a global-None placeholder (ATTEMPT_KEYS above) until task 2.2/2.3
+# give it real values, so nothing today can observe whether it would need to
+# be immutable across a poll transition. That decision belongs to whichever
+# of 2.2/2.3 first gives the field a value that can change.
 POLL_IMMUTABLE_ATTEMPT_KEYS = frozenset(
     {
         "schema_version",
@@ -306,9 +350,12 @@ _REASON_DETAIL_DOMAIN = {
 
 
 def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
-    """The four schema v2 attempt columns that replace v1's `reason_code`.
+    """The three schema v2 attempt columns recomputed fresh from the wire
+    classification on every write: `reason`/`reason_detail`, which replace
+    v1's single `reason_code`, plus the still-inert `authorization_kind`
+    placeholder.
 
-    Every site that writes an attempt builds these four fields here, so the
+    Every site that writes an attempt builds these three fields here, so the
     folded vocabulary has exactly one producer and cannot drift between the
     create path, the poll path and the two recovery paths.
 
@@ -321,8 +368,20 @@ def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
     the wire code, which disagrees with it on poll_unauthorized and
     credential_source_changed. reason_detail keeps the wire code only for the
     two reasons whose code is not implied by the classification.
-    authorization_kind and result_refresh_round_count are the placeholders
-    task 2.1b carries without giving them behaviour (see ATTEMPT_KEYS).
+    authorization_kind is the placeholder task 2.1b carries without giving
+    it behaviour (see ATTEMPT_KEYS).
+
+    `result_refresh_round_count` is deliberately NOT one of this function's
+    columns as of task 2.1d, even though it was carried here (always 0) as a
+    2.1b placeholder: unlike the three columns above, it is not a pure
+    function of (flat_state, reason_code) recomputed fresh on every write --
+    it is a cumulative, carry-forward-or-increment counter that must survive
+    poll observations unrelated to a result URL. A caller that `.update()`s
+    an existing attempt dict with this function's return value (as
+    _poll_transition does on every poll) relies on that omission to leave
+    result_refresh_round_count exactly as the attempt already carried it;
+    only _poll_transition's own new-URL branch and _attempt_state_columns
+    below (a genuinely fresh attempt) ever set it.
     """
     reason = FLAT_STATE_MIGRATION[flat_state][1]
     return {
@@ -333,23 +392,29 @@ def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
             else None
         ),
         "authorization_kind": None,
-        "result_refresh_round_count": 0,
     }
 
 
 def _attempt_state_columns(flat_state: str) -> dict:
     """The folded `state` a record for `flat_state` stores, plus its reason
-    columns.
+    columns and a fresh `result_refresh_round_count` of 0.
 
     The one place the fold is applied on the write side. Callers used to
     write `"state": <wire classification>` next to a separate
     _attempt_reason_columns call; going through one helper means the stored
     state and the stored reason can never come from different rows of
     FLAT_STATE_MIGRATION.
+
+    Every _attempt_state_columns call is a genuinely new attempt (the
+    "authorized"/"not_started" placeholder) that has never polled, so 0 is
+    not a placeholder here the way it was in _attempt_reason_columns before
+    task 2.1d -- it is simply correct: no result URL rotation can have
+    happened yet.
     """
     return {
         "state": FLAT_STATE_MIGRATION[flat_state][0],
         **_attempt_reason_columns(flat_state, None),
+        "result_refresh_round_count": 0,
     }
 
 
@@ -1297,6 +1362,22 @@ def _recorded_result_url(private_state: dict, *, attempt_id, task_id, url):
     return None
 
 
+def result_refresh_rounds_exhausted(attempt: dict) -> bool:
+    """Whether `attempt`'s cumulative result-refresh round count has reached
+    RESULT_REFRESH_ROUND_CEILING.
+
+    Not wired into any state transition as of task 2.1d -- which finite
+    ceiling to configure, and what an exhausted attempt should do, are
+    Decision 10, deferred to a later change. RESULT_REFRESH_ROUND_CEILING
+    defaults to None, in which case this branch is fully short-circuited:
+    the function returns False unconditionally, without even reading
+    `attempt`, so today's observable behaviour cannot depend on it.
+    """
+    if RESULT_REFRESH_ROUND_CEILING is None:
+        return False
+    return attempt.get("result_refresh_round_count", 0) >= RESULT_REFRESH_ROUND_CEILING
+
+
 def _valid_timestamp(value) -> bool:
     if not isinstance(value, str) or not value:
         return False
@@ -1451,8 +1532,18 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     if (
         not _valid_reason_detail(reason, attempt.get("reason_detail"))
         or attempt.get("authorization_kind") is not None
+        # task 2.1d: result_refresh_round_count is no longer pinned to
+        # exactly 0 -- it is a real, cumulative counter now. Its only
+        # snapshot-checkable self-consistency here is int/non-negative; the
+        # tighter `<= poll_count` bound below (same shape as
+        # consecutive_transient_count's) and the "authorized" state's
+        # explicit `== 0` check are what actually constrain it once polling
+        # is in play. True non-regression (it never decreases across polls)
+        # is guaranteed by _poll_transition's construction -- carry-forward
+        # or increment, never reset -- not by this single-snapshot function,
+        # which has no access to the attempt's prior value.
         or type(attempt.get("result_refresh_round_count")) is not int
-        or attempt["result_refresh_round_count"] != 0
+        or attempt["result_refresh_round_count"] < 0
     ):
         return False
     if state == "authorized":
@@ -1461,6 +1552,13 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
             and attempt.get("api_base") is None
             and attempt.get("poll_count") == 0
             and attempt.get("consecutive_transient_count") == 0
+            # A freshly authorized/not-yet-submitted attempt has never
+            # polled, so no result URL rotation can have happened yet. The
+            # general `<= poll_count` bound below never runs for this state
+            # (it returns here first), so this has to be checked explicitly,
+            # the same way poll_count/consecutive_transient_count are on the
+            # two lines above.
+            and attempt.get("result_refresh_round_count") == 0
             and all(
                 attempt.get(key) is None
                 for key in ATTEMPT_KEYS
@@ -1471,7 +1569,6 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
                     "authorization",
                     "poll_count",
                     "consecutive_transient_count",
-                    # Pinned to 0 by the schema v2 gate above, not to None.
                     "result_refresh_round_count",
                 }
             )
@@ -1489,6 +1586,11 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
         or type(attempt.get("consecutive_transient_count")) is not int
         or attempt["consecutive_transient_count"] < 0
         or attempt["consecutive_transient_count"] > attempt["poll_count"]
+        # Same shape as the consecutive_transient_count bound directly
+        # above: a round can only have been observed by way of an actual
+        # poll, so the cumulative count can never exceed how many polls this
+        # attempt has made.
+        or attempt["result_refresh_round_count"] > attempt["poll_count"]
     ):
         return False
     if state == "submitting":
@@ -2661,9 +2763,22 @@ def _poll_transition(
         updated_attempt["result_url_sha256"] = (
             "sha256:" + hashlib.sha256(result.url.encode("utf-8")).hexdigest()
         )
-        updated_attempt["result_observed_at"] = (
-            at if recorded_result is None else recorded_result.get("observed_at")
-        )
+        if recorded_result is None:
+            # private_state has never recorded this URL for this attempt --
+            # by definition a new rotation, since the same task answered the
+            # GET with different content than it did before. The round count
+            # is a cumulative, monotonically-increasing tally of these
+            # rotations across the whole attempt's lifetime: it is never
+            # reset, so every other branch of this function (including the
+            # `recorded_result is not None` twin of this one, when the same
+            # URL is redelivered) leaves it exactly as `updated_attempt =
+            # deepcopy(active)` above already carried it in.
+            updated_attempt["result_refresh_round_count"] = (
+                active.get("result_refresh_round_count", 0) + 1
+            )
+            updated_attempt["result_observed_at"] = at
+        else:
+            updated_attempt["result_observed_at"] = recorded_result.get("observed_at")
         updated_attempt["result_validity_hours"] = 24
     elif active_pair == ("result_ready", None):
         updated_attempt["result_url_sha256"] = None

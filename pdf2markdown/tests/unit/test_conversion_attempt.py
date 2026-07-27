@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -4127,9 +4127,14 @@ def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
     # the validator and the monkeypatch below are handed the reason directly.
     probe_flat_state = "credential_source_changed"
     probe_reason = "credential_fingerprint_changed"
-    probe_code = "credential_fingerprint_changed"
-    # Today `credential_fingerprint_changed` is not in `_REASON_DETAIL_DOMAIN`,
-    # so both sides must drop the code.
+    # Deliberately a third string, distinct from both probe_flat_state and
+    # probe_reason: if the writer regressed to looking `_REASON_DETAIL_DOMAIN`
+    # up by `reason_code` instead of by `reason`, probe_code == probe_reason
+    # would make that regression invisible (the lookup key would accidentally
+    # still resolve to the entry this test monkeypatches below).
+    probe_code = "credential_fingerprint_changed_on_wire"
+    # Today `credential_fingerprint_changed_on_wire` is not in
+    # `_REASON_DETAIL_DOMAIN`, so both sides must drop the code.
     assert (
         ca._attempt_reason_columns(probe_flat_state, probe_code)["reason_detail"]
         is None
@@ -4924,3 +4929,195 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
     # 说明折叠没落地，多了说明迁移表被改动过。
     assert len(moved) == 12
     assert len({FOLDED_STATE_OBSERVABLES[f][1] for f in FLAT_STATE_OBSERVABLES}) == 7
+
+
+# --- Task 2.1d: unconditional round accounting behind a disabled ceiling ---
+#
+# RESULT_REFRESH_ROUND_CEILING defaults to None: the round count is tallied
+# on every attempt regardless of whether a ceiling is configured, but the
+# (currently unwired) exhaustion check stays fully short-circuited so
+# today's observable behaviour is byte-for-byte unchanged. Which finite
+# ceiling to use, and which state transition an exhausted count feeds into,
+# are out of scope here (Decision 10, deferred to a later change).
+
+_drive_rotating_result_urls_call_counter = itertools.count()
+
+
+def read_manifest(bundle):
+    return json.loads((bundle / "manifest.json").read_text())
+
+
+def drive_through_rotating_result_urls(tmp_path, rounds):
+    """Drive a fresh work bundle through `rounds` distinct result_ready
+    observations of the same Doc2X task.
+
+    A repeat result_ready poll for an attempt already sitting in
+    result_ready is only reachable one way in this codebase: raw_conversion
+    detects the previously recorded result reference has locally expired
+    (result_reference_is_expired) and downgrades conversion_state to
+    recoverable_error; the *next* resume then repolls doc2x, which is free
+    to answer with the same URL as before or a new one. This mirrors
+    _refresh_ready_bundle and the "manifest"/"new" branch of
+    test_expired_refresh_crash_boundaries_recover_without_new_task_or_get
+    above, generalized from two observations to `rounds`, and swapped onto
+    _CapturedIO / pytest.MonkeyPatch.context() (see drive_to_flat_state's
+    docstring) so it can run outside the capsys/monkeypatch fixtures --
+    the exact reusable (tmp_path, ...) shape drive_to_flat_state established
+    for the same reason.
+
+    Returns the work bundle path; callers read the manifest/private state
+    back from disk (see read_manifest above).
+    """
+    if rounds < 1:
+        raise AssertionError("drive_through_rotating_result_urls needs rounds >= 1")
+    call_root = tmp_path / (
+        f"drive-rotating-{next(_drive_rotating_result_urls_call_counter)}"
+    )
+    call_root.mkdir()
+    with _CapturedIO() as capture:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+                ready_staged_bundle(call_root, capture, monkeypatch)
+            )
+            environ = {**dependencies, "AIHUB_API_KEY": key}
+
+            def resume(expected_generation, *, transport, now=NOW):
+                _rc, result, _stderr = invoke(
+                    capture,
+                    [
+                        "resume",
+                        "--work-bundle",
+                        str(bundle),
+                        "--expected-generation",
+                        str(expected_generation),
+                    ],
+                    cwd=call_root,
+                    environ=environ,
+                    transport=transport,
+                    now=now,
+                )
+                return result
+
+            task_id = "task-rotating-result"
+            submitted = resume(
+                staged["generation"], transport=SuccessfulCreate(task_id)
+            )
+            ready = resume(
+                submitted["generation"],
+                transport=PollStatus(
+                    task_id,
+                    "completed",
+                    results=[
+                        {
+                            "url": (
+                                "https://results.example/rotating.zip"
+                                "?token=round-1"
+                            )
+                        }
+                    ],
+                ),
+            )
+            assert ready["outcome"] == "result_ready"
+            generation = ready["generation"]
+            for round_index in range(2, rounds + 1):
+                # result_ready's validity window is a fixed 24h
+                # (_valid_attempt pins result_validity_hours == 24); each
+                # cycle's "now" has to clear the previous round's window so
+                # the local expiry check actually fires.
+                cycle_at = NOW + timedelta(hours=24 * (round_index - 1))
+                expired = resume(
+                    generation, transport=CountingNeverNetwork(), now=cycle_at
+                )
+                assert expired["outcome"] == "result_url_unavailable", round_index
+                renewed = resume(
+                    expired["generation"],
+                    transport=PollStatus(
+                        task_id,
+                        "completed",
+                        results=[
+                            {
+                                "url": (
+                                    "https://results.example/rotating.zip"
+                                    f"?token=round-{round_index}"
+                                )
+                            }
+                        ],
+                    ),
+                    now=cycle_at,
+                )
+                assert renewed["outcome"] == "result_ready", round_index
+                generation = renewed["generation"]
+    return bundle
+
+
+def test_result_refresh_rounds_are_counted_unconditionally(tmp_path):
+    """裁定 2：计数无条件累加，与上界是否启用无关，为后续定阈值提供真实数据。"""
+    import conversion_attempt as ca
+
+    assert ca.RESULT_REFRESH_ROUND_CEILING is None
+    bundle = drive_through_rotating_result_urls(tmp_path, rounds=3)
+    attempt = read_manifest(bundle)["conversion_attempts"][-1]
+    assert attempt["result_refresh_round_count"] == 3
+
+
+def test_result_refresh_ceiling_is_off_by_default_and_injectable(tmp_path, monkeypatch):
+    """裁定 2：上界默认哨兵 None 时判定分支完全短路，可观察行为与今天一致；
+    注入小上界后超限分支可达。本子步骤不接线任何超限收敛分支
+    （result_refresh_rounds_exhausted 此刻只有这里调用它，这是有意的）。
+    """
+    import conversion_attempt as ca
+
+    bundle = drive_through_rotating_result_urls(tmp_path, rounds=3)
+    assert read_manifest(bundle)["conversion_state"] == "result_downloading"
+
+    monkeypatch.setattr(ca, "RESULT_REFRESH_ROUND_CEILING", 2)
+    assert ca.result_refresh_rounds_exhausted({"result_refresh_round_count": 2})
+    assert not ca.result_refresh_rounds_exhausted({"result_refresh_round_count": 1})
+    monkeypatch.setattr(ca, "RESULT_REFRESH_ROUND_CEILING", None)
+    assert not ca.result_refresh_rounds_exhausted({"result_refresh_round_count": 99})
+
+
+def test_result_refresh_round_count_is_unchanged_when_the_same_result_url_is_redelivered(
+    tmp_path, capsys, monkeypatch
+):
+    """`_attempt_reason_columns` recomputes reason/reason_detail/
+    authorization_kind fresh from the wire classification on every poll
+    observation. If result_refresh_round_count rode along in that same
+    producer (as task 2.1b's placeholder-only version did), it would reset
+    to 0 on this branch too: `_recorded_result_url` finds the redelivered
+    URL already on file, so the new-URL increment branch in _poll_transition
+    never runs to restore it. Outside that one branch, the count must be
+    exactly what `updated_attempt = deepcopy(active)` already carried in --
+    this is the carry-forward half of "其余路径保持原值" the brief requires,
+    which neither of the two tests above can exercise on their own: both
+    only ever observe distinct URLs, so their new-URL branch runs on every
+    round regardless of whether the reset bug is fixed.
+    """
+    import conversion_attempt as ca
+
+    bundle, environ, resume, ready = _refresh_ready_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    assert (
+        json.loads((bundle / "manifest.json").read_text())["conversion_attempts"][-1][
+            "result_refresh_round_count"
+        ]
+        == 1
+    )
+
+    expired = resume(
+        ready["generation"], transport=CountingNeverNetwork(), now=REFRESH_EXPIRY
+    )
+    assert expired["outcome"] == "result_url_unavailable"
+    renewed = resume(
+        expired["generation"],
+        transport=PollStatus(
+            REFRESH_TASK_ID, "completed", results=[{"url": REFRESH_FIRST_URL}]
+        ),
+        now=REFRESH_EXPIRY,
+    )
+    assert renewed["outcome"] == "result_ready"
+    attempt = json.loads((bundle / "manifest.json").read_text())["conversion_attempts"][
+        -1
+    ]
+    assert attempt["result_refresh_round_count"] == 1
