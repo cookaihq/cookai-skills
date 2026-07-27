@@ -94,6 +94,27 @@ ERROR_PATH_ACTIONS = frozenset(
 )
 
 
+# The folded (state, reason) pairs a `resume` re-polls when the manifest is in
+# recoverable_error. Re-keyed by the 2.1c fold from a set of seven flat attempt
+# states that all fold onto `failed` -- note credential_source_changed's folded
+# reason is the renamed credential_fingerprint_changed, and poll_unauthorized's
+# is poll_authentication_rejected. A mistyped reason here does not raise; the
+# resume simply stops re-polling that failure, so
+# test_resumable_recoverable_pairs_are_legal_and_pollable pins the set against
+# conversion_attempt's own tables.
+RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
+    {
+        ("failed", "credential_source_missing"),
+        ("failed", "credential_fingerprint_changed"),
+        ("failed", "poll_authentication_rejected"),
+        ("failed", "task_unavailable"),
+        ("failed", "poll_transient"),
+        ("failed", "poll_timeout"),
+        ("failed", "result_pending_timeout"),
+    }
+)
+
+
 class WorkflowError(Exception):
     def __init__(
         self,
@@ -1895,23 +1916,40 @@ def _advance(
             if manifest["conversion_state"] == "terminal_error" and manifest.get(
                 "conversion_attempts"
             ):
-                active_state = manifest["conversion_attempts"][-1]["state"]
-                if active_state != "unsafe_result_url":
+                # Re-keyed by the 2.1c fold. The outcome printed here used to
+                # be the flat attempt state; the two rows that reach this
+                # branch -- unsafe_result_url and unexpected_result_count --
+                # both fold onto `failed`, and their flat name survives
+                # verbatim as the folded reason. (The third terminal_error
+                # shape, a result_ready attempt rejected by raw_conversion,
+                # returned above and never gets here.)
+                active_attempt = manifest["conversion_attempts"][-1]
+                active_outcome = (
+                    active_attempt.get("reason") or active_attempt["state"]
+                )
+                if active_outcome != "unsafe_result_url":
                     result = conversion_attempt_module.result_from_manifest(
                         manifest,
                         work_bundle=str(bundle),
-                        outcome=active_state,
+                        outcome=active_outcome,
                     )
                     print(
-                        f"[pdf2markdown] {active_state} for work bundle {bundle.name}",
+                        f"[pdf2markdown] {active_outcome} for work bundle {bundle.name}",
                         file=sys.stderr,
                     )
                     return result
             if manifest["conversion_state"] == "awaiting_user" and manifest.get(
                 "conversion_attempts"
             ):
-                active_state = manifest["conversion_attempts"][-1]["state"]
-                outcome = "task_failed" if active_state == "failed" else active_state
+                # awaiting_user is reached by exactly one row, flat `failed`,
+                # which folds onto ("failed", "task_failed").
+                active_attempt = manifest["conversion_attempts"][-1]
+                outcome = (
+                    "task_failed"
+                    if (active_attempt["state"], active_attempt.get("reason"))
+                    == ("failed", "task_failed")
+                    else active_attempt["state"]
+                )
                 result = conversion_attempt_module.result_from_manifest(
                     manifest,
                     work_bundle=str(bundle),
@@ -1926,21 +1964,19 @@ def _advance(
                 manifest["conversion_state"] == "submitted"
                 or (
                     manifest["conversion_state"] == "terminal_error"
-                    and manifest["conversion_attempts"][-1]["state"]
-                    == "unsafe_result_url"
+                    and (
+                        manifest["conversion_attempts"][-1]["state"],
+                        manifest["conversion_attempts"][-1].get("reason"),
+                    )
+                    == ("failed", "unsafe_result_url")
                 )
                 or (
                     manifest["conversion_state"] == "recoverable_error"
-                    and manifest["conversion_attempts"][-1]["state"]
-                    in {
-                        "credential_source_missing",
-                        "credential_source_changed",
-                        "poll_unauthorized",
-                        "task_unavailable",
-                        "poll_transient",
-                        "poll_timeout",
-                        "result_pending_timeout",
-                    }
+                    and (
+                        manifest["conversion_attempts"][-1]["state"],
+                        manifest["conversion_attempts"][-1].get("reason"),
+                    )
+                    in RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS
                 )
                 or (
                     manifest["conversion_state"] == "recoverable_error"
@@ -2710,9 +2746,22 @@ def _record(args, *, cwd: Path, environ: dict[str, str], now) -> dict:
                 ]
                 recovered_outcome = (
                     "conversion_retry_authorized"
-                    if recovered_state == "not_started"
+                    # Re-keyed by the 2.1c fold: the retry placeholder's
+                    # stored state is "authorized" (flat "not_started").
+                    if recovered_state == "authorized"
                     else "conversion_submitted"
                     if recovered_state == "submitted"
+                    # This default has always printed the attempt's stored
+                    # state verbatim, so the fold carries straight through it:
+                    # a recovered poll observation now reports the folded name
+                    # (`failed` / `processing` / `result_ready`) instead of the
+                    # flat one. design.md Risks accepts that loss for this
+                    # substep; task 2.2 restores the detail by projecting
+                    # conversion_attempt_reason alongside it. Deriving a
+                    # flat-looking name from `reason` instead would be a new
+                    # rule, and would print "no_task_id" for the
+                    # submission_unknown row this branch actually reaches
+                    # most often.
                     else recovered_state
                 )
                 result = conversion_attempt_module.result_from_manifest(

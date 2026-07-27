@@ -2070,7 +2070,18 @@ def test_result_url_refresh_failures_remain_bound_to_the_same_task(
     assert result["conversion_state"] == "recoverable_error"
     assert len(manifest["conversion_attempts"]) == 1
     assert manifest["conversion_attempts"][0]["task_id"] == "task-result-001"
-    assert manifest["conversion_attempts"][0]["state"] == expected_state
+    # Task 2.1c folds the five recoverable refresh outcomes onto `failed`;
+    # `expected_state` survives verbatim as the attempt's `reason` (with
+    # credential_source_changed renamed to credential_fingerprint_changed by
+    # the folded vocabulary), so the row stays pinned exactly as tightly.
+    assert manifest["conversion_attempts"][0]["state"] == "failed"
+    assert manifest["conversion_attempts"][0]["reason"] == (
+        "credential_fingerprint_changed"
+        if expected_state == "credential_source_changed"
+        else "poll_authentication_rejected"
+        if expected_state == "poll_unauthorized"
+        else expected_state
+    )
     assert old_result_url not in public_state
 
 

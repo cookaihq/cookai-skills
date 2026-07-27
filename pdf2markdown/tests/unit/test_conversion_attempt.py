@@ -484,7 +484,9 @@ def test_confirm_retry_action_appends_a_new_attempt_before_a_second_create(
     assert authorized["conversion_state"] == "ready_to_submit"
     assert [item["state"] for item in manifest["conversion_attempts"]] == [
         "submission_unknown",
-        "not_started",
+        # Task 2.1c folds the retry placeholder's flat "not_started" onto
+        # "authorized"; the row is otherwise unchanged.
+        "authorized",
     ]
     assert manifest["conversion_attempts"][0] == old_attempt
 
@@ -1240,8 +1242,20 @@ def test_completed_task_without_a_nonempty_result_stays_pending_on_the_same_task
     assert poll_rc == 0
     assert pending["outcome"] == "result_pending"
     assert pending["conversion_state"] == "submitted"
-    assert pending["conversion_attempt_state"] == "result_pending"
+    # Task 2.1c folds flat `result_pending` onto ("processing", None), the
+    # pair it shares with `pending` and `processing`. `upstream_status` is
+    # what still tells the three apart (design.md Decision 1 note 3), so it
+    # is asserted here rather than dropped -- without it this row would no
+    # longer distinguish an empty completed result from an ordinary in-flight
+    # poll, which is exactly what the test is about.
+    assert pending["conversion_attempt_state"] == "processing"
     manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_attempts"][-1]["reason"] is None
+    assert manifest["conversion_attempts"][-1]["upstream_status"] == "completed"
+    assert (
+        manifest["conversion_attempts"][-1]["result_pending_deadline_at"]
+        is not None
+    )
     assert manifest["conversion_attempts"][-1]["task_id"] == "task-empty-result"
     assert len(manifest["conversion_attempts"]) == 1
     assert len(poll.calls) == 1
@@ -1302,7 +1316,13 @@ def test_completed_task_with_unsafe_or_ambiguous_results_stops_without_guessing(
     assert poll_rc == 0
     assert stopped["outcome"] == expected_state
     assert stopped["conversion_state"] == "terminal_error"
-    assert stopped["conversion_attempt_state"] == expected_state
+    # Both parametrized rows fold onto `failed`; `reason` carries the flat
+    # name that used to sit in conversion_attempt_state, so asserting both
+    # keeps the row's identity pinned exactly as tightly as before.
+    assert stopped["conversion_attempt_state"] == "failed"
+    assert json.loads((bundle / "manifest.json").read_text())[
+        "conversion_attempts"
+    ][-1]["reason"] == expected_state
     assert stopped["action_required"] == (
         "resolve_unexpected_result_count"
         if expected_state == "unexpected_result_count"
@@ -1330,7 +1350,10 @@ def test_completed_task_with_unsafe_or_ambiguous_results_stops_without_guessing(
         assert resumed["generation"] == stopped["generation"]
     else:
         assert resumed["conversion_state"] == "recoverable_error"
-        assert resumed["conversion_attempt_state"] == "poll_transient"
+        assert resumed["conversion_attempt_state"] == "failed"
+        assert json.loads((bundle / "manifest.json").read_text())[
+            "conversion_attempts"
+        ][-1]["reason"] == "poll_transient"
 
 
 def test_confirm_can_authorize_a_new_attempt_after_unexpected_result_count(
@@ -1594,7 +1617,9 @@ def test_resume_persists_missing_and_drifted_creation_credentials_without_pollin
     assert blocked_rc == 0
     assert blocked["outcome"] == expected_reason
     assert blocked["conversion_state"] == "recoverable_error"
-    assert blocked["conversion_attempt_state"] == expected_reason
+    # Folded onto `failed`; the discriminating value is the `reason` asserted
+    # on the next line, which the test already pinned before the fold.
+    assert blocked["conversion_attempt_state"] == "failed"
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert manifest["conversion_attempts"][-1]["reason"] == expected_attempt_reason
     assert manifest["conversion_attempts"][-1]["reason_detail"] is None
@@ -1670,7 +1695,7 @@ def test_poll_401_and_404_have_distinct_recoverable_reasons_on_the_same_task(
     assert poll_rc == 0
     assert recoverable["outcome"] == expected_reason
     assert recoverable["conversion_state"] == "recoverable_error"
-    assert recoverable["conversion_attempt_state"] == expected_reason
+    assert recoverable["conversion_attempt_state"] == "failed"
     assert rejected.calls == 1
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert manifest["conversion_attempts"][-1]["reason"] == expected_attempt_reason
@@ -1753,7 +1778,7 @@ def test_transient_poll_failures_are_persisted_and_only_the_same_task_is_retried
     assert poll_rc == 0
     assert recoverable["outcome"] == "poll_transient"
     assert recoverable["conversion_state"] == "recoverable_error"
-    assert recoverable["conversion_attempt_state"] == "poll_transient"
+    assert recoverable["conversion_attempt_state"] == "failed"
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert manifest["conversion_attempts"][-1]["reason"] == "poll_transient"
     assert manifest["conversion_attempts"][-1]["reason_detail"] == "poll_transient"
@@ -1841,7 +1866,7 @@ def test_processing_poll_window_expires_without_an_extra_network_request(
     assert timeout_rc == 0
     assert timed_out["outcome"] == "poll_timeout"
     assert timed_out["conversion_state"] == "recoverable_error"
-    assert timed_out["conversion_attempt_state"] == "poll_timeout"
+    assert timed_out["conversion_attempt_state"] == "failed"
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert manifest["conversion_attempts"][-1]["reason"] == "poll_timeout"
     assert manifest["conversion_attempts"][-1]["reason_detail"] is None
@@ -1926,7 +1951,8 @@ def test_transient_poll_backoff_is_persisted_exponential_and_zero_network_until_
     attempt = json.loads((bundle / "manifest.json").read_text())[
         "conversion_attempts"
     ][-1]
-    assert second["conversion_attempt_state"] == "poll_transient"
+    assert second["conversion_attempt_state"] == "failed"
+    assert attempt["reason"] == "poll_transient"
     assert attempt["consecutive_transient_count"] == 2
     assert attempt["next_poll_at"] == "2024-01-02T03:04:29Z"
 
@@ -2011,7 +2037,7 @@ def test_completed_empty_result_window_has_its_own_bounded_timeout(
     assert timeout_rc == 0
     assert timed_out["outcome"] == "result_pending_timeout"
     assert timed_out["conversion_state"] == "recoverable_error"
-    assert timed_out["conversion_attempt_state"] == "result_pending_timeout"
+    assert timed_out["conversion_attempt_state"] == "failed"
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert manifest["conversion_attempts"][-1]["reason"] == (
         "result_pending_timeout"
@@ -2239,8 +2265,12 @@ def test_poll_result_journal_recovers_each_write_boundary_without_leaking_result
     )
 
     assert recovered_rc == 0, json.dumps(recovered, sort_keys=True)
-    expected_state = "poll_transient" if boundary == "private" else "result_ready"
+    expected_state = "failed" if boundary == "private" else "result_ready"
+    expected_reason = "poll_transient" if boundary == "private" else None
     assert recovered["conversion_attempt_state"] == expected_state
+    assert json.loads((bundle / "manifest.json").read_text())[
+        "conversion_attempts"
+    ][-1]["reason"] == expected_reason
     manifest_text = (bundle / "manifest.json").read_text()
     history_text = (bundle / ".state" / "history.ndjson").read_text()
     private_state = json.loads((bundle / ".state" / "private.json").read_text())
@@ -2335,7 +2365,10 @@ REFRESH_RECOVERY_EXPECTATIONS = {
     # gone: recovery must downgrade the decision instead of inventing a URL.
     ("private", "new"): (
         "recoverable_error",
-        "poll_transient",
+        # Task 2.1c folds flat `poll_transient` onto ("failed",
+        # "poll_transient"); the reason column below already carried the
+        # discriminating value before the fold, so this row stays as tight.
+        "failed",
         "poll_transient",
         "result_private_payload_lost",
         1,
@@ -2617,7 +2650,7 @@ def test_conversion_retry_journal_recovers_each_write_boundary_idempotently(
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert [attempt["state"] for attempt in manifest["conversion_attempts"]] == [
         "submission_unknown",
-        "not_started",
+        "authorized",
     ]
     assert len(
         [
@@ -2712,7 +2745,7 @@ def test_layout_retry_journal_recovers_inside_a_raw_bearing_bundle(
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert [attempt["state"] for attempt in manifest["conversion_attempts"]] == [
         "result_ready",
-        "not_started",
+        "authorized",
     ]
     history = [
         json.loads(line)
@@ -3795,7 +3828,7 @@ def test_flat_state_migration_agrees_with_the_live_conversion_state_projection()
             flat == "result_ready" and reason is not None
         ):
             continue
-        assert ca._conversion_state_for_attempt(flat) == top_level, flat
+        assert ca._conversion_state_for_poll_result(flat) == top_level, flat
 
 
 def test_legal_triples_is_the_single_owner_of_state_legality():
@@ -3811,21 +3844,67 @@ def test_legal_triples_is_the_single_owner_of_state_legality():
     # 逐字抄自被删除的 POLL_STATE_CONTRACT / expected_manifest_state 字面量。
     # 它不从任何生产表派生，所以生产侧任何一处回退成字面量、或派生逻辑写错，
     # 都会红。
+    # ⚠️ 2026-07-26（任务 2.1c）：原本这张 oracle 是三元组
+    # (http_status, upstream_status, reason_code)，与 POLL_STATE_CONTRACT 整体
+    # 比对。2.1c 把 wire reason_code 从 POLL_STATE_CONTRACT 的值里折掉了（自
+    # schema v2 起它没有任何生产读者），所以 oracle 拆成两张：
+    # CONTRACT_BEFORE_REFACTOR 保留前两列，WIRE_REASON_CODE_BEFORE_REFACTOR
+    # 单独钉 reason_code。两张都仍逐字抄自重构前 c0d197a 的真实值，覆盖面与
+    # 拆分前完全相同——14 行 × 3 列一格不少。
     CONTRACT_BEFORE_REFACTOR = {
-        "submitted": (200, None, None),
-        "pending": (200, "pending", None),
-        "processing": (200, "processing", None),
-        "result_pending": (200, "completed", None),
-        "result_ready": (200, "completed", None),
-        "unsafe_result_url": (200, "completed", "unsafe_result_url"),
-        "unexpected_result_count": (200, "completed", "unexpected_result_count"),
-        "failed": (200, "failed", "task_failed"),
-        "credential_source_missing": (None, None, "credential_source_missing"),
-        "credential_source_changed": (None, None, "credential_source_changed"),
-        "poll_unauthorized": (401, None, "poll_unauthorized"),
-        "task_unavailable": (404, None, "task_unavailable"),
-        "poll_timeout": (None, None, "poll_timeout"),
-        "result_pending_timeout": (None, "completed", "result_pending_timeout"),
+        "submitted": (200, None),
+        "pending": (200, "pending"),
+        "processing": (200, "processing"),
+        "result_pending": (200, "completed"),
+        "result_ready": (200, "completed"),
+        "unsafe_result_url": (200, "completed"),
+        "unexpected_result_count": (200, "completed"),
+        "failed": (200, "failed"),
+        "credential_source_missing": (None, None),
+        "credential_source_changed": (None, None),
+        "poll_unauthorized": (401, None),
+        "task_unavailable": (404, None),
+        "poll_timeout": (None, None),
+        "result_pending_timeout": (None, "completed"),
+    }
+    WIRE_REASON_CODE_BEFORE_REFACTOR = {
+        "submitted": None,
+        "pending": None,
+        "processing": None,
+        "result_pending": None,
+        "result_ready": None,
+        "unsafe_result_url": "unsafe_result_url",
+        "unexpected_result_count": "unexpected_result_count",
+        "failed": "task_failed",
+        "credential_source_missing": "credential_source_missing",
+        "credential_source_changed": "credential_source_changed",
+        "poll_unauthorized": "poll_unauthorized",
+        "task_unavailable": "task_unavailable",
+        "poll_timeout": "poll_timeout",
+        "result_pending_timeout": "result_pending_timeout",
+    }
+    # 折叠后 attempt_state 列不再是行标识，flat_state 列才是。这张 oracle
+    # 是独立字面量（design.md Decision 1 表格的前两列），用来钉住
+    # LEGAL_TRIPLES 从 FLAT_STATE_MIGRATION 派生出来的折叠列没有走样。
+    FOLDED_PAIR_BY_FLAT_STATE = {
+        "not_started": ("authorized", None),
+        "submitting": ("submitting", None),
+        "submitted": ("submitted", None),
+        "submission_unknown": ("submission_unknown", "no_task_id"),
+        "pending": ("processing", None),
+        "processing": ("processing", None),
+        "result_pending": ("processing", None),
+        "result_ready": ("result_ready", None),
+        "unsafe_result_url": ("failed", "unsafe_result_url"),
+        "unexpected_result_count": ("failed", "unexpected_result_count"),
+        "failed": ("failed", "task_failed"),
+        "poll_transient": ("failed", "poll_transient"),
+        "poll_unauthorized": ("failed", "poll_authentication_rejected"),
+        "task_unavailable": ("failed", "task_unavailable"),
+        "credential_source_missing": ("failed", "credential_source_missing"),
+        "credential_source_changed": ("failed", "credential_fingerprint_changed"),
+        "poll_timeout": ("failed", "poll_timeout"),
+        "result_pending_timeout": ("failed", "result_pending_timeout"),
     }
     CONVERSION_STATE_BEFORE_REFACTOR = {
         "not_started": "ready_to_submit",
@@ -3851,11 +3930,17 @@ def test_legal_triples_is_the_single_owner_of_state_legality():
     # 表的行集必须被钉住：否则多一行、少一行、重复一行都只会以 KeyError
     # 间接暴露，而「唯一 owner 表」这条性质本身没有断言保护。
     assert len(ca.LEGAL_TRIPLES) == 18
-    assert {row.attempt_state for row in ca.LEGAL_TRIPLES} == ca.FLAT_STATE_DOMAIN
+    # 2.1c：行标识从 attempt_state 移到 flat_state（wire 分类），因为折叠后
+    # 18 行只落 7 个 attempt_state。行集仍必须与扁平全域一一对应。
+    assert {row.flat_state for row in ca.LEGAL_TRIPLES} == ca.FLAT_STATE_DOMAIN
+    assert {
+        row.flat_state: (row.attempt_state, row.reason)
+        for row in ca.LEGAL_TRIPLES
+    } == FOLDED_PAIR_BY_FLAT_STATE
 
     # 2.1b 前置 B（2.1a 复审转来）：四行占位 None 必须被显式钉住。这四行的
     # reason_code / http_status / upstream_status 被 POLL_STATE_CONTRACT 与
-    # _LEGAL_TRIPLE_BY_ATTEMPT_STATE 两处派生全部过滤掉，改成任意垃圾值今天
+    # _LEGAL_TRIPLE_BY_FLAT_STATE 两处派生全部过滤掉，改成任意垃圾值今天
     # 都不会变红；而 2.1b 起就有读者读这几行（v1 降级要靠 .reason_code 取
     # 线上值）。把「恒为 None」从「碰巧如此」升格为显式契约。
     placeholder_states = {
@@ -3863,19 +3948,26 @@ def test_legal_triples_is_the_single_owner_of_state_legality():
     }
     assert placeholder_states == set(ca._NON_CONTRACT_STATES)
     assert {
-        row.attempt_state: (row.reason_code, row.http_status, row.upstream_status)
+        row.flat_state: (row.reason_code, row.http_status, row.upstream_status)
         for row in ca.LEGAL_TRIPLES
-        if row.attempt_state in placeholder_states
+        if row.flat_state in placeholder_states
     } == {state: (None, None, None) for state in placeholder_states}
 
     # 派生处 1：POLL_STATE_CONTRACT。与独立 oracle 比，不与自身推导式比。
     assert ca.POLL_STATE_CONTRACT == CONTRACT_BEFORE_REFACTOR
+    # wire reason_code 列（2.1c 从 POLL_STATE_CONTRACT 折出来后仍由
+    # LEGAL_TRIPLES 拥有），同样与独立 oracle 比，覆盖 14 个 contract 行。
+    assert {
+        row.flat_state: row.reason_code
+        for row in ca.LEGAL_TRIPLES
+        if row.flat_state not in placeholder_states
+    } == WIRE_REASON_CODE_BEFORE_REFACTOR
 
     # 表的 conversion_state 列必须与独立 oracle 全 18 行一致——含
     # not_started / submitting / submission_unknown 这三行，它们被下面的
     # 投影循环排除（函数输入域比表窄），若不在这里钉住就没有任何测试覆盖。
     assert {
-        row.attempt_state: row.conversion_state for row in ca.LEGAL_TRIPLES
+        row.flat_state: row.conversion_state for row in ca.LEGAL_TRIPLES
     } == CONVERSION_STATE_BEFORE_REFACTOR
 
     # _conversion_state_for_attempt 的输入域比表窄：那三个 state 今天永远落它
@@ -3891,7 +3983,14 @@ def test_legal_triples_is_the_single_owner_of_state_legality():
     for flat in ca.FLAT_STATE_DOMAIN - NON_POLL_OBSERVATIONS:
         assert (
             CONVERSION_STATE_BEFORE_REFACTOR[flat]
-            == ca._conversion_state_for_attempt(flat)
+            == ca._conversion_state_for_poll_result(flat)
+        ), flat
+        # 2.1c 起同一投影有第二个入口：读**已存记录**的折叠 (state, reason)。
+        # 两个入口必须对同一行给出同一个 conversion_state，否则 poll 直写路径
+        # 与崩溃恢复重放路径会写出不同的 manifest。
+        assert (
+            CONVERSION_STATE_BEFORE_REFACTOR[flat]
+            == ca._conversion_state_for_attempt(*FOLDED_PAIR_BY_FLAT_STATE[flat])
         ), flat
 
     # 派生处 3（易漏项）：容量准入的最坏 poll 分支也必须从同一张表构造。
@@ -3906,12 +4005,12 @@ def test_legal_triples_is_the_single_owner_of_state_legality():
         "submitted"
     }
     for branch in table_driven:
-        http_status, upstream_status, reason_code = CONTRACT_BEFORE_REFACTOR[
-            branch.state
-        ]
+        http_status, upstream_status = CONTRACT_BEFORE_REFACTOR[branch.state]
         assert branch.http_status == http_status, branch.state
         assert branch.upstream_status == upstream_status, branch.state
-        assert branch.reason_code == reason_code, branch.state
+        assert branch.reason_code == WIRE_REASON_CODE_BEFORE_REFACTOR[
+            branch.state
+        ], branch.state
     assert len([b for b in branches if b.state == "poll_transient"]) == 4
 
 
@@ -3978,7 +4077,7 @@ def test_the_non_contract_state_exclusion_domain_has_a_single_owner():
     """2.1b 前置 A（2.1a 复审转来）。
 
     `NON_POLL_OBSERVATIONS | {"poll_transient"}` 这个排除域原本在
-    `_LEGAL_TRIPLE_BY_ATTEMPT_STATE` 与 `POLL_STATE_CONTRACT` 两处推导式的
+    `_LEGAL_TRIPLE_BY_FLAT_STATE` 与 `POLL_STATE_CONTRACT` 两处推导式的
     `if` 里各写一遍。两处一旦不一致，索引域与 contract 就分歧——正是 2.1a
     刚消灭的漂移形态以新形式回归。这里钉住：域有名字、且两处派生的键集都
     恰好等于「全域减去它」。
@@ -3991,7 +4090,7 @@ def test_the_non_contract_state_exclusion_domain_has_a_single_owner():
     contract_domain = set(ca.FLAT_STATE_DOMAIN) - set(ca._NON_CONTRACT_STATES)
     assert len(contract_domain) == 14
     assert set(ca.POLL_STATE_CONTRACT) == contract_domain
-    assert set(ca._LEGAL_TRIPLE_BY_ATTEMPT_STATE) == contract_domain
+    assert set(ca._LEGAL_TRIPLE_BY_FLAT_STATE) == contract_domain
 
 
 def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
@@ -4016,6 +4115,11 @@ def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
     """
     import conversion_attempt as ca
 
+    # Task 2.1c re-keys `_REASON_DETAIL_DOMAIN` from the flat state to the
+    # folded `reason`. This probe still reads the same on both sides because
+    # flat `poll_timeout` folds onto the reason of the same name -- the writer
+    # is handed the flat name and looks the reason up itself, the validator is
+    # handed the reason directly.
     probe_state = "poll_timeout"
     probe_code = "poll_timeout"
     # Today `poll_timeout` is not in `_REASON_DETAIL_DOMAIN`, so both sides
@@ -4063,7 +4167,9 @@ def _schema_v1_attempt(attempt, wire_reason_code_by_state):
     downgraded["reason_code"] = (
         detail
         if detail is not None
-        else wire_reason_code_by_state.get(attempt["state"])
+        else wire_reason_code_by_state.get(
+            (attempt["state"], attempt.get("reason"))
+        )
     )
     return downgraded
 
@@ -4115,8 +4221,13 @@ def test_a_schema_version_one_attempt_fails_closed(tmp_path, capsys, monkeypatch
     assert attempt["result_refresh_round_count"] == 0
     assert conversion_attempt.valid_private_state(private_state, manifest) is True
 
+    # Keyed by the folded (state, reason) pair since 2.1c -- that is what a
+    # stored record carries. Keying on attempt_state alone would silently keep
+    # only the last of the ten rows that share `failed`. The pair is
+    # well defined for this column too: the three rows that collapse onto
+    # ("processing", None) all carry reason_code None.
     wire_reason_code_by_state = {
-        row.attempt_state: row.reason_code
+        (row.attempt_state, row.reason): row.reason_code
         for row in conversion_attempt.LEGAL_TRIPLES
     }
     v1_manifest = json.loads(json.dumps(manifest))
@@ -4560,17 +4671,16 @@ FLAT_STATE_OBSERVABLES = {
 }
 
 
-@pytest.mark.parametrize("flat_state", sorted(FLAT_STATE_OBSERVABLES))
-def test_flat_state_observable_projection_is_pinned(tmp_path, flat_state):
-    result = drive_to_flat_state(tmp_path, flat_state)
-    expected = FLAT_STATE_OBSERVABLES[flat_state]
-    assert (
-        result["conversion_state"],
-        result["conversion_attempt_state"],
-        result["outcome"],
-        result.get("action_required"),
-    ) == expected
-    assert set(FLAT_STATE_OBSERVABLES) == conversion_attempt.FLAT_STATE_DOMAIN
+# ⚠️ 2026-07-26（任务 2.1c）：原先此处有一条参数化用例
+# test_flat_state_observable_projection_is_pinned，拿 FLAT_STATE_OBSERVABLES
+# 直接比 main() 的实时输出。折叠落地后它描述的是**折叠前**的合同，已改指向
+# 折叠后的对照表——见本文件末尾的
+# test_folded_state_observable_projection_is_pinned（同样的驱动器、同样的四
+# 元组、同样 18 个参数），以及证明「折叠只动了该动的那一格」的
+# test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else。
+#
+# FLAT_STATE_OBSERVABLES 本身**一格未改**，作为折叠前基线保留：它是上面那条
+# 无损性断言唯一的对照物，覆写或删除它就等于销毁证据。
 
 
 def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_path):
@@ -4590,12 +4700,15 @@ def test_submission_unknown_and_poll_transient_branches_are_invisible_today(tmp_
     """
     for flat_state in ("submission_unknown", "poll_transient"):
         result = drive_to_flat_state(tmp_path, flat_state)
+        # 2.1c：改指向折叠后的对照表。整四元组比对这一点没有放松，只是对照物
+        # 换成了折叠后的真值——继续沿用折叠前的表会让本用例断言一个已经不成立
+        # 的合同，而不是继续钉住「两个分支的判别信息不可见」这条基线。
         assert (
             result["conversion_state"],
             result["conversion_attempt_state"],
             result["outcome"],
             result.get("action_required"),
-        ) == FLAT_STATE_OBSERVABLES[flat_state], flat_state
+        ) == FOLDED_STATE_OBSERVABLES[flat_state], flat_state
         assert "conversion_attempt_reason" not in result
         assert "conversion_attempt_reason_detail" not in result
 
@@ -4610,3 +4723,187 @@ def test_drive_to_flat_state_can_be_called_twice_for_the_same_state(tmp_path):
     second = drive_to_flat_state(tmp_path, "submitted")
     assert first["conversion_attempt_state"] == "submitted"
     assert second["conversion_attempt_state"] == "submitted"
+
+
+# --- Task 2.1c: the folded seven-value attempt state domain ----------------
+
+
+def test_attempt_state_domain_is_closed_to_seven_values():
+    import conversion_attempt as ca
+
+    assert ca.ATTEMPT_STATES == {
+        "authorized", "submitting", "submitted", "processing",
+        "failed", "result_ready", "submission_unknown",
+    }
+    assert {row.attempt_state for row in ca.LEGAL_TRIPLES} == ca.ATTEMPT_STATES
+
+
+def test_every_refolded_pair_set_names_a_legal_pair():
+    """折叠这一步最危险的失败形态：把某处 `state in {...}` 改写成
+    `(state, reason) in {...}` 时把 reason 拼错。
+
+    拼错不会抛异常——那条规则只是从此永不命中，静默失效。最容易踩的两个是
+    折叠时被改名的 `credential_source_changed → credential_fingerprint_changed`
+    和 `poll_unauthorized → poll_authentication_rejected`：沿用旧名字看起来
+    完全合理，却指向一个任何记录都不可能携带的 pair。
+
+    这里把每一处重新以 (state, reason) 为键的集合都钉在
+    LEGAL_STATE_REASON_PAIRS 内。LEGAL_STATE_REASON_PAIRS 由
+    FLAT_STATE_MIGRATION 派生，而后者的 18 行由本文件的独立字面量 oracle
+    （FOLDED_PAIR_BY_FLAT_STATE、FLAT_STATE_MIGRATION 覆盖域测试）钉住，所以
+    这不是同义反复。
+    """
+    import conversion_attempt as ca
+    import workflow as wf
+
+    assert set(ca._REFOLDED_PAIR_SETS) == {
+        "POLL_ACTIVE_ATTEMPT_PAIRS", "CONFIRMABLE_PAIRS", "_BACKOFF_PAIRS",
+        "_CREDENTIAL_ERROR_PAIRS", "_POLL_DEADLINE_PAIRS",
+        "_POLL_WINDOW_RESET_PAIRS", "_PROCESSING_PAIR",
+        "_POLL_TRANSIENT_PAIR", "_RESULT_PENDING_TIMEOUT_PAIR",
+    }
+    for name, pairs in ca._REFOLDED_PAIR_SETS.items():
+        assert pairs, name
+        assert set(pairs) <= set(ca.LEGAL_STATE_REASON_PAIRS), name
+    # workflow.py 的那一处也一样，且它必须是可续 poll 的子集——否则 resume
+    # 会把一个 _poll_transition 立刻拒绝的记录送去重新轮询。
+    assert set(wf.RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS) <= set(
+        ca.LEGAL_STATE_REASON_PAIRS
+    )
+    assert set(wf.RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS) <= set(
+        ca.POLL_ACTIVE_ATTEMPT_PAIRS
+    )
+
+
+def test_poll_admission_is_keyed_by_state_and_reason_not_state_alone():
+    """折叠后 failed 同时覆盖可续 poll 与不可续 poll 两类，state 单独已失去判别力。"""
+    import conversion_attempt as ca
+
+    assert ("failed", "poll_transient") in ca.POLL_ACTIVE_ATTEMPT_PAIRS
+    assert ("failed", "unsafe_result_url") in ca.POLL_ACTIVE_ATTEMPT_PAIRS
+    assert ("failed", "task_failed") not in ca.POLL_ACTIVE_ATTEMPT_PAIRS
+    assert ("failed", "unexpected_result_count") not in (
+        ca.POLL_ACTIVE_ATTEMPT_PAIRS
+    )
+
+
+# FOLDED_STATE_OBSERVABLES is the post-fold twin of FLAT_STATE_OBSERVABLES:
+# the same (conversion_state, conversion_attempt_state, outcome,
+# action_required) quadruple, driven through the same drive_to_flat_state and
+# main() boundary, recorded after task 2.1c folded the stored attempt state
+# from 18 flat values to 7.
+#
+# It is written as an INDEPENDENT LITERAL, not as a comprehension over
+# conversion_attempt.FLAT_STATE_MIGRATION. Deriving it would make
+# test_folded_state_observable_projection_is_pinned compare the production
+# table with itself the moment the fold lands (the `x == x` self-proof the
+# 2.1a review caught), and would make the losslessness test below vacuous.
+#
+# FLAT_STATE_OBSERVABLES above is deliberately left untouched: it is task
+# 1.3's pre-fold baseline snapshot and the only material that can show the
+# fold lost nothing. Do not update its cells.
+FOLDED_STATE_OBSERVABLES = {
+    "not_started": (
+        "ready_to_submit", "authorized", "conversion_retry_authorized", None
+    ),
+    "submitting": ("submitting", "submitting", "inspected", None),
+    "submitted": ("submitted", "submitted", "conversion_submitted", None),
+    "submission_unknown": (
+        "submission_unknown", "submission_unknown", "submission_unknown",
+        "resolve_submission_unknown",
+    ),
+    "pending": ("submitted", "processing", "conversion_pending", None),
+    "processing": ("submitted", "processing", "conversion_processing", None),
+    "result_pending": ("submitted", "processing", "result_pending", None),
+    "result_ready": ("result_downloading", "result_ready", "result_ready", None),
+    "unsafe_result_url": ("terminal_error", "failed", "unsafe_result_url", None),
+    "unexpected_result_count": (
+        "terminal_error", "failed", "unexpected_result_count",
+        "resolve_unexpected_result_count",
+    ),
+    "failed": ("awaiting_user", "failed", "task_failed", "resolve_task_failed"),
+    "poll_transient": ("recoverable_error", "failed", "poll_transient", None),
+    "poll_unauthorized": (
+        "recoverable_error", "failed", "poll_unauthorized", None
+    ),
+    "task_unavailable": ("recoverable_error", "failed", "task_unavailable", None),
+    "credential_source_missing": (
+        "recoverable_error", "failed", "credential_source_missing", None,
+    ),
+    "credential_source_changed": (
+        "recoverable_error", "failed", "credential_source_changed", None,
+    ),
+    "poll_timeout": ("recoverable_error", "failed", "poll_timeout", None),
+    "result_pending_timeout": (
+        "recoverable_error", "failed", "result_pending_timeout", None,
+    ),
+}
+
+
+@pytest.mark.parametrize("flat_state", sorted(FOLDED_STATE_OBSERVABLES))
+def test_folded_state_observable_projection_is_pinned(tmp_path, flat_state):
+    result = drive_to_flat_state(tmp_path, flat_state)
+    expected = FOLDED_STATE_OBSERVABLES[flat_state]
+    assert (
+        result["conversion_state"],
+        result["conversion_attempt_state"],
+        result["outcome"],
+        result.get("action_required"),
+    ) == expected
+    assert set(FOLDED_STATE_OBSERVABLES) == conversion_attempt.FLAT_STATE_DOMAIN
+
+
+# The two rows whose `outcome` cell is COMMAND-derived rather than
+# state-derived, per FLAT_STATE_OBSERVABLES' own notes:
+#   - not_started: `record conversion` prints "conversion_retry_authorized"
+#     unconditionally for every call, whatever attempt state it records
+#     against.
+#   - submitting: `inspect` prints "inspected" for every state it observes.
+# Neither cell carries state information, so an unchanged value there is not
+# evidence that the fold left `outcome` alone. They are excluded from the
+# outcome comparison below (task 4.4's additional acceptance note); their
+# other three cells are NOT discounted and are compared like every other row.
+_COMMAND_DERIVED_OUTCOME_ROWS = frozenset({"not_started", "submitting"})
+
+
+def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
+    """折叠无损性的正面证明。
+
+    「新表全绿」只说明折叠后的行为被钉住了，不说明折叠没有顺带改掉别的东西。
+    这里逐格比对折叠前基线（FLAT_STATE_OBSERVABLES，任务 1.3）与折叠后快照
+    （FOLDED_STATE_OBSERVABLES），要求两者的差异**恰好**等于
+    FLAT_STATE_MIGRATION 规定的差异：
+
+      - 第 0 格 conversion_state：折叠前后必须相等，且必须等于迁移表第三列
+        （迁移表没有承诺改它，所以它必须一格不动）；
+      - 第 1 格 conversion_attempt_state：折叠前必须是扁平值本身，折叠后必须
+        恰好是迁移表第一列——这是唯一允许移动的一格；
+      - 第 2 格 outcome：必须相等（两行命令派生的除外，见上方注释）；
+      - 第 3 格 action_required：必须相等（kind 折叠是任务 2.4，不在本步）。
+
+    两张表都是独立字面量，迁移表是生产代码，所以本断言不会退化成同义反复。
+    """
+    import conversion_attempt as ca
+
+    assert set(FOLDED_STATE_OBSERVABLES) == set(FLAT_STATE_OBSERVABLES)
+    assert set(FLAT_STATE_OBSERVABLES) == set(ca.FLAT_STATE_MIGRATION)
+    moved = set()
+    for flat in sorted(FLAT_STATE_OBSERVABLES):
+        before = FLAT_STATE_OBSERVABLES[flat]
+        after = FOLDED_STATE_OBSERVABLES[flat]
+        folded_state, _folded_reason, folded_conversion_state = (
+            ca.FLAT_STATE_MIGRATION[flat]
+        )
+        assert after[0] == before[0], flat
+        assert after[0] == folded_conversion_state, flat
+        assert before[1] == flat, flat
+        assert after[1] == folded_state, flat
+        assert after[3] == before[3], flat
+        if flat not in _COMMAND_DERIVED_OUTCOME_ROWS:
+            assert after[2] == before[2], flat
+        if after[1] != before[1]:
+            moved.add(flat)
+    # 折叠确实发生了：18 个扁平值里有 12 个的 attempt state 变了名字。少了
+    # 说明折叠没落地，多了说明迁移表被改动过。
+    assert len(moved) == 12
+    assert len({FOLDED_STATE_OBSERVABLES[f][1] for f in FLAT_STATE_OBSERVABLES}) == 7

@@ -193,250 +193,36 @@ SUBMISSION_UNKNOWN_REASON_CODES = frozenset(
     }
 )
 
-
-class _LegalTriple(NamedTuple):
-    """One row of the single owner table of flat attempt state legality.
-
-    conversion_state is the top-level manifest projection valid_private_state
-    requires (today's expected_manifest_state, verbatim); attempt_state is the
-    flat state name; reason_code/http_status/upstream_status are the triple
-    POLL_STATE_CONTRACT and _valid_attempt enforce for the 14 states that are
-    poll observations. The four states that are not single-valued poll
-    observations -- _NON_CONTRACT_STATES: not_started, submitting,
-    submission_unknown and poll_transient, whose reason_code/http_status vary
-    across POLL_TRANSIENT_REASON_CODES and _WORST_CASE_HTTP_STATUSES -- carry
-    None placeholders in those three fields. Nothing derives from them there,
-    and test_legal_triples_is_the_single_owner_of_state_legality pins all
-    twelve of those cells to None so a reader that does start using them (the
-    schema v1 downgrade in the tests already does) cannot silently pick up a
-    stray value.
-
-    reason_code is today's wire reason_code -- it is deliberately *not* named
-    `reason`; see LEGAL_TRIPLES' own comment below for the division of labour
-    against FLAT_STATE_MIGRATION and for the two rows on which the two tables
-    disagree.
-    """
-
-    conversion_state: str
-    attempt_state: str
-    reason_code: str | None
-    http_status: int | None
-    upstream_status: str | None
-
-
-# design.md Decision 1 / Task 2.1a -- the single owner table of flat attempt
-# state legality. It is the union of what used to be two independently
-# maintained copies: POLL_STATE_CONTRACT (the (http_status, upstream_status,
-# reason_code) triple a poll observation may carry) and valid_private_state's
-# expected_manifest_state (the top-level conversion_state each flat state
-# projects to). Both are now derived from this table below, so the two can
-# never again drift out of sync with each other.
-#
-# --- Division of labour: LEGAL_TRIPLES vs FLAT_STATE_MIGRATION -------------
-#
-# The user's 2026-07-26 ruling keeps these two tables separate, with their
-# ownership written down here and mirrored in FLAT_STATE_MIGRATION's own
-# comment below. They do not hold two copies of one fact; they hold two
-# different facts.
-#
-# LEGAL_TRIPLES owns *today's line-level legality*: for each of the 18 flat
-# states, the wire reason_code, the HTTP status and the upstream status a
-# record in that state may carry, plus the top-level conversion_state it
-# projects to. It does NOT own the folded target vocabulary.
-#
-# FLAT_STATE_MIGRATION owns the *migration mapping*: flat state -> the folded
-# (attempt state, reason, conversion_state) triple. It does NOT own wire
-# values, HTTP statuses or upstream statuses.
-#
-# Restricted to the 14 contract rows (POLL_STATE_CONTRACT's domain), the
-# reason columns of the two tables disagree on exactly two of them, and that
-# is by design, not drift:
-#
-#   flat state                  | LEGAL_TRIPLES.reason_code   | FLAT_STATE_MIGRATION reason
-#   ----------------------------+-----------------------------+-----------------------------
-#   poll_unauthorized           | poll_unauthorized           | poll_authentication_rejected
-#   credential_source_changed   | credential_source_changed   | credential_fingerprint_changed
-#
-# Outside that domain, two more rows also disagree: submission_unknown and
-# poll_transient are _NON_CONTRACT_STATES placeholders, so LEGAL_TRIPLES
-# carries None for them by construction (see _LegalTriple's docstring), while
-# FLAT_STATE_MIGRATION carries their real folded reason ("no_task_id" /
-# "poll_transient"). Their on-the-wire value never lived in
-# LEGAL_TRIPLES.reason_code to begin with -- from schema v2 on it lives in the
-# attempt's `reason_detail` field (SUBMISSION_UNKNOWN_REASON_CODES /
-# POLL_TRANSIENT_REASON_CODES), not in this table.
-#
-# To read today's on-the-wire value for a contract row, read
-# LEGAL_TRIPLES.reason_code; for submission_unknown/poll_transient, read
-# reason_detail instead. To read the folded target value -- which is what the
-# schema v2 attempt field `reason` carries from task 2.1b onward -- read
-# FLAT_STATE_MIGRATION. Merging the two would produce a table whose columns
-# describe different points in time, and task 2.1c would have to split it
-# again once the fold lands. The known cost is that task 3.2's uniqueness
-# proof spans both tables.
-LEGAL_TRIPLES = (
-    _LegalTriple("ready_to_submit", "not_started", None, None, None),
-    _LegalTriple("submitting", "submitting", None, None, None),
-    _LegalTriple("submitted", "submitted", None, 200, None),
-    _LegalTriple("submission_unknown", "submission_unknown", None, None, None),
-    _LegalTriple("submitted", "pending", None, 200, "pending"),
-    _LegalTriple("submitted", "processing", None, 200, "processing"),
-    _LegalTriple("submitted", "result_pending", None, 200, "completed"),
-    _LegalTriple("result_downloading", "result_ready", None, 200, "completed"),
-    _LegalTriple(
-        "terminal_error", "unsafe_result_url", "unsafe_result_url", 200, "completed"
-    ),
-    _LegalTriple(
-        "terminal_error",
-        "unexpected_result_count",
-        "unexpected_result_count",
-        200,
-        "completed",
-    ),
-    _LegalTriple("awaiting_user", "failed", "task_failed", 200, "failed"),
-    _LegalTriple("recoverable_error", "poll_transient", None, None, None),
-    _LegalTriple(
-        "recoverable_error", "poll_unauthorized", "poll_unauthorized", 401, None
-    ),
-    _LegalTriple(
-        "recoverable_error", "task_unavailable", "task_unavailable", 404, None
-    ),
-    _LegalTriple(
-        "recoverable_error",
-        "credential_source_missing",
-        "credential_source_missing",
-        None,
-        None,
-    ),
-    _LegalTriple(
-        "recoverable_error",
-        "credential_source_changed",
-        "credential_source_changed",
-        None,
-        None,
-    ),
-    _LegalTriple("recoverable_error", "poll_timeout", "poll_timeout", None, None),
-    _LegalTriple(
-        "recoverable_error",
-        "result_pending_timeout",
-        "result_pending_timeout",
-        None,
-        "completed",
-    ),
-)
-
-# The flat states LEGAL_TRIPLES carries that are not single-valued poll
-# observations: not_started and submitting precede any poll response, and
-# submission_unknown is written by the create path (conversion_attempt.py
-# :1486, :1630) directly, never by a poll observation. POLL_STATE_CONTRACT and
-# _poll_response_branches must both exclude these three; they exclude
-# poll_transient alongside them, which is why the exclusion domain has its own
-# name (_NON_CONTRACT_STATES below) rather than being spelled out per use.
-NON_POLL_OBSERVATIONS = frozenset({"not_started", "submitting", "submission_unknown"})
-
-# The exclusion domain both derivations below apply: the flat states whose
-# LEGAL_TRIPLES row is a placeholder rather than a single-valued contract
-# entry. It has a name and a single definition because both
-# _LEGAL_TRIPLE_BY_ATTEMPT_STATE and POLL_STATE_CONTRACT must filter on
-# *exactly* the same set: if the index domain and the contract domain ever
-# disagree, a state is either indexed without a contract or given a contract
-# it cannot satisfy. Written inline in each comprehension's `if`, that
-# invariant depended on two expressions staying textually identical -- the
-# same drift shape task 2.1a removed from POLL_STATE_CONTRACT and
-# expected_manifest_state, reintroduced one level down.
-_NON_CONTRACT_STATES = NON_POLL_OBSERVATIONS | frozenset({"poll_transient"})
-
-# Indexed over the same domain POLL_STATE_CONTRACT describes -- every
-# non-transient poll observation state, excluding _NON_CONTRACT_STATES.
-# Filtering here (rather than indexing all 18 rows) means a future widening of
-# _poll_response_branches' input domain raises KeyError instead of silently
-# returning a placeholder row shaped like a single-valued contract entry -- a
-# shape _valid_attempt would reject, and exactly the shape
-# _poll_response_branches' docstring promises never to budget capacity for.
-_LEGAL_TRIPLE_BY_ATTEMPT_STATE = {
-    row.attempt_state: row
-    for row in LEGAL_TRIPLES
-    if row.attempt_state not in _NON_CONTRACT_STATES
-}
-
-# The top-level conversion_state each flat attempt state projects to, over
-# LEGAL_TRIPLES' full 18-row domain. valid_private_state's expected_manifest_
-# state and _conversion_state_for_attempt's (POLL_RESULT_STATES-filtered)
-# _ATTEMPT_STATE_CONVERSION_STATE both derive from this single dict instead of
-# each rebuilding a near-identical comprehension over LEGAL_TRIPLES.
-_MANIFEST_STATE_BY_ATTEMPT_STATE = {
-    row.attempt_state: row.conversion_state for row in LEGAL_TRIPLES
-}
-
-# The (http_status, upstream_status, reason_code) triple each non-transient
-# attempt state must carry. The capacity admission below builds its worst-case
-# poll branches from the same table so the two can never disagree about which
-# observations are legal.
-#
-# _valid_attempt enforces the first two elements against the stored attempt.
-# From schema v2 on it no longer compares the third: an attempt no longer
-# stores the wire reason_code at all, and the field that replaced it -- the
-# folded `reason` -- is enforced against FLAT_STATE_MIGRATION instead. The two
-# checks are equally tight, because both columns are single-valued functions
-# of the state (they agree row for row apart from the two renames documented
-# on LEGAL_TRIPLES). The reason_code element has no production reader left
-# after schema v2: _poll_response_branches (below) builds its worst-case
-# observations from _LEGAL_TRIPLE_BY_ATTEMPT_STATE directly, never from this
-# tuple. Keeping it here is test-only from this task onward -- the 2.1a owner
-# test (test_legal_triples_is_the_single_owner_of_state_legality) still
-# compares the whole three-element tuple against a literal oracle -- which
-# strengthens, rather than weakens, task 2.1c's case for folding this column
-# away.
-POLL_STATE_CONTRACT = {
-    row.attempt_state: (row.http_status, row.upstream_status, row.reason_code)
-    for row in LEGAL_TRIPLES
-    if row.attempt_state not in _NON_CONTRACT_STATES
-}
-
-# poll_transient is the one state POLL_STATE_CONTRACT cannot describe: it
-# carries no upstream status and admits either of two reason codes, the second
-# of which only a crash recovery produces.
+# poll_transient is the one wire classification POLL_STATE_CONTRACT cannot
+# describe: it carries no upstream status and admits either of two reason
+# codes, the second of which only a crash recovery produces.
 POLL_TRANSIENT_REASON_CODES = frozenset(
     {"poll_transient", "result_private_payload_lost"}
 )
 
-# design.md Decision 1 -- the single enumeration of today's flat attempt
-# state domain and its target (state, reason, conversion_state) triple.
-# Every production site of a flat value is listed once; the table is the sole
-# driver of the 2.1c fold, the 2.2 reason closure and the 4.2 migration note.
+# design.md Decision 1 -- the single enumeration of the 18 *wire* (flat)
+# classifications doc2x still produces and the folded (attempt state, reason,
+# conversion_state) triple each one stores from task 2.1c onward.
 #
-# --- Division of labour: FLAT_STATE_MIGRATION vs LEGAL_TRIPLES -------------
+# --- What "flat state" means after the 2.1c fold ---------------------------
 #
-# The mirror of the note on LEGAL_TRIPLES above; the user's 2026-07-26 ruling
-# keeps the two tables separate and requires each to name the other.
+# Before 2.1c the 18 keys of this table were simultaneously (a) the value
+# doc2x._classify / _classify_poll return in CreateResult.state /
+# PollResult.state and (b) the value an attempt record stored in its `state`
+# field. Task 2.1c splits those two roles apart:
 #
-# FLAT_STATE_MIGRATION owns the *migration mapping* only: for each of today's
-# 18 flat states, the folded (attempt state, reason, top-level
-# conversion_state) triple. Its reason column is the folded target
-# vocabulary, and from task 2.1b onward it is also what the schema v2 attempt
-# field `reason` stores. It does NOT own wire reason codes, HTTP statuses or
-# upstream statuses -- those are LEGAL_TRIPLES' columns, and LEGAL_TRIPLES
-# also owns the top-level conversion_state each flat state projects to
-# *today*, which valid_private_state enforces.
+#   * the KEYS stay the wire vocabulary -- doc2x.py is untouched by this
+#     task, so a poll observation is still classified as one of these 18;
+#   * the stored attempt `state` is now the folded value in column 0, drawn
+#     from the closed 7-value ATTEMPT_STATES, with column 1's `reason`
+#     carrying the discrimination the folded name gave up.
 #
-# Restricted to the 14 contract rows, the two reason columns disagree on
-# exactly two of them, by design:
-#
-#   flat state                  | LEGAL_TRIPLES.reason_code   | reason here
-#   ----------------------------+-----------------------------+-----------------------------
-#   poll_unauthorized           | poll_unauthorized           | poll_authentication_rejected
-#   credential_source_changed   | credential_source_changed   | credential_fingerprint_changed
-#
-# Outside that domain, two more rows also disagree -- submission_unknown and
-# poll_transient, the _NON_CONTRACT_STATES placeholders where
-# LEGAL_TRIPLES.reason_code is None by construction but this table carries
-# the real folded reason. See LEGAL_TRIPLES' own comment above for the full
-# four-row account and where each placeholder's on-the-wire value actually
-# lives (reason_detail, not LEGAL_TRIPLES.reason_code).
-#
-# To read today's on-the-wire value, read LEGAL_TRIPLES.reason_code (or
-# reason_detail for the two placeholders). To read the folded target value,
-# read this table.
+# So every table below that is keyed by one of these 18 names is keyed by a
+# WIRE classification, not by a stored attempt state; the names say so
+# (`_..._BY_FLAT_STATE`, `_poll_response_branches`). Anything that reads a
+# stored record keys on `(state, reason)` instead -- and, for the one place
+# the fold is not injective, on `upstream_status` as well (see
+# _MANIFEST_STATE_BY_FOLDED_STATE below).
 FLAT_STATE_MIGRATION = {
     # flat state: (attempt state, reason, top-level conversion_state)
     "not_started": ("authorized", None, "ready_to_submit"),
@@ -470,45 +256,75 @@ FLAT_STATE_MIGRATION = {
 }
 FLAT_STATE_DOMAIN = frozenset(FLAT_STATE_MIGRATION)
 
-# Which states may carry a non-null reason_detail, and the closed set each one
-# may draw from. The two domained states are exactly the ones whose wire
-# value ranges over a set instead of being a single-valued function of the
-# state: every other state's wire code is recoverable from the state alone
-# (LEGAL_TRIPLES owns that mapping), so keeping it in reason_detail would
-# store a second copy of something already implied. Anything outside the
-# domain must be None -- _valid_reason_detail enforces this and
-# _attempt_reason_columns produces it by reading this same dict (via
-# `.get(state, frozenset())`), so the writer and the validator read one table
-# rather than two agreeing conditionals.
+# design.md Decision 1 -- the closed seven-value domain a stored attempt
+# `state` may take from task 2.1c onward. Derived from the migration table's
+# target column rather than restated, so the fold has exactly one owner;
+# test_attempt_state_domain_is_closed_to_seven_values pins the seven names
+# against an independent literal.
+ATTEMPT_STATES = frozenset(
+    state for state, _reason, _conversion_state in FLAT_STATE_MIGRATION.values()
+)
+
+# The legal `(state, reason)` pairs a stored attempt may carry. 18 wire rows
+# collapse onto 16 pairs (pending/processing/result_pending all fold onto
+# ("processing", None)). This replaces schema v2's per-state
+# `reason == FLAT_STATE_MIGRATION[state][1]` check: the set of legal
+# (state, reason) combinations is identical, it is just no longer indexed by
+# a name the record has stopped carrying.
+LEGAL_STATE_REASON_PAIRS = frozenset(
+    (state, reason)
+    for state, reason, _conversion_state in FLAT_STATE_MIGRATION.values()
+)
+
+# Which folded reasons may carry a non-null reason_detail, and the closed set
+# each one may draw from. The two domained reasons are exactly the ones whose
+# wire value ranges over a set instead of being a single-valued function of
+# the wire classification: every other classification's wire code is
+# recoverable from LEGAL_TRIPLES' reason_code column, so keeping it in
+# reason_detail would store a second copy of something already implied.
+#
+# Keyed by `reason` rather than by state since 2.1c: the two keys used to be
+# the flat states submission_unknown and poll_transient, which fold onto
+# ("submission_unknown", "no_task_id") and ("failed", "poll_transient"). The
+# reason alone is enough -- "no_task_id" and "poll_transient" each occur on
+# exactly one row of FLAT_STATE_MIGRATION -- and keying on the pair would
+# carry a redundant first element.
+#
+# Anything outside the domain must be None: _valid_reason_detail enforces
+# this and _attempt_reason_columns produces it by reading this same dict, so
+# the writer and the validator read one table rather than two agreeing
+# conditionals.
 _REASON_DETAIL_DOMAIN = {
-    "submission_unknown": SUBMISSION_UNKNOWN_REASON_CODES,
+    "no_task_id": SUBMISSION_UNKNOWN_REASON_CODES,
     "poll_transient": POLL_TRANSIENT_REASON_CODES,
 }
 
 
-def _attempt_reason_columns(state: str, reason_code: str | None) -> dict:
+def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
     """The four schema v2 attempt columns that replace v1's `reason_code`.
 
     Every site that writes an attempt builds these four fields here, so the
     folded vocabulary has exactly one producer and cannot drift between the
     create path, the poll path and the two recovery paths.
 
-    `state` is a flat state name; `reason_code` is the wire code the transport
-    reported for it (None where there was no response, e.g. the placeholder
-    and submitting records).
+    `flat_state` is a WIRE classification (a FLAT_STATE_MIGRATION key -- what
+    doc2x returned, or what the caller is about to record); `reason_code` is
+    the wire code the transport reported for it (None where there was no
+    response, e.g. the placeholder and submitting records).
 
     reason is FLAT_STATE_MIGRATION's folded target reason -- deliberately not
     the wire code, which disagrees with it on poll_unauthorized and
     credential_source_changed. reason_detail keeps the wire code only for the
-    two states whose code is not implied by the state. authorization_kind and
-    result_refresh_round_count are the placeholders task 2.1b carries without
-    giving them behaviour (see ATTEMPT_KEYS).
+    two reasons whose code is not implied by the classification.
+    authorization_kind and result_refresh_round_count are the placeholders
+    task 2.1b carries without giving them behaviour (see ATTEMPT_KEYS).
     """
+    reason = FLAT_STATE_MIGRATION[flat_state][1]
     return {
-        "reason": FLAT_STATE_MIGRATION[state][1],
+        "reason": reason,
         "reason_detail": (
             reason_code
-            if reason_code in _REASON_DETAIL_DOMAIN.get(state, frozenset())
+            if reason_code in _REASON_DETAIL_DOMAIN.get(reason, frozenset())
             else None
         ),
         "authorization_kind": None,
@@ -516,37 +332,349 @@ def _attempt_reason_columns(state: str, reason_code: str | None) -> dict:
     }
 
 
-def _valid_reason_detail(state: str, reason_detail) -> bool:
-    domain = _REASON_DETAIL_DOMAIN.get(state)
+def _attempt_state_columns(flat_state: str) -> dict:
+    """The folded `state` a record for `flat_state` stores, plus its reason
+    columns.
+
+    The one place the fold is applied on the write side. Callers used to
+    write `"state": <wire classification>` next to a separate
+    _attempt_reason_columns call; going through one helper means the stored
+    state and the stored reason can never come from different rows of
+    FLAT_STATE_MIGRATION.
+    """
+    return {
+        "state": FLAT_STATE_MIGRATION[flat_state][0],
+        **_attempt_reason_columns(flat_state, None),
+    }
+
+
+def _valid_reason_detail(reason: str | None, reason_detail) -> bool:
+    domain = _REASON_DETAIL_DOMAIN.get(reason)
     return reason_detail is None if domain is None else reason_detail in domain
 
 
-# The result states a poll observation may commit. "submitted" is in
+class _LegalTriple(NamedTuple):
+    """One row of the single owner table of attempt state legality.
+
+    There is one row per WIRE classification (`flat_state`, a
+    FLAT_STATE_MIGRATION key), because that is what the columns describe: the
+    HTTP status, upstream status and wire reason_code a response so classified
+    may carry. `conversion_state`, `attempt_state` and `reason` are the folded
+    triple that classification stores, read straight off FLAT_STATE_MIGRATION
+    so this table cannot hold a second, drifting copy of the fold.
+
+    `reason_code` is today's on-the-wire code and is deliberately *not* the
+    same column as `reason`: within this one table they disagree on exactly
+    four rows, and that is by design, not drift.
+
+      * two contract rows, where the folded vocabulary renames the wire code:
+
+          flat_state                | reason_code               | reason
+          --------------------------+---------------------------+------------------------------
+          poll_unauthorized         | poll_unauthorized         | poll_authentication_rejected
+          credential_source_changed | credential_source_changed | credential_fingerprint_changed
+
+      * two placeholder rows, submission_unknown and poll_transient, whose
+        wire code ranges over a set (SUBMISSION_UNKNOWN_REASON_CODES /
+        POLL_TRANSIENT_REASON_CODES) rather than being single valued. Their
+        reason_code is None here by construction and their real wire value
+        lives in the attempt's `reason_detail` field, never in this table.
+
+    The four states that are not single-valued poll observations --
+    _NON_CONTRACT_STATES: not_started, submitting, submission_unknown and
+    poll_transient, whose reason_code/http_status vary across
+    POLL_TRANSIENT_REASON_CODES and _WORST_CASE_HTTP_STATUSES -- carry None
+    placeholders in reason_code/http_status/upstream_status. Nothing derives
+    from them there, and test_legal_triples_is_the_single_owner_of_state_
+    legality pins all twelve of those cells to None so a reader that does
+    start using them (the schema v1 downgrade in the tests already does)
+    cannot silently pick up a stray value.
+    """
+
+    flat_state: str
+    conversion_state: str
+    attempt_state: str
+    reason: str | None
+    reason_code: str | None
+    http_status: int | None
+    upstream_status: str | None
+
+
+def _legal_triple(
+    flat_state: str,
+    reason_code: str | None,
+    http_status: int | None,
+    upstream_status: str | None,
+) -> _LegalTriple:
+    """A LEGAL_TRIPLES row: the wire columns spelled out, the folded columns
+    read off FLAT_STATE_MIGRATION."""
+    attempt_state, reason, conversion_state = FLAT_STATE_MIGRATION[flat_state]
+    return _LegalTriple(
+        flat_state,
+        conversion_state,
+        attempt_state,
+        reason,
+        reason_code,
+        http_status,
+        upstream_status,
+    )
+
+
+# design.md Decision 1 / Task 2.1a -- the single owner table of attempt state
+# legality. It is the union of what used to be two independently maintained
+# copies: POLL_STATE_CONTRACT (the (http_status, upstream_status) pair a poll
+# observation may carry) and valid_private_state's expected_manifest_state
+# (the top-level conversion_state each state projects to). Both are derived
+# from this table below, so the two can never drift out of sync.
+LEGAL_TRIPLES = (
+    _legal_triple("not_started", None, None, None),
+    _legal_triple("submitting", None, None, None),
+    _legal_triple("submitted", None, 200, None),
+    _legal_triple("submission_unknown", None, None, None),
+    _legal_triple("pending", None, 200, "pending"),
+    _legal_triple("processing", None, 200, "processing"),
+    _legal_triple("result_pending", None, 200, "completed"),
+    _legal_triple("result_ready", None, 200, "completed"),
+    _legal_triple("unsafe_result_url", "unsafe_result_url", 200, "completed"),
+    _legal_triple(
+        "unexpected_result_count", "unexpected_result_count", 200, "completed"
+    ),
+    _legal_triple("failed", "task_failed", 200, "failed"),
+    _legal_triple("poll_transient", None, None, None),
+    _legal_triple("poll_unauthorized", "poll_unauthorized", 401, None),
+    _legal_triple("task_unavailable", "task_unavailable", 404, None),
+    _legal_triple(
+        "credential_source_missing", "credential_source_missing", None, None
+    ),
+    _legal_triple(
+        "credential_source_changed", "credential_source_changed", None, None
+    ),
+    _legal_triple("poll_timeout", "poll_timeout", None, None),
+    _legal_triple(
+        "result_pending_timeout", "result_pending_timeout", None, "completed"
+    ),
+)
+
+# The wire classifications LEGAL_TRIPLES carries that are not single-valued
+# poll observations: not_started and submitting precede any poll response, and
+# submission_unknown is written by the create path directly, never by a poll
+# observation. POLL_STATE_CONTRACT and _poll_response_branches must both
+# exclude these three; they exclude poll_transient alongside them, which is
+# why the exclusion domain has its own name (_NON_CONTRACT_STATES below)
+# rather than being spelled out per use.
+NON_POLL_OBSERVATIONS = frozenset({"not_started", "submitting", "submission_unknown"})
+
+# The exclusion domain both derivations below apply: the wire classifications
+# whose LEGAL_TRIPLES row is a placeholder rather than a single-valued
+# contract entry. It has a name and a single definition because both
+# _LEGAL_TRIPLE_BY_FLAT_STATE and POLL_STATE_CONTRACT must filter on
+# *exactly* the same set: if the index domain and the contract domain ever
+# disagree, a classification is either indexed without a contract or given a
+# contract it cannot satisfy. Written inline in each comprehension's `if`,
+# that invariant depended on two expressions staying textually identical --
+# the same drift shape task 2.1a removed from POLL_STATE_CONTRACT and
+# expected_manifest_state, reintroduced one level down.
+_NON_CONTRACT_STATES = NON_POLL_OBSERVATIONS | frozenset({"poll_transient"})
+
+# Indexed over the same domain POLL_STATE_CONTRACT describes -- every
+# non-transient poll observation, excluding _NON_CONTRACT_STATES. Filtering
+# here (rather than indexing all 18 rows) means a future widening of
+# _poll_response_branches' input domain raises KeyError instead of silently
+# returning a placeholder row shaped like a single-valued contract entry -- a
+# shape _valid_attempt would reject, and exactly the shape
+# _poll_response_branches' docstring promises never to budget capacity for.
+_LEGAL_TRIPLE_BY_FLAT_STATE = {
+    row.flat_state: row
+    for row in LEGAL_TRIPLES
+    if row.flat_state not in _NON_CONTRACT_STATES
+}
+
+# The top-level conversion_state each *stored* attempt projects to, keyed by
+# the folded (state, reason) pair, over LEGAL_TRIPLES' full 18-row domain (16
+# distinct pairs). valid_private_state's expected_manifest_state and
+# _conversion_state_for_attempt's (POLL_RESULT_STATES-filtered)
+# _FOLDED_POLL_RESULT_CONVERSION_STATE both derive from this single dict.
+#
+# The pair is enough here even though the fold is not injective: the three
+# rows that collapse onto ("processing", None) -- pending, processing,
+# result_pending -- all project to "submitted", so the collapsed key is
+# still single valued. (The one place the collapse *does* matter is where a
+# rule applied to result_pending but not to its two siblings; those sites
+# discriminate on upstream_status, which is exactly what distinguishes the
+# three LEGAL_TRIPLES rows. design.md Decision 1 note 3.)
+_MANIFEST_STATE_BY_FOLDED_STATE = {
+    (row.attempt_state, row.reason): row.conversion_state for row in LEGAL_TRIPLES
+}
+
+# The (http_status, upstream_status) pair each non-transient wire
+# classification must carry.
+#
+# The wire reason_code used to be a third element of this tuple. It has had no
+# production reader since schema v2 -- an attempt no longer stores the wire
+# code at all, _poll_response_branches builds its worst-case observations from
+# _LEGAL_TRIPLE_BY_FLAT_STATE directly, and _valid_attempt now judges a stored
+# record against _LEGAL_POLL_OBSERVATIONS -- so task 2.1c drops it. The wire
+# column itself is unchanged and still owned by LEGAL_TRIPLES.reason_code;
+# only this derived copy of it is gone.
+POLL_STATE_CONTRACT = {
+    row.flat_state: (row.http_status, row.upstream_status)
+    for row in LEGAL_TRIPLES
+    if row.flat_state not in _NON_CONTRACT_STATES
+}
+
+# What _valid_attempt judges a stored poll observation against: the legal
+# (state, reason, http_status, upstream_status) quadruples, over the same
+# contract domain POLL_STATE_CONTRACT covers.
+#
+# This is exactly as tight as the pre-fold `(http_status, upstream_status) ==
+# POLL_STATE_CONTRACT[state][:2]` check it replaces. Before the fold, the
+# stored flat state named one row and the pair had to match that row; after
+# the fold the record no longer names a row, so legality is membership of the
+# whole quadruple. The set of legal records is unchanged -- an attempt that
+# used to be `state=pending, upstream=completed` (illegal) is now
+# `state=processing, reason=None, upstream=completed`, which is the
+# result_pending row and was always legal under that name.
+_LEGAL_POLL_OBSERVATIONS = frozenset(
+    (row.attempt_state, row.reason, row.http_status, row.upstream_status)
+    for row in LEGAL_TRIPLES
+    if row.flat_state not in _NON_CONTRACT_STATES
+)
+
+# The folded pair a poll_transient observation stores. Named because five
+# separate rules key on it and `("failed", "poll_transient")` spelled out five
+# times is five chances to typo a reason the fold made load-bearing.
+_POLL_TRANSIENT_PAIR = ("failed", "poll_transient")
+
+# The two pairs whose records carry an exponential backoff: a positive
+# consecutive_transient_count and a next_poll_at derived from it. Pre-fold
+# this was the flat set {"task_unavailable", "poll_transient"}; both fold onto
+# `failed`, so the reason is now the whole of the discrimination.
+_BACKOFF_PAIRS = frozenset({("failed", "task_unavailable"), _POLL_TRANSIENT_PAIR})
+
+# The two pairs a *local* credential failure produces. These never reached the
+# network, so they are exempt from the poll accounting the other observations
+# must satisfy (poll_count > 0, consecutive_transient_count reset,
+# next_poll_at cleared). Pre-fold this was the flat set
+# {"credential_source_missing", "credential_source_changed"}; note the second
+# reason is `credential_fingerprint_changed`, the folded rename.
+_CREDENTIAL_ERROR_PAIRS = frozenset(
+    {
+        ("failed", "credential_source_missing"),
+        ("failed", "credential_fingerprint_changed"),
+    }
+)
+
+# The one pair the fold left ambiguous, plus the discriminator that resolves
+# it. `result_pending` folds onto ("processing", None) together with `pending`
+# and `processing`; the three are distinguished by upstream_status, which is
+# what already distinguishes their LEGAL_TRIPLES rows (design.md Decision 1
+# note 3). Rules that applied to `result_pending` but not to its two siblings
+# -- the result-pending window requirement in _valid_attempt, the deadline
+# check in timeout_before_poll -- must therefore test upstream_status too.
+_PROCESSING_PAIR = ("processing", None)
+_RESULT_PENDING_UPSTREAM_STATUS = "completed"
+_RESULT_PENDING_TIMEOUT_PAIR = ("failed", "result_pending_timeout")
+
+
+def _is_result_pending(state, reason, upstream_status) -> bool:
+    """Whether a stored record is the folded form of flat `result_pending`."""
+    return (state, reason) == _PROCESSING_PAIR and (
+        upstream_status == _RESULT_PENDING_UPSTREAM_STATUS
+    )
+
+
+# The result classifications a poll observation may commit. "submitted" is in
 # POLL_STATE_CONTRACT because an attempt can be *in* that state, but no poll
 # response can return it.
 POLL_RESULT_STATES = frozenset(POLL_STATE_CONTRACT) - {"submitted"} | {
     "poll_transient"
 }
 
-# The attempt states an active attempt may be in when a poll observation is
-# applied to it.
-POLL_ACTIVE_ATTEMPT_STATES = frozenset(
+# The folded (state, reason) pairs an active attempt may be in when a poll
+# observation is applied to it -- the re-keyed POLL_ACTIVE_ATTEMPT_STATES,
+# whose 13 flat members collapse onto these 11 pairs.
+#
+# The fold is why this had to become a pair set rather than a state set: eight
+# of the ten reasons `failed` now covers may keep polling, but
+# ("failed", "task_failed") and ("failed", "unexpected_result_count") may not.
+# Keying on `failed` alone would admit both of those and let a terminal
+# attempt be polled again.
+POLL_ACTIVE_ATTEMPT_PAIRS = frozenset(
     {
-        "submitted",
-        "pending",
-        "processing",
-        "result_pending",
-        "credential_source_missing",
-        "credential_source_changed",
-        "poll_unauthorized",
-        "task_unavailable",
-        "poll_transient",
-        "poll_timeout",
-        "result_pending_timeout",
-        "unsafe_result_url",
-        "result_ready",
+        ("submitted", None),
+        # pending / processing / result_pending; all three were admitted
+        # before the fold, so the collapsed pair loses nothing.
+        _PROCESSING_PAIR,
+        ("failed", "credential_source_missing"),
+        ("failed", "credential_fingerprint_changed"),
+        ("failed", "poll_authentication_rejected"),
+        ("failed", "task_unavailable"),
+        ("failed", "poll_transient"),
+        ("failed", "poll_timeout"),
+        ("failed", "result_pending_timeout"),
+        ("failed", "unsafe_result_url"),
+        ("result_ready", None),
     }
 )
+
+# The folded pairs whose records may carry a pending action, and the kind each
+# one takes. Pre-fold this was three flat states -- submission_unknown,
+# failed, unexpected_result_count -- and both _valid_pending_action's
+# expected_kinds and valid_private_state's confirm-mode invariant listed them
+# separately. They are one table now: `failed` covers ten reasons after the
+# fold, and reusing the flat set would demand a pending action from all ten,
+# instantly invalidating every recoverable record (poll_transient,
+# task_unavailable, ...).
+#
+# The kind names are still the three `resolve_*` values; task 2.4 folds them
+# onto one authorize_new_conversion_attempt.
+CONFIRMABLE_PENDING_KINDS = {
+    ("submission_unknown", "no_task_id"): "resolve_submission_unknown",
+    ("failed", "task_failed"): "resolve_task_failed",
+    ("failed", "unexpected_result_count"): "resolve_unexpected_result_count",
+}
+CONFIRMABLE_PAIRS = frozenset(CONFIRMABLE_PENDING_KINDS)
+
+# The folded pairs timeout_before_poll judges against the *poll* deadline.
+# Pre-fold flat set: {"pending", "processing", "poll_transient",
+# "task_unavailable", "unsafe_result_url"} -- note it excluded
+# `result_pending`, so the ("processing", None) member has to be qualified by
+# upstream_status at the call site.
+_POLL_DEADLINE_PAIRS = frozenset(
+    {
+        _PROCESSING_PAIR,
+        _POLL_TRANSIENT_PAIR,
+        ("failed", "task_unavailable"),
+        ("failed", "unsafe_result_url"),
+    }
+)
+
+# The folded pairs whose successor poll restarts the poll window instead of
+# continuing it. Pre-fold flat set: {"poll_timeout", "result_pending_timeout",
+# "result_ready"}.
+_POLL_WINDOW_RESET_PAIRS = frozenset(
+    {
+        ("failed", "poll_timeout"),
+        _RESULT_PENDING_TIMEOUT_PAIR,
+        ("result_ready", None),
+    }
+)
+
+# Every module-level set of folded (state, reason) pairs, so
+# test_every_refolded_pair_set_names_a_legal_pair can prove none of them
+# names a pair no record can ever carry. A mistyped reason in any of these
+# does not raise -- the rule it keys simply stops firing, silently.
+_REFOLDED_PAIR_SETS = {
+    "POLL_ACTIVE_ATTEMPT_PAIRS": POLL_ACTIVE_ATTEMPT_PAIRS,
+    "CONFIRMABLE_PAIRS": CONFIRMABLE_PAIRS,
+    "_BACKOFF_PAIRS": _BACKOFF_PAIRS,
+    "_CREDENTIAL_ERROR_PAIRS": _CREDENTIAL_ERROR_PAIRS,
+    "_POLL_DEADLINE_PAIRS": _POLL_DEADLINE_PAIRS,
+    "_POLL_WINDOW_RESET_PAIRS": _POLL_WINDOW_RESET_PAIRS,
+    "_PROCESSING_PAIR": frozenset({_PROCESSING_PAIR}),
+    "_POLL_TRANSIENT_PAIR": frozenset({_POLL_TRANSIENT_PAIR}),
+    "_RESULT_PENDING_TIMEOUT_PAIR": frozenset({_RESULT_PENDING_TIMEOUT_PAIR}),
+}
 
 
 class ConversionAttemptError(ValueError):
@@ -796,7 +924,7 @@ def _poll_response_branches() -> list[doc2x.PollResult]:
     """
     branches = []
     for state in sorted(POLL_RESULT_STATES - {"poll_transient"}):
-        row = _LEGAL_TRIPLE_BY_ATTEMPT_STATE[state]
+        row = _LEGAL_TRIPLE_BY_FLAT_STATE[state]
         branches.append(
             doc2x.PollResult(
                 state,
@@ -1104,10 +1232,13 @@ def _next_backoff_at(*, at: str, deadline: str, consecutive_count: int) -> str:
 
 
 def waiting_for_poll_backoff(attempt: dict, *, at: str) -> bool:
-    if not isinstance(attempt, dict) or attempt.get("state") not in {
-        "task_unavailable",
-        "poll_transient",
-    }:
+    # Re-keyed by the fold: the flat pair {"task_unavailable",
+    # "poll_transient"} both fold onto `failed`, so the reason carries the
+    # whole discrimination (_BACKOFF_PAIRS).
+    if not isinstance(attempt, dict) or (
+        attempt.get("state"),
+        attempt.get("reason"),
+    ) not in _BACKOFF_PAIRS:
         return False
     next_poll_at = attempt.get("next_poll_at")
     if not isinstance(next_poll_at, str):
@@ -1218,17 +1349,19 @@ def _valid_authorization(value) -> bool:
 def _valid_pending_action(value, *, attempt: dict, generation: int) -> bool:
     if value is None:
         return True
-    expected_kinds = {
-        "submission_unknown": "resolve_submission_unknown",
-        "failed": "resolve_task_failed",
-        "unexpected_result_count": "resolve_unexpected_result_count",
-    }
     evidence_attempt = deepcopy(attempt)
     evidence_attempt["pending_action"] = None
     return (
         isinstance(value, dict)
         and set(value) == PENDING_ACTION_KEYS
-        and value.get("kind") == expected_kinds.get(attempt.get("state"))
+        # Re-keyed by the fold: CONFIRMABLE_PENDING_KINDS replaces the local
+        # `expected_kinds` dict that used to be keyed by flat state. `failed`
+        # alone would now name ten reasons, only one of which
+        # (`task_failed`) takes resolve_task_failed.
+        and value.get("kind")
+        == CONFIRMABLE_PENDING_KINDS.get(
+            (attempt.get("state"), attempt.get("reason"))
+        )
         and isinstance(value.get("action_id"), str)
         and ACTION_ID_PATTERN.fullmatch(value["action_id"]) is not None
         and value.get("generation") == generation
@@ -1280,27 +1413,33 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     ):
         return False
     state = attempt.get("state")
+    reason = attempt.get("reason")
+    upstream_status = attempt.get("upstream_status")
     authorization = attempt.get("authorization")
     if authorization is not None and not _valid_authorization(authorization):
         return False
     # Schema v2's four reason columns are checked once here, for every state,
-    # rather than state by state: `reason` is a single-valued function of the
-    # state (FLAT_STATE_MIGRATION owns it) and the other three are the same
-    # shape everywhere, so a per-branch check would be 18 chances to disagree
-    # with the writer. Rejecting an unknown state up front is what makes the
-    # FLAT_STATE_MIGRATION lookup total; the branches below already rejected
-    # such a state, only later and through POLL_STATE_CONTRACT.
-    if state not in FLAT_STATE_DOMAIN:
+    # rather than state by state: the legal (state, reason) combinations are
+    # a closed set (FLAT_STATE_MIGRATION owns it) and the other three columns
+    # are the same shape everywhere, so a per-branch check would be as many
+    # chances to disagree with the writer as there are branches.
+    #
+    # Task 2.1c re-keys this gate from `reason == FLAT_STATE_MIGRATION[state]
+    # [1]` to membership of LEGAL_STATE_REASON_PAIRS. The admitted set is
+    # identical -- both accept exactly the pairs FLAT_STATE_MIGRATION lists --
+    # it is just no longer indexed by a flat name the record has stopped
+    # carrying. Rejecting an illegal pair up front is what makes the branches
+    # below total.
+    if (state, reason) not in LEGAL_STATE_REASON_PAIRS:
         return False
     if (
-        attempt.get("reason") != FLAT_STATE_MIGRATION[state][1]
-        or not _valid_reason_detail(state, attempt.get("reason_detail"))
+        not _valid_reason_detail(reason, attempt.get("reason_detail"))
         or attempt.get("authorization_kind") is not None
         or type(attempt.get("result_refresh_round_count")) is not int
         or attempt["result_refresh_round_count"] != 0
     ):
         return False
-    if state == "not_started":
+    if state == "authorized":
         return (
             _valid_authorization(authorization)
             and attempt.get("api_base") is None
@@ -1365,21 +1504,22 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
         or doc2x.TASK_ID_PATTERN.fullmatch(task_id) is None
     ):
         return False
-    if state == "poll_transient":
+    if (state, reason) == _POLL_TRANSIENT_PAIR:
         # The reason_detail gate above already required one of
         # POLL_TRANSIENT_REASON_CODES; only the upstream status is left.
-        if attempt.get("upstream_status") is not None:
+        if upstream_status is not None:
             return False
-    elif state not in POLL_STATE_CONTRACT or (
+    elif (
+        state,
+        reason,
         attempt.get("http_status"),
-        attempt.get("upstream_status"),
-        # The contract's third element is the wire reason_code, which a schema
-        # v2 attempt no longer stores; the folded `reason` that replaced it is
-        # checked against FLAT_STATE_MIGRATION by the gate above. See
-        # POLL_STATE_CONTRACT for why the two checks are equally tight.
-    ) != POLL_STATE_CONTRACT[state][:2]:
+        upstream_status,
+        # Re-keyed by the fold from `POLL_STATE_CONTRACT[state][:2]` to
+        # membership of _LEGAL_POLL_OBSERVATIONS; see that constant for why
+        # the two are equally tight.
+    ) not in _LEGAL_POLL_OBSERVATIONS:
         return False
-    if state in {"task_unavailable", "poll_transient"}:
+    if (state, reason) in _BACKOFF_PAIRS:
         if (
             attempt.get("consecutive_transient_count", 0) <= 0
             or not _valid_timestamp(attempt.get("next_poll_at"))
@@ -1391,7 +1531,7 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
             )
         ):
             return False
-    elif state not in {"credential_source_missing", "credential_source_changed"}:
+    elif (state, reason) not in _CREDENTIAL_ERROR_PAIRS:
         if (
             attempt.get("consecutive_transient_count") != 0
             or attempt.get("next_poll_at") is not None
@@ -1401,13 +1541,21 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
         return attempt.get("poll_count") == 0 and _empty_poll_and_result_fields(
             attempt
         )
-    if state not in {"credential_source_missing", "credential_source_changed"} and (
+    if (state, reason) not in _CREDENTIAL_ERROR_PAIRS and (
         attempt.get("poll_count", 0) <= 0
     ):
         return False
     if not _valid_poll_fields(attempt):
         return False
-    if state in {"result_pending", "result_pending_timeout"} and (
+    # Pre-fold: `state in {"result_pending", "result_pending_timeout"}`.
+    # result_pending is the one row the fold collapsed onto a pair shared with
+    # two siblings that do NOT carry this window, so it is recovered from
+    # upstream_status -- already pinned to "completed" for that row by the
+    # observation gate above.
+    if (
+        _is_result_pending(state, reason, upstream_status)
+        or (state, reason) == _RESULT_PENDING_TIMEOUT_PAIR
+    ) and (
         attempt.get("result_pending_started_at") is None
         or attempt.get("result_pending_deadline_at") is None
     ):
@@ -1542,7 +1690,13 @@ def _submit_state(
         )
     expected_generation = manifest["generation"]
     new_generation = expected_generation + 1
-    placeholder = attempts[-1] if attempts and attempts[-1].get("state") == "not_started" else None
+    # The retry placeholder commit_retry_decision leaves behind. Task 2.1c
+    # folds its stored state from "not_started" to "authorized".
+    placeholder = (
+        attempts[-1]
+        if attempts and attempts[-1].get("state") == "authorized"
+        else None
+    )
     if placeholder is not None:
         attempt_id = placeholder["attempt_id"]
         previous_attempts = attempts[:-1]
@@ -1555,7 +1709,7 @@ def _submit_state(
     attempt = {
         "schema_version": SCHEMA_VERSION,
         "attempt_id": attempt_id,
-        "state": "submitting",
+        **_attempt_state_columns("submitting"),
         "api_base": API_BASE,
         "request_summary": deepcopy(request_summary),
         "request_hash": object_hash(request),
@@ -1568,7 +1722,6 @@ def _submit_state(
         "submitted_at": at,
         "response_at": None,
         "http_status": None,
-        **_attempt_reason_columns("submitting", None),
         "task_id": None,
         "pending_action": None,
         "authorization": authorization,
@@ -1727,7 +1880,7 @@ def _started_state_from_intent(
         if (
             not previous_attempts
             or previous_attempts[-1] != previous_attempt
-            or previous_attempt.get("state") != "not_started"
+            or previous_attempt.get("state") != "authorized"
         ):
             raise ConversionAttemptError(
                 "integrity_violation", "A pending conversion placeholder is invalid."
@@ -1783,7 +1936,9 @@ def _submission_result_state(
     completed = deepcopy(attempts[-1])
     completed.update(
         {
-            "state": result.state,
+            # result.state is doc2x's wire classification; the record stores
+            # the folded state next to the reason it folded onto.
+            "state": FLAT_STATE_MIGRATION[result.state][0],
             "response_at": at,
             "http_status": result.http_status,
             **_attempt_reason_columns(result.state, result.reason_code),
@@ -1803,7 +1958,7 @@ def _submission_result_state(
         }
     updated_manifest = deepcopy(manifest)
     updated_manifest["generation"] = new_generation
-    updated_manifest["conversion_state"] = result.state
+    updated_manifest["conversion_state"] = FLAT_STATE_MIGRATION[result.state][2]
     updated_manifest["conversion_attempts"] = [*deepcopy(attempts[:-1]), completed]
     updated_private = deepcopy(private_state)
     updated_private["generation"] = new_generation
@@ -1918,14 +2073,14 @@ def _submission_result_state_from_intent(
         submitting = deepcopy(completed)
         submitting.update(
             {
-                "state": "submitting",
                 "response_at": None,
                 "http_status": None,
                 # Rebuilding the predecessor is an attempt construction site
-                # too -- it must produce the same four schema v2 columns
-                # _submit_state wrote, or the recomputed previous_manifest_hash
-                # can never match the durable intent.
-                **_attempt_reason_columns("submitting", None),
+                # too -- it must produce the same folded state and the same
+                # four schema v2 columns _submit_state wrote, or the
+                # recomputed previous_manifest_hash can never match the
+                # durable intent.
+                **_attempt_state_columns("submitting"),
                 "task_id": None,
                 "pending_action": None,
             }
@@ -1951,7 +2106,12 @@ def _submission_result_state_from_intent(
 
     desired_manifest = deepcopy(previous_manifest)
     desired_manifest["generation"] = new_generation
-    desired_manifest["conversion_state"] = completed["state"]
+    # completed["state"] is already folded and, for the two states this
+    # branch admits, is its own conversion_state; read it off the table
+    # anyway so the projection has one owner.
+    desired_manifest["conversion_state"] = _MANIFEST_STATE_BY_FOLDED_STATE[
+        (completed["state"], completed.get("reason"))
+    ]
     desired_manifest["conversion_attempts"] = [
         *deepcopy(previous_manifest["conversion_attempts"][:-1]),
         deepcopy(completed),
@@ -2316,7 +2476,14 @@ def timeout_before_poll(attempt: dict, *, at: str) -> doc2x.PollResult | None:
             "integrity_violation", "The active conversion attempt is invalid."
         )
     now = _parse_timestamp(at)
-    if attempt.get("state") == "result_pending":
+    state = attempt.get("state")
+    reason = attempt.get("reason")
+    upstream_status = attempt.get("upstream_status")
+    # Re-keyed by the fold. `result_pending` shares ("processing", None) with
+    # `pending` and `processing`, which must NOT be judged against the
+    # result-pending deadline, so upstream_status carries the split (design.md
+    # Decision 1 note 3).
+    if _is_result_pending(state, reason, upstream_status):
         deadline = attempt.get("result_pending_deadline_at")
         if not isinstance(deadline, str):
             raise ConversionAttemptError(
@@ -2330,13 +2497,14 @@ def timeout_before_poll(attempt: dict, *, at: str) -> doc2x.PollResult | None:
                 "completed",
                 None,
             )
-    if attempt.get("state") in {
-        "pending",
-        "processing",
-        "poll_transient",
-        "task_unavailable",
-        "unsafe_result_url",
-    }:
+    # The pre-fold set was the flat {"pending", "processing", "poll_transient",
+    # "task_unavailable", "unsafe_result_url"} -- note it excluded
+    # `result_pending`, the third row that folds onto ("processing", None), so
+    # the upstream_status filter below is load-bearing rather than cosmetic.
+    if (state, reason) in _POLL_DEADLINE_PAIRS and not (
+        (state, reason) == _PROCESSING_PAIR
+        and upstream_status == _RESULT_PENDING_UPSTREAM_STATUS
+    ):
         deadline = attempt.get("poll_deadline_at")
         if not isinstance(deadline, str):
             raise ConversionAttemptError(
@@ -2349,25 +2517,42 @@ def timeout_before_poll(attempt: dict, *, at: str) -> doc2x.PollResult | None:
     return None
 
 
-# The projection _conversion_state_for_attempt applies. Its domain is
-# POLL_RESULT_STATES -- the states a poll observation can commit -- which is
-# narrower than LEGAL_TRIPLES' full FLAT_STATE_DOMAIN: not_started, submitting
-# and submission_unknown never reach this projection (see
-# NON_POLL_OBSERVATIONS), so they are deliberately absent here and any input
-# outside this table -- including those three -- falls to the "submitted"
-# default below, exactly as the pre-refactor if/elif chain did. Filtered from
-# _MANIFEST_STATE_BY_ATTEMPT_STATE rather than re-deriving the same
-# attempt_state->conversion_state comprehension from LEGAL_TRIPLES a second
-# time.
-_ATTEMPT_STATE_CONVERSION_STATE = {
-    state: conversion_state
-    for state, conversion_state in _MANIFEST_STATE_BY_ATTEMPT_STATE.items()
-    if state in POLL_RESULT_STATES
+# The projection the two poll commit paths apply. Its domain is
+# POLL_RESULT_STATES -- what a poll observation can commit -- which is
+# narrower than LEGAL_TRIPLES' full 18 rows: not_started, submitting and
+# submission_unknown never reach this projection (see NON_POLL_OBSERVATIONS),
+# so they are deliberately absent from both tables and any input outside them
+# -- including those three -- falls to the "submitted" default, exactly as the
+# pre-refactor if/elif chain did.
+#
+# There are two of them because the two call sites hold different vocabulary:
+# _poll_transition has just been handed doc2x's wire classification, while
+# _poll_state_from_intent reads a stored attempt whose state is already
+# folded. Both are filtered on the same POLL_RESULT_STATES rows of
+# LEGAL_TRIPLES, so they cannot disagree about a row; they only differ in what
+# they are keyed by.
+_POLL_RESULT_CONVERSION_STATE_BY_FLAT_STATE = {
+    row.flat_state: row.conversion_state
+    for row in LEGAL_TRIPLES
+    if row.flat_state in POLL_RESULT_STATES
+}
+_POLL_RESULT_CONVERSION_STATE_BY_FOLDED_STATE = {
+    (row.attempt_state, row.reason): row.conversion_state
+    for row in LEGAL_TRIPLES
+    if row.flat_state in POLL_RESULT_STATES
 }
 
 
-def _conversion_state_for_attempt(state: str) -> str:
-    return _ATTEMPT_STATE_CONVERSION_STATE.get(state, "submitted")
+def _conversion_state_for_poll_result(flat_state: str) -> str:
+    """Keyed by doc2x's wire classification."""
+    return _POLL_RESULT_CONVERSION_STATE_BY_FLAT_STATE.get(flat_state, "submitted")
+
+
+def _conversion_state_for_attempt(state, reason) -> str:
+    """Keyed by a stored attempt's folded (state, reason) pair."""
+    return _POLL_RESULT_CONVERSION_STATE_BY_FOLDED_STATE.get(
+        (state, reason), "submitted"
+    )
 
 
 def _poll_transition(
@@ -2379,7 +2564,8 @@ def _poll_transition(
         manifest.get("conversion_state")
         not in {"submitted", "recoverable_error", "terminal_error"}
         or not isinstance(active, dict)
-        or active.get("state") not in POLL_ACTIVE_ATTEMPT_STATES
+        or (active.get("state"), active.get("reason"))
+        not in POLL_ACTIVE_ATTEMPT_PAIRS
         or not isinstance(active.get("task_id"), str)
         or not active["task_id"]
         or private_state.get("generation") != manifest.get("generation")
@@ -2388,19 +2574,21 @@ def _poll_transition(
         raise ConversionAttemptError(
             "invalid_state_transition", "The Doc2X poll result is not applicable."
         )
+    active_pair = (active.get("state"), active.get("reason"))
     updated_attempt = deepcopy(active)
-    updated_attempt["state"] = result.state
+    # result.state is doc2x's wire classification; the stored state is the
+    # folded value, written together with its reason columns below.
+    updated_attempt["state"] = FLAT_STATE_MIGRATION[result.state][0]
     local_credential_error = result.state in {
         "credential_source_missing",
         "credential_source_changed",
     }
     local_timeout = result.state in {"poll_timeout", "result_pending_timeout"}
     if not local_credential_error and not local_timeout:
-        reset_window = active.get("state") in {
-            "poll_timeout",
-            "result_pending_timeout",
-            "result_ready",
-        }
+        # Pre-fold flat set {"poll_timeout", "result_pending_timeout",
+        # "result_ready"}; the first two fold onto `failed` and are recovered
+        # by their reason.
+        reset_window = active_pair in _POLL_WINDOW_RESET_PAIRS
         updated_attempt["poll_started_at"] = (
             at if reset_window else active.get("poll_started_at") or at
         )
@@ -2417,7 +2605,7 @@ def _poll_transition(
     if result.state in {"task_unavailable", "poll_transient"}:
         consecutive_count = (
             active.get("consecutive_transient_count", 0) + 1
-            if active.get("state") in {"task_unavailable", "poll_transient"}
+            if active_pair in _BACKOFF_PAIRS
             else 1
         )
         updated_attempt["consecutive_transient_count"] = consecutive_count
@@ -2430,7 +2618,7 @@ def _poll_transition(
         updated_attempt["consecutive_transient_count"] = 0
         updated_attempt["next_poll_at"] = None
     if result.state == "result_pending":
-        reset_result_window = active.get("state") == "result_pending_timeout"
+        reset_result_window = active_pair == _RESULT_PENDING_TIMEOUT_PAIR
         updated_attempt["result_pending_started_at"] = (
             at
             if reset_result_window
@@ -2461,7 +2649,7 @@ def _poll_transition(
             at if recorded_result is None else recorded_result.get("observed_at")
         )
         updated_attempt["result_validity_hours"] = 24
-    elif active.get("state") == "result_ready":
+    elif active_pair == ("result_ready", None):
         updated_attempt["result_url_sha256"] = None
         updated_attempt["result_observed_at"] = None
         updated_attempt["result_validity_hours"] = None
@@ -2482,7 +2670,9 @@ def _poll_transition(
     new_generation = expected_generation + 1
     updated_manifest = deepcopy(manifest)
     updated_manifest["generation"] = new_generation
-    updated_manifest["conversion_state"] = _conversion_state_for_attempt(result.state)
+    updated_manifest["conversion_state"] = _conversion_state_for_poll_result(
+        result.state
+    )
     updated_manifest["conversion_attempts"] = [
         *deepcopy(attempts[:-1]),
         updated_attempt,
@@ -2603,6 +2793,13 @@ def commit_retry_decision(
     )
     pending = attempt_pending if isinstance(attempt_pending, dict) else raw_pending
     if (
+        # Re-keyed by the fold: the middle element is the attempt's stored
+        # state, so `unexpected_result_count` became `failed`. Left alone the
+        # tuple could never match again and `record conversion` would reject
+        # every unexpected_result_count decision. The kind still separates the
+        # two terminal_error/failed rows (unsafe_result_url carries no pending
+        # action at all); design.md Decision 5 moves that discrimination onto
+        # the reason in task 2.4.
         (
             manifest.get("conversion_state"),
             active.get("state") if isinstance(active, dict) else None,
@@ -2617,7 +2814,7 @@ def commit_retry_decision(
             ("awaiting_user", "failed", "resolve_task_failed"),
             (
                 "terminal_error",
-                "unexpected_result_count",
+                "failed",
                 "resolve_unexpected_result_count",
             ),
             (
@@ -2647,7 +2844,7 @@ def commit_retry_decision(
     placeholder = {
         "schema_version": SCHEMA_VERSION,
         "attempt_id": f"conversion-attempt-{len(attempts) + 1:04d}",
-        "state": "not_started",
+        **_attempt_state_columns("not_started"),
         "api_base": None,
         "request_summary": None,
         "request_hash": None,
@@ -2656,7 +2853,6 @@ def commit_retry_decision(
         "submitted_at": None,
         "response_at": None,
         "http_status": None,
-        **_attempt_reason_columns("not_started", None),
         "task_id": None,
         "pending_action": None,
         "authorization": {
@@ -2772,7 +2968,7 @@ def _poll_state_from_intent(
     desired_manifest = deepcopy(manifest)
     desired_manifest["generation"] = new_generation
     desired_manifest["conversion_state"] = _conversion_state_for_attempt(
-        updated_attempt.get("state")
+        updated_attempt.get("state"), updated_attempt.get("reason")
     )
     desired_manifest["conversion_attempts"] = [
         *deepcopy(attempts[:-1]),
@@ -2846,7 +3042,7 @@ def _retry_state_from_intent(
         or object_hash(private_state) != intent.get("previous_private_hash")
         or not isinstance(attempts, list)
         or not isinstance(placeholder, dict)
-        or placeholder.get("state") != "not_started"
+        or placeholder.get("state") != "authorized"
         or not isinstance(pending, dict)
         or not isinstance(authorization, dict)
         or intent.get("action_id") != pending.get("action_id")
@@ -3133,7 +3329,7 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
                 if task_id in task_ids:
                     return False
                 task_ids.add(task_id)
-            if attempt.get("state") == "not_started":
+            if attempt.get("state") == "authorized":
                 continue
             staging_identity = attempt["staging_identity"]
             staging_public = public_staging.get(staging_identity["attempt_id"])
@@ -3169,18 +3365,18 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
             if attempt.get("request_hash") != object_hash(request):
                 return False
         active = attempts[-1]
-        expected_manifest_state = _MANIFEST_STATE_BY_ATTEMPT_STATE.get(
-            active.get("state")
-        )
+        active_pair = (active.get("state"), active.get("reason"))
+        expected_manifest_state = _MANIFEST_STATE_BY_FOLDED_STATE.get(active_pair)
         if manifest.get("conversion_state") != expected_manifest_state:
             return False
         active_pending = active.get("pending_action")
         mode = manifest.get("settings_snapshot", {}).get("interaction_mode")
-        if active.get("state") in {
-            "submission_unknown",
-            "failed",
-            "unexpected_result_count",
-        }:
+        # Re-keyed by the fold. The pre-fold set was the flat
+        # {"submission_unknown", "failed", "unexpected_result_count"};
+        # carrying it over verbatim would demand a pending action from all ten
+        # reasons `failed` now covers, making every recoverable record
+        # (poll_transient, task_unavailable, ...) instantly invalid.
+        if active_pair in CONFIRMABLE_PAIRS:
             if (mode == "confirm") != isinstance(active_pending, dict):
                 return False
         elif active_pending is not None:
