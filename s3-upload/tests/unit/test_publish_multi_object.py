@@ -3,7 +3,7 @@ import os
 
 from conftest import CALLER
 from delivery_schema import PLAN_FIELDS, RESULT_FIELDS, body_of
-from delivery_workflow import publish
+from delivery_workflow import acknowledge, publish
 from plan_store import PlanStore, build_plan_body, new_plan_id
 from planning import build_upload_dry_run, derive_contract_key, registry_for_target
 from s3 import Response
@@ -118,6 +118,39 @@ def test_a_failed_sibling_does_not_roll_back_a_published_object(project, resolve
     assert body_of(outcome.result)["blocking_reasons"] == ["source_drift"]
     assert open(first[2] / "result.json", "rb").read() == frozen
     assert len(ok.calls) == 1
+
+
+def _run(project, resolved, item, transport):
+    return publish(
+        resolved=resolved, store=item[0], token=item[1].token, transport=transport,
+        project_root=str(project.root), config_home=str(project.home), caller=CALLER,
+        executable_path=EXECUTABLE, cwd=str(project.root),
+    )
+
+
+def _ack(project, item):
+    return acknowledge(
+        store=item[0], token=item[1].token, caller=CALLER,
+        executable_path=EXECUTABLE, cwd=str(project.root),
+        result_text=open(item[2] / "result.json", encoding="utf-8").read(),
+        ack_out=str(item[2] / "ack.json"), project_root=str(project.root),
+        config_home=str(project.home),
+    )
+
+
+def test_acknowledging_one_object_leaves_its_siblings_publishable(project, resolved):
+    first = plan_for(project, resolved, IMAGES[0], 0)
+    second = plan_for(project, resolved, IMAGES[1], 1)
+    _run(project, resolved, first, Recorder())
+    assert _ack(project, first).state == "acknowledged"
+    late = Recorder()
+    outcome = _run(project, resolved, second, late)
+    assert len(late.calls) == 1
+    assert body_of(outcome.result)["recovery_state"] == "terminal_unacknowledged"
+    receipt = _ack(project, second)
+    assert receipt.state == "acknowledged"
+    assert body_of(receipt.ack)["plan_id"] == second[1].plan_id
+    assert os.path.exists(first[2] / "ack.json")
 
 
 def test_caller_aggregation_needs_three_separate_publishes(project, resolved):
