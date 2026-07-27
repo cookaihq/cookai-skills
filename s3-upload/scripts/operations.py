@@ -30,6 +30,10 @@ class OperationError(RuntimeError):
     pass
 
 
+class DefinitiveNoWrite(OperationError):
+    pass
+
+
 ClockInput = Optional[Union[datetime, Callable[[], datetime]]]
 
 
@@ -134,6 +138,8 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                        config_home: str, now: ClockInput,
                        checkpoint_notice: Callable[[str], None],
                        source: VerifiedSource,
+                       checkpoint_created: Optional[Callable[[str], None]] = None,
+                       retain_definitive_checkpoint: bool = False,
                        uuid_factory: Callable[[], uuid.UUID] = uuid.uuid4) -> OperationOutcome:
     if not plan["executable"] or plan["upload_mode"] != "single-put":
         raise OperationError("single Put execution requires an executable single-Put plan")
@@ -206,6 +212,8 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
         }
         store = CheckpointStore(project_root)
         store.create(checkpoint)
+        if checkpoint_created is not None:
+            checkpoint_created(checkpoint_id)
         active_credentials = (
             connection.access_key_id,
             connection.secret_access_key,
@@ -311,11 +319,17 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                 request_moment = _signed_moment(resolved, now)
                 continue
             if parsed.classification != "success":
-                try:
-                    store.remove(checkpoint_id)
-                except ArtifactError:
-                    pass
-                raise OperationError("remote Put returned a definitive no-write response")
+                if retain_definitive_checkpoint:
+                    checkpoint = _set_state(checkpoint, "not_started", moment)
+                    store.replace(checkpoint)
+                else:
+                    try:
+                        store.remove(checkpoint_id)
+                    except ArtifactError:
+                        pass
+                raise DefinitiveNoWrite(
+                    "remote Put returned a definitive no-write response"
+                )
             version = parsed.identifiers.get("version_id")
             break
 

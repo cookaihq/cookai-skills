@@ -88,24 +88,7 @@ def _existing(parent_fd: int, name: str,
     return None if data is None else hashlib.sha256(data).hexdigest()
 
 
-def read_artifact(target: HandoffTarget) -> Optional[bytes]:
-    """Re-read a preflighted destination under the preflight safety rules.
-
-    The target MUST be one that preflight() returned in this process: nothing
-    in the type system enforces it, and every safety property here rests on
-    it. The parent identity carried by the target is what this function
-    re-checks the current parent against, so a HandoffTarget assembled by hand
-    would have this function certify a path nobody ever vetted.
-
-    Given such a target, the file is re-opened no-follow and non-blocking
-    relative to the preflighted parent, and the regular-file, ownership, mode,
-    single-link and size rules are re-checked against whatever is there now --
-    a plain open() would follow a symlink into it, accept a loosened file or a
-    hardlink alias, and block forever on a FIFO.
-
-    Raises HandoffError if the destination is unsafe; the fstat and read of an
-    open descriptor raise OSError, which the caller must be ready for.
-    """
+def _read_artifact(target: HandoffTarget) -> Optional[bytes]:
     try:
         parent_fd = open_directory(os.path.dirname(target.path))
     except (OSError, FileSecurityError) as exc:

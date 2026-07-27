@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from artifacts import ArtifactError, CheckpointStore
-from delivery_records import build_recovery_descriptor, build_result
+from delivery_records import build_recovery_descriptor, build_result, result_hash
 from delivery_schema import (
     DeliverySchemaError, artifact_digest, body_of, parse_typed, serialize_artifact,
 )
-from handoff_io import HandoffError, HandoffTarget, commit, preflight, read_artifact
-from operations import OperationError, execute_single_put
+from handoff_io import HandoffError, HandoffTarget, _read_artifact, commit, preflight
+from operations import DefinitiveNoWrite, execute_single_put
 from plan_store import PlanStore, PlanStoreError
 from planning import PlanError, derive_contract_key, registry_for_target
 from safe_io import lexical_absolute
@@ -31,11 +31,6 @@ class TransportSealed(RuntimeError):
     pass
 
 
-# These name the crash points of a publish that composes a fresh answer and
-# writes it. A publish that replays an answer already durable on result_out
-# writes nothing, so it deliberately crosses none of them -- not even
-# before_stdout -- and returns the durable bytes directly. Do not read a
-# missing boundary on a replay as a missing write.
 BOUNDARIES: Tuple[str, ...] = (
     "plan_durable",
     "revalidated",
@@ -127,42 +122,19 @@ def _armed(store: PlanStore, plan_id: str) -> bool:
 
 def _surviving_checkpoint(project_root: str,
                           checkpoint_id: Optional[str]) -> Optional[str]:
-    """Report the checkpoint id unless the directory has really let go of it.
-
-    Only absence lets a caller stop tracking a checkpoint, so only absence may
-    answer None, and absence has to be proven: a stat that fails for any other
-    reason (an unreadable or wrong-moded checkpoint directory, a path that is
-    no longer a directory) still reports the id. Answering this with
-    CheckpointStore.load() would fold every such failure into None -- load()
-    re-validates the whole store, so a checkpoint directory that drifted off
-    0700, or a body that no longer parses, would report a stranded checkpoint
-    as gone. Existence is the question being asked here; readability is not.
-    """
     if checkpoint_id is None:
         return None
-    path = os.path.join(
-        CheckpointStore(project_root).directory, checkpoint_id + ".json"
-    )
     try:
-        os.lstat(path)
+        os.lstat(CheckpointStore(project_root)._path(checkpoint_id))
     except FileNotFoundError:
         return None
-    except OSError:
+    except (ArtifactError, OSError):
         return checkpoint_id
     return checkpoint_id
 
 
 def _drop_checkpoint(store: PlanStore, plan_id: str, project_root: str,
                      checkpoint_id: str) -> bool:
-    """Best-effort rollback of a checkpoint this call created.
-
-    Scope note: this guard binds the four rollback call sites in this module
-    only. It is NOT a workspace-wide invariant that a surviving operation
-    record always points at a checkpoint on disk -- operations.execute_single_put
-    removes the checkpoint on a definitive no-write response while
-    operation.json keeps pointing at it, and this module deliberately does not
-    roll that record back (see the F2 pin in the publish tests).
-    """
     try:
         record = store.operation_record(plan_id)
     except PlanStoreError:
@@ -177,37 +149,18 @@ def _drop_checkpoint(store: PlanStore, plan_id: str, project_root: str,
 
 
 def _read_handoff(target: Optional[HandoffTarget]) -> bytes:
-    """Read back a handoff destination that this call already preflighted.
-
-    A None target means preflight never succeeded for that destination, so
-    there is nothing this process is allowed to read. Every other read goes
-    through the handoff safety rules (no-follow, non-blocking, regular file,
-    owner, 0600, single link, size), so a destination that was swapped for a
-    symlink, a FIFO, a hardlink alias or a loosened file after preflight
-    reads back as absent instead of as content.
-
-    A read that fails outright is answered the same way. handoff_io converts
-    only the os.open of the destination into a HandoffError; the fstat and the
-    reads that follow it, and the fstat of the parent directory, raise a bare
-    OSError. Letting one of those escape would take the whole publish with it,
-    and these reads sit on exits taken after the object may already be on the
-    remote -- an escaping OSError would replace a durable answer with a
-    traceback and leave result_out unwritten. "Could not be read" is therefore
-    reported as "not there", the same conservative reading every caller of this
-    helper is already written for. Never substitute remembered content here:
-    the point of the read is that only the bytes on disk may answer.
-    """
     if target is None:
         return b""
     try:
-        raw = read_artifact(target)
+        raw = _read_artifact(target)
     except (HandoffError, OSError):
         return b""
     return b"" if raw is None else raw
 
 
-def _durable_result(target: Optional[HandoffTarget],
-                    plan_id: str) -> Optional[Dict[str, Any]]:
+def _durable_result(target: Optional[HandoffTarget], *, plan: Dict[str, Any],
+                    operation_id: str,
+                    recovery_id: str) -> Optional[Dict[str, Any]]:
     raw = _read_handoff(target)
     if not raw:
         return None
@@ -215,7 +168,18 @@ def _durable_result(target: Optional[HandoffTarget],
         item = parse_typed(raw.decode("utf-8"), expected_type="s3-upload.result")
     except (DeliverySchemaError, UnicodeDecodeError):
         return None
-    return item if body_of(item)["plan_id"] == plan_id else None
+    body = body_of(item)
+    expected = {
+        "operation": "publish",
+        "operation_id": operation_id,
+        "plan_hash": plan["plan_hash"],
+        "plan_id": plan["plan_id"],
+        "recovery_id": recovery_id,
+        "target_contract_hash": plan["target_contract_hash"],
+    }
+    if body["result_hash"] != result_hash(body):
+        return None
+    return item if all(body[key] == value for key, value in expected.items()) else None
 
 
 def _durable_recovery(target: Optional[HandoffTarget],
@@ -310,21 +274,14 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
     root = root_recovery_id or recovery_id
     project_root = lexical_absolute(project_root)
 
-    # Only a destination this call preflighted may be read back, so an exit
-    # taken while an entry is still None reports nothing for it rather than
-    # reading an unvetted path. The two entries are bound at different points
-    # on purpose: result_out is bound as soon as the plan is (below), because
-    # every exit taken from there on has to answer against the durable result
-    # if there is one, while recovery_out is only bound once the run is about
-    # to write a descriptor of its own.
     targets: Dict[str, Optional[HandoffTarget]] = {"recovery": None, "result": None}
 
     def stop(reasons, *, state="blocked", plan=None, contract=None, checkpoint_id=None):
-        # A durable result already on result_out is this plan's answer. It is
-        # immutable and was written before the caller could observe anything,
-        # so an exit that merely raised later must never contradict it.
         if plan is not None:
-            durable = _durable_result(targets["result"], plan["plan_id"])
+            durable = _durable_result(
+                targets["result"], plan=plan, operation_id=operation_id,
+                recovery_id=recovery_id,
+            )
             if durable is not None:
                 return PublishOutcome(
                     durable, _durable_recovery(targets["recovery"], recovery_id),
@@ -369,14 +326,6 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
     root = root_recovery_id or recovery_id
     target_lock = "target-" + plan["target_contract_hash"].split(":", 1)[1]
     with store.lock("project"), store.lock(target_lock), store.lock("plan-" + plan_id):
-        # Bind result_out here, before the first exit that knows which plan it
-        # is answering for. result_out is create-once, so a result already
-        # durable there is this plan's answer no matter which exit this run
-        # takes; an exit that reported "blocked" without looking would hand
-        # back allowed_actions=["inspect"] and leave the caller unable to ack
-        # the answer that is sitting on disk. A destination that cannot be
-        # preflighted stays None and is rejected by the preflight below, which
-        # stays the only exit allowed to report handoff_unsafe.
         identity = _source_identity(plan)
         if identity is not None:
             try:
@@ -386,14 +335,6 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                     source_identity=identity,
                 )
             except (HandoffError, OSError):
-                # OSError too: preflight converts the os.open of the
-                # destination, but an fstat or read failing afterwards comes
-                # out bare. This read is an addition to the exits below, so it
-                # must not become a way for them to stop being reached -- a
-                # source_drift that used to be answered cleanly would turn
-                # into a traceback. Whatever is really wrong with the
-                # destination is reported by the preflight below, which is
-                # still the only exit that judges it.
                 targets["result"] = None
         if plan["executable"] is not True:
             return stop(["plan_not_executable"], plan=plan)
@@ -436,10 +377,6 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         ):
             return stop(["source_drift"], plan=plan, contract=digest)
         if identity is None:
-            # Unreachable while the drift check above compares the live device
-            # and inode against the plan, and kept fail-closed rather than
-            # handing preflight a None identity, which would silently drop the
-            # "destination aliases the upload source" check.
             return stop(["source_drift"], plan=plan, contract=digest)
         try:
             recovery_target = preflight(
@@ -466,12 +403,15 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         handoff: Dict[str, Any] = {"checkpoint_id": None}
 
         def surviving():
-            # Every exit reports the checkpoint the same way: the id this call
-            # is carrying, unless the checkpoint directory has demonstrably let
-            # go of it. Reporting the raw handle at some exits and the
-            # disk-backed answer at others is what let a rolled-back checkpoint
-            # and a stranded one look alike.
             return _surviving_checkpoint(project_root, handoff["checkpoint_id"])
+
+        def rollback_unarmed_checkpoint():
+            checkpoint_id = handoff["checkpoint_id"]
+            if checkpoint_id is not None and _drop_checkpoint(
+                store, plan_id, project_root, checkpoint_id
+            ):
+                handoff["checkpoint_id"] = None
+            return surviving()
 
         def compose(state, reasons, capabilities_ok):
             return build_result(
@@ -490,12 +430,10 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             )
 
         def emit(state, reasons=(), *, capabilities_ok=True, checkpoint_id=None):
-            # result_out is create-once, so a result already durable there for
-            # this plan is the authoritative answer and outranks whatever this
-            # attempt would have composed. Without this the immutable commit
-            # below fails and the caller is handed a fresh in_flight_unknown
-            # that contradicts a terminal_unacknowledged already on disk.
-            durable = _durable_result(result_target, plan_id)
+            durable = _durable_result(
+                result_target, plan=plan, operation_id=operation_id,
+                recovery_id=recovery_id,
+            )
             if durable is not None:
                 return PublishOutcome(
                     durable, _durable_recovery(recovery_target, recovery_id),
@@ -506,13 +444,6 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             try:
                 commit(result_target, serialize_artifact(record))
             except HandoffError:
-                # No second read of result_out here. The pre-read above is
-                # taken under store.lock("plan-" + plan_id), which this call
-                # holds for its whole publish, so no other publish of this plan
-                # can have created a result between that read and this failure:
-                # the window a re-read would cover is closed by the lock, not
-                # by luck. A commit that fails here is this process failing to
-                # write, and it is reported as such.
                 record = compose(
                     state, list(reasons) + ["handoff_write_failed"], capabilities_ok
                 )
@@ -602,6 +533,9 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             gate.arm()
             hook("before_request")
 
+        def checkpoint_created(checkpoint_id: str) -> None:
+            handoff["checkpoint_id"] = checkpoint_id
+
         try:
             outcome = execute_single_put(
                 resolved=resolved,
@@ -612,50 +546,35 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 now=now,
                 checkpoint_notice=checkpoint_notice,
                 source=SpooledSource(_plan_snapshot(plan), frozen),
+                checkpoint_created=checkpoint_created,
+                retain_definitive_checkpoint=True,
                 uuid_factory=uuid_factory,
             )
         except AlreadyHandedOff:
-            existing = _durable_result(result_target, plan_id)
-            if existing is not None:
-                return PublishOutcome(
-                    existing, _durable_recovery(recovery_target, recovery_id), 0,
-                    surviving(),
-                )
-            replayed = compose("in_flight_unknown", (), True)
-            try:
-                commit(result_target, serialize_artifact(replayed))
-            except HandoffError:
-                pass
-            return PublishOutcome(
-                replayed, _durable_recovery(recovery_target, recovery_id), 0,
-                surviving(),
-            )
+            return emit("in_flight_unknown", checkpoint_id=surviving())
         except (HandoffError, PlanStoreError):
-            # Classify by what left the process, not by which exception type
-            # arrived: the only answer that may promise a safe retry is one
-            # taken with zero transport calls and no operation record on disk.
             if gate.calls == 0 and not _armed(store, plan_id):
                 return stop(["handoff_write_failed"], state="known_not_applied",
                             plan=plan, contract=digest,
-                            checkpoint_id=surviving())
+                            checkpoint_id=rollback_unarmed_checkpoint())
             if gate.calls:
                 hook("after_request")
             return emit("in_flight_unknown", ["handoff_write_failed"],
                         checkpoint_id=surviving())
         except TransportSealed:
             raise
-        except OperationError:
-            hook("after_request")
+        except DefinitiveNoWrite:
+            if gate.calls:
+                hook("after_request")
             return emit("known_not_applied", capabilities_ok=False,
                         checkpoint_id=surviving())
         except Exception:
-            reported = surviving()
             if gate.calls == 0 and not _armed(store, plan_id):
                 return stop([], state="known_not_applied", plan=plan, contract=digest,
-                            checkpoint_id=reported)
+                            checkpoint_id=rollback_unarmed_checkpoint())
             if gate.calls:
                 hook("after_request")
-            return emit("in_flight_unknown", checkpoint_id=reported)
+            return emit("in_flight_unknown", checkpoint_id=surviving())
         if gate.sealed_violations:
             raise TransportSealed(
                 "a remote request preceded the durable recovery handoff"
