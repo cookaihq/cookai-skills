@@ -104,9 +104,17 @@ class ConsumedPlan:
     tombstone: Optional[Dict[str, Any]]
 
 
-def _exact(value: Any, fields: Tuple[str, ...], label: str) -> Dict[str, Any]:
+def _exact(value: Any, fields: Tuple[str, ...], label: str,
+           *, str_fields: Tuple[str, ...] = ()) -> Dict[str, Any]:
     if not isinstance(value, dict) or set(value) != set(fields):
         raise PlanStoreError(f"{label} does not have the exact field set")
+    # Value-type guard: every field named in str_fields is consumed as a str
+    # downstream (path construction, secrets.compare_digest), and a polluted
+    # on-disk record would otherwise surface as a bare TypeError instead of
+    # this store's error contract.
+    for key in str_fields:
+        if not isinstance(value[key], str):
+            raise PlanStoreError(f"{label} field {key} must be a string")
     return value
 
 
@@ -252,7 +260,8 @@ class PlanStore:
         return IssuedPlan(plan_id, token, build_typed("s3-upload.plan", handed))
 
     def _read_json(self, plan_id: str, name: str, fields: Tuple[str, ...],
-                   label: str) -> Optional[Dict[str, Any]]:
+                   label: str,
+                   str_fields: Tuple[str, ...] = ()) -> Optional[Dict[str, Any]]:
         path = os.path.join(self._plan_dir(plan_id), name)
         try:
             text = read_regular_file(path, max_bytes=MAX_RECORD_BYTES, secret=True,
@@ -265,10 +274,11 @@ class PlanStore:
             value = loads(text)
         except StrictJSONError as exc:
             raise PlanStoreError(f"{label} is corrupt") from exc
-        return _exact(value, fields, label)
+        return _exact(value, fields, label, str_fields=str_fields)
 
     def load_record(self, plan_id: str) -> Dict[str, Any]:
-        record = self._read_json(plan_id, "record.json", RECORD_FIELDS, "plan record")
+        record = self._read_json(plan_id, "record.json", RECORD_FIELDS, "plan record",
+                                 str_fields=("created_at", "token_digest"))
         if record is None:
             raise PlanStoreError("plan record is unavailable")
         try:
@@ -282,14 +292,17 @@ class PlanStore:
         return record
 
     def load_tombstone(self, plan_id: str) -> Optional[Dict[str, Any]]:
-        return self._read_json(plan_id, "tombstone.json", TOMBSTONE_FIELDS, "plan tombstone")
+        return self._read_json(plan_id, "tombstone.json", TOMBSTONE_FIELDS,
+                               "plan tombstone",
+                               str_fields=("plan_id", "token_digest"))
 
     def operation_record(self, plan_id: str) -> Optional[Dict[str, Any]]:
         return self._read_json(plan_id, "operation.json", OPERATION_FIELDS,
-                               "plan operation record")
+                               "plan operation record", str_fields=OPERATION_FIELDS)
 
     def write_operation_record(self, plan_id: str, value: Dict[str, Any]) -> None:
-        _exact(value, OPERATION_FIELDS, "plan operation record")
+        _exact(value, OPERATION_FIELDS, "plan operation record",
+               str_fields=OPERATION_FIELDS)
         try:
             atomic_write(os.path.join(self._plan_dir(plan_id), "operation.json"),
                          canonicalize(value), mode=0o600, replace=False)
@@ -329,7 +342,23 @@ class PlanStore:
                                           token_digest(plan_id, token)):
                 raise PlanStoreError("invalid plan token")
             return ConsumedPlan("acknowledged", plan_id, None, tombstone)
-        record = self.load_record(plan_id)
+        try:
+            record = self.load_record(plan_id)
+        except PlanStoreError:
+            # A concurrent acknowledgement writes tombstone.json first and only
+            # then removes record.json, so "no tombstone yet, record already
+            # gone" is a real mid-cleanup state, not a bad token. Re-reading the
+            # tombstone resolves it: a tombstone that has appeared since the
+            # probe above is this plan's durable settlement and answers the
+            # token exactly as the fast path would have. If the re-read finds
+            # nothing (or is itself unreadable), the original refusal stands.
+            settled = self.load_tombstone(plan_id)
+            if settled is None:
+                raise
+            if not secrets.compare_digest(settled["token_digest"],
+                                          token_digest(plan_id, token)):
+                raise PlanStoreError("invalid plan token") from None
+            return ConsumedPlan("acknowledged", plan_id, None, settled)
         if not secrets.compare_digest(record["token_digest"], token_digest(plan_id, token)):
             raise PlanStoreError("invalid plan token")
         body = body_of(record["plan"])
@@ -389,19 +418,51 @@ class PlanStore:
         directory = self._plan_dir(plan_id)
         existing = self.load_tombstone(plan_id)
         if existing is None:
-            record = self.load_record(plan_id)
-            tombstone = {
-                "acknowledged": acknowledged,
-                "plan_id": plan_id,
-                "result_hash": result_hash,
-                "token_digest": record["token_digest"],
-            }
-            _exact(tombstone, TOMBSTONE_FIELDS, "plan tombstone")
             try:
-                atomic_write(os.path.join(directory, "tombstone.json"),
-                             canonicalize(tombstone), mode=0o600, replace=False)
-            except (FileExistsError, OSError, FileSecurityError) as exc:
-                raise PlanStoreError("plan tombstone could not be written durably") from exc
+                record = self.load_record(plan_id)
+            except PlanStoreError:
+                # A concurrent _finish of the same plan writes tombstone.json
+                # and then removes record.json, so a record that vanished after
+                # the tombstone probe above can mean the other side already
+                # settled this plan. Only a tombstone that records the same
+                # settlement may stand in for the write this call was about to
+                # make; anything else keeps the refusal. (Same durable-state
+                # re-read pattern as write_operation_record.)
+                settled = self.load_tombstone(plan_id)
+                if settled is None:
+                    raise
+                if (settled["acknowledged"] is not acknowledged
+                        or settled["result_hash"] != result_hash):
+                    raise PlanStoreError(
+                        "plan tombstone already records another settlement"
+                    )
+                tombstone = settled
+            else:
+                tombstone = {
+                    "acknowledged": acknowledged,
+                    "plan_id": plan_id,
+                    "result_hash": result_hash,
+                    "token_digest": record["token_digest"],
+                }
+                _exact(tombstone, TOMBSTONE_FIELDS, "plan tombstone")
+                try:
+                    atomic_write(os.path.join(directory, "tombstone.json"),
+                                 canonicalize(tombstone), mode=0o600, replace=False)
+                except FileExistsError as exc:
+                    # tombstone.json is create-once, so losing this write means
+                    # another _finish of the same plan got there first. Read the
+                    # durable bytes back and compare: an identical settlement is
+                    # this call's outcome already on disk (finish the idempotent
+                    # cleanup below); a different one is refused. A re-read that
+                    # itself fails propagates as its own PlanStoreError.
+                    settled = self.load_tombstone(plan_id)
+                    if settled != tombstone:
+                        raise PlanStoreError(
+                            "plan tombstone could not be written durably"
+                        ) from exc
+                    tombstone = settled
+                except (OSError, FileSecurityError) as exc:
+                    raise PlanStoreError("plan tombstone could not be written durably") from exc
         else:
             tombstone = existing
         try:

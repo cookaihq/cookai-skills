@@ -10,6 +10,7 @@ from delivery_schema import body_of, build_typed, parse_typed, serialize_artifac
 from delivery_workflow import WorkflowError, acknowledge, publish
 from plan_store import PlanStore, build_plan_body, new_plan_id
 from s3 import Response
+from strict_json import canonicalize, loads
 
 
 EXECUTABLE = "/usr/bin/python3"
@@ -25,7 +26,7 @@ class Recorder:
         return Response(200)
 
 
-def published(project, resolved):
+def published(project, resolved, transport=None):
     store = PlanStore(str(project.state_root))
     from planning import build_upload_dry_run
     from target_contract import contract_hash, contract_snapshot
@@ -56,7 +57,8 @@ def published(project, resolved):
     finally:
         dry_run.close()
     outcome = publish(
-        resolved=resolved, store=store, token=issued.token, transport=Recorder(),
+        resolved=resolved, store=store, token=issued.token,
+        transport=transport if transport is not None else Recorder(),
         project_root=str(project.root), config_home=str(project.home), caller=CALLER,
         executable_path=EXECUTABLE, cwd=str(project.root),
     )
@@ -121,6 +123,9 @@ def test_result_and_recovery_artifacts_survive_cleanup(project, resolved):
 
 
 def test_acknowledge_is_idempotent_and_byte_identical(project, resolved):
+    # Byte-identity is promised for a same-caller replay: the receipt's caller
+    # field records who obtained this issuance, and a replay is bound by the
+    # token digest plus the recorded result hash, not by the original caller.
     store, issued, outcome = published(project, resolved)
     raw = open(project.result_out, "r", encoding="utf-8").read()
     first = ack(project, store, issued.token, raw)
@@ -146,10 +151,15 @@ def test_a_result_with_a_forged_hash_does_not_clean_anything(project, resolved):
 
 
 def test_a_result_from_another_plan_does_not_clean_anything(project, resolved):
+    # The forged result must recompute its own result_hash: a plain string
+    # substitution breaks the self-consistent hash and is stopped by the hash
+    # check one line earlier, so it never proves the plan_id binding exists.
     store, issued, outcome = published(project, resolved)
-    raw = open(project.result_out, "r", encoding="utf-8").read()
-    other = raw.replace(issued.plan_id, "f" * 32)
-    with pytest.raises(WorkflowError):
+    body = dict(body_of(outcome.result))
+    body["plan_id"] = "f" * 32
+    body["result_hash"] = compute_result_hash(body)
+    other = serialize_artifact(build_typed("s3-upload.result", body)).decode("utf-8")
+    with pytest.raises(WorkflowError, match="belongs to another plan"):
         ack(project, store, issued.token, other)
     assert os.path.exists(project.state_root / "plans" / issued.plan_id / "record.json")
     assert not os.path.exists(project.ack_out)
@@ -254,6 +264,166 @@ def test_an_unsafe_ack_destination_cleans_nothing(project, resolved):
         project.state_root / "checkpoints" / (outcome.checkpoint_id + ".json")
     )
     assert not os.path.exists(project.state_root / "ack.json")
+
+
+def test_a_non_terminal_result_cannot_be_acknowledged(project, resolved):
+    def timing_out(method, url, headers, body):
+        raise TimeoutError("injected transport timeout")
+
+    store, issued, outcome = published(project, resolved, transport=timing_out)
+    assert body_of(outcome.result)["recovery_state"] == "in_flight_unknown"
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    with pytest.raises(WorkflowError, match="only a terminal result"):
+        ack(project, store, issued.token, raw)
+    assert os.path.exists(project.state_root / "plans" / issued.plan_id / "record.json")
+    assert os.path.exists(project.state_root / "plans" / issued.plan_id / "spool")
+    assert os.path.exists(
+        project.state_root / "checkpoints" / (outcome.checkpoint_id + ".json")
+    )
+    assert not os.path.exists(project.ack_out)
+
+
+def test_an_unsafe_checkpoint_store_does_not_take_back_a_durable_ack(project, resolved,
+                                                                     monkeypatch):
+    import artifacts as artifacts_module
+
+    store, issued, outcome = published(project, resolved)
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    os.unlink(project.state_root / "checkpoints" / ".gitignore")
+    real_write = artifacts_module.atomic_write
+
+    def racing(path, data, **kwargs):
+        # A concurrent creator wins the guard write between remove()'s probe
+        # and its create-once attempt; the loser then re-reads the guard, and
+        # an unsafe re-read surfaces a bare FileSecurityError (a ValueError,
+        # not an OSError) out of CheckpointStore.remove.
+        if path.endswith(os.path.join("checkpoints", ".gitignore")):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("*\n!.gitignore\n")
+            os.chmod(path, 0o644)
+        return real_write(path, data, **kwargs)
+
+    monkeypatch.setattr(artifacts_module, "atomic_write", racing)
+    result = ack(project, store, issued.token, raw)
+    assert result.state == "acknowledged"
+    assert os.path.exists(project.ack_out)
+    assert os.path.exists(project.state_root / "plans" / issued.plan_id / "tombstone.json")
+    # The refused removal leaves the checkpoint behind; the ack stands anyway.
+    assert os.path.exists(
+        project.state_root / "checkpoints" / (outcome.checkpoint_id + ".json")
+    )
+
+
+def test_a_type_polluted_operation_record_is_refused_not_a_crash(project, resolved):
+    store, issued, outcome = published(project, resolved)
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    path = project.state_root / "plans" / issued.plan_id / "operation.json"
+    value = loads(path.read_text(encoding="utf-8"))
+    value["result_out"] = 42
+    os.unlink(path)
+    path.write_bytes(canonicalize(value))
+    os.chmod(path, 0o600)
+    with pytest.raises(WorkflowError, match="could not be read back"):
+        ack(project, store, issued.token, raw)
+    assert os.path.exists(project.state_root / "plans" / issued.plan_id / "record.json")
+    assert os.path.exists(project.state_root / "plans" / issued.plan_id / "spool")
+    assert not os.path.exists(project.ack_out)
+
+
+def test_a_publish_replay_racing_an_ack_reports_already_acknowledged(project, resolved):
+    # Deterministic interleaving: publish's consume probes the tombstone
+    # (None), a full acknowledgement lands in between, and the record read that
+    # follows finds the file gone. The replay must answer with the durable
+    # terminal state, not report the caller's own token as invalid.
+    store, issued, outcome = published(project, resolved)
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    real = store.load_tombstone
+    injected = {"done": False}
+
+    def interleave(plan_id):
+        value = real(plan_id)
+        if value is None and not injected["done"]:
+            injected["done"] = True
+            ack(project, PlanStore(str(project.state_root)), issued.token, raw)
+        return value
+
+    store.load_tombstone = interleave
+    second = Recorder()
+    replay = publish(
+        resolved=resolved, store=store, token=issued.token, transport=second,
+        project_root=str(project.root), config_home=str(project.home), caller=CALLER,
+        executable_path=EXECUTABLE, cwd=str(project.root),
+    )
+    assert second.calls == []
+    assert replay.transport_calls == 0
+    assert body_of(replay.result)["blocking_reasons"] == ["already_acknowledged"]
+    assert body_of(replay.result)["recovery_state"] == "terminal_acknowledged"
+    assert os.path.exists(project.ack_out)
+    assert os.path.exists(project.state_root / "plans" / issued.plan_id / "tombstone.json")
+
+
+def test_two_acks_racing_at_the_tombstone_write_both_succeed(project, resolved):
+    # Deterministic interleaving: the loser loads the record inside _finish,
+    # the winner completes a whole acknowledgement, and the loser's create-once
+    # tombstone write fails with FileExistsError. The durable receipt on both
+    # sides is the same settlement, so both callers succeed.
+    store, issued, outcome = published(project, resolved)
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    real = store.load_record
+    calls = {"n": 0}
+    winner = {}
+
+    def interleave(plan_id):
+        value = real(plan_id)
+        calls["n"] += 1
+        if calls["n"] == 2:  # the read taken inside _finish, before the write
+            winner["outcome"] = ack(
+                project, PlanStore(str(project.state_root)), issued.token, raw
+            )
+        return value
+
+    store.load_record = interleave
+    loser = ack(project, store, issued.token, raw)
+    assert winner["outcome"].state in {"acknowledged", "already_acknowledged"}
+    assert loser.state in {"acknowledged", "already_acknowledged"}
+    assert serialize_artifact(loser.ack) == serialize_artifact(winner["outcome"].ack)
+    plan_dir = project.state_root / "plans" / issued.plan_id
+    assert os.path.exists(plan_dir / "tombstone.json")
+    assert not os.path.exists(plan_dir / "record.json")
+    assert not os.path.exists(plan_dir / "spool")
+    assert os.path.exists(project.ack_out)
+
+
+def test_two_acks_racing_at_the_record_read_both_succeed(project, resolved):
+    # Deterministic interleaving: the loser's _finish probes the tombstone
+    # (None), the winner completes a whole acknowledgement, and the loser's
+    # record read then finds the file gone. The re-read of the tombstone
+    # recognises the identical settlement, so both callers succeed.
+    store, issued, outcome = published(project, resolved)
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    real = store.load_tombstone
+    calls = {"n": 0}
+    winner = {}
+
+    def interleave(plan_id):
+        value = real(plan_id)
+        calls["n"] += 1
+        if calls["n"] == 2 and value is None:  # the probe inside _finish
+            winner["outcome"] = ack(
+                project, PlanStore(str(project.state_root)), issued.token, raw
+            )
+        return value
+
+    store.load_tombstone = interleave
+    loser = ack(project, store, issued.token, raw)
+    assert winner["outcome"].state in {"acknowledged", "already_acknowledged"}
+    assert loser.state in {"acknowledged", "already_acknowledged"}
+    assert serialize_artifact(loser.ack) == serialize_artifact(winner["outcome"].ack)
+    plan_dir = project.state_root / "plans" / issued.plan_id
+    assert os.path.exists(plan_dir / "tombstone.json")
+    assert not os.path.exists(plan_dir / "record.json")
+    assert not os.path.exists(plan_dir / "spool")
+    assert os.path.exists(project.ack_out)
 
 
 def test_a_failed_cleanup_after_the_receipt_is_retryable(project, resolved, monkeypatch):

@@ -16,7 +16,7 @@ from handoff_io import HandoffError, HandoffTarget, _read_artifact, commit, pref
 from operations import DefinitiveNoWrite, execute_single_put
 from plan_store import PlanStore, PlanStoreError
 from planning import PlanError, derive_contract_key, registry_for_target
-from safe_io import lexical_absolute
+from safe_io import FileSecurityError, lexical_absolute
 from source_file import SourceError, SourceSnapshot, VerifiedSource
 from target_contract import contract_hash, contract_snapshot
 
@@ -176,7 +176,10 @@ def _drop_checkpoint(store: PlanStore, plan_id: str, project_root: str,
         return False
     try:
         CheckpointStore(project_root).remove(checkpoint_id)
-    except (ArtifactError, FileNotFoundError, OSError):
+    except (ArtifactError, FileNotFoundError, OSError, FileSecurityError):
+        # FileSecurityError is a ValueError subclass, not an OSError, so it
+        # needs its own entry: remove() can surface it bare when the checkpoint
+        # store's guard file has to be re-read after a lost creation race.
         return False
     return True
 
@@ -715,11 +718,29 @@ def acknowledge(*, store: PlanStore, token: str, caller: str, executable_path: s
     refusing the ack and cleaning nothing.
 
     The receipt is committed to ack_out before any internal state is released,
-    so a lost response is always re-askable: a replay re-issues the
-    byte-identical receipt and re-runs the idempotent cleanup, which also
-    finishes a cleanup that failed after the tombstone was written. Checkpoint
-    removal stays best-effort -- a checkpoint that cannot be removed must not
-    take back an acknowledgement that is already durable on both sides.
+    so a lost response is always re-askable: a replay from the same caller
+    re-issues the byte-identical receipt and re-runs the idempotent cleanup,
+    which also finishes a cleanup that failed after the tombstone was written.
+    Checkpoint removal stays best-effort -- a checkpoint that cannot be removed
+    must not take back an acknowledgement that is already durable on both
+    sides.
+
+    Replay semantics (ruled): the token is the credential. Once the tombstone
+    exists, a replay is bound by the token digest and the recorded result hash
+    alone -- the plan record that named the original caller is gone by then,
+    and no caller check is re-imposed. The receipt's caller field therefore
+    records who obtained *this* issuance, not who acknowledged first, and
+    "byte-identical replay" holds for a same-caller replay. A different caller
+    holding the plan token is not a hole this check could close: leaking the
+    token is already the larger credential incident.
+
+    operation.json intentionally survives a successful acknowledgement: it is
+    what lets a publish that raced this ack converge through its
+    AlreadyHandedOff path instead of starting a second handoff. After the
+    checkpoint removal below, its checkpoint_id points at a removed file and
+    its result_out stays an absolute path -- both are known limitations, owned
+    by the F5 lazy garbage collection along with the rest of the settled plan
+    directory.
     """
     hook = on_boundary or _no_hook
     project_root = lexical_absolute(project_root)
@@ -794,15 +815,19 @@ def acknowledge(*, store: PlanStore, token: str, caller: str, executable_path: s
     if operation is not None:
         try:
             CheckpointStore(project_root).remove(operation["checkpoint_id"])
-        except (ArtifactError, FileNotFoundError, OSError):
+        except (ArtifactError, FileNotFoundError, OSError, FileSecurityError):
+            # FileSecurityError too (a ValueError subclass, so no OSError entry
+            # covers it): an unsafe checkpoint store refuses the removal, and a
+            # refused removal must not take back an acknowledgement that is
+            # already durable on both sides.
             pass
     return AckOutcome(receipt, state, tombstone)
 
 
 def _commit_ack(receipt: Dict[str, Any], ack_out: str, *, project_root: str,
                 config_home: str, state_root: str) -> None:
-    payload = serialize_artifact(receipt)
     try:
+        payload = serialize_artifact(receipt)
         target = preflight(ack_out, project_root=project_root, config_home=config_home,
                            state_root=state_root, source_identity=None)
         commit(target, payload)
