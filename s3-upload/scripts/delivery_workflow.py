@@ -58,11 +58,16 @@ BOUNDARIES: Tuple[str, ...] = (
     "before_cleanup",
 )
 
-STATE_BY_STATUS: Dict[str, Tuple[str, Tuple[str, ...]]] = {
-    "ok": ("terminal_unacknowledged", ()),
-    "ambiguous": ("in_flight_unknown", ()),
-    "partial_success": ("in_flight_unknown", ()),
-    "collision": ("blocked", ("capability_missing",)),
+# state, blocking reasons, outcome. outcome is carried here rather than
+# derived from the state because the two are not in bijection and must not be
+# made to look like they are: terminal_unacknowledged is "created" for a Put
+# that succeeded, but the adoption and reconcile paths reach the same state
+# with "adopted" and "reconciled".
+STATE_BY_STATUS: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
+    "ok": ("terminal_unacknowledged", (), "created"),
+    "ambiguous": ("in_flight_unknown", (), "unknown"),
+    "partial_success": ("in_flight_unknown", (), "unknown"),
+    "collision": ("blocked", ("capability_missing",), "blocked"),
 }
 
 
@@ -339,7 +344,8 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
     # to write a descriptor of its own.
     targets: Dict[str, Optional[HandoffTarget]] = {"recovery": None, "result": None}
 
-    def stop(reasons, *, state="blocked", plan=None, contract=None, checkpoint_id=None):
+    def stop(reasons, *, outcome, state="blocked", plan=None, contract=None,
+             checkpoint_id=None):
         # A durable result already on result_out is this plan's answer. It is
         # immutable and was written before the caller could observe anything,
         # so an exit that merely raised later must never contradict it.
@@ -365,6 +371,7 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 root_recovery_id=root,
                 state=state,
                 capabilities_ok=state in {"known_not_applied", "not_started"},
+                outcome=outcome,
                 blocking_reasons=reasons,
                 predecessor_operation_id=predecessor_operation_id,
                 predecessor_result_hash=predecessor_result_hash,
@@ -378,9 +385,10 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         consumed = store.consume(token, caller=caller, executable_path=executable_path,
                                  cwd=cwd, state_root=store.state_root)
     except PlanStoreError:
-        return stop(["token_invalid"])
+        return stop(["token_invalid"], outcome="blocked")
     if consumed.state == "acknowledged":
-        return stop(["already_acknowledged"], state="terminal_acknowledged")
+        return stop(["already_acknowledged"], outcome="blocked",
+                    state="terminal_acknowledged")
     plan = body_of(consumed.record["plan"])
     plan_id = plan["plan_id"]
     operation_id = _derived_id(
@@ -422,9 +430,9 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 # still the only exit that judges it.
                 targets["result"] = None
         if plan["executable"] is not True:
-            return stop(["plan_not_executable"], plan=plan)
+            return stop(["plan_not_executable"], outcome="blocked", plan=plan)
         if plan["upload_mode"] != "single-put":
-            return stop(["capability_missing"], plan=plan)
+            return stop(["capability_missing"], outcome="blocked", plan=plan)
         try:
             key = derive_contract_key(resolved.target)
             snapshot = contract_snapshot(
@@ -436,37 +444,45 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 registry=registry_for_target(resolved.target, key),
             )
         except PlanError:
-            return stop(["capability_missing"], plan=plan)
+            return stop(["capability_missing"], outcome="blocked", plan=plan)
         digest = contract_hash(snapshot)
         if digest != plan["target_contract_hash"] or resolved.ref.text != plan["target_ref"]:
-            return stop(["target_contract_drift"], plan=plan, contract=digest)
+            return stop(["target_contract_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         if plan["caller"] != caller:
-            return stop(["caller_drift"], plan=plan, contract=digest)
+            return stop(["caller_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         if plan["executable_path"] != executable_path:
-            return stop(["executable_drift"], plan=plan, contract=digest)
+            return stop(["executable_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         if plan["cwd"] != lexical_absolute(cwd):
-            return stop(["cwd_drift"], plan=plan, contract=digest)
+            return stop(["cwd_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         if plan["state_root"] != store.state_root:
-            return stop(["state_root_drift"], plan=plan, contract=digest)
+            return stop(["state_root_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         try:
             with VerifiedSource.open(plan["source"]["path"],
                                      soft_max_bytes=plan["source"]["size"]) as live:
                 current = live.snapshot
         except SourceError:
-            return stop(["source_drift"], plan=plan, contract=digest)
+            return stop(["source_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         if (
             current.size != plan["source"]["size"]
             or current.sha256 != plan["source"]["sha256"]
             or str(current.device) != plan["source"]["device"]
             or str(current.inode) != plan["source"]["inode"]
         ):
-            return stop(["source_drift"], plan=plan, contract=digest)
+            return stop(["source_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         if identity is None:
             # Unreachable while the drift check above compares the live device
             # and inode against the plan, and kept fail-closed rather than
             # handing preflight a None identity, which would silently drop the
             # "destination aliases the upload source" check.
-            return stop(["source_drift"], plan=plan, contract=digest)
+            return stop(["source_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         try:
             recovery_target = preflight(
                 plan["recovery_out"], project_root=project_root, config_home=config_home,
@@ -477,7 +493,8 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 state_root=store.state_root, source_identity=identity,
             )
         except (HandoffError, OSError):
-            return stop(["handoff_unsafe"], plan=plan, contract=digest)
+            return stop(["handoff_unsafe"], outcome="blocked",
+                        plan=plan, contract=digest)
         targets["recovery"] = recovery_target
         targets["result"] = result_target
         hook("revalidated")
@@ -488,7 +505,8 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 expected_sha256=plan["source"]["sha256"],
             )
         except PlanStoreError:
-            return stop(["source_drift"], plan=plan, contract=digest)
+            return stop(["source_drift"], outcome="blocked",
+                        plan=plan, contract=digest)
         handoff: Dict[str, Any] = {"checkpoint_id": None}
 
         def surviving():
@@ -507,7 +525,7 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 handoff["checkpoint_id"] = None
             return surviving()
 
-        def compose(state, reasons, capabilities_ok):
+        def compose(state, reasons, capabilities_ok, outcome):
             return build_result(
                 operation="publish",
                 operation_id=operation_id,
@@ -518,12 +536,14 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 root_recovery_id=root,
                 state=state,
                 capabilities_ok=capabilities_ok,
+                outcome=outcome,
                 blocking_reasons=list(reasons),
                 predecessor_operation_id=predecessor_operation_id,
                 predecessor_result_hash=predecessor_result_hash,
             )
 
-        def emit(state, reasons=(), *, capabilities_ok=True, checkpoint_id=None):
+        def emit(state, reasons=(), *, outcome, capabilities_ok=True,
+                 checkpoint_id=None):
             # result_out is create-once, so a result already durable there for
             # this plan is the authoritative answer and outranks whatever this
             # attempt would have composed. Without this the immutable commit
@@ -538,7 +558,7 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                     durable, _durable_recovery(recovery_target, recovery_id),
                     gate.calls, checkpoint_id,
                 )
-            record = compose(state, reasons, capabilities_ok)
+            record = compose(state, reasons, capabilities_ok, outcome)
             hook("before_result_fsync")
             try:
                 commit(result_target, serialize_artifact(record))
@@ -551,7 +571,8 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 # by luck. A commit that fails here is this process failing to
                 # write, and it is reported as such.
                 record = compose(
-                    state, list(reasons) + ["handoff_write_failed"], capabilities_ok
+                    state, list(reasons) + ["handoff_write_failed"], capabilities_ok,
+                    outcome,
                 )
                 return PublishOutcome(
                     record, _durable_recovery(recovery_target, recovery_id),
@@ -657,42 +678,47 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 uuid_factory=uuid_factory,
             )
         except AlreadyHandedOff:
-            return emit("in_flight_unknown", checkpoint_id=surviving())
+            return emit("in_flight_unknown", outcome="unknown",
+                        checkpoint_id=surviving())
         except (HandoffError, PlanStoreError):
             # Classify by what left the process, not by which exception type
             # arrived: the only answer that may promise a safe retry is one
             # taken with zero transport calls and no operation record on disk.
             if gate.calls == 0 and not _armed(store, plan_id):
-                return stop(["handoff_write_failed"], state="known_not_applied",
+                return stop(["handoff_write_failed"], outcome="not_applied",
+                            state="known_not_applied",
                             plan=plan, contract=digest,
                             checkpoint_id=rollback_unarmed_checkpoint())
             if gate.calls:
                 hook("after_request")
             return emit("in_flight_unknown", ["handoff_write_failed"],
-                        checkpoint_id=surviving())
+                        outcome="unknown", checkpoint_id=surviving())
         except TransportSealed:
             raise
         except DefinitiveNoWrite:
             if gate.calls:
                 hook("after_request")
-            return emit("known_not_applied", capabilities_ok=False,
-                        checkpoint_id=surviving())
+            return emit("known_not_applied", outcome="not_applied",
+                        capabilities_ok=False, checkpoint_id=surviving())
         except Exception:
             if gate.calls == 0 and not _armed(store, plan_id):
-                return stop([], state="known_not_applied", plan=plan, contract=digest,
+                return stop([], outcome="not_applied", state="known_not_applied",
+                            plan=plan, contract=digest,
                             checkpoint_id=rollback_unarmed_checkpoint())
             if gate.calls:
                 hook("after_request")
-            return emit("in_flight_unknown", checkpoint_id=surviving())
+            return emit("in_flight_unknown", outcome="unknown",
+                        checkpoint_id=surviving())
         if gate.sealed_violations:
             raise TransportSealed(
                 "a remote request preceded the durable recovery handoff"
             )
         hook("after_request")
-        state, reasons = STATE_BY_STATUS.get(
-            outcome.result["status"], ("blocked", ("unclassified_outcome",))
+        state, reasons, verdict = STATE_BY_STATUS.get(
+            outcome.result["status"],
+            ("blocked", ("unclassified_outcome",), "blocked"),
         )
-        return emit(state, reasons, checkpoint_id=surviving())
+        return emit(state, reasons, outcome=verdict, checkpoint_id=surviving())
 
 
 @dataclass(frozen=True)

@@ -47,6 +47,7 @@ def result(**overrides):
         root_recovery_id="r" * 32,
         state="not_started",
         capabilities_ok=True,
+        outcome="not_applied",
     )
     kwargs.update(overrides)
     return build_result(**kwargs)
@@ -169,10 +170,12 @@ def test_result_hash_is_computed_from_canonical_bytes_not_repr():
     body = body_of(result())
     material = {key: value for key, value in body.items() if key != "result_hash"}
     assert set(material) == {
-        "allowed_actions", "authorization_required", "blocking_reasons", "operation",
-        "operation_id", "plan_hash", "plan_id", "predecessor_operation_id",
-        "predecessor_result_hash", "recovery_id", "recovery_state", "retry_safe",
-        "root_recovery_id", "target_contract_hash",
+        "allowed_actions", "authorization_required", "blocking_reasons",
+        "content_verification", "object_reference", "object_written", "operation",
+        "operation_id", "outcome", "plan_hash", "plan_id",
+        "predecessor_operation_id", "predecessor_result_hash", "recovery_id",
+        "recovery_state", "retry_safe", "root_recovery_id",
+        "target_contract_hash", "url", "url_expires_at", "url_kind", "url_scope",
     }
     expected = "sha256:" + hashlib.sha256(
         canonicalize({"domain": "s3-upload/result/v1", "value": material})

@@ -147,10 +147,12 @@ def test_recovery_fields_are_locked():
 
 def test_result_fields_are_locked():
     assert RESULT_FIELDS == (
-        "allowed_actions", "authorization_required", "blocking_reasons", "operation",
-        "operation_id", "plan_hash", "plan_id", "predecessor_operation_id",
-        "predecessor_result_hash", "recovery_id", "recovery_state", "result_hash",
-        "retry_safe", "root_recovery_id", "target_contract_hash",
+        "allowed_actions", "authorization_required", "blocking_reasons",
+        "content_verification", "object_reference", "object_written", "operation",
+        "operation_id", "outcome", "plan_hash", "plan_id",
+        "predecessor_operation_id", "predecessor_result_hash", "recovery_id",
+        "recovery_state", "result_hash", "retry_safe", "root_recovery_id",
+        "target_contract_hash", "url", "url_expires_at", "url_kind", "url_scope",
     )
 
 

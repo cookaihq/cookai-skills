@@ -15,6 +15,8 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 from artifacts import ArtifactError, validate_provider_identifier
+from strict_json import StrictJSONError
+from target_contract import contract_hash
 from delivery_schema import (
     DISPOSITIONS, DeliverySchemaError, VERIFICATION_CHANNELS, body_of,
     build_typed, parse_typed,
@@ -366,6 +368,39 @@ def _verifications(value: Any, content: Dict[str, Any],
     return sorted(entries, key=lambda entry: entry["channel"])
 
 
+def _contract(value: Any, digest: str) -> Dict[str, Any]:
+    """Bind target_contract to target_contract_hash by recomputing the hash.
+
+    v1's _validate_reference recomputed target_fingerprint and compared it
+    (scripts/artifacts.py:170-179); v2 shipped the same pair with no binding
+    at all, so editing target_contract while leaving target_contract_hash
+    alone was accepted (run, not assumed). This is the one check in v1's
+    surface that had no v2 counterpart, and the one piece of provenance in
+    this body that is locally verifiable at all: plan_id, plan_hash,
+    target_ref and root_recovery_id name things this module cannot see, but
+    target_contract_hash is a pure function of a field carried right beside
+    it. The result envelope's own digest is no substitute -- it is computed
+    from the same body and recomputed by whoever edits it, so it detects
+    nothing that a hand edit does not also fix.
+
+    Precedent for the assertion shape: tests/unit/test_probe.py:134.
+    """
+    item = _object(value, "target_contract")
+    # Path-free, but the same rule as any derived check: the value, the
+    # derivation and the comparison sit in one try, and the except names
+    # every type contract_hash can raise. canonicalize refuses non-JSON
+    # values with StrictJSONError (a ValueError subclass, and _digest does
+    # not wrap it), which would otherwise escape as a foreign exception --
+    # the same leak shape as the bare ValueError out of urlsplit.
+    try:
+        recomputed = contract_hash(item)
+    except StrictJSONError as exc:
+        raise ReferenceError("target_contract is not canonically hashable") from exc
+    if recomputed != digest:
+        raise ReferenceError("target_contract does not match target_contract_hash")
+    return item
+
+
 def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
                               location: Any, operation_id: Any, plan_hash: Any,
                               plan_id: Any, retention: Any, root_recovery_id: Any,
@@ -410,7 +445,9 @@ def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
         # (scripts/plan_store.py:83): the caller keeps its own handle on this
         # nested object and a shallow alias lets a later mutation reach inside
         # an artifact that has already been validated.
-        "target_contract": deepcopy(_object(target_contract, "target_contract")),
+        "target_contract": deepcopy(_contract(
+            target_contract, _digest(target_contract_hash, "target_contract_hash")
+        )),
         "target_contract_hash": _digest(target_contract_hash, "target_contract_hash"),
         "target_ref": _text(target_ref, "target_ref"),
         "verifications": entries,
@@ -429,6 +466,11 @@ def parse_object_reference_v2(text: str,
     body from its own non-derived fields is what refuses a hand-edited
     artifact whose disposition and object_written disagree -- the read/write
     asymmetry that let serialize_artifact check type but not version.
+
+    "As strict as writing" is only worth as much as the write side is strict,
+    which is why _contract exists: until it did, a reference whose
+    target_contract had been edited while target_contract_hash stayed put
+    passed both halves.
 
     ``credentials`` is threaded through for the same reason the whole rebuild
     is: the read side handles an artifact somebody else produced, so it needs

@@ -168,12 +168,37 @@ RECOVERY_FIELDS: Tuple[str, ...] = (
     "root_recovery_id", "target_contract_hash",
 )
 
+# Redefined in place from the 15 fields this tuple carried until now, with
+# schema_version deliberately left at 1 rather than minting (s3-upload.result, 2).
+# The exemption rests on three facts that were checked, not assumed, and it
+# lapses if any of them stops holding:
+#   1. scripts/upload.py is not wired to this envelope -- publish / plan / ack
+#      are a later plan's work, so no public entry point can emit a result
+#      artifact today (grep: the only build_result callers for this type are
+#      delivery_workflow and its tests);
+#   2. the 15-field version of (s3-upload.result, 1) therefore never left the
+#      process, so nobody outside can hold an instance of the old field set;
+#   3. same precedent as leaving CONTRACT_VERSION at 1 through plan two -- a
+#      bump would signal that version 1 had been published and superseded,
+#      which would be a lie.
+# The exemption covers this envelope only. contract_snapshot's field set and
+# target_contract._digest's input are published (github-cookaihq @ 87dcc1e,
+# 2026-07-27) and any change there must bump CONTRACT_VERSION.
 RESULT_FIELDS: Tuple[str, ...] = (
-    "allowed_actions", "authorization_required", "blocking_reasons", "operation",
-    "operation_id", "plan_hash", "plan_id", "predecessor_operation_id",
-    "predecessor_result_hash", "recovery_id", "recovery_state", "result_hash",
-    "retry_safe", "root_recovery_id", "target_contract_hash",
+    "allowed_actions", "authorization_required", "blocking_reasons",
+    "content_verification", "object_reference", "object_written", "operation",
+    "operation_id", "outcome", "plan_hash", "plan_id",
+    "predecessor_operation_id", "predecessor_result_hash", "recovery_id",
+    "recovery_state", "result_hash", "retry_safe", "root_recovery_id",
+    "target_contract_hash", "url", "url_expires_at", "url_kind", "url_scope",
 )
+
+# What a delivered URL is, as a closed vocabulary. A presigned URL carries an
+# expiry and a public one must not: the pair is what tells a consumer whether
+# the link it holds decays. url_scope lives in delivery_reference next to the
+# verification it qualifies (URL_SCOPES) and is imported from there rather
+# than restated here -- one vocabulary, one home.
+URL_KINDS: Tuple[str, ...] = ("public", "presigned")
 
 ACK_FIELDS: Tuple[str, ...] = (
     "acknowledged", "caller", "plan_id", "predecessor_operation_id", "recovery_id",

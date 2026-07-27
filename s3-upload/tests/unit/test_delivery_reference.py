@@ -10,6 +10,7 @@ from delivery_schema import (
     OUTCOME_WRITE_CERTAINTY, VERIFICATION_CHANNELS, body_of, parse_typed,
     serialize_artifact,
 )
+from target_contract import contract_hash
 import delivery_reference
 from delivery_reference import (
     CONTENT_STABILITIES, DISPOSITION_REQUIRED_CHANNELS,
@@ -32,6 +33,7 @@ AT = "2026-07-27T00:00:00Z"
 # credential when that string appears inside a version_id -- so an obvious
 # placeholder exercises exactly the same code path.
 SECRET = "CREDENTIAL/VALUE-THAT-MUST-NOT-APPEAR"
+CONTRACT = {"contract_version": 1}
 
 
 def verification(channel="authenticated_full_get", **overrides):
@@ -57,8 +59,10 @@ def reference(**overrides):
         "retention": {"mode": "retain", "days": None,
                       "enforcement": "external-unverified"},
         "root_recovery_id": "2" * 32,
-        "target_contract": {"contract_version": 1},
-        "target_contract_hash": "sha256:" + "3" * 64,
+        "target_contract": CONTRACT,
+        # Recomputed, not spelled out: the two fields are bound, so a literal
+        # here would be a second source of truth for the same value.
+        "target_contract_hash": contract_hash(CONTRACT),
         "target_ref": "project:images",
         "verifications": [verification()],
     }

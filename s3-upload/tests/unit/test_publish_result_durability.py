@@ -122,6 +122,53 @@ def test_durable_result_parses_as_a_closed_v2_result(
     assert body == body_of(outcome.result)
 
 
+# recovery_state answers "what may the caller do next"; outcome answers "what
+# did this operation do to the bytes". They are not the same question and the
+# workflow must not answer one with the other -- terminal_unacknowledged will
+# also be reached with "adopted" and "reconciled" once those paths land, so a
+# state->outcome table would be wrong the moment it looked convenient.
+@pytest.mark.parametrize("status,state,outcome,written", [
+    (200, "terminal_unacknowledged", "created", True),
+    (503, "in_flight_unknown", "unknown", None),
+    (403, "known_not_applied", "not_applied", False),
+])
+def test_every_publish_exit_names_what_happened_to_the_object(
+    project, resolved, dry_run, snapshot, contract_digest, status, state, outcome,
+    written
+):
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    body = body_of(run(project, resolved, store, issued.token,
+                       Recorder(status=status)).result)
+    assert body["recovery_state"] == state
+    assert body["outcome"] == outcome
+    assert body["object_written"] is written
+    # Nothing this task delivers reaches the network twice, so the delivery
+    # fields are the explicit empties, not values borrowed from the plan.
+    assert body["object_reference"] is None
+    assert body["url"] is None and body["url_kind"] is None
+    assert body["url_scope"] is None and body["url_expires_at"] is None
+    assert body["content_verification"] == {
+        "channels": [], "sha256": None, "size": None, "verified_at": None,
+    }
+
+
+def test_a_refusal_before_any_request_is_blocked_not_unknown(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    # blocked is the only exit whose outcome is settled without ever having
+    # asked the remote anything, which is why it may say object_written=False
+    # where in_flight_unknown may not.
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    transport = Recorder()
+    refused = run(project, resolved, store, "not-" + issued.token, transport)
+    body = body_of(refused.result)
+    assert transport.calls == []
+    assert body["blocking_reasons"] == ["token_invalid"]
+    assert body["recovery_state"] == "blocked"
+    assert body["outcome"] == "blocked"
+    assert body["object_written"] is False
+
+
 def test_result_file_is_0600_with_a_single_link(project, resolved, dry_run, snapshot,
                                                 contract_digest):
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
