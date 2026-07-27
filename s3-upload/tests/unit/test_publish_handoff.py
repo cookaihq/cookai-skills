@@ -738,6 +738,48 @@ def test_a_failed_checkpoint_drop_reports_the_checkpoint_it_left_behind(
     assert reported[0] != reported[1]
 
 
+def test_an_unsafe_checkpoint_store_does_not_take_the_rollback_exit_down(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    # The rollback of an unarmed checkpoint runs inside publish's own except
+    # handler, so an exception escaping CheckpointStore.remove there would
+    # replace the structured known_not_applied answer with a traceback. The
+    # bare-FileSecurityError shape is the lost-creation-race one: remove()'s
+    # _prepare finds the guard missing, loses the create-once write to a
+    # competitor, and the unsafe re-read surfaces FileSecurityError (a
+    # ValueError, not an OSError) out of remove().
+    import artifacts as artifacts_module
+
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    raw = Recorder()
+    real_write = artifacts_module.atomic_write
+
+    def racing(path, data, **kwargs):
+        if path.endswith(os.path.join("checkpoints", ".gitignore")):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("*\n!.gitignore\n")
+            os.chmod(path, 0o644)
+        return real_write(path, data, **kwargs)
+
+    def sabotage(name):
+        if name == "checkpoint_durable":
+            os.unlink(project.state_root / "checkpoints" / ".gitignore")
+            monkeypatch.setattr(artifacts_module, "atomic_write", racing)
+            raise RuntimeError("injected crash before the durable handoff")
+
+    outcome = run(project, resolved, store, issued.token, raw, on_boundary=sabotage)
+    body = body_of(outcome.result)
+    assert raw.calls == []
+    assert outcome.transport_calls == 0
+    assert body["recovery_state"] == "known_not_applied"
+    assert body["blocking_reasons"] == []
+    assert durable_state(project, issued.plan_id)["operation_record"] is False
+    assert not os.path.exists(project.recovery_out)
+    # The refused removal leaves the checkpoint behind, reported at the exit.
+    assert outcome.checkpoint_id is not None
+    assert checkpoint_path(project, outcome.checkpoint_id).exists()
+
+
 def test_a_checkpoint_the_directory_will_not_show_is_still_reported(
     project, resolved, dry_run, snapshot, contract_digest
 ):

@@ -362,6 +362,64 @@ def test_a_publish_replay_racing_an_ack_reports_already_acknowledged(project, re
     assert os.path.exists(project.state_root / "plans" / issued.plan_id / "tombstone.json")
 
 
+def test_a_forged_token_crossing_the_ack_race_window_is_still_refused(project, resolved):
+    # Same deterministic interleaving as the replay test above, but with a
+    # forged token: consume probes the tombstone (None), a full
+    # acknowledgement lands in between, and the record read finds the file
+    # gone. The fallback's tombstone re-read then answers the token, and its
+    # compare_digest is the only guard left between a forgery and the durable
+    # settlement -- the forgery must come back token_invalid, never
+    # already_acknowledged.
+    store, issued, outcome = published(project, resolved)
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    forged = issued.plan_id + ".not-the-secret"
+    real = store.load_tombstone
+    injected = {"done": False}
+
+    def interleave(plan_id):
+        value = real(plan_id)
+        if value is None and not injected["done"]:
+            injected["done"] = True
+            ack(project, PlanStore(str(project.state_root)), issued.token, raw)
+        return value
+
+    store.load_tombstone = interleave
+    second = Recorder()
+    replay = publish(
+        resolved=resolved, store=store, token=forged, transport=second,
+        project_root=str(project.root), config_home=str(project.home), caller=CALLER,
+        executable_path=EXECUTABLE, cwd=str(project.root),
+    )
+    assert second.calls == []
+    assert replay.transport_calls == 0
+    assert body_of(replay.result)["blocking_reasons"] == ["token_invalid"]
+    assert body_of(replay.result)["recovery_state"] == "blocked"
+
+
+def test_a_replay_after_the_tombstone_is_bound_by_the_token_not_the_caller(project, resolved):
+    # Ruled semantics: the token is the credential. Once the tombstone exists,
+    # the plan record that named the original caller is gone, so a replay is
+    # bound by the token digest and the recorded result hash alone -- no
+    # caller (or executable/cwd) check is re-imposed, and the receipt's caller
+    # field records who presented the token this time.
+    store, issued, outcome = published(project, resolved)
+    raw = open(project.result_out, "r", encoding="utf-8").read()
+    first = ack(project, store, issued.token, raw)
+    assert first.state == "acknowledged"
+    replayer_ack_out = str(project.out / "replayer-ack.json")
+    replayed = ack(
+        project, store, issued.token, raw,
+        caller="vi-pdf2md",
+        executable_path="/usr/local/bin/python3",
+        cwd=str(project.home),
+        ack_out=replayer_ack_out,
+    )
+    assert replayed.state == "already_acknowledged"
+    assert body_of(replayed.ack)["caller"] == "vi-pdf2md"
+    assert body_of(replayed.ack)["result_hash"] == body_of(first.ack)["result_hash"]
+    assert os.path.exists(replayer_ack_out)
+
+
 def test_two_acks_racing_at_the_tombstone_write_both_succeed(project, resolved):
     # Deterministic interleaving: the loser loads the record inside _finish,
     # the winner completes a whole acknowledgement, and the loser's create-once

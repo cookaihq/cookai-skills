@@ -826,8 +826,12 @@ def acknowledge(*, store: PlanStore, token: str, caller: str, executable_path: s
 
 def _commit_ack(receipt: Dict[str, Any], ack_out: str, *, project_root: str,
                 config_home: str, state_root: str) -> None:
+    # serialize_artifact sits outside the try on purpose: the except below
+    # catches only HandoffError/OSError, so keeping it inside would suggest a
+    # DeliverySchemaError could be folded into the handoff failure when it
+    # cannot.
+    payload = serialize_artifact(receipt)
     try:
-        payload = serialize_artifact(receipt)
         target = preflight(ack_out, project_root=project_root, config_home=config_home,
                            state_root=state_root, source_identity=None)
         commit(target, payload)

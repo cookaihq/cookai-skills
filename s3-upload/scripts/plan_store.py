@@ -108,10 +108,11 @@ def _exact(value: Any, fields: Tuple[str, ...], label: str,
            *, str_fields: Tuple[str, ...] = ()) -> Dict[str, Any]:
     if not isinstance(value, dict) or set(value) != set(fields):
         raise PlanStoreError(f"{label} does not have the exact field set")
-    # Value-type guard: every field named in str_fields is consumed as a str
-    # downstream (path construction, secrets.compare_digest), and a polluted
-    # on-disk record would otherwise surface as a bare TypeError instead of
-    # this store's error contract.
+    # Value-type guard (shape hardening): every field named in str_fields must
+    # be a string. Some of them have downstream consumers that require it
+    # (path construction, secrets.compare_digest); the rest are pinned so a
+    # polluted on-disk record surfaces as this store's error contract instead
+    # of a bare TypeError later.
     for key in str_fields:
         if not isinstance(value[key], str):
             raise PlanStoreError(f"{label} field {key} must be a string")
@@ -351,7 +352,9 @@ class PlanStore:
             # tombstone resolves it: a tombstone that has appeared since the
             # probe above is this plan's durable settlement and answers the
             # token exactly as the fast path would have. If the re-read finds
-            # nothing (or is itself unreadable), the original refusal stands.
+            # nothing, the original refusal stands; a re-read that itself
+            # fails propagates as its own PlanStoreError (with the original
+            # refusal in its __context__).
             settled = self.load_tombstone(plan_id)
             if settled is None:
                 raise
@@ -433,6 +436,10 @@ class PlanStore:
                     raise
                 if (settled["acknowledged"] is not acknowledged
                         or settled["result_hash"] != result_hash):
+                    # No production path currently reaches this refusal:
+                    # invalidate() has no production caller, and concurrent
+                    # acks of one plan always carry the same settlement.
+                    # Kept as pure defence in depth.
                     raise PlanStoreError(
                         "plan tombstone already records another settlement"
                     )
@@ -457,8 +464,12 @@ class PlanStore:
                     # itself fails propagates as its own PlanStoreError.
                     settled = self.load_tombstone(plan_id)
                     if settled != tombstone:
+                        # No production path currently reaches this refusal:
+                        # invalidate() has no production caller, and concurrent
+                        # acks of one plan always carry the same settlement.
+                        # Kept as pure defence in depth.
                         raise PlanStoreError(
-                            "plan tombstone could not be written durably"
+                            "plan tombstone already records another settlement"
                         ) from exc
                     tombstone = settled
                 except (OSError, FileSecurityError) as exc:
