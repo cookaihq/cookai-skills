@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -315,6 +316,81 @@ def resolve_official_binary(layered: dict, home: Path):
 
 
 # ---------------------------------------------------------------------------
+# sakura 定制二进制自动安装（natfrp API + size/hash 校验 + 保守回退）
+# ---------------------------------------------------------------------------
+
+SAKURA_CLIENTS_URL = "https://api.natfrp.com/v4/system/clients"
+SAKURA_HOST_SUFFIXES = (".natfrp.com", ".globalslb.net")
+_HASH32_RE = re.compile(r"^[0-9a-f]{32}$")
+SAKURA_FALLBACK_HINT = ("已停止自动安装。请从樱花面板『软件下载』手动下载定制 frpc，"
+                        "并通过 FRPC_LAUNCH_SAKURA_FRPC 提供其路径")
+
+
+class SakuraApiError(FrpcLaunchError):
+    pass
+
+
+def parse_sakura_clients(payload: dict, plat_key: str) -> dict:
+    # 取值路径以 tests/fixtures/sakura_clients.json（真实响应）为准：
+    # payload["frpc"]["ver"] + payload["frpc"]["archs"][plat_key]{url,hash,size}
+    frpc_cat = payload.get("frpc") if isinstance(payload, dict) else None
+    if not isinstance(frpc_cat, dict):
+        raise SakuraApiError("客户端清单缺少 frpc 分类。" + SAKURA_FALLBACK_HINT)
+    version = frpc_cat.get("ver")
+    archs = frpc_cat.get("archs")
+    entry = archs.get(plat_key) if isinstance(archs, dict) else None
+    if not isinstance(entry, dict):
+        raise SakuraApiError("客户端清单中找不到平台 %s。%s"
+                             % (plat_key, SAKURA_FALLBACK_HINT))
+    url, size, hash_ = entry.get("url"), entry.get("size"), entry.get("hash")
+    if not version or not url or not isinstance(size, int) or size <= 0:
+        raise SakuraApiError("客户端清单字段缺失或类型异常。" + SAKURA_FALLBACK_HINT)
+    parsed = urllib.parse.urlparse(str(url))
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or not host.endswith(SAKURA_HOST_SUFFIXES):
+        raise SakuraApiError("下载 URL 非 HTTPS 或 host 不可识别: %s。%s"
+                             % (url, SAKURA_FALLBACK_HINT))
+    if not _HASH32_RE.match(str(hash_ or "")):
+        raise SakuraApiError("hash 格式无法识别（预期 32 位十六进制）。" + SAKURA_FALLBACK_HINT)
+    return {"version": str(version), "url": str(url), "size": size, "hash": str(hash_)}
+
+
+def install_sakura(home: Path, fetch_json=None, fetch_bytes=None) -> dict:
+    fetch_json = fetch_json or http_get_json
+    fetch_bytes = fetch_bytes or http_get
+    os_name, os_subdir, arch = detect_platform()
+    ensure_home_layout(home)
+    info = parse_sakura_clients(fetch_json(SAKURA_CLIENTS_URL), "%s_%s" % (os_name, arch))
+    with tempfile.TemporaryDirectory(dir=str(home / "run")) as td:
+        tmp_bin = Path(td) / "frpc-sakura.new"
+        body = fetch_bytes(info["url"])
+        if len(body) != info["size"]:
+            raise SakuraApiError("下载大小不一致（期望 %d 实际 %d）。%s"
+                                 % (info["size"], len(body), SAKURA_FALLBACK_HINT))
+        tmp_bin.write_bytes(body)
+        if md5_file(tmp_bin) != info["hash"]:
+            raise SakuraApiError("hash 校验不一致，已删除临时文件。" + SAKURA_FALLBACK_HINT)
+        final = home / "bin" / os_subdir / "frpc-sakura"
+        install_binary(tmp_bin, final)
+    meta = {"version": info["version"], "source_url": info["url"],
+            "sha256": sha256_file(final), "upstream_hash": info["hash"],
+            "installed_at": datetime.now(timezone.utc).isoformat()}
+    write_meta(home / "bin" / os_subdir / "frpc-sakura.meta.json", meta)
+    return meta
+
+
+def resolve_sakura_binary(layered: dict, home: Path):
+    explicit = layered.get("FRPC_LAUNCH_SAKURA_FRPC")
+    if explicit:
+        return Path(explicit[0]).expanduser(), "explicit"
+    _, os_subdir, _ = detect_platform()
+    managed = home / "bin" / os_subdir / "frpc-sakura"
+    if managed.is_file() and os.access(managed, os.X_OK):
+        return managed, "managed"
+    return None, ""
+
+
+# ---------------------------------------------------------------------------
 # 模式判定
 # ---------------------------------------------------------------------------
 
@@ -391,6 +467,15 @@ def cmd_install(args) -> int:
         meta = install_official(args.home, args.version)
         _emit(args, {"result": "installed", "meta": meta},
               "已安装官方 frpc v%s（sha256 校验通过）" % meta["version"])
+        return 0
+    layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
+    binary, origin = resolve_sakura_binary(layered, args.home)
+    if origin == "managed":
+        _, os_subdir, _ = detect_platform()
+        meta = read_meta(args.home / "bin" / os_subdir / "frpc-sakura.meta.json")
+        _emit(args, {"result": "already_installed", "meta": meta},
+              "已安装受管 frpc-sakura %s，不重复下载；如需升级请用 update"
+              % meta.get("version", "?"))
         return 0
     meta = install_sakura(args.home)
     _emit(args, {"result": "installed", "meta": meta},

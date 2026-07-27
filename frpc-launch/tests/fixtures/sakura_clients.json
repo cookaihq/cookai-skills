@@ -1,0 +1,317 @@
+{
+    "windows": {
+        "ver": "3.2.0.0",
+        "time": 1774945308,
+        "note": "#### \u7528\u6237\u754c\u9762 ############\n3.2.0.0:\n[+] \u65b0\u7248\u7528\u6237\u754c\u9762\u6d4b\u8bd5\u4e2d\n\n#### \u6838\u5fc3\u670d\u52a1 ########\n3.1.8:\n[+] \u6539\u5584 API \u8fde\u63a5\u6027",
+        "archs": {
+            "default": {
+                "title": "\u901a\u7528\u5b89\u88c5\u7a0b\u5e8f",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-windows/3.2.0.0/SakuraLauncher.exe",
+                "hash": "acc258c0eece33335eac38abe6df139f",
+                "size": 46323432,
+                "powershell": "irm https://nya.globalslb.net/natfrp/client/launcher-windows/3.2.0.0/SakuraLauncher.ps1 | iex"
+            }
+        }
+    },
+    "macos": {
+        "ver": "3.1.8",
+        "time": 1783833198,
+        "note": "#### \u7528\u6237\u754c\u9762 #############\n3.1.8:\n=> \u6838\u5fc3\u670d\u52a1: 3.1.8\n=> frpc: 0.51.0-sakura-13\n\n#### \u6838\u5fc3\u670d\u52a1 ########\n3.1.8:\n[+] \u6539\u5584 API \u8fde\u63a5\u6027",
+        "archs": {
+            "darwin_arm64": {
+                "title": "Apple Silicon (arm64)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-macos/3.1.8/SakuraLauncher_macOS_arm64.dmg",
+                "hash": "f74578d96278a41572bdd793bc825f77",
+                "size": 16821521
+            },
+            "darwin_amd64": {
+                "title": "Intel (x86_64)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-macos/3.1.8/SakuraLauncher_macOS_x86_64.dmg",
+                "hash": "3b1670ac6aebe3134a2ce3cb3d1083a8",
+                "size": 18284422
+            }
+        }
+    },
+    "android": {
+        "ver": "3.1.8",
+        "time": 1784620315,
+        "note": "#### \u7528\u6237\u754c\u9762 #############\n3.1.8:\n=> \u6838\u5fc3\u670d\u52a1: 3.1.8\n=> frpc: 0.51.0-sakura-14\n\n#### \u6838\u5fc3\u670d\u52a1 ########\n3.1.8:\n[+] \u6539\u5584 API \u8fde\u63a5\u6027",
+        "archs": {
+            "linux_arm64": {
+                "title": "arm64-v8a",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-android/3.1.8/SakuraLauncher-arm64-v8a-release.apk",
+                "hash": "7f4bc5bd629f53534e8b208bd49324ae",
+                "size": 19770093
+            },
+            "linux_armv7": {
+                "title": "armeabi-v7a",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-android/3.1.8/SakuraLauncher-armeabi-v7a-release.apk",
+                "hash": "155c37c0970e036ff30254a295258208",
+                "size": 19462639
+            },
+            "linux_amd64": {
+                "title": "x86_64",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-android/3.1.8/SakuraLauncher-x86_64-release.apk",
+                "hash": "61de27656e0c3b446bc9a29b94b5fa80",
+                "size": 20928348
+            },
+            "linux_386": {
+                "title": "x86",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-android/3.1.8/SakuraLauncher-x86-release.apk",
+                "hash": "d9186968e374667c4218f0cf71bb9fdf",
+                "size": 19581631
+            }
+        }
+    },
+    "unix": {
+        "ver": "3.1.8",
+        "time": 1784355225,
+        "note": "3.1.8:\n[+] \u6539\u5584 API \u8fde\u63a5\u6027",
+        "archs": {
+            "docker_natfrp": {
+                "title": "Docker (\u5b98\u65b9\u6e90)",
+                "url": "https://natfrp.com/registry/#!/taglist/launcher"
+            },
+            "docker_hub": {
+                "title": "Docker (Docker Hub)",
+                "url": "https://hub.docker.com/r/natfrp/launcher"
+            },
+            "docker_ghcr": {
+                "title": "Docker (GitHub Packages)",
+                "url": "https://github.com/orgs/natfrp/packages/container/package/launcher"
+            },
+            "linux_amd64": {
+                "title": "Linux 64 \u4f4d (x86_64, amd64)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_amd64.tar.zst",
+                "hash": "67012fca8eeb4511d4a7b6e2405c13f8",
+                "size": 12741587
+            },
+            "linux_386": {
+                "title": "Linux 32 \u4f4d (i386)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_386.tar.zst",
+                "hash": "913ed221830df4cc2cadc5cc235878d1",
+                "size": 12170405
+            },
+            "linux_arm64": {
+                "title": "Linux AArch64 (arm64)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_arm64.tar.zst",
+                "hash": "c484d5d1309790e43ec634269ac3afd0",
+                "size": 11247816
+            },
+            "linux_armv7": {
+                "title": "Linux ARMv7",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_armv7.tar.zst",
+                "hash": "8a01f48435d4c5f7cc2995d20942b66c",
+                "size": 11428318
+            },
+            "linux_mips": {
+                "title": "Linux MIPS",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_mips.tar.zst",
+                "hash": "e9c34f25df9fc1010c6a7dc6e8796201",
+                "size": 11434549
+            },
+            "linux_mipsle": {
+                "title": "Linux MIPS (le)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_mipsle.tar.zst",
+                "hash": "bd82815cdc2b93dea93d88eaa672b01e",
+                "size": 11373824
+            },
+            "linux_mips64": {
+                "title": "Linux MIPS64",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_mips64.tar.zst",
+                "hash": "0b3d3b4db2a486a6e941d38b4d2c9d15",
+                "size": 9319875
+            },
+            "linux_mips64le": {
+                "title": "Linux MIPS64 (le)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_mips64le.tar.zst",
+                "hash": "51f4741e0546d9d656ea3ebd30141691",
+                "size": 9331288
+            },
+            "linux_riscv64": {
+                "title": "Linux RISC-V 64",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_riscv64.tar.zst",
+                "hash": "2f71494ecf9d2a0b2c25f49e0aa27af7",
+                "size": 10983484
+            },
+            "linux_loong64": {
+                "title": "Linux LoongArch 64",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_loong64.tar.zst",
+                "hash": "e50312f36332313fae61b7140c9a5c8e",
+                "size": 10403524
+            },
+            "linux_arm_garbage": {
+                "title": "Linux arm_garbage",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_linux_arm_garbage.tar.zst",
+                "hash": "929958d5b4dcc1bd2eced775fffc1f2a",
+                "size": 11471114
+            },
+            "freebsd_amd64": {
+                "title": "FreeBSD 64 \u4f4d (amd64)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_freebsd_amd64.tar.zst",
+                "hash": "c68ed3c968140a43ea6c7f5139667df8",
+                "size": 10690057
+            },
+            "freebsd_386": {
+                "title": "FreeBSD 32 \u4f4d (i386)",
+                "url": "https://nya.globalslb.net/natfrp/client/launcher-unix/3.1.8/natfrp-service_freebsd_386.tar.zst",
+                "hash": "2bfc9cc7d09878746bd8cda13538e262",
+                "size": 10180152
+            }
+        }
+    },
+    "frpc": {
+        "ver": "0.51.0-sakura-14",
+        "time": 1784298660,
+        "note": "0.51.0-sakura-14:\n\u3010\u672c\u66f4\u65b0\u4e2d\u5305\u542b\u9762\u5411\u5e7b\u517d\u5e15\u9c81 Palworld \u7684\u4e13\u95e8\u4f18\u5316\u53ca\u5176\u4ed6\u4f53\u9a8c\u6539\u8fdb\u5185\u5bb9\uff0c\u5efa\u8bae\u5b89\u88c5\u3011\n\n[+] \u4f18\u5316 UDP \u96a7\u9053\u5728\u9ad8\u8d1f\u8f7d\u573a\u666f\u4e0b\u7684\u6027\u80fd\u548c\u5e26\u5bbd\u4e0d\u8db3\u65f6\u7684\u6d41\u63a7\u903b\u8f91\n[-] \u4fee\u590d\u4e00\u5b9a\u60c5\u51b5\u4e0b\uff0cUDP \u96a7\u9053\u51fa\u73b0\u5f02\u5e38\u963b\u585e\u7684\u95ee\u9898\n[+] \u4f18\u5316\u8bbf\u95ee\u8ba4\u8bc1\u6210\u529f\u540e\u7684\u91cd\u5b9a\u5411\u903b\u8f91\uff0c\u65b0\u589e\u6765\u6e90 URL \u53c2\u6570\n[+] \u81ea\u52a8 HTTPS \u81ea\u7b7e\u540d\u8bc1\u4e66\u73b0\u5df2\u652f\u6301\u4e2d\u6587\u7b49\u56fd\u9645\u5316\u57df\u540d\n[+] \u4f18\u5316 Minecraft \u5c40\u57df\u7f51\u6e38\u620f\u5207\u6362\u903b\u8f91\n[-] \u4fee\u590d\u4e00\u5b9a\u60c5\u51b5\u4e0b\uff0c\u81ea\u52a8 HTTPS \u57df\u540d\u6821\u9a8c\u5f02\u5e38\u6216\u9020\u6210\u5d29\u6e83\u7684\u95ee\u9898\n[-] \u4fee\u590d\u4e00\u5b9a\u60c5\u51b5\u4e0b\uff0c\u81ea\u52a8 HTTPS \u65e0\u6cd5\u52a0\u8f7d\u5b8c\u6574\u8bc1\u4e66\u94fe\u7684\u95ee\u9898",
+        "archs": {
+            "docker_natfrp": {
+                "title": "Docker (\u5b98\u65b9\u6e90)",
+                "url": "https://natfrp.com/registry/#!/taglist/frpc"
+            },
+            "docker_hub": {
+                "title": "Docker (Docker Hub)",
+                "url": "https://hub.docker.com/r/natfrp/frpc"
+            },
+            "docker_ghcr": {
+                "title": "Docker (GitHub Packages)",
+                "url": "https://github.com/orgs/natfrp/packages/container/package/frpc"
+            },
+            "windows_amd64": {
+                "title": "Windows 64 \u4f4d (x86_64, amd64)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_windows_amd64.exe",
+                "hash": "3dc416a0ee2348dc66639c7c5d3130d4",
+                "size": 14133248
+            },
+            "windows_386": {
+                "title": "Windows 32 \u4f4d (i386)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_windows_386.exe",
+                "hash": "e852b920b3a130aac8a9b766cad430fd",
+                "size": 13278208
+            },
+            "windows_arm64": {
+                "title": "Windows AArch64 (arm64)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_windows_arm64.exe",
+                "hash": "5f180c3f36a13d87693bcd95f0e4eba9",
+                "size": 13262336
+            },
+            "linux_amd64": {
+                "title": "Linux 64 \u4f4d (x86_64, amd64)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_amd64",
+                "hash": "b5632fff7156e29f231cfd19dd079674",
+                "size": 6389308
+            },
+            "linux_386": {
+                "title": "Linux 32 \u4f4d (i386)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_386",
+                "hash": "0a5526ddd4d35779b03b56b67a599a89",
+                "size": 6082776
+            },
+            "linux_arm64": {
+                "title": "Linux AArch64 (arm64)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_arm64",
+                "hash": "5b3e5920c9df75ac8ba6261c3162e449",
+                "size": 5609528
+            },
+            "linux_armv7": {
+                "title": "Linux ARMv7",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_armv7",
+                "hash": "d4a613a112a23ad9b357fafba0f8faa8",
+                "size": 5733020
+            },
+            "linux_mips": {
+                "title": "Linux MIPS",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_mips",
+                "hash": "7485d17274b9b5f28e58890e3384d6a8",
+                "size": 5806308
+            },
+            "linux_mipsle": {
+                "title": "Linux MIPS (le)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_mipsle",
+                "hash": "8ba6db09fbd9270da4e1acfc9b2dddde",
+                "size": 5753132
+            },
+            "linux_mips64": {
+                "title": "Linux MIPS64",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_mips64",
+                "hash": "7aa8a5f164d38208f23fa235145ffe23",
+                "size": 17236094
+            },
+            "linux_mips64le": {
+                "title": "Linux MIPS64 (le)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_mips64le",
+                "hash": "1533ff1b408d1a237ee182edc7f4487b",
+                "size": 17236094
+            },
+            "linux_riscv64": {
+                "title": "Linux RISC-V 64",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_riscv64",
+                "hash": "c6d961f2c8e3051f4b7236053e99fd16",
+                "size": 14286974
+            },
+            "linux_loong64": {
+                "title": "Linux LoongArch 64",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_loong64",
+                "hash": "dfc10d660728e915f20252dbbf34c35e",
+                "size": 15663230
+            },
+            "linux_arm_garbage": {
+                "title": "Linux arm_garbage",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_linux_arm_garbage",
+                "hash": "813703481f55e4f1ac04d91b8aa5b3ad",
+                "size": 5757676
+            },
+            "darwin_amd64": {
+                "title": "macOS Intel (x86_64)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_darwin_amd64",
+                "hash": "2939efc4d666a26972a128ca380067cb",
+                "size": 16345568
+            },
+            "darwin_arm64": {
+                "title": "macOS Apple Silicon (arm64)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_darwin_arm64",
+                "hash": "8617fdf37994ea34116cc30a2289faa1",
+                "size": 15247122
+            },
+            "freebsd_amd64": {
+                "title": "FreeBSD 64 \u4f4d (amd64)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_freebsd_amd64",
+                "hash": "94b455655aeec7fba0d9469ec56242e4",
+                "size": 15814792
+            },
+            "freebsd_386": {
+                "title": "FreeBSD 32 \u4f4d (i386)",
+                "url": "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_freebsd_386",
+                "hash": "4458928ff7d4a0c2b452ecb1d31d42fd",
+                "size": 14618760
+            }
+        }
+    },
+    "other": {
+        "ver": "3.1.8",
+        "time": 1784355225,
+        "note": "\u6838\u5fc3\u670d\u52a1 3.1.8:\n[+] \u6539\u5584 API \u8fde\u63a5\u6027\n\nfrpc 0.51.0-sakura-14:\n[+] \u4f18\u5316 UDP \u96a7\u9053\u5728\u9ad8\u8d1f\u8f7d\u573a\u666f\u4e0b\u7684\u6027\u80fd\u548c\u5e26\u5bbd\u4e0d\u8db3\u65f6\u7684\u6d41\u63a7\u903b\u8f91\n[-] \u4fee\u590d\u4e00\u5b9a\u60c5\u51b5\u4e0b\uff0cUDP \u96a7\u9053\u51fa\u73b0\u5f02\u5e38\u963b\u585e\u7684\u95ee\u9898\n[+] \u4f18\u5316\u8bbf\u95ee\u8ba4\u8bc1\u6210\u529f\u540e\u7684\u91cd\u5b9a\u5411\u903b\u8f91\uff0c\u65b0\u589e\u6765\u6e90 URL \u53c2\u6570\n[+] \u81ea\u52a8 HTTPS \u81ea\u7b7e\u540d\u8bc1\u4e66\u73b0\u5df2\u652f\u6301\u4e2d\u6587\u7b49\u56fd\u9645\u5316\u57df\u540d\n[+] \u4f18\u5316 Minecraft \u5c40\u57df\u7f51\u6e38\u620f\u5207\u6362\u903b\u8f91\n[-] \u4fee\u590d\u4e00\u5b9a\u60c5\u51b5\u4e0b\uff0c\u81ea\u52a8 HTTPS \u57df\u540d\u6821\u9a8c\u5f02\u5e38\u6216\u9020\u6210\u5d29\u6e83\u7684\u95ee\u9898\n[-] \u4fee\u590d\u4e00\u5b9a\u60c5\u51b5\u4e0b\uff0c\u81ea\u52a8 HTTPS \u65e0\u6cd5\u52a0\u8f7d\u5b8c\u6574\u8bc1\u4e66\u94fe\u7684\u95ee\u9898",
+        "archs": {
+            "pkg_openwrt": {
+                "title": "OpenWRT (LuCI)",
+                "url": "https://doc.natfrp.com/launcher/usage.html#openwrt"
+            },
+            "pkg_dsm": {
+                "title": "\u7fa4\u6656 (Synology) DSM",
+                "url": "https://doc.natfrp.com/app/synology.html"
+            },
+            "docker_natfrp": {
+                "title": "Docker (\u5b98\u65b9\u6e90)",
+                "url": "https://natfrp.com/registry/#!/taglist/launcher"
+            },
+            "docker_hub": {
+                "title": "Docker (Docker Hub)",
+                "url": "https://hub.docker.com/r/natfrp/launcher"
+            },
+            "docker_ghcr": {
+                "title": "Docker (GitHub Packages)",
+                "url": "https://github.com/orgs/natfrp/packages/container/package/launcher"
+            }
+        }
+    }
+}
