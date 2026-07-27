@@ -50,7 +50,8 @@ def mask_secret(value: str) -> str:
 
 def mask_text(text: str, secrets: list) -> str:
     for s in secrets:
-        if s:
+        # review W5：极短值做全文替换会把端口号/时间戳等无关内容打花，跳过 len<6
+        if s and len(s) >= 6:
             text = text.replace(s, mask_secret(s))
     return text
 
@@ -670,9 +671,11 @@ def cmd_guide_init(args) -> int:
             ensure_home_layout(home)
             target = home / "frpc.toml"
         else:
+            # review I1/N6：git 安全检查必须是写盘前 preflight——任一目标不通过，一个字节都不写
             target = cwd / "frpc.toml"
-            if token:
-                ok, reason = _git_secret_check(cwd, target, args.allow_tracked)
+            preflight = ([target] if token else []) + [cwd / ".env.local"]
+            for check_target in preflight:
+                ok, reason = _git_secret_check(cwd, check_target, args.allow_tracked)
                 if not ok:
                     print("错误: %s" % reason, file=sys.stderr)
                     return 6
@@ -686,11 +689,6 @@ def cmd_guide_init(args) -> int:
                   "若服务端启用了 token 认证请补充", file=sys.stderr)
         if args.scope == "project":
             env_target = cwd / ".env.local"
-            # review N6：目标是 Secret 文件本身，写入前同样过 git 安全检查
-            ok, reason = _git_secret_check(cwd, env_target, args.allow_tracked)
-            if not ok:
-                print("错误: %s" % reason, file=sys.stderr)
-                return 6
             update_env_file(env_target, {"FRPC_LAUNCH_CONFIG": str(target.resolve())})
             written.append(str(env_target))
     else:
@@ -801,8 +799,11 @@ def cmd_status(args) -> int:
             "log_tail": mask_text(read_log_tail(log_file, 5), secrets),
         }
     human = "\n".join(
-        "%s: %s%s" % (m, "运行中 (pid %s)" % v["pid"] if v["running"] else "未运行",
-                      "，配置来源: %s" % v["config_source"] if v["config_source"] else "")
+        "%s: %s%s%s" % (
+            m,
+            "运行中 (pid %s)" % v["pid"] if v["running"] else "未运行",
+            "（未见登录成功证据）" if v["running"] and v["verified"] is False else "",
+            "，配置来源: %s" % v["config_source"] if v["config_source"] else "")
         for m, v in modes.items())
     _emit(args, {"modes": modes}, human)
     return 0
@@ -868,13 +869,20 @@ def wait_for_ready(pid: int, log_path: Path, success_markers, failure_markers,
         _time.sleep(poll)
 
 
-# review M1：同时匹配双引号与单引号（TOML 字面量字符串），并覆盖 token 之外的凭证键
+# review M1/W7：匹配双引号、单引号与三引号（TOML basic/literal/multiline 字符串），
+# 并覆盖 token 之外的凭证键
 _SECRET_KEY_RE = re.compile(
-    r'(?:token|clientSecret|password)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+    r'(?:token|clientSecret|password)\s*=\s*'
+    r'(?:"""(.*?)"""|\'\'\'(.*?)\'\'\'|"([^"]*)"|\'([^\']*)\')')
 
 
 def _extract_official_secrets(toml_text: str) -> list:
-    return [a or b for a, b in _SECRET_KEY_RE.findall(toml_text) if (a or b)]
+    result = []
+    for groups in _SECRET_KEY_RE.findall(toml_text):
+        value = next((g for g in groups if g), "")
+        if value:
+            result.append(value)
+    return result
 
 
 def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> dict:
@@ -896,8 +904,11 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
             print("已自动安装官方 frpc v%s（sha256 校验通过）" % meta["version"],
                   file=sys.stderr)
             binary, origin = resolve_official_binary(layered, home)
-        verify = subprocess.run([str(binary), "verify", "-c", str(config_path)],
-                                capture_output=True, text=True)
+        try:
+            verify = subprocess.run([str(binary), "verify", "-c", str(config_path)],
+                                    capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise FrpcLaunchError("frpc verify 超时（30s），二进制可能异常: %s" % binary)
         if verify.returncode != 0:
             raise FrpcLaunchError(
                 "frpc verify 未通过:\n%s" % mask_text(
@@ -933,15 +944,21 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
                 # review M2：timeout 写入的记录标记 verified=false；
                 # 二次 start 必须复核成功证据，不得把未登录成功的进程报成 0
                 if not record.get("verified", True):
-                    full_tail = read_log_tail(log_file, 200)
-                    if any(m in full_tail for m in success_markers):
+                    # review I2：复核成功证据必须扫全量日志（尾部窗口会被后续日志顶掉）；
+                    # review W2：先掩码再截断，避免 secret 跨切片边界残留明文
+                    try:
+                        full_text = log_file.read_text(encoding="utf-8",
+                                                       errors="replace")
+                    except OSError:
+                        full_text = ""
+                    if any(m in full_text for m in success_markers):
                         record["verified"] = True
                         write_pid_record(pid_file, record)
                     else:
                         return {"mode": mode, "result": "running_unverified",
                                 "pid": record["pid"], "config_source": config_source,
                                 "binary_version": meta_now.get("version", ""),
-                                "log_tail": mask_text(full_tail[-2000:], secrets),
+                                "log_tail": mask_text(full_text, secrets)[-2000:],
                                 "detail": "进程存活但仍未见登录成功证据；"
                                           "请检查日志或 stop 后重试", "exit_code": 1}
                 return {"mode": mode, "result": "already_running",
@@ -1049,9 +1066,18 @@ def _emit(args, payload: dict, human: str) -> None:
 
 def cmd_install(args) -> int:
     mode = args.mode or "official"
+    if mode == "sakura" and args.version:
+        # review W4：与 update 一致，按用法错误处理
+        print("用法错误: sakura 模式版本由上游 API 决定，不支持 --version", file=sys.stderr)
+        return 2
     if mode == "official":
         layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
-        binary, origin = resolve_official_binary(layered, args.home)
+        try:
+            binary, origin = resolve_official_binary(layered, args.home)
+        except FrpcLaunchError as e:
+            # review W1：install 是修复"没有可用二进制"的入口，显式路径失效降级为警告后继续安装
+            print("警告: %s；忽略该显式路径，继续安装受管二进制" % e, file=sys.stderr)
+            binary, origin = None, ""
         if origin == "managed":
             _, os_subdir, _ = detect_platform()
             meta = read_meta(args.home / "bin" / os_subdir / "frpc.meta.json")
@@ -1064,7 +1090,11 @@ def cmd_install(args) -> int:
               "已安装官方 frpc v%s（sha256 校验通过）" % meta["version"])
         return 0
     layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
-    binary, origin = resolve_sakura_binary(layered, args.home)
+    try:
+        binary, origin = resolve_sakura_binary(layered, args.home)
+    except FrpcLaunchError as e:
+        print("警告: %s；忽略该显式路径，继续安装受管二进制" % e, file=sys.stderr)
+        binary, origin = None, ""
     if origin == "managed":
         _, os_subdir, _ = detect_platform()
         meta = read_meta(args.home / "bin" / os_subdir / "frpc-sakura.meta.json")
@@ -1084,7 +1114,9 @@ def cmd_update(args) -> int:
         meta = install_official(args.home, args.version)
     else:
         if args.version:
-            raise FrpcLaunchError("sakura 模式版本由上游 API 决定，不支持 --version")
+            print("用法错误: sakura 模式版本由上游 API 决定，不支持 --version",
+                  file=sys.stderr)
+            return 2
         meta = install_sakura(args.home)
     _emit(args, {"result": "updated", "meta": meta},
           "已更新 %s 模式受管二进制至 %s" % (mode, meta["version"]))

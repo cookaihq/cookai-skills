@@ -182,6 +182,23 @@ def test_timeout_then_second_start_not_reported_as_success(tmp_path):
         run_cli(home, cwd, "stop")
 
 
+def test_unverified_rescan_reads_full_log_not_tail(tmp_path):
+    # review I2：verified=false 的复核必须扫全量日志——成功行被后续大量日志顶出尾部窗口时不得误判
+    home, cwd = _setup(tmp_path, FAKE_FRPC_SILENT)
+    try:
+        r1 = run_cli(home, cwd, "start", "--wait", "2")
+        assert json.loads(r1.stdout)["result"] == "timeout"
+        log = home / "run" / "official.log"
+        text = log.read_text()
+        log.write_text(text + "login to server success, get run id late\n" +
+                       "".join("proxy traffic line %d\n" % i for i in range(300)))
+        r2 = run_cli(home, cwd, "start", "--wait", "2")
+        assert r2.returncode == 0
+        assert json.loads(r2.stdout)["result"] == "already_running"
+    finally:
+        run_cli(home, cwd, "stop")
+
+
 def test_explicit_mode_without_config_enters_guide(tmp_path):
     home = tmp_path / "empty_home"
     cwd = tmp_path / "proj3"

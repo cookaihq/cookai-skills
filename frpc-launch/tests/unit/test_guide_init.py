@@ -96,6 +96,24 @@ def test_guide_init_project_official_checks_env_local_git(tmp_path):
                    "--server-addr", "h.example.com", "--server-port", "7000")
     assert r.returncode == 6
     assert not (cwd / ".env.local").exists()
+    # review I1：git 检查必须是写盘前 preflight——退出 6 时不得留下任何已落盘的凭证文件
+    assert not (cwd / "frpc.toml").exists()
+
+
+def _run_plain(home, cwd, *args):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FRPC_LAUNCH_")}
+    return subprocess.run([sys.executable, SCRIPT, "--home", str(home), "--json", *args],
+                          capture_output=True, text=True, cwd=str(cwd), env=env)
+
+
+def test_install_update_sakura_rejects_version_flag(tmp_path):
+    # review W4：sakura 版本由上游 API 决定，--version 组合按用法错误 exit 2，两个入口一致
+    home = tmp_path / "home"
+    cwd = tmp_path / "p"
+    cwd.mkdir()
+    for sub in ("install", "update"):
+        r = _run_plain(home, cwd, sub, "--mode", "sakura", "--version", "0.51")
+        assert r.returncode == 2, (sub, r.returncode, r.stderr)
 
 
 def test_guide_init_project_refuses_unignored_secret_in_git(tmp_path):
