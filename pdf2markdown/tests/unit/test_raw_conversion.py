@@ -2015,6 +2015,127 @@ def test_local_expiry_sets_the_attempt_reason_but_archive_host_does_not(
     assert remote_manifest["conversion_attempts"][-1]["reason"] is None
 
 
+def _minimal_rejection_intent():
+    """A syntactically valid `intent` dict, just complete enough for
+    `_rejection_record` and `_valid_rejection` to accept it -- the review
+    round 2 unit tests below only exercise `detected_by`/`reason_code`
+    pairing, not any of intent's other fields."""
+    return {
+        "operation_id": "attempt-001-raw-adoption",
+        "attempt_id": "attempt-001",
+        "task_id": "task-001",
+        "result_url_sha256": "sha256:" + "0" * 64,
+        "staging_name": ".attempt-001.raw-token.part",
+        "limits": result_archive.limits_record(),
+        "at": "2024-01-01T00:00:00+00:00",
+    }
+
+
+def test_reason_codes_by_detected_by_pins_the_pairing_table():
+    """Task 2.2c review round 2, Minor #4 -- DETECTED_BY_VALUES is now
+    derived from REASON_CODES_BY_DETECTED_BY's keys (Important #1's fix);
+    this pins the table itself against an independent value-level
+    assertion -- both the closed three-value key set and each key's
+    reason_code domain -- so a future edit to the table cannot silently
+    widen or narrow either without a test noticing."""
+    assert set(raw_conversion.REASON_CODES_BY_DETECTED_BY) == {
+        "local_expiry",
+        "local_ledger",
+        "archive_host",
+    }
+    assert (
+        raw_conversion.REASON_CODES_BY_DETECTED_BY["local_expiry"]
+        == raw_conversion.RECOVERABLE_ARCHIVE_REJECTIONS
+    )
+    assert (
+        raw_conversion.REASON_CODES_BY_DETECTED_BY["local_ledger"]
+        == raw_conversion.LEDGER_RESULT_REJECTIONS
+    )
+    assert raw_conversion.REASON_CODES_BY_DETECTED_BY["archive_host"] == (
+        raw_conversion.DETERMINISTIC_ARCHIVE_REJECTIONS
+        | raw_conversion.RECOVERABLE_ARCHIVE_REJECTIONS
+    )
+
+
+@pytest.mark.parametrize(
+    ("reason_code", "detected_by"),
+    [
+        # A LEDGER_RESULT_REJECTIONS member no archive-host-detected
+        # rejection can ever carry -- only `_reference_already_unavailable`'s
+        # local ledger check produces `result_url_not_renewed`.
+        ("result_url_not_renewed", "archive_host"),
+        # A DETERMINISTIC_ARCHIVE_REJECTIONS member no local-ledger check
+        # ever reports -- the ledger only ever reports
+        # `result_url_not_renewed`.
+        ("archive_member_size_limit_exceeded", "local_ledger"),
+        # A RECOVERABLE_ARCHIVE_REJECTIONS member the ledger branch never
+        # reports either -- `_reference_already_unavailable` only ever
+        # decides `result_url_not_renewed`; `result_url_unavailable` is
+        # `local_expiry`'s and `archive_host`'s reason_code, not the
+        # ledger's. Mutation-tested: widening
+        # REASON_CODES_BY_DETECTED_BY["local_ledger"] to also cover
+        # RECOVERABLE_ARCHIVE_REJECTIONS turns this case red where the two
+        # combinations above stay green (they do not touch this boundary),
+        # so this case is load-bearing, not redundant with them.
+        ("result_url_unavailable", "local_ledger"),
+    ],
+)
+def test_valid_rejection_rejects_combinations_no_detection_branch_produces(
+    reason_code, detected_by
+):
+    """Task 2.2c review round 2, Important #1 -- `_valid_rejection` checked
+    `reason_code` and `detected_by` as two independent set memberships,
+    which accepts their full cartesian product. None of the combinations
+    here is reachable through any real call site (see
+    REASON_CODES_BY_DETECTED_BY), and `_valid_rejection` must reject all of
+    them."""
+    intent = _minimal_rejection_intent()
+    record = raw_conversion._rejection_record(
+        intent, reason_code=reason_code, detected_by=detected_by
+    )
+    assert not raw_conversion._valid_rejection(record, intent)
+
+
+def test_local_rejection_detected_by_raises_for_a_reason_code_no_local_branch_owns():
+    """Task 2.2c review round 2, Important #2 -- the pre-fix
+    `"local_ledger" if reason_code in LEDGER_RESULT_REJECTIONS else
+    "local_expiry"` ternary made "local_expiry" the silent default for any
+    reason_code that is not a LEDGER_RESULT_REJECTIONS member, including
+    reason codes neither local branch actually owns.
+    `archive_member_size_limit_exceeded` is a DETERMINISTIC_ARCHIVE_REJECTIONS
+    member only the archive-host branch ever reports; no local detection
+    branch produces it, so `_local_rejection_detected_by` must raise instead
+    of mislabelling it "local_expiry"."""
+    with pytest.raises(raw_conversion.RawConversionError) as excinfo:
+        raw_conversion._local_rejection_detected_by(
+            "archive_member_size_limit_exceeded"
+        )
+    assert excinfo.value.code == "integrity_violation"
+
+
+def test_desired_rejection_raises_when_the_active_attempt_is_not_result_ready():
+    """Task 2.2c review round 2, Important #3 -- the state guard that folds a
+    local-expiry rejection onto the active attempt's `reason` used to
+    silently skip the fold when `attempts[-1]["state"] != "result_ready"`
+    instead of raising. This shape is unreachable through any real call site
+    today (both call sites of `_desired_rejection` raise earlier if the
+    active attempt is not `result_ready`), so this test constructs the input
+    directly to prove the guard now fails loud rather than silently writing
+    a rejection record whose `detected_by`/`reason_code` claim a fold
+    happened that `conversion_attempts` does not show."""
+    manifest = {"conversion_attempts": [{"state": "processing"}]}
+    private_state = {}
+    record = {
+        "reason_code": "result_url_unavailable",
+        "detected_by": "local_expiry",
+    }
+    with pytest.raises(raw_conversion.RawConversionError) as excinfo:
+        raw_conversion._desired_rejection(
+            manifest, private_state, record=record, new_generation=2
+        )
+    assert excinfo.value.code == "integrity_violation"
+
+
 def test_locally_expired_attempt_resumes_to_a_successful_repoll(
     tmp_path, capsys, monkeypatch
 ):
@@ -2034,7 +2155,7 @@ def test_locally_expired_attempt_resumes_to_a_successful_repoll(
     """
     case_root = tmp_path / "local-expiry-resumes-to-repoll"
     case_root.mkdir()
-    bundle, ready, dependencies, key, old_result_url = ready_result_bundle(
+    bundle, ready, dependencies, key, _old_result_url = ready_result_bundle(
         case_root, capsys, monkeypatch
     )
     expired_rc, expired, _stderr = invoke(

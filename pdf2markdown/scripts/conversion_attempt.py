@@ -648,6 +648,10 @@ if _LOCALLY_DETECTED_WIRE_COLLISION:
         "LOCALLY_DETECTED_PAIRS collides with a wire-derived (state, reason) "
         f"pair: {sorted(_LOCALLY_DETECTED_WIRE_COLLISION)!r}"
     )
+# Task 2.2c review round 2, Minor #7 -- this name has no reader past the
+# guard above; deleting it keeps it from lingering as a module-level
+# attribute someone could mistake for a maintained constant.
+del _LOCALLY_DETECTED_WIRE_COLLISION
 _MANIFEST_STATE_BY_FOLDED_STATE = (
     _WIRE_MANIFEST_STATE_BY_FOLDED_STATE | LOCALLY_DETECTED_PAIRS
 )

@@ -61,7 +61,24 @@ LEDGER_RESULT_REJECTIONS = frozenset({"result_url_not_renewed"})
 #     reason untouched, and reported a fabricated expiry for a reference that
 #     may never have expired at all (it can also close on a stale-URL-forever
 #     verdict, see LEDGER_RESULT_REJECTIONS).
-DETECTED_BY_VALUES = frozenset({"local_expiry", "local_ledger", "archive_host"})
+# Task 2.2c review round 2, Important #1 -- the pairing between a
+# `detected_by` branch and the `reason_code` values it may legally produce.
+# `_valid_rejection` used to check `reason_code` and `detected_by` as two
+# independent set-membership tests, which accepted their full cartesian
+# product: impossible combinations such as
+# ("result_url_not_renewed", "archive_host") or
+# ("archive_member_size_limit_exceeded", "local_ledger") passed validation
+# even though no code path ever produces them. This table is the single
+# source of truth for which `reason_code` values each `detected_by` branch
+# owns -- `_valid_rejection` and `_local_rejection_detected_by` both read it,
+# so the pairing cannot drift apart between the read side and the write side
+# that decides `detected_by` in the first place.
+REASON_CODES_BY_DETECTED_BY = {
+    "local_expiry": RECOVERABLE_ARCHIVE_REJECTIONS,
+    "local_ledger": LEDGER_RESULT_REJECTIONS,
+    "archive_host": DETERMINISTIC_ARCHIVE_REJECTIONS | RECOVERABLE_ARCHIVE_REJECTIONS,
+}
+DETECTED_BY_VALUES = frozenset(REASON_CODES_BY_DETECTED_BY)
 
 
 class RawConversionError(ValueError):
@@ -285,6 +302,18 @@ def _rejection_record(intent: dict, *, reason_code: str, detected_by: str) -> di
     }
 
 
+# Task 2.2c review round 2, Minor #5 -- single-element unpacking of
+# LOCALLY_DETECTED_PAIRS' one member, the same guard shape
+# conversion_attempt.py's _locally_detected_observations uses for the same
+# table. `_desired_rejection` used to spell the pair's two halves as
+# separate cross-module literals ("result_ready", "result_url_expired") that
+# had no mechanical link back to conversion_attempt.LOCALLY_DETECTED_PAIRS --
+# this makes that link an import-time ValueError (too many values to unpack)
+# the moment a second locally-detected pair is added, instead of a silent
+# drift between the two literals below and the table they were copied from.
+((_state, _reason),) = conversion_attempt.LOCALLY_DETECTED_PAIRS
+
+
 def _desired_rejection(
     manifest: dict, private_state: dict, *, record: dict, new_generation: int
 ) -> tuple[dict, dict]:
@@ -312,30 +341,49 @@ def _desired_rejection(
     # "local_expiry" then) -- see DETECTED_BY_VALUES' comment for why that was
     # wrong. The reason_code check makes the pairing with
     # RECOVERABLE_ARCHIVE_REJECTIONS explicit instead of relying on
-    # detected_by alone to imply it forever. The attempt-state check guards
-    # the one shape LOCALLY_DETECTED_PAIRS actually admits: today the
-    # rejection call sites only ever reach this branch with
-    # attempts[-1]["state"] == "result_ready" (POLL_ACTIVE_ATTEMPT_PAIRS has
-    # no other pair this rejection could observe), but the check makes that a
-    # checked invariant instead of a coincidence future call sites could
-    # silently break by writing an illegal ("failed", "result_url_expired")
-    # pair (POLL_ACTIVE_ATTEMPT_PAIRS has no such member).
+    # detected_by alone to imply it forever.
+    #
+    # Review round 2, Important #3 -- the attempt-state check used to guard
+    # the fold with a silent no-op (`if attempts[-1].state == "result_ready":
+    # fold`, else do nothing) rather than raising. That was inconsistent
+    # with the rest of this module: `_active_result` above already raises on
+    # the same "no result_ready attempt" condition, so having two shapes for
+    # one invariant -- one that raises, one that silently no-ops -- meant a
+    # caller could not tell which behavior to expect from a state guard just
+    # by reading its name. The pre-fix comment called this "a checked
+    # invariant instead of a coincidence", but check-then-skip is not what a
+    # checked invariant looks like; a checked invariant that is violated
+    # raises. Left as a silent skip, a future call site reaching this branch
+    # with a non-`result_ready` last attempt would write a rejection record
+    # whose `detected_by`/`reason_code` claim a local-expiry fold happened
+    # while `conversion_attempts` shows no such fold -- a combination no
+    # downstream reader validates against, because today's call sites never
+    # produce it. This branch is unreachable today (both call sites raise
+    # before reaching it if the active attempt is not `result_ready`), so
+    # switching it to `raise` is a zero-behavior-change hardening: it turns
+    # an invariant that already always holds into one that is checked to
+    # hold, rather than leaving a second untested way for it to stop
+    # holding.
     if (
         record.get("detected_by") == "local_expiry"
         and record.get("reason_code") in RECOVERABLE_ARCHIVE_REJECTIONS
     ):
         attempts = desired_manifest.get("conversion_attempts")
         if (
-            isinstance(attempts, list)
-            and attempts
-            and attempts[-1].get("state") == "result_ready"
+            not isinstance(attempts, list)
+            or not attempts
+            or attempts[-1].get("state") != _state
         ):
-            active_attempt = deepcopy(attempts[-1])
-            active_attempt["reason"] = "result_url_expired"
-            desired_manifest["conversion_attempts"] = [
-                *attempts[:-1],
-                active_attempt,
-            ]
+            raise RawConversionError(
+                "integrity_violation",
+                "A local-expiry rejection has no result_ready attempt to fold onto.",
+            )
+        active_attempt = deepcopy(attempts[-1])
+        active_attempt["reason"] = _reason
+        desired_manifest["conversion_attempts"] = [
+            *attempts[:-1],
+            active_attempt,
+        ]
     desired_private = deepcopy(private_state)
     desired_private["generation"] = new_generation
     return desired_manifest, desired_private
@@ -871,8 +919,24 @@ def _local_rejection_detected_by(reason_code: str) -> str:
     sites route through this one function so they cannot drift apart on that
     distinction the way the pre-fix inline `detected_by="local_expiry"`
     literal did.
+
+    Review round 2, Important #2 -- the pre-fix `... if ... else "local_expiry"`
+    ternary made "local_expiry" the silent default for any reason_code that
+    is not a LEDGER_RESULT_REJECTIONS member, including reason codes that
+    have no local detection branch at all (an else clause is only as
+    trustworthy as the binary split it assumes). This walks
+    REASON_CODES_BY_DETECTED_BY's two local branches explicitly and raises
+    if neither owns `reason_code`, so a `_reference_rejection` call site that
+    starts returning a reason_code neither local branch produces fails loud
+    instead of being mislabelled "local_expiry" by default.
     """
-    return "local_ledger" if reason_code in LEDGER_RESULT_REJECTIONS else "local_expiry"
+    for value in ("local_ledger", "local_expiry"):
+        if reason_code in REASON_CODES_BY_DETECTED_BY[value]:
+            return value
+    raise RawConversionError(
+        "integrity_violation",
+        f"No local detection branch owns reason_code {reason_code!r}.",
+    )
 
 
 def adopt_ready_result(
@@ -1478,13 +1542,17 @@ def _valid_rejection(record: dict, intent: dict) -> bool:
         and record.get("schema_version") == SCHEMA_VERSION
         and record.get("operation_id") == intent.get("operation_id")
         and record.get("state") == "rejected"
+        # Task 2.2c review round 2, Important #1 -- a single membership check
+        # against REASON_CODES_BY_DETECTED_BY's per-branch reason_code set,
+        # replacing the two independent checks (reason_code against the
+        # union of all three rejection domains, detected_by against
+        # DETECTED_BY_VALUES) that used to accept their cartesian product.
+        # `.get(..., frozenset())` makes an unknown detected_by fail this
+        # check the same way an unknown reason_code always did -- there is
+        # no longer a separate `detected_by in DETECTED_BY_VALUES` test to
+        # keep in sync with this one.
         and record.get("reason_code")
-        in (
-            DETERMINISTIC_ARCHIVE_REJECTIONS
-            | RECOVERABLE_ARCHIVE_REJECTIONS
-            | LEDGER_RESULT_REJECTIONS
-        )
-        and record.get("detected_by") in DETECTED_BY_VALUES
+        in REASON_CODES_BY_DETECTED_BY.get(record.get("detected_by"), frozenset())
         and record.get("attempt_id") == intent.get("attempt_id")
         and record.get("task_id") == intent.get("task_id")
         and record.get("result_url_sha256") == intent.get("result_url_sha256")
