@@ -687,6 +687,32 @@ def test_reflected_version_id_becomes_ambiguous_without_persisting_secret(tmp_pa
     assert "project-secret-value" not in checkpoint.read_text(encoding="utf-8")
 
 
+def test_reference_out_preflight_failure_is_a_config_error_not_a_traceback(tmp_path, capsys):
+    # The --reference-out preflight raises ArtifactError from inside the
+    # planner. Its --result-out twin is already converted to a config_error;
+    # without the same catch here the CLI exits with an uncaught traceback.
+    configure(tmp_path)
+    source = tmp_path / "cover.png"
+    source.write_bytes(b"reference")
+    protected = tmp_path / ".s3-upload" / "targets" / "reference.json"
+    calls = []
+
+    rc = upload.main(
+        [
+            "upload", "--file", str(source), "--target", "project:images", "--json",
+            "--reference-out", str(protected),
+        ],
+        environ={}, cwd=str(tmp_path), config_home=str(tmp_path / "home"),
+        transport=lambda *args: calls.append(args) or Response(200), now=NOW,
+    )
+
+    output = capsys.readouterr()
+    assert rc == 2 and output.out == ""
+    assert "config_error" in output.err
+    assert calls == []
+    assert not protected.exists()
+
+
 def test_reference_out_cas_drift_after_put_is_partial_and_never_retries(tmp_path, capsys):
     configure(tmp_path)
     source = tmp_path / "cover.png"

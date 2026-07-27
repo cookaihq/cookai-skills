@@ -243,6 +243,108 @@ def test_result_out_dry_run_writes_the_plan_result(tmp_path, capsys):
     assert json.loads(output)["status"] == "dry_run"
 
 
+def test_result_out_never_leaves_a_previous_run_result_behind(tmp_path, capsys):
+    # A cross-process verifier reads the handoff file, not this process's
+    # exit code. A second run that ends without a durable result must not
+    # leave the first run's terminal `ok` readable as if it were its own.
+    handoff = tmp_path / "handoff.json"
+
+    first = run_upload(tmp_path, handoff, transport=lambda *args: Response(200))
+    capsys.readouterr()
+    assert first == 0
+    assert json.loads(handoff.read_text(encoding="utf-8"))["status"] == "ok"
+
+    source = tmp_path / "report.bin"
+    second = upload.main(
+        [
+            "upload", "--file", str(source), "--target", "project:objects",
+            "--json", "--result-out", str(handoff),
+        ],
+        environ={},
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        transport=lambda *args: Response(403),
+        now=NOW,
+    )
+
+    output = capsys.readouterr()
+    assert second == 1 and output.out == ""
+    result = json.loads(handoff.read_text(encoding="utf-8"))
+    assert result["status"] == "not_started"
+    assert result["object_written"] is False and result["retry_safety"] == "safe"
+
+
+def test_result_out_placeholder_precedes_every_remote_request(tmp_path, capsys):
+    # The placeholder has to be on disk before the first request, not merely
+    # before the terminal write: the counter below is read inside the
+    # transport, so a placeholder written afterwards records "absent" here.
+    handoff = tmp_path / "handoff.json"
+    seen = []
+
+    def transport(*args):
+        seen.append(
+            json.loads(handoff.read_text(encoding="utf-8"))["status"]
+            if handoff.exists()
+            else "absent"
+        )
+        return Response(200)
+
+    rc = run_upload(tmp_path, handoff, transport=transport)
+
+    capsys.readouterr()
+    assert rc == 0
+    assert seen == ["not_started"]
+    assert json.loads(handoff.read_text(encoding="utf-8"))["status"] == "ok"
+
+
+def test_result_out_refuses_a_destination_that_appeared_after_preflight(tmp_path, capsys):
+    # The preflight window is the whole upload. A file that shows up at the
+    # destination while the Put is in flight is not what preflight cleared,
+    # so the terminal write must refuse it instead of replacing it.
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    handoff = out_dir / "handoff.json"
+
+    def transport(*args):
+        handoff.write_text("foreign", encoding="utf-8")
+        handoff.chmod(0o600)
+        return Response(200)
+
+    rc = run_upload(tmp_path, handoff, transport=transport)
+
+    output = capsys.readouterr()
+    assert rc == 1
+    assert "result_error" in output.err
+    assert json.loads(output.out)["status"] == "ok"
+    assert handoff.read_text(encoding="utf-8") == "foreign"
+
+
+def test_result_out_parent_swap_after_preflight_cannot_redirect_the_write(tmp_path, capsys):
+    # Same window, one level up: the parent directory preflight cleared is
+    # replaced mid-upload. The write must not land in the substitute.
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    handoff = out_dir / "handoff.json"
+    displaced = tmp_path / "displaced"
+
+    def transport(*args):
+        out_dir.rename(displaced)
+        out_dir.mkdir()
+        return Response(200)
+
+    rc = run_upload(tmp_path, handoff, transport=transport)
+
+    output = capsys.readouterr()
+    assert rc == 1
+    assert "result_error" in output.err
+    assert json.loads(output.out)["status"] == "ok"
+    # Nothing lands in the substitute directory, and the real destination
+    # still holds this run's placeholder rather than its terminal result.
+    assert os.listdir(out_dir) == []
+    displaced_result = json.loads((displaced / "handoff.json").read_text(encoding="utf-8"))
+    assert displaced_result["status"] == "not_started"
+
+
 def test_result_out_write_failure_never_clobbers_and_fails_loud(tmp_path, capsys):
     out_dir = tmp_path / "out"
     out_dir.mkdir()

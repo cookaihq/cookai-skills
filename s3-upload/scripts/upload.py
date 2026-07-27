@@ -15,6 +15,7 @@ from artifacts import (
     parse_checkpoint,
     parse_object_reference,
     preflight_result_output,
+    write_result_output,
 )
 from capabilities import LiveTestInterlock
 from operations import (
@@ -38,7 +39,7 @@ from probe import build_probe
 from provider_candidates import build_candidate_request
 from resolver import ResolutionError, resolve_target
 from results import ResultError, build_result, exit_code_for_result, validate_result
-from safe_io import FileSecurityError, atomic_write, read_regular_file
+from safe_io import FileSecurityError, read_regular_file
 from source_file import SourceError
 from v2_schema import EXPERIMENTAL_PROVIDERS, SchemaError
 from s3 import (
@@ -314,13 +315,17 @@ def _result_payload(result) -> bytes:
     ).encode("utf-8")
 
 
-def _write_result_out(snapshot, result) -> bool:
+def _write_result_out(snapshot, result):
+    # Returns the snapshot refreshed to the bytes just published, or None
+    # when the write was refused. The destination is re-checked against the
+    # preflight snapshot inside write_result_output: preflight and the
+    # terminal write are separated by the entire upload, so a plain atomic
+    # replace would happily overwrite whatever moved in during that window.
     try:
-        atomic_write(snapshot.value["path"], _result_payload(result))
-        return True
+        return write_result_output(snapshot, _result_payload(result))
     except (ArtifactError, FileSecurityError, OSError) as exc:
         print(f"[s3-upload] result_error: {exc}", file=sys.stderr, flush=True)
-        return False
+        return None
 
 
 def _checkpoint_request_builder(resolved):
@@ -625,6 +630,21 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 args.result_out, cwd=cwd, config_home=config_home,
                 source=dry_run.source,
             )
+            # Preflight has passed and no remote request exists yet, so this
+            # is the last instant at which the handoff file can be pinned to
+            # this run. Writing the not_started placeholder here makes "the
+            # file holds some earlier run's terminal result" unrepresentable:
+            # a run that dies before a durable result leaves this, not the
+            # previous run's `ok`. Every later write replaces it.
+            result_snapshot = _write_result_out(
+                result_snapshot,
+                build_result(
+                    "upload", "not_started", object_written=False,
+                    retention=dry_run.plan["retention"],
+                ),
+            )
+            if result_snapshot is None:
+                return 1
         if args.dry_run:
             result = build_result(
                 "upload",
@@ -634,7 +654,10 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 retention=dry_run.plan["retention"],
                 plan=dry_run.plan,
             )
-            wrote = result_snapshot is None or _write_result_out(result_snapshot, result)
+            wrote = (
+                result_snapshot is None
+                or _write_result_out(result_snapshot, result) is not None
+            )
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
             else:
@@ -642,17 +665,9 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
             code = exit_code_for_result(result)
             return code if wrote or code != 0 else 1
         if not dry_run.executable:
-            if result_snapshot is not None:
-                # Rejected before any request: the handoff file still gets
-                # the full nine-field result, with every inapplicable value
-                # an explicit null.
-                _write_result_out(
-                    result_snapshot,
-                    build_result(
-                        "upload", "not_started", object_written=False,
-                        retention=dry_run.plan["retention"],
-                    ),
-                )
+            # Rejected before any request: the placeholder written above is
+            # already the full nine-field not_started result this exit owes
+            # the caller, so there is nothing further to write here.
             print("[s3-upload] config_error: upload plan is blocked", file=sys.stderr)
             return 2
         if (
@@ -691,7 +706,10 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 source=dry_run.source,
             )
         result = outcome.result
-        wrote = result_snapshot is None or _write_result_out(result_snapshot, result)
+        wrote = (
+            result_snapshot is None
+            or _write_result_out(result_snapshot, result) is not None
+        )
         if args.json:
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
         elif result["url"] is not None:
@@ -708,7 +726,10 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
     except (LocalFileError, SourceError) as exc:
         print(f"[s3-upload] file_error: {exc}", file=sys.stderr)
         return 3
-    except (ResolutionError, PlanError) as exc:
+    except (ArtifactError, ResolutionError, PlanError) as exc:
+        # The --reference-out preflight raises ArtifactError from inside the
+        # planner; without this it leaves the process on an uncaught
+        # traceback. Its --result-out twin already arrives here as PlanError.
         print(f"[s3-upload] config_error: {exc}", file=sys.stderr)
         return 2
     except (OperationError, MultipartError) as exc:

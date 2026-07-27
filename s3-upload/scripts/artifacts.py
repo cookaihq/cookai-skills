@@ -537,6 +537,18 @@ def _atomic_write_at(parent_fd: int, name: str, data: bytes, *, replace: bool) -
                 pass
 
 
+def _present_snapshot(info: os.stat_result, data: bytes) -> Dict[str, Any]:
+    return {
+        "state": "existing-reference",
+        "identity": {
+            "device": str(info.st_dev), "inode": str(info.st_ino), "owner": info.st_uid,
+            "mode": stat.S_IMODE(info.st_mode), "size": info.st_size,
+            "mtime_ns": str(info.st_mtime_ns), "ctime_ns": str(info.st_ctime_ns),
+        },
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
 def _preflight_caller_output(path: str, *, project_root: str, config_home: str,
                              source_identity: Optional[Tuple[int, int]],
                              existing_content_check: Callable[[bytes], None],
@@ -574,15 +586,7 @@ def _preflight_caller_output(path: str, *, project_root: str, config_home: str,
         if source_identity is not None and (info.st_dev, info.st_ino) == source_identity:
             raise ArtifactError(f"{description} aliases the upload source")
         existing_content_check(data)
-        final_snapshot = {
-            "state": "existing-reference",
-            "identity": {
-                "device": str(info.st_dev), "inode": str(info.st_ino), "owner": info.st_uid,
-                "mode": stat.S_IMODE(info.st_mode), "size": info.st_size,
-                "mtime_ns": str(info.st_mtime_ns), "ctime_ns": str(info.st_ctime_ns),
-            },
-            "sha256": hashlib.sha256(data).hexdigest(),
-        }
+        final_snapshot = _present_snapshot(info, data)
     value = {"path": absolute, "parent_snapshot": parent_snapshot, "final_snapshot": final_snapshot}
     _validate_reference_out(value)
     return ReferenceOutputSnapshot(value, project_root, config_home, source_identity)
@@ -635,34 +639,46 @@ def _same_parent(snapshot: Dict[str, Any], info: os.stat_result) -> bool:
     )
 
 
-def write_reference_output(snapshot: ReferenceOutputSnapshot, reference: Dict[str, Any]) -> None:
-    intended = serialize_object_reference(reference)
+def _write_caller_output(snapshot: ReferenceOutputSnapshot, intended: bytes, *,
+                         description: str) -> ReferenceOutputSnapshot:
+    """Publish `intended` at the preflighted destination, or refuse.
+
+    The preflight snapshot is re-checked against the live filesystem here,
+    because everything between the two moments -- for --result-out, the whole
+    upload -- is a window in which the destination or its parent can be
+    swapped. Returns a snapshot refreshed to the published bytes, so a second
+    write through the same handle (the not_started placeholder, then the
+    terminal result) re-checks against what this call actually left behind.
+    """
     value = snapshot.value
     path = value["path"]
+    name = os.path.basename(path)
     if _protected(path, snapshot.project_root, snapshot.config_home):
-        raise ArtifactError("reference output is in a protected namespace")
+        raise ArtifactError(f"{description} is in a protected namespace")
     parent_fd = open_directory(os.path.dirname(path))
     try:
         if not _same_parent(value["parent_snapshot"], os.fstat(parent_fd)):
-            raise ArtifactError("reference output parent changed")
+            raise ArtifactError(f"{description} parent changed")
         current = None
         try:
-            info, current = _opened_file_snapshot_at(parent_fd, os.path.basename(path))
+            info, current = _opened_file_snapshot_at(parent_fd, name)
         except FileNotFoundError:
             info = None
         if current == intended:
-            return
+            return _refreshed_snapshot(snapshot, info, current)
         original = value["final_snapshot"]
         if original["state"] == "absent":
             if info is not None:
-                raise ArtifactError("reference output changed after preflight")
+                raise ArtifactError(f"{description} changed after preflight")
             try:
-                _atomic_write_at(parent_fd, os.path.basename(path), intended, replace=False)
+                _atomic_write_at(parent_fd, name, intended, replace=False)
             except FileExistsError as exc:
-                raise ArtifactError("reference output changed after preflight") from exc
-            return
+                raise ArtifactError(f"{description} changed after preflight") from exc
+            return _refreshed_snapshot(
+                snapshot, *_opened_file_snapshot_at(parent_fd, name)
+            )
         if info is None:
-            raise ArtifactError("reference output changed after preflight")
+            raise ArtifactError(f"{description} changed after preflight")
         identity = original["identity"]
         matches = (
             str(info.st_dev) == identity["device"] and str(info.st_ino) == identity["inode"]
@@ -672,10 +688,39 @@ def write_reference_output(snapshot: ReferenceOutputSnapshot, reference: Dict[st
             and hashlib.sha256(current or b"").hexdigest() == original["sha256"]
         )
         if not matches:
-            raise ArtifactError("reference output changed after preflight")
-        _atomic_write_at(parent_fd, os.path.basename(path), intended, replace=True)
+            raise ArtifactError(f"{description} changed after preflight")
+        _atomic_write_at(parent_fd, name, intended, replace=True)
+        return _refreshed_snapshot(snapshot, *_opened_file_snapshot_at(parent_fd, name))
     finally:
         os.close(parent_fd)
+
+
+def _refreshed_snapshot(snapshot: ReferenceOutputSnapshot, info: os.stat_result,
+                        data: bytes) -> ReferenceOutputSnapshot:
+    value = dict(snapshot.value)
+    value["final_snapshot"] = _present_snapshot(info, data)
+    _validate_reference_out(value)
+    return ReferenceOutputSnapshot(
+        value, snapshot.project_root, snapshot.config_home, snapshot.source_identity
+    )
+
+
+def write_reference_output(snapshot: ReferenceOutputSnapshot,
+                           reference: Dict[str, Any]) -> ReferenceOutputSnapshot:
+    return _write_caller_output(
+        snapshot, serialize_object_reference(reference), description="reference output",
+    )
+
+
+def write_result_output(snapshot: ReferenceOutputSnapshot,
+                        payload: bytes) -> ReferenceOutputSnapshot:
+    """The --result-out twin of write_reference_output.
+
+    Same post-preflight re-check and same atomic publish; only the bytes are
+    supplied by the caller, because the result JSON is serialized in
+    results.py / upload.py rather than here.
+    """
+    return _write_caller_output(snapshot, payload, description="result output")
 
 
 class CheckpointStore:
