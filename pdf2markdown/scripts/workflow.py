@@ -144,21 +144,44 @@ CONVERSION_ACTION_EXCEPTIONS = frozenset(
     {("invalid_bundle", "resume_pending_conversion_operation")}
 )
 
+# The code `_inspect_open_bundle`'s history check reports under, and the only
+# code the gate above may admit a conversion action beneath. Spelled once and
+# read by both that construction site and the import-time check below: there is
+# no closed vocabulary of WorkflowError codes to test membership against, so
+# the code half's reality anchor has to be the one site the exception exists to
+# serve. Without it the pair's code half is unchecked, and a table entry naming
+# a code nothing raises would leave the gate looking guarded while admitting a
+# pair no construction site can produce.
+HISTORY_CHECK_ERROR_CODE = "invalid_bundle"
+
 
 def _check_conversion_action_exceptions_are_real() -> None:
-    """Every admitted action must be a live conversion-vocabulary member.
+    """Every admitted pair must be live on both halves.
 
-    Without this the exception list survives a rename of the action it admits:
-    the gate would keep letting a string through that no producer writes any
-    more, and the WorkflowError check would look closed while quietly guarding
-    nothing. `raise`, not `assert`, so `python -O` cannot strip it (same
+    Without the action half the exception list survives a rename of the action
+    it admits: the gate would keep letting a string through that no producer
+    writes any more, and the WorkflowError check would look closed while
+    quietly guarding nothing. Without the code half the same is true one field
+    over -- the gate matches (code, action) whole, so an admitted code no
+    construction site reports is a dead entry that nothing can trip over.
+    `raise`, not `assert`, so `python -O` cannot strip either check (same
     stance as conversion_attempt.py's own import-time table guards).
+
+    What this does *not* check is that the construction site still produces the
+    pair at all; that is behaviour, and
+    test_inspect_at_a_pending_conversion_boundary_points_at_resume owns it.
     """
     for code, action in CONVERSION_ACTION_EXCEPTIONS:
         if action not in conversion_attempt_module.CONVERSION_ACTIONS:
             raise ValueError(
                 f"CONVERSION_ACTION_EXCEPTIONS admits {action!r} for {code!r}, "
                 "which is not a conversion action"
+            )
+        if code != HISTORY_CHECK_ERROR_CODE:
+            raise ValueError(
+                f"CONVERSION_ACTION_EXCEPTIONS admits {action!r} under {code!r}, "
+                "which is not the code the history check reports "
+                f"({HISTORY_CHECK_ERROR_CODE!r})"
             )
 
 
@@ -1097,9 +1120,18 @@ def _at_pending_conversion_boundary(
     if not history:
         return False
     last = history[-1]
+    # The event name has to be pinned to `str` before it is looked up, not just
+    # compared: read_history admits any JSON value under the "event" key (it
+    # only checks that the event itself is a dict), and `x not in frozenset`
+    # raises TypeError rather than returning False for an unhashable x. That
+    # exception has no handler between here and main's last-resort one, so a
+    # dict or list event name would turn this branch's rc 4 / invalid_bundle
+    # into rc 1 / runtime_error -- on precisely the externally damaged bundles
+    # the branch exists to diagnose.
+    event = last.get("event") if isinstance(last, dict) else None
     if (
-        not isinstance(last, dict)
-        or last.get("event") not in conversion_attempt_module.CONVERSION_INTENTS
+        not isinstance(event, str)
+        or event not in conversion_attempt_module.CONVERSION_INTENTS
     ):
         return False
     reduced = conversion_attempt_module.resolve_history_state(
@@ -1311,7 +1343,10 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     )
     if not valid_history:
         raise WorkflowError(
-            "invalid_bundle",
+            # Read from the same symbol CONVERSION_ACTION_EXCEPTIONS is checked
+            # against, so the code this branch actually reports and the code the
+            # gate admits cannot drift apart.
+            HISTORY_CHECK_ERROR_CODE,
             "Work bundle history uses an unknown or inconsistent schema.",
             return_code=4,
             action_required=(

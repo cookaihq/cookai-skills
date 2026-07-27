@@ -1924,7 +1924,34 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
         else:
             yield False, ast.dump(node)
 
-    constructed, dynamic = set(), set()
+    def _code_of(call):
+        """构造点的 code（第一个位置参数）的静态值。
+
+        取不到静态值时返回该节点的 AST 转储，让下面的等值断言变红，而不是把
+        这个构造点静默漏掉——漏掉正好是本检查要堵的洞。
+        """
+        if not call.args:
+            return "<no positional code>"
+        node = call.args[0]
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        # 唯一允许的间接写法：模块级字符串常量名。窄口那条构造点读的就是
+        # workflow.HISTORY_CHECK_ERROR_CODE——它必须和窄口表的 import 时
+        # 自校验读同一个符号，否则「表里的 code」和「真被抛出的 code」可以
+        # 各说各话。局部变量名在这里取不到模块属性，照旧落到 dump 分支。
+        if isinstance(node, ast.Name):
+            resolved = getattr(workflow, node.id, None)
+            if isinstance(resolved, str):
+                return resolved
+        return ast.dump(node)
+
+    # 任务 3.1b 修复轮 1（审查 M2）：窄口是按 (code, action) 成对匹配的，而上面
+    # 的采集只看 action 一侧。于是把 resume_pending_conversion_operation 写到
+    # 另一个 code 下（窄口并不放行的组合）时本测试照旧全绿，只有那条分支真被
+    # 执行时才在运行时 ValueError——fail-loud 但 fail-late。这里把 code 一侧
+    # 一并钉死：凡 action 落在 ERROR_PATH_ACTIONS 之外的构造点，其
+    # (code, action) 必须恰好是窄口放行的那一组，不多不少。
+    constructed, dynamic, outside_table = set(), set(), set()
     for node in ast.walk(ast.parse(source)):
         if (
             isinstance(node, ast.Call)
@@ -1935,6 +1962,8 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
                 if keyword.arg == "action_required":
                     for is_static, value in _leaves(keyword.value):
                         (constructed if is_static else dynamic).add(value)
+                        if is_static and value not in workflow.ERROR_PATH_ACTIONS:
+                            outside_table.add((_code_of(node), value))
 
     # 动态传参必须显式暴露而不是被静默吞掉：静默返回空正是「表看起来闭合、
     # 运行时却在未覆盖分支抛 ValueError」的成因。
@@ -1987,6 +2016,11 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
         set(workflow.ERROR_PATH_ACTIONS) | NARROW_GATE_ONLY
     )
 
+    # code 一侧：表外 action 的每个构造点，其 (code, action) 必须正是运行时
+    # 放行的那一对。把该 action 挪到别的 code 下、或让第二个 code 也产出它，
+    # 都在这里立刻变红，而不是等那条分支被执行。
+    assert outside_table == set(workflow.CONVERSION_ACTION_EXCEPTIONS)
+
 
 def test_workflow_error_accepts_a_null_action_required():
     import workflow
@@ -2013,11 +2047,19 @@ def test_workflow_error_accepts_a_null_action_required():
 # start -> advance -> record preflight -> stage -> create pipeline, which
 # tests/unit/test_conversion_attempt.py already builds (`ready_staged_bundle`)
 # together with the fake transports the pipeline is fed. Importing it beats
-# copying ~120 lines of driver into this file; the repo already cross-imports
-# one test module from another (test_conversion_attempt imports
-# test_raw_conversion). pytest's prepend import mode only puts `tests/` on
-# sys.path when this file is collected on its own, so tests/unit has to be
-# added here for the standalone run to work.
+# copying ~120 lines of driver into this file.
+#
+# Be exact about the precedent (3.1b review, M1): one test module importing
+# another is established here -- tests/unit/test_conversion_attempt.py:19 and
+# tests/unit/test_review.py:17 both import test_raw_conversion -- but both of
+# those are *same-directory* imports that need no sys.path change. Importing
+# across test directories, and inserting a path in order to, is new with this
+# helper, so it does not inherit those two as cover. pytest's prepend import
+# mode only puts `tests/` on sys.path when this file is collected on its own,
+# so tests/unit has to be added here for the standalone run to work. What makes
+# the new part safe was checked rather than assumed: neither imported module
+# runs anything at module level, and no name under tests/unit collides with
+# scripts/ or the stdlib, so prepending that directory shadows nothing.
 def _unit_test_module(name):
     unit = Path(__file__).parent / "unit"
     if str(unit) not in sys.path:
@@ -2033,15 +2075,24 @@ def _staging_helpers():
     return _unit_test_module("test_source_staging")
 
 
-def drive_to_pending_conversion_intent(tmp_path, capsys, monkeypatch):
-    """Park a real bundle on an unclosed `conversion_submit_intent`.
+def park_on_conversion_intent(tmp_path, capsys, monkeypatch, intent_event):
+    """Park a real bundle on an unclosed `intent_event`.
 
-    `begin_attempt` appends the intent, then writes private.json, then
-    manifest.json, then appends the `conversion_submit_started` event. Crashing
-    the first private.json write leaves the intent dangling with both
-    authoritative files still holding the pre-intent state -- the boundary
-    `_resume`/`recover_interrupted_attempt` closes with zero network calls, and
-    the one `_inspect_open_bundle` used to call a corrupt work bundle.
+    Every conversion operation writes the same durable four steps: append the
+    intent, write private.json, write manifest.json, append the committed
+    event. Crashing the private.json write that *follows this intent* leaves
+    the intent dangling with both authoritative files still holding the
+    pre-intent state -- the boundary `recover_interrupted_attempt` closes with
+    zero network calls, and the one `_inspect_open_bundle` used to call a
+    corrupt work bundle.
+
+    Keying the crash on the last appended event name rather than on "the first
+    private.json write" is what makes one helper serve all five intents: a
+    single command can open two of these transactions in a row (a `resume`
+    submits *and* records the submission result), so the first private write is
+    the wrong one for the second intent.
+
+    Returns (bundle, staged, environ).
     """
     helpers = _conversion_helpers()
     import conversion_attempt
@@ -2049,20 +2100,39 @@ def drive_to_pending_conversion_intent(tmp_path, capsys, monkeypatch):
     bundle, staged, dependencies, key, _url, _sha256 = helpers.ready_staged_bundle(
         tmp_path, capsys, monkeypatch
     )
-    create = helpers.SuccessfulCreate("must-not-be-created")
-    original_atomic_write = conversion_attempt.bundle.atomic_write_json
-    crashed = False
+    environ = {**dependencies, "AIHUB_API_KEY": key}
 
-    def crash_once(name, value, *, dir_fd):
-        nonlocal crashed
-        if not crashed and name == "private.json":
-            crashed = True
-            raise helpers.SimulatedProcessCrash
-        return original_atomic_write(name, value, dir_fd=dir_fd)
-
-    monkeypatch.setattr(conversion_attempt.bundle, "atomic_write_json", crash_once)
-    with pytest.raises(helpers.SimulatedProcessCrash):
-        workflow.main(
+    if intent_event == "conversion_authorize_initial_intent":
+        # The credential gate: `advance` on a staged bundle with no API key in
+        # the environment authorizes the first attempt before submitting it.
+        argv = [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+            "--visual-capability",
+            "available",
+        ]
+        crash_environ, crash_transport = dependencies, helpers.NeverNetwork()
+    elif intent_event in {
+        "conversion_submit_intent",
+        "conversion_submit_result_intent",
+    }:
+        # One `resume` opens both: begin_attempt, then finish_submission once
+        # the create call answers.
+        argv = [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ]
+        crash_environ = environ
+        crash_transport = helpers.SuccessfulCreate("task-at-the-boundary")
+    elif intent_event == "conversion_poll_result_intent":
+        submit_rc, submitted, _stderr = helpers.invoke(
+            capsys,
             [
                 "resume",
                 "--work-bundle",
@@ -2070,20 +2140,107 @@ def drive_to_pending_conversion_intent(tmp_path, capsys, monkeypatch):
                 "--expected-generation",
                 str(staged["generation"]),
             ],
-            environ={**dependencies, "AIHUB_API_KEY": key},
+            cwd=tmp_path,
+            environ=environ,
+            transport=helpers.SuccessfulCreate("task-at-the-boundary"),
+        )
+        assert submit_rc == 0, json.dumps(submitted, sort_keys=True)
+        argv = [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(submitted["generation"]),
+        ]
+        crash_environ = environ
+        crash_transport = helpers.PollStatus(
+            "task-at-the-boundary",
+            "completed",
+            results=[{"url": "https://results.aihubmax.com/b.zip?token=private"}],
+        )
+    elif intent_event == "conversion_retry_intent":
+        unknown_rc, unknown, _stderr = helpers.invoke(
+            capsys,
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+            ],
+            cwd=tmp_path,
+            environ=environ,
+            transport=helpers.StatusCreate(500),
+        )
+        assert unknown_rc == 0, json.dumps(unknown, sort_keys=True)
+        argv = [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unknown["generation"]),
+            "--action-id",
+            unknown["action_id"],
+            "--evidence-hash",
+            unknown["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "I accept the possible duplicate conversion charge.",
+        ]
+        crash_environ, crash_transport = dependencies, helpers.NeverNetwork()
+    else:  # pragma: no cover - a new intent must bring its driver with it
+        raise AssertionError(f"no driver parks a bundle on {intent_event!r}")
+
+    original_atomic_write = conversion_attempt.bundle.atomic_write_json
+    original_append_history = conversion_attempt.bundle.append_history
+    last_appended = None
+
+    def append_history(value, *, state_fd):
+        nonlocal last_appended
+        last_appended = value.get("event")
+        return original_append_history(value, state_fd=state_fd)
+
+    def crash_after_the_intent(name, value, *, dir_fd):
+        if name == "private.json" and last_appended == intent_event:
+            raise helpers.SimulatedProcessCrash
+        return original_atomic_write(name, value, dir_fd=dir_fd)
+
+    monkeypatch.setattr(conversion_attempt.bundle, "append_history", append_history)
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", crash_after_the_intent
+    )
+    with pytest.raises(helpers.SimulatedProcessCrash):
+        workflow.main(
+            argv,
+            environ=crash_environ,
             cwd=str(tmp_path),
             config_home=str(tmp_path / "config-home"),
-            transport=create,
+            transport=crash_transport,
             now=NOW,
         )
     capsys.readouterr()
     monkeypatch.setattr(
+        conversion_attempt.bundle, "append_history", original_append_history
+    )
+    monkeypatch.setattr(
         conversion_attempt.bundle, "atomic_write_json", original_atomic_write
     )
-    assert create.calls == []
+    if intent_event == "conversion_submit_intent":
+        # The submission itself must not have gone out: begin_attempt's private
+        # write is the crash point, and it runs before the create call.
+        assert crash_transport.calls == []
     history = read_history_events(bundle)
-    assert history[-1]["event"] == "conversion_submit_intent"
-    return bundle, staged, {**dependencies, "AIHUB_API_KEY": key}
+    assert history[-1]["event"] == intent_event
+    return bundle, staged, environ
+
+
+def drive_to_pending_conversion_intent(tmp_path, capsys, monkeypatch):
+    """Park a real bundle on an unclosed `conversion_submit_intent`."""
+    return park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, "conversion_submit_intent"
+    )
 
 
 def read_history_events(bundle):
@@ -2114,6 +2271,62 @@ def corrupt_history_prefix(bundle):
     (bundle / ".state" / "history.ndjson").write_bytes(
         b"".join(bundle_module.canonical_json_bytes(event) for event in events)
     )
+
+
+def retype_tail_event_name(bundle, value):
+    """Give the last history event a non-string `event` value.
+
+    `bundle.read_history` only checks that each event is a dict -- the value
+    under the "event" key is never type-checked -- so a bundle whose tail event
+    name has been replaced by a container is read in without complaint. That is
+    an externally damaged bundle, which is exactly the population `inspect`'s
+    invalid_bundle / repair_or_restore_work_bundle branch exists to diagnose.
+    """
+    import bundle as bundle_module
+
+    events = read_history_events(bundle)
+    events[-1]["event"] = value
+    (bundle / ".state" / "history.ndjson").write_bytes(
+        b"".join(bundle_module.canonical_json_bytes(event) for event in events)
+    )
+
+
+@pytest.mark.parametrize("event_value", [{"a": 1}, ["x"]], ids=["dict", "list"])
+def test_a_non_string_tail_event_name_still_says_repair(
+    tmp_path, capsys, monkeypatch, event_value
+):
+    """An unhashable tail event name must not turn rc 4 into rc 1.
+
+    The boundary test asks whether the tail event is a conversion intent. Asking
+    that with `in` against a frozenset raises TypeError -- not returns False --
+    when the value is unhashable, and neither _at_pending_conversion_boundary
+    nor _inspect_open_bundle catches it, so it escapes to main's last-resort
+    handler and is reported as rc 1 / runtime_error / inspect_runtime_error.
+    That loses all three fields this branch is required to keep (rc 4,
+    invalid_bundle, an action the caller can act on) for the one population the
+    branch is for.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = drive_to_pending_conversion_intent(
+        tmp_path, capsys, monkeypatch
+    )
+    retype_tail_event_name(bundle, event_value)
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
 
 
 def test_inspect_at_a_pending_conversion_boundary_points_at_resume(
@@ -2192,6 +2405,74 @@ def test_resume_still_closes_the_same_boundary_without_network(
     assert rc == 0
     assert transport.calls == []
     assert result["conversion_state"] == "submission_unknown"
+
+
+@pytest.mark.parametrize(
+    "intent_event",
+    sorted(workflow.conversion_attempt_module.CONVERSION_INTENTS),
+)
+def test_every_conversion_intent_boundary_names_an_action_resume_performs(
+    tmp_path, capsys, monkeypatch, intent_event
+):
+    """All five intents, not just the submission one.
+
+    `_at_pending_conversion_boundary` admits any CONVERSION_INTENTS member, so
+    "the action `inspect` names is one `resume` can really do" is a claim about
+    five events. Only `conversion_submit_intent` was pinned; the other four
+    rested on reading recover_interrupted_attempt's branches (3.1b review, M4).
+    Parametrising off the runtime frozenset also means a sixth intent cannot be
+    added without either a driver here or a deliberate, visible failure.
+
+    Two halves per member, because either alone is satisfiable by a lie:
+    `inspect` names the resume action (rc 4, invalid_bundle and zero writes all
+    intact), and `resume` then really closes that intent -- rc 0, no network,
+    and the dangling intent is no longer the last event.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, intent_event
+    )
+    before = state_snapshot(bundle)
+    inspect_transport = helpers.CountingNeverNetwork()
+
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=inspect_transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "resume_pending_conversion_operation"
+    assert inspect_transport.calls == []
+    assert state_snapshot(bundle) == before
+
+    # The generation is read off disk rather than remembered: some of these
+    # intents are opened by a command that already committed an earlier
+    # generation bump, so a stale --expected-generation would fail the resume
+    # for a reason that has nothing to do with the boundary.
+    generation = json.loads((bundle / "manifest.json").read_text())["generation"]
+    resume_transport = helpers.CountingNeverNetwork()
+
+    resume_rc, resumed, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=resume_transport,
+    )
+
+    assert resume_rc == 0, json.dumps(resumed, sort_keys=True)
+    assert resume_transport.calls == []
+    assert read_history_events(bundle)[-1]["event"] != intent_event
 
 
 def test_a_pending_source_staging_intent_is_not_called_a_conversion_boundary(
