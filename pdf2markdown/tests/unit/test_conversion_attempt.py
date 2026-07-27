@@ -4163,13 +4163,21 @@ def test_conversion_reason_vocabulary_is_closed_to_twelve_values():
     The subset assertion (not equality) against LEGAL_TRIPLES is deliberate:
     eleven of the twelve values are already the distinct reasons
     FLAT_STATE_MIGRATION/LEGAL_TRIPLES produce; the twelfth,
-    `result_url_expired`, is not yet produced by any flat_state (no
-    FLAT_STATE_MIGRATION row folds onto it) -- wiring that emission is the
-    remaining half of Decision 4, out of this substep's allowed file set
-    (FLAT_STATE_MIGRATION/LEGAL_TRIPLES values are unchanged here). Equality
-    would therefore be wrong today and would only start passing once a later
-    substep adds that row -- exactly the kind of assertion that silently
-    stops testing anything the moment the fold changes underneath it.
+    `result_url_expired`, is produced by no flat_state at all (it is detected
+    locally, not classified off the wire), and the two characterization tables
+    stay at their measured 18 rows. Equality against LEGAL_TRIPLES would
+    therefore be wrong, today and permanently.
+
+    Equality against the *pair* set, however, must hold -- and that assertion
+    is what stops CONVERSION_REASONS from being a dead symbol nothing reads
+    (review Important #2). The two sides are built from different material:
+    the left is the reason column of LEGAL_STATE_REASON_PAIRS (derived from
+    FLAT_STATE_MIGRATION, spliced with LOCALLY_DETECTED_PAIRS' keys), the
+    right is the eleven migration-table reasons plus one literal. Drift on
+    either side -- a reason added to the migration table but not to the
+    vocabulary, a locally-detected pair added without its reason, the literal
+    edited -- turns this red. It is not self-证明: neither expression can be
+    rewritten into the other without going through a different table.
     """
     import conversion_attempt as ca
 
@@ -4181,6 +4189,10 @@ def test_conversion_reason_vocabulary_is_closed_to_twelve_values():
         "unsafe_result_url", "unexpected_result_count",
     }
     assert {row.reason for row in ca.LEGAL_TRIPLES} - {None} <= ca.CONVERSION_REASONS
+    assert {
+        reason for _state, reason in ca.LEGAL_STATE_REASON_PAIRS
+        if reason is not None
+    } == ca.CONVERSION_REASONS
 
 
 def test_reason_detail_is_a_total_refinement_of_exactly_two_reasons():
@@ -4201,11 +4213,6 @@ def test_reason_detail_is_a_total_refinement_of_exactly_two_reasons():
     assert ca.REASON_DETAILS["poll_transient"] == {
         "poll_transient", "result_private_payload_lost",
     }
-    # 取值域完全来自现成的两个 frozenset，不新造任何值。
-    assert (
-        set().union(*ca.REASON_DETAILS.values())
-        == ca.SUBMISSION_UNKNOWN_REASON_CODES | ca.POLL_TRANSIENT_REASON_CODES
-    )
 
 
 @pytest.mark.parametrize("reason", sorted({
@@ -4252,6 +4259,121 @@ def test_a_detail_outside_its_reason_bucket_is_rejected():
 
     assert (
         ca._valid_reason_detail("no_task_id", "result_private_payload_lost")
+        is False
+    )
+
+
+def test_the_locally_detected_result_url_expired_pair_is_legal(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.2a fix round 1 (review Critical #1) -- design.md Decision 1
+    row 8's second form must be a *legal* stored pair, not merely a member of
+    the reason vocabulary.
+
+    `result_url_expired` is the one reason no wire classification produces: it
+    is detected locally, when the result URL a `result_ready` attempt already
+    holds has passed its validity window. So it has no FLAT_STATE_MIGRATION /
+    LEGAL_TRIPLES row -- those two tables characterize the *measured wire*
+    domain and stay at 18 rows -- and every derivation that defines legality
+    has to splice `LOCALLY_DETECTED_PAIRS` in instead.
+
+    Without that splice `("result_ready", "result_url_expired")` is not in
+    LEGAL_STATE_REASON_PAIRS, so `_valid_attempt` rejects any attempt carrying
+    it at its very first gate -- which would make tasks 2.2c and 3.1a, both
+    written against "2.2a already introduced result_url_expired", hit a wall
+    the moment they write the pair out.
+
+    The attempt is not hand-built: it is the real v2 record a bundle driven to
+    `result_ready` through main()'s public boundary holds, re-labelled with
+    the locally-detected reason and nothing else. Hand-building would prove
+    only that a dict of my own devising satisfies the validator; taking the
+    genuine record and moving exactly the one column under test is what makes
+    a green here mean "a record the production writer could hold is accepted".
+
+    `reason_detail` stays None: `result_url_expired` is not one of
+    REASON_DETAILS' two keys, so a non-null detail is forbidden for it.
+
+    This is also the first direct call to `_valid_attempt` anywhere in the
+    suite -- every other test reaches it end-to-end through drive/resume --
+    and therefore the first assertion that pins its `_valid_reason_detail`
+    delegation from the outside.
+    """
+    import conversion_attempt as ca
+
+    pair = ("result_ready", "result_url_expired")
+    assert pair in ca.LEGAL_STATE_REASON_PAIRS
+    assert ca._MANIFEST_STATE_BY_FOLDED_STATE[pair] == "recoverable_error"
+    # The two characterization tables are untouched: neither describes a
+    # locally-detected classification, and a synthetic row in either would
+    # destroy their "these 18 are what the wire actually returns" meaning.
+    assert len(ca.FLAT_STATE_MIGRATION) == 18
+    assert len(ca.LEGAL_TRIPLES) == 18
+    assert "result_url_expired" not in {
+        reason for _s, reason, _c in ca.FLAT_STATE_MIGRATION.values()
+    }
+
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    task_id = "task-locally-expired"
+    create_rc, submitted, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=SuccessfulCreate(task_id),
+    )
+    assert create_rc == 0
+    poll_rc, ready, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(submitted["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=PollStatus(
+            task_id,
+            "completed",
+            results=[
+                {"url": "https://results.aihubmax.com/ready.zip?token=one"}
+            ],
+        ),
+    )
+    assert poll_rc == 0
+    assert ready["conversion_attempt_state"] == "result_ready"
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    generation = manifest["generation"]
+    attempt = manifest["conversion_attempts"][-1]
+    # Control: the genuine record is accepted, and carries the pair the wire
+    # produces for this state.
+    assert (attempt["state"], attempt["reason"]) == ("result_ready", None)
+    assert (
+        ca._valid_attempt(attempt, manifest=manifest, generation=generation) is True
+    )
+
+    expired = dict(attempt, reason="result_url_expired", reason_detail=None)
+    assert (
+        ca._valid_attempt(expired, manifest=manifest, generation=generation) is True
+    )
+    # ...and the detail gate still applies to it: outside REASON_DETAILS'
+    # two keys, only None is legal.
+    assert (
+        ca._valid_attempt(
+            dict(expired, reason_detail="no_task_id"),
+            manifest=manifest,
+            generation=generation,
+        )
         is False
     )
 

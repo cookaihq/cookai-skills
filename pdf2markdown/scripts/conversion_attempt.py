@@ -320,16 +320,26 @@ ATTEMPT_STATES = frozenset(
     state for state, _reason, _conversion_state in FLAT_STATE_MIGRATION.values()
 )
 
+# design.md Decision 1 row 8, second form. Locally *detected* -- no wire
+# classification ever produces it, so it lives outside the two
+# characterization tables (FLAT_STATE_MIGRATION / LEGAL_TRIPLES stay 18
+# rows of measured wire domain) and is spliced into every derivation
+# that defines pair legality. Write side lands in 2.2c.
+LOCALLY_DETECTED_PAIRS = {
+    ("result_ready", "result_url_expired"): "recoverable_error",
+}
+
 # The legal `(state, reason)` pairs a stored attempt may carry. 18 wire rows
 # collapse onto 16 pairs (pending/processing/result_pending all fold onto
-# ("processing", None)). This replaces schema v2's per-state
-# `reason == FLAT_STATE_MIGRATION[state][1]` check: the set of legal
-# (state, reason) combinations is identical, it is just no longer indexed by
-# a name the record has stopped carrying.
+# ("processing", None)), plus LOCALLY_DETECTED_PAIRS' keys. This replaces
+# schema v2's per-state `reason == FLAT_STATE_MIGRATION[state][1]` check: for
+# the wire-derived pairs the set of legal (state, reason) combinations is
+# identical, it is just no longer indexed by a name the record has stopped
+# carrying.
 LEGAL_STATE_REASON_PAIRS = frozenset(
     (state, reason)
     for state, reason, _conversion_state in FLAT_STATE_MIGRATION.values()
-)
+) | frozenset(LOCALLY_DETECTED_PAIRS)
 
 # design.md Decision 4 / task 2.2a -- the closed twelve-value domain a stored
 # attempt's `reason` column may take. Eleven of the twelve are already the
@@ -609,9 +619,13 @@ _LEGAL_TRIPLE_BY_FLAT_STATE = {
 # rule applied to result_pending but not to its two siblings; those sites
 # discriminate on upstream_status, which is exactly what distinguishes the
 # three LEGAL_TRIPLES rows. design.md Decision 1 note 3.)
+#
+# Spliced with LOCALLY_DETECTED_PAIRS, whose one member has no LEGAL_TRIPLES
+# row to read a conversion_state off (see that constant): the dict's values
+# *are* the top-level state those pairs project to.
 _MANIFEST_STATE_BY_FOLDED_STATE = {
     (row.attempt_state, row.reason): row.conversion_state for row in LEGAL_TRIPLES
-}
+} | LOCALLY_DETECTED_PAIRS
 
 # The (http_status, upstream_status) pair each non-transient wire
 # classification must carry.
@@ -641,10 +655,46 @@ POLL_STATE_CONTRACT = {
 # used to be `state=pending, upstream=completed` (illegal) is now
 # `state=processing, reason=None, upstream=completed`, which is the
 # result_pending row and was always legal under that name.
-_LEGAL_POLL_OBSERVATIONS = frozenset(
+_WIRE_POLL_OBSERVATIONS = frozenset(
     (row.attempt_state, row.reason, row.http_status, row.upstream_status)
     for row in LEGAL_TRIPLES
     if row.flat_state not in _NON_CONTRACT_STATES
+)
+
+
+def _locally_detected_observations():
+    """The quadruples LOCALLY_DETECTED_PAIRS' members occupy in the gate above.
+
+    A locally detected pair does not describe a *new* observation: local
+    detection only re-labels the `reason` of a record some wire row already
+    wrote. `result_url_expired` is found by checking the validity window of a
+    result URL a `result_ready` record is already holding -- nothing is
+    re-polled, so that record still carries the http_status and
+    upstream_status of the poll that produced it. The wire columns are
+    therefore *inherited* from the row being re-labelled rather than restated:
+    LEGAL_TRIPLES stays their single owner and there is no second literal of
+    them to drift out of sync with it.
+
+    Single-element unpacking (rather than a `for` that yields one quadruple
+    per matching row) is what keeps that inheritance honest. It is well
+    defined only while the re-labelled state has exactly one wire row --
+    true of `result_ready`, false of `failed`, which ten reasons share. A
+    future locally-detected pair re-labelling `failed` must state which row
+    it inherits from; unpacking makes that an import-time ValueError instead
+    of silently widening the gate by ten quadruples.
+    """
+    for state, reason in LOCALLY_DETECTED_PAIRS:
+        (wire_row,) = {
+            row
+            for row in LEGAL_TRIPLES
+            if row.attempt_state == state
+            and row.flat_state not in _NON_CONTRACT_STATES
+        }
+        yield (state, reason, wire_row.http_status, wire_row.upstream_status)
+
+
+_LEGAL_POLL_OBSERVATIONS = _WIRE_POLL_OBSERVATIONS | frozenset(
+    _locally_detected_observations()
 )
 
 # The folded pair a poll_transient observation stores. Named because five
