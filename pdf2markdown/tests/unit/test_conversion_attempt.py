@@ -4156,6 +4156,106 @@ def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
     assert ca._valid_reason_detail(probe_reason, probe_code) is True
 
 
+def test_conversion_reason_vocabulary_is_closed_to_twelve_values():
+    """Task 2.2a / design.md Decision 4 -- the closed reason vocabulary a
+    stored attempt's `reason` column may take.
+
+    The subset assertion (not equality) against LEGAL_TRIPLES is deliberate:
+    eleven of the twelve values are already the distinct reasons
+    FLAT_STATE_MIGRATION/LEGAL_TRIPLES produce; the twelfth,
+    `result_url_expired`, is not yet produced by any flat_state (no
+    FLAT_STATE_MIGRATION row folds onto it) -- wiring that emission is the
+    remaining half of Decision 4, out of this substep's allowed file set
+    (FLAT_STATE_MIGRATION/LEGAL_TRIPLES values are unchanged here). Equality
+    would therefore be wrong today and would only start passing once a later
+    substep adds that row -- exactly the kind of assertion that silently
+    stops testing anything the moment the fold changes underneath it.
+    """
+    import conversion_attempt as ca
+
+    assert ca.CONVERSION_REASONS == {
+        "no_task_id", "credential_source_missing",
+        "credential_fingerprint_changed", "poll_authentication_rejected",
+        "task_unavailable", "poll_transient", "poll_timeout",
+        "result_pending_timeout", "task_failed", "result_url_expired",
+        "unsafe_result_url", "unexpected_result_count",
+    }
+    assert {row.reason for row in ca.LEGAL_TRIPLES} - {None} <= ca.CONVERSION_REASONS
+
+
+def test_reason_detail_is_a_total_refinement_of_exactly_two_reasons():
+    """Task 2.2a -- REASON_DETAILS is the public name for the table task 2.1c
+    already built as `_REASON_DETAIL_DOMAIN`. The `is` check pins that the
+    rename is an alias to the exact same dict object, not a second literal
+    that only happens to agree with it today (the two-tables-that-must-agree
+    shape task 2.1a/2.1b already removed elsewhere in this module).
+    """
+    import conversion_attempt as ca
+
+    assert ca.REASON_DETAILS is ca._REASON_DETAIL_DOMAIN
+    assert set(ca.REASON_DETAILS) == {"no_task_id", "poll_transient"}
+    assert ca.REASON_DETAILS["no_task_id"] == {
+        "no_task_id", "invalid_transport_result",
+        "network_result_unknown", "interrupted_before_result_commit",
+    }
+    assert ca.REASON_DETAILS["poll_transient"] == {
+        "poll_transient", "result_private_payload_lost",
+    }
+    # 取值域完全来自现成的两个 frozenset，不新造任何值。
+    assert (
+        set().union(*ca.REASON_DETAILS.values())
+        == ca.SUBMISSION_UNKNOWN_REASON_CODES | ca.POLL_TRANSIENT_REASON_CODES
+    )
+
+
+@pytest.mark.parametrize("reason", sorted({
+    "credential_source_missing", "credential_fingerprint_changed",
+    "poll_authentication_rejected", "task_unavailable", "poll_timeout",
+    "result_pending_timeout", "task_failed", "result_url_expired",
+    "unsafe_result_url", "unexpected_result_count",
+}))
+def test_the_other_ten_reasons_forbid_a_non_null_detail(reason):
+    """The ten reasons outside REASON_DETAILS' two keys must reject any
+    non-null reason_detail and accept only None.
+
+    The brief this substep is driven from illustrates this via
+    `ca._valid_attempt(make_attempt(...), manifest=make_manifest(), ...)`,
+    but neither `make_attempt` nor `make_manifest` exists anywhere in this
+    file (same brief-vs-reality gap flagged in 1.2/2.1a/2.1b's reports) --
+    and for `reason="result_url_expired"` no real `_valid_attempt`-shaped
+    attempt can be constructed in this substep's scope at all: no flat_state
+    folds onto it yet, so `(state, "result_url_expired")` is not a member of
+    LEGAL_STATE_REASON_PAIRS for any state, and `_valid_attempt` would reject
+    the pair before ever reaching the reason_detail check -- regardless of
+    what reason_detail carries. Wiring a real flat_state onto
+    `result_url_expired` requires touching FLAT_STATE_MIGRATION/LEGAL_TRIPLES,
+    which this substep's allowed file set forbids.
+
+    `_valid_reason_detail` is the actual, already-existing single-owner
+    function this exact relationship is delegated to (see REASON_DETAILS'
+    module comment, and test_reason_detail_producer_and_validator_read_one_table
+    above, which exercises it the same direct way) -- so it is called
+    directly here instead of round-tripping through the unrelated parts of
+    `_valid_attempt`'s state machine (task_id shape, timestamps, credential
+    fields, ...) that this substep does not touch and that constructing a
+    full attempt dict would otherwise have to satisfy for no reason connected
+    to what this test is about.
+    """
+    import conversion_attempt as ca
+
+    assert ca._valid_reason_detail(reason, "no_task_id") is False
+    assert ca._valid_reason_detail(reason, None) is True
+
+
+def test_a_detail_outside_its_reason_bucket_is_rejected():
+    import conversion_attempt as ca
+
+    assert (
+        ca._valid_reason_detail("no_task_id", "result_private_payload_lost")
+        is False
+    )
+
+
 def _schema_v1_attempt(attempt, wire_reason_code_by_state):
     """The exact schema v1 record a v1 implementation would have written for
     this v2 attempt.

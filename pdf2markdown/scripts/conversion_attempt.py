@@ -81,8 +81,10 @@ ATTEMPT_KEYS = frozenset(
         # carry it: `no_task_id` and `poll_transient` are the two *reasons*
         # whose wire reason code ranges over a set rather than a single value
         # (SUBMISSION_UNKNOWN_REASON_CODES / POLL_TRANSIENT_REASON_CODES) --
-        # `_REASON_DETAIL_DOMAIN` has been keyed by `reason`, not by the flat
-        # state, since task 2.1c. None everywhere else -- no information is
+        # `REASON_DETAILS` (task 2.2a's public name for what task 2.1c built
+        # as `_REASON_DETAIL_DOMAIN`, which is now only an alias to the same
+        # dict) has been keyed by `reason`, not by the flat state, since task
+        # 2.1c. None everywhere else -- no information is
         # lost, because for every other legal (state, reason) pair the wire
         # value is recoverable from that pair via LEGAL_TRIPLES' reason_code
         # column, not from `state` alone.
@@ -329,6 +331,31 @@ LEGAL_STATE_REASON_PAIRS = frozenset(
     for state, reason, _conversion_state in FLAT_STATE_MIGRATION.values()
 )
 
+# design.md Decision 4 / task 2.2a -- the closed twelve-value domain a stored
+# attempt's `reason` column may take. Eleven of the twelve are already the
+# distinct non-null values FLAT_STATE_MIGRATION's `reason` column (column 1)
+# produces -- LEGAL_TRIPLES.reason is read straight off that same column, so
+# deriving from either table is equivalent and there is no second literal of
+# those eleven values to drift out of sync with the migration table.
+#
+# `result_url_expired` is the twelfth and is deliberately NOT derived: no
+# flat_state folds onto it yet. Task 2.2a only closes the reason *vocabulary*;
+# wiring the local-expiry branch (raw_conversion.py's
+# result_reference_is_expired) to actually emit a `result_url_expired`
+# attempt, and adding its LEGAL_TRIPLES row, is the remaining half of design.md
+# Decision 4 -- out of this substep's allowed file set (FLAT_STATE_MIGRATION
+# and LEGAL_TRIPLES' values are unchanged here). It is listed below so the
+# vocabulary itself closes at twelve values in one place, ahead of the
+# write-side wiring that will start emitting the twelfth member.
+_REASONS_FROM_FLAT_STATE_MIGRATION = frozenset(
+    reason
+    for _state, reason, _conversion_state in FLAT_STATE_MIGRATION.values()
+    if reason is not None
+)
+CONVERSION_REASONS = _REASONS_FROM_FLAT_STATE_MIGRATION | frozenset(
+    {"result_url_expired"}
+)
+
 # Which folded reasons may carry a non-null reason_detail, and the closed set
 # each one may draw from. The two domained reasons are exactly the ones whose
 # wire value ranges over a set instead of being a single-valued function of
@@ -347,10 +374,18 @@ LEGAL_STATE_REASON_PAIRS = frozenset(
 # this and _attempt_reason_columns produces it by reading this same dict, so
 # the writer and the validator read one table rather than two agreeing
 # conditionals.
-_REASON_DETAIL_DOMAIN = {
+#
+# REASON_DETAILS is task 2.2a's public name for this table.
+# `_REASON_DETAIL_DOMAIN` is kept only as an alias to the exact same dict
+# object (not a second literal), because task 2.1c's producer
+# (_attempt_reason_columns) and validator (_valid_reason_detail) below, and
+# test_reason_detail_producer_and_validator_read_one_table's monkeypatch, all
+# still read it by that name.
+REASON_DETAILS = {
     "no_task_id": SUBMISSION_UNKNOWN_REASON_CODES,
     "poll_transient": POLL_TRANSIENT_REASON_CODES,
 }
+_REASON_DETAIL_DOMAIN = REASON_DETAILS
 
 
 def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
