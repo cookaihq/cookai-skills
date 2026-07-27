@@ -2,6 +2,7 @@ import fcntl
 import json
 import os
 import stat
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1967,7 +1968,24 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
         f"{SERIALIZED_ONLY - serialized}"
     )
 
-    assert constructed | SERIALIZED_ONLY == set(workflow.ERROR_PATH_ACTIONS)
+    # 任务 3.1b 等强翻译：WorkflowError 的闭合校验新增了一个**窄口**——
+    # (invalid_bundle, resume_pending_conversion_operation) 这一对，是全计划
+    # 唯一一处 WorkflowError 携带 conversion 词汇表 action 的情形，因此
+    # workflow.py 里多了一个不属于 ERROR_PATH_ACTIONS 的静态字面量。
+    #
+    # 翻译方向不放宽：等值断言仍是 ==（不是 <=），只是右边把窄口值单列出来。
+    # 于是任何**别的**表外字面量照旧让本断言变红，删掉某个表内值也照旧变红。
+    # 白名单本身按 SERIALIZED_ONLY 的同一口径自校验：它必须恰好等于运行时真正
+    # 放行的那一组 action，否则窄口和本测试就能各说各话。
+    NARROW_GATE_ONLY = {
+        action for _code, action in workflow.CONVERSION_ACTION_EXCEPTIONS
+    }
+    assert NARROW_GATE_ONLY == {"resume_pending_conversion_operation"}
+    assert not NARROW_GATE_ONLY & set(workflow.ERROR_PATH_ACTIONS)
+
+    assert constructed | SERIALIZED_ONLY == (
+        set(workflow.ERROR_PATH_ACTIONS) | NARROW_GATE_ONLY
+    )
 
 
 def test_workflow_error_accepts_a_null_action_required():
@@ -1987,3 +2005,311 @@ def test_workflow_error_accepts_a_null_action_required():
         "invalid_bundle", "message", return_code=4, action_required=None
     )
     assert explicit.action_required is None
+
+
+# --- Task 3.1b: a pending conversion boundary points at resume -------------
+#
+# Driving a bundle all the way to an unclosed conversion intent needs the real
+# start -> advance -> record preflight -> stage -> create pipeline, which
+# tests/unit/test_conversion_attempt.py already builds (`ready_staged_bundle`)
+# together with the fake transports the pipeline is fed. Importing it beats
+# copying ~120 lines of driver into this file; the repo already cross-imports
+# one test module from another (test_conversion_attempt imports
+# test_raw_conversion). pytest's prepend import mode only puts `tests/` on
+# sys.path when this file is collected on its own, so tests/unit has to be
+# added here for the standalone run to work.
+def _unit_test_module(name):
+    unit = Path(__file__).parent / "unit"
+    if str(unit) not in sys.path:
+        sys.path.insert(0, str(unit))
+    return __import__(name)
+
+
+def _conversion_helpers():
+    return _unit_test_module("test_conversion_attempt")
+
+
+def _staging_helpers():
+    return _unit_test_module("test_source_staging")
+
+
+def drive_to_pending_conversion_intent(tmp_path, capsys, monkeypatch):
+    """Park a real bundle on an unclosed `conversion_submit_intent`.
+
+    `begin_attempt` appends the intent, then writes private.json, then
+    manifest.json, then appends the `conversion_submit_started` event. Crashing
+    the first private.json write leaves the intent dangling with both
+    authoritative files still holding the pre-intent state -- the boundary
+    `_resume`/`recover_interrupted_attempt` closes with zero network calls, and
+    the one `_inspect_open_bundle` used to call a corrupt work bundle.
+    """
+    helpers = _conversion_helpers()
+    import conversion_attempt
+
+    bundle, staged, dependencies, key, _url, _sha256 = helpers.ready_staged_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    create = helpers.SuccessfulCreate("must-not-be-created")
+    original_atomic_write = conversion_attempt.bundle.atomic_write_json
+    crashed = False
+
+    def crash_once(name, value, *, dir_fd):
+        nonlocal crashed
+        if not crashed and name == "private.json":
+            crashed = True
+            raise helpers.SimulatedProcessCrash
+        return original_atomic_write(name, value, dir_fd=dir_fd)
+
+    monkeypatch.setattr(conversion_attempt.bundle, "atomic_write_json", crash_once)
+    with pytest.raises(helpers.SimulatedProcessCrash):
+        workflow.main(
+            [
+                "resume",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+            ],
+            environ={**dependencies, "AIHUB_API_KEY": key},
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=create,
+            now=NOW,
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+    )
+    assert create.calls == []
+    history = read_history_events(bundle)
+    assert history[-1]["event"] == "conversion_submit_intent"
+    return bundle, staged, {**dependencies, "AIHUB_API_KEY": key}
+
+
+def read_history_events(bundle):
+    return [
+        json.loads(line)
+        for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
+    ]
+
+
+def corrupt_history_prefix(bundle):
+    """Break the history *before* the dangling intent.
+
+    The prefix reduce is what tells "parked on an intent" apart from "really
+    corrupt", so the negative case has to damage the prefix and nothing else:
+    one committed event's `manifest_hash` is replaced, which no reducer can
+    reconcile, while every schema check that runs before the history check
+    still passes.
+    """
+    import bundle as bundle_module
+
+    events = read_history_events(bundle)
+    for event in events:
+        if event.get("event") == "source_upload_result_committed":
+            event["manifest_hash"] = "sha256:" + "0" * 64
+            break
+    else:  # pragma: no cover - the driver always writes this event
+        raise AssertionError("no source_upload_result_committed event to corrupt")
+    (bundle / ".state" / "history.ndjson").write_bytes(
+        b"".join(bundle_module.canonical_json_bytes(event) for event in events)
+    )
+
+
+def test_inspect_at_a_pending_conversion_boundary_points_at_resume(
+    tmp_path, capsys, monkeypatch
+):
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = drive_to_pending_conversion_intent(
+        tmp_path, capsys, monkeypatch
+    )
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "resume_pending_conversion_operation"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
+
+
+def test_a_genuinely_corrupt_bundle_still_says_repair(tmp_path, capsys, monkeypatch):
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = drive_to_pending_conversion_intent(
+        tmp_path, capsys, monkeypatch
+    )
+    corrupt_history_prefix(bundle)
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
+
+
+def test_resume_still_closes_the_same_boundary_without_network(
+    tmp_path, capsys, monkeypatch
+):
+    """The action `inspect` now names has to be one `resume` can actually do."""
+    helpers = _conversion_helpers()
+    bundle, staged, environ = drive_to_pending_conversion_intent(
+        tmp_path, capsys, monkeypatch
+    )
+    transport = helpers.CountingNeverNetwork()
+
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 0
+    assert transport.calls == []
+    assert result["conversion_state"] == "submission_unknown"
+
+
+def test_a_pending_source_staging_intent_is_not_called_a_conversion_boundary(
+    tmp_path, capsys, monkeypatch
+):
+    """The boundary test discriminates on the intent, not just on the prefix.
+
+    A source upload parked on its own dangling `source_upload_result_intent`
+    reduces its prefix to exactly what is on disk too -- measured, not
+    assumed -- so the prefix reduce alone cannot tell it apart from a
+    conversion boundary. Only the tail event can, and
+    `resume_pending_conversion_operation` is a conversion-vocabulary action
+    that must not be handed out for a staging operation (nor smuggled through
+    the WorkflowError narrow gate on its behalf).
+    """
+    helpers = _staging_helpers()
+    bundle, ready, dependencies, _source_bytes = helpers.ready_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    key = "test-aihub-key-123456"
+    upload = helpers.SuccessfulUpload(
+        "https://files.aihubmax.com/source.pdf?token=private-bearer"
+    )
+    original_atomic_write = helpers.source_staging.bundle.atomic_write_json
+    private_writes = 0
+
+    def crash_on_the_result_commit(name, value, *, dir_fd):
+        nonlocal private_writes
+        if name == "private.json":
+            private_writes += 1
+            if private_writes == 2:
+                raise helpers.SimulatedProcessCrash
+        return original_atomic_write(name, value, dir_fd=dir_fd)
+
+    monkeypatch.setattr(
+        helpers.source_staging.bundle, "atomic_write_json", crash_on_the_result_commit
+    )
+    with pytest.raises(helpers.SimulatedProcessCrash):
+        workflow.main(
+            [
+                "advance",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(ready["generation"]),
+                "--visual-capability",
+                "available",
+            ],
+            environ={**dependencies, "AIHUB_API_KEY": key},
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=upload,
+            now=helpers.NOW,
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(
+        helpers.source_staging.bundle, "atomic_write_json", original_atomic_write
+    )
+    history = read_history_events(bundle)
+    assert history[-1]["event"] == "source_upload_result_intent"
+
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=helpers.NeverNetwork(),
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+
+
+def test_the_workflow_error_conversion_gate_admits_exactly_one_pair():
+    """Pin the narrow gate: one action, one code, nothing else.
+
+    `resume_pending_conversion_operation` is a CONVERSION_ACTIONS member, so
+    the closed ERROR_PATH_ACTIONS check in WorkflowError.__init__ has to admit
+    it -- but only paired with `invalid_bundle`. Widening the check to the
+    whole conversion table (or to any code) must fail here.
+    """
+    import conversion_attempt
+
+    assert workflow.CONVERSION_ACTION_EXCEPTIONS == frozenset(
+        {("invalid_bundle", "resume_pending_conversion_operation")}
+    )
+    # Not a dead literal: the admitted action is really a conversion-vocabulary
+    # member, and is still disjoint from the error-path vocabulary.
+    for _code, action in workflow.CONVERSION_ACTION_EXCEPTIONS:
+        assert action in conversion_attempt.CONVERSION_ACTIONS
+        assert action not in workflow.ERROR_PATH_ACTIONS
+
+    admitted = workflow.WorkflowError(
+        "invalid_bundle",
+        "message",
+        return_code=4,
+        action_required="resume_pending_conversion_operation",
+    )
+    assert admitted.action_required == "resume_pending_conversion_operation"
+
+    # Same action, a different code -- still refused.
+    for code in ("integrity_violation", "invalid_arguments", "runtime_error"):
+        with pytest.raises(ValueError) as excinfo:
+            workflow.WorkflowError(
+                code,
+                "message",
+                return_code=4,
+                action_required="resume_pending_conversion_operation",
+            )
+        assert "resume_pending_conversion_operation" in str(excinfo.value)
+
+    # Same code, every other conversion action -- still refused.
+    for action in sorted(
+        conversion_attempt.CONVERSION_ACTIONS - {"resume_pending_conversion_operation"}
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            workflow.WorkflowError(
+                "invalid_bundle", "message", return_code=4, action_required=action
+            )
+        assert action in str(excinfo.value)

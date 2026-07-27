@@ -123,6 +123,48 @@ RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
 )
 
 
+# The only (code, action_required) pairs a WorkflowError may carry from
+# outside ERROR_PATH_ACTIONS. Task 3.1b (design.md Decision 1) is the whole of
+# it: `inspect` parked on an unclosed conversion intent still reports
+# invalid_bundle / rc 4 / writes nothing, but the action it names has to be the
+# one that actually closes that boundary -- `resume`, which reaches
+# recover_interrupted_attempt without ever calling _inspect_open_bundle and so
+# finishes the intent with zero network calls. That action
+# (resume_pending_conversion_operation) belongs to
+# conversion_attempt.CONVERSION_ACTIONS, not to the error-path table.
+#
+# This is a keyhole, not a door: the pair is matched whole, so neither another
+# conversion action under invalid_bundle nor this action under another code
+# gets through. Widening it to `action_required in CONVERSION_ACTIONS` would
+# dissolve the closed error-path vocabulary the check exists to enforce --
+# tests/test_workflow.py::
+# test_the_workflow_error_conversion_gate_admits_exactly_one_pair pins both
+# halves of that.
+CONVERSION_ACTION_EXCEPTIONS = frozenset(
+    {("invalid_bundle", "resume_pending_conversion_operation")}
+)
+
+
+def _check_conversion_action_exceptions_are_real() -> None:
+    """Every admitted action must be a live conversion-vocabulary member.
+
+    Without this the exception list survives a rename of the action it admits:
+    the gate would keep letting a string through that no producer writes any
+    more, and the WorkflowError check would look closed while quietly guarding
+    nothing. `raise`, not `assert`, so `python -O` cannot strip it (same
+    stance as conversion_attempt.py's own import-time table guards).
+    """
+    for code, action in CONVERSION_ACTION_EXCEPTIONS:
+        if action not in conversion_attempt_module.CONVERSION_ACTIONS:
+            raise ValueError(
+                f"CONVERSION_ACTION_EXCEPTIONS admits {action!r} for {code!r}, "
+                "which is not a conversion action"
+            )
+
+
+_check_conversion_action_exceptions_are_real()
+
+
 class WorkflowError(Exception):
     def __init__(
         self,
@@ -133,7 +175,11 @@ class WorkflowError(Exception):
         action_required: str | None,
         context=None,
     ):
-        if action_required is not None and action_required not in ERROR_PATH_ACTIONS:
+        if (
+            action_required is not None
+            and action_required not in ERROR_PATH_ACTIONS
+            and (code, action_required) not in CONVERSION_ACTION_EXCEPTIONS
+        ):
             raise ValueError(
                 f"action_required {action_required!r} is not an error-path action"
             )
@@ -1020,6 +1066,50 @@ def _assert_bundle_descriptors_current(bundle: Path, descriptors: dict) -> None:
         ) from None
 
 
+def _at_pending_conversion_boundary(
+    history: list[dict], manifest: dict, private_state: dict
+) -> bool:
+    """Is this history merely parked on an unclosed conversion intent?
+
+    `valid_history` demands that reducing the whole history reproduce the
+    manifest and private state on disk. A durable intent whose committed event
+    never landed breaks that equality by construction -- the reducer applies
+    the operation the intent opened, disk does not have it yet -- so a bundle
+    waiting to be recovered is indistinguishable from a damaged one at that
+    call site. Reducing the history *without* its last event separates them:
+    if the prefix reproduces disk exactly, everything before the intent is
+    intact and the only thing outstanding is the operation the intent opened,
+    which is precisely what recover_interrupted_attempt replays.
+
+    Read-only and allocation-only: `history` is already in memory, and
+    resolve_history_state is a pure reduce over it (no file descriptors, no
+    network). It runs only on the failure path.
+
+    conversion_attempt's reducer is the right one to ask even though
+    valid_history above may have dispatched the *bundle* to another layer: it
+    reduces its own conversion segment and hands the part before it to
+    source_staging (conversion_attempt.py:4895), which chains on down to
+    preflight, so it covers every history a conversion intent can currently
+    sit at the end of. A bundle carrying a raw-conversion or review slice is
+    outside what it can reduce; that returns None here and keeps the original
+    `repair_or_restore_work_bundle` verdict rather than guessing.
+    """
+    if not history:
+        return False
+    last = history[-1]
+    if (
+        not isinstance(last, dict)
+        or last.get("event") not in conversion_attempt_module.CONVERSION_INTENTS
+    ):
+        return False
+    reduced = conversion_attempt_module.resolve_history_state(
+        history[:-1],
+        manifest_template=manifest,
+        private_template=private_state,
+    )
+    return reduced == (manifest, private_state)
+
+
 def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     try:
         manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
@@ -1224,7 +1314,11 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             "invalid_bundle",
             "Work bundle history uses an unknown or inconsistent schema.",
             return_code=4,
-            action_required="repair_or_restore_work_bundle",
+            action_required=(
+                "resume_pending_conversion_operation"
+                if _at_pending_conversion_boundary(history, manifest, private_state)
+                else "repair_or_restore_work_bundle"
+            ),
             context=state_context,
         )
     try:
