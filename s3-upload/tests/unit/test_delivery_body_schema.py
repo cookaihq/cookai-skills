@@ -70,19 +70,32 @@ def test_verify_public_is_not_a_caller_operation():
 
 def test_blocking_reasons_vocabulary_is_locked():
     assert BLOCKING_REASONS == (
+        "abort_unavailable",
         "already_acknowledged",
+        "authorization_missing",
+        "authorization_stale",
         "caller_drift",
         "capability_missing",
+        "collision_unverified",
+        "content_mismatch",
         "cwd_drift",
         "executable_drift",
         "handoff_unsafe",
         "handoff_write_failed",
         "plan_not_executable",
+        "public_verification_failed",
+        "remote_rejected_absent",
+        "remote_rejected_denied",
+        "remote_rejected_invalid",
+        "remote_rejected_unclassified",
+        "resume_unavailable",
         "source_drift",
         "state_root_drift",
         "target_contract_drift",
         "token_invalid",
         "unclassified_outcome",
+        "verification_capability_missing",
+        "verification_incomplete",
     )
 
 

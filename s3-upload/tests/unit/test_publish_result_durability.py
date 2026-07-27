@@ -700,8 +700,13 @@ def test_a_definitive_no_write_survives_a_failed_checkpoint_retention_write(
     the checkpoint is moved back to "not_started"; a replace that fails there
     (checkpoint directory drifted, ENOSPC) is a local bookkeeping failure. It
     must not displace DefinitiveNoWrite into the generic exception exit, which
-    would report in_flight_unknown / retry_safe=False and leave reconcile
-    probing an object the server already refused.
+    would report in_flight_unknown and leave reconcile probing an object the
+    server already refused.
+
+    retry_safe is False here even though the state is known_not_applied: this
+    exit passes capabilities_ok=False to end the plan, so allowed_actions
+    carries no publish for a retry to use. Do NOT read the False as a claim
+    that the write may have landed -- recovery_state is what carries that.
     """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     real = CheckpointStore.replace
@@ -718,7 +723,8 @@ def test_a_definitive_no_write_survives_a_failed_checkpoint_retention_write(
     assert len(raw.calls) == 1
     assert outcome.transport_calls == 1
     assert body["recovery_state"] == "known_not_applied"
-    assert body["retry_safe"] is True
+    assert body["retry_safe"] is False
+    assert body["allowed_actions"] == ["inspect"]
     assert open(project.result_out, "rb").read() == serialize_artifact(outcome.result)
     record = operation_record(project, issued.plan_id)
     assert record is not None

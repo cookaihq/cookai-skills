@@ -98,7 +98,7 @@ def test_recovery_state_fields_come_from_the_registry(state, capabilities_ok):
     assert item["allowed_actions"] == list(
         allowed_actions(state, capabilities_ok=capabilities_ok)
     )
-    assert item["retry_safe"] is retry_safe(state)
+    assert item["retry_safe"] is retry_safe(state, capabilities_ok=capabilities_ok)
 
 
 def test_recovery_descriptor_rejects_an_unregistered_state():

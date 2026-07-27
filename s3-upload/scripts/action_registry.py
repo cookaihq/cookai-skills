@@ -67,7 +67,16 @@ def allowed_actions(state: str, *, capabilities_ok: bool) -> Tuple[str, ...]:
     return tuple(action for action in actions if action in NO_REMOTE_EFFECT_ACTIONS)
 
 
-def retry_safe(state: str) -> bool:
+def retry_safe(state: str, *, capabilities_ok: bool = True) -> bool:
     if state not in RECOVERY_STATES:
         raise ActionRegistryError("unregistered recovery state")
-    return _RETRY_SAFE[state]
+    if not _RETRY_SAFE[state]:
+        return False
+    # A caller told retry_safe=True must have somewhere to retry to. Reading
+    # only _RETRY_SAFE answered True for a state whose capability filter had
+    # already removed every mutating action, so the caller was handed
+    # "safe to retry" together with allowed_actions=["inspect"].
+    return bool(
+        set(allowed_actions(state, capabilities_ok=capabilities_ok))
+        - NO_REMOTE_EFFECT_ACTIONS
+    )

@@ -36,7 +36,7 @@ def _state_fields(state: str, capabilities_ok: bool) -> Dict[str, Any]:
     return {
         "allowed_actions": list(allowed_actions(state, capabilities_ok=capabilities_ok)),
         "recovery_state": state,
-        "retry_safe": retry_safe(state),
+        "retry_safe": retry_safe(state, capabilities_ok=capabilities_ok),
     }
 
 

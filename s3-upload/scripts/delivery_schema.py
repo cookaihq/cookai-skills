@@ -82,20 +82,70 @@ def serialize_artifact(artifact: Dict[str, Any]) -> bytes:
 OPERATIONS: Tuple[str, ...] = ("publish", "reconcile", "resume", "abort", "ack", "inspect")
 
 BLOCKING_REASONS: Tuple[str, ...] = (
+    "abort_unavailable",
     "already_acknowledged",
+    "authorization_missing",
+    "authorization_stale",
     "caller_drift",
     "capability_missing",
+    "collision_unverified",
+    "content_mismatch",
     "cwd_drift",
     "executable_drift",
     "handoff_unsafe",
     "handoff_write_failed",
     "plan_not_executable",
+    "public_verification_failed",
+    "remote_rejected_absent",
+    "remote_rejected_denied",
+    "remote_rejected_invalid",
+    "remote_rejected_unclassified",
+    "resume_unavailable",
     "source_drift",
     "state_root_drift",
     "target_contract_drift",
     "token_invalid",
     "unclassified_outcome",
+    "verification_capability_missing",
+    "verification_incomplete",
 )
+
+# How the remote qualified its refusal, as a closed dimension inside
+# BLOCKING_REASONS rather than a parallel table: a caller that only knows the
+# reason vocabulary must still be able to see that the object is absent, that
+# the credential was denied, that the request was malformed, or that the
+# refusal could not be placed in any of those -- without a transport status
+# code leaking into a public artifact.
+REMOTE_REJECTIONS: Tuple[str, ...] = (
+    "remote_rejected_absent",
+    "remote_rejected_denied",
+    "remote_rejected_invalid",
+    "remote_rejected_unclassified",
+)
+
+OUTCOMES: Tuple[str, ...] = (
+    "adopted", "blocked", "created", "not_applied", "reconciled", "rejected",
+    "unknown",
+)
+
+DISPOSITIONS: Tuple[str, ...] = ("adopted", "created", "reconciled")
+
+VERIFICATION_CHANNELS: Tuple[str, ...] = (
+    "anonymous_public_get", "authenticated_full_get",
+)
+
+# The write certainty an outcome is allowed to claim. None is not "unset": it
+# is the claim that this operation's write is unknown, which is exactly what
+# reconciled has to keep and what created must never be folded into.
+OUTCOME_WRITE_CERTAINTY: Dict[str, Optional[bool]] = {
+    "adopted": False,
+    "blocked": False,
+    "created": True,
+    "not_applied": False,
+    "reconciled": None,
+    "rejected": False,
+    "unknown": None,
+}
 
 PLAN_FIELDS: Tuple[str, ...] = (
     "access", "blocking_reasons", "caller", "collision", "contract_key", "cwd",
