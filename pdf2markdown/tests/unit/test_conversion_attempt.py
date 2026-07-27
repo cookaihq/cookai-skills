@@ -4116,22 +4116,28 @@ def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
     import conversion_attempt as ca
 
     # Task 2.1c re-keys `_REASON_DETAIL_DOMAIN` from the flat state to the
-    # folded `reason`. This probe still reads the same on both sides because
-    # flat `poll_timeout` folds onto the reason of the same name -- the writer
-    # is handed the flat name and looks the reason up itself, the validator is
-    # handed the reason directly.
-    probe_state = "poll_timeout"
-    probe_code = "poll_timeout"
-    # Today `poll_timeout` is not in `_REASON_DETAIL_DOMAIN`, so both sides
-    # must drop the code.
+    # folded `reason`. This probe deliberately uses a flat state
+    # (`credential_source_changed`) whose folded reason
+    # (`credential_fingerprint_changed`) is a *different* string -- unlike
+    # `poll_timeout`, which folds onto a reason of the same name and so could
+    # not tell "keyed by flat state" apart from "keyed by reason": monkeypatching
+    # under either name would land on the domain entry the other indexing
+    # scheme also reads, so a regression back to flat-state keying would still
+    # pass. The writer is handed the flat name and looks the reason up itself;
+    # the validator and the monkeypatch below are handed the reason directly.
+    probe_flat_state = "credential_source_changed"
+    probe_reason = "credential_fingerprint_changed"
+    probe_code = "credential_fingerprint_changed"
+    # Today `credential_fingerprint_changed` is not in `_REASON_DETAIL_DOMAIN`,
+    # so both sides must drop the code.
     assert (
-        ca._attempt_reason_columns(probe_state, probe_code)["reason_detail"]
+        ca._attempt_reason_columns(probe_flat_state, probe_code)["reason_detail"]
         is None
     )
-    assert ca._valid_reason_detail(probe_state, probe_code) is False
+    assert ca._valid_reason_detail(probe_reason, probe_code) is False
 
     monkeypatch.setitem(
-        ca._REASON_DETAIL_DOMAIN, probe_state, frozenset({probe_code})
+        ca._REASON_DETAIL_DOMAIN, probe_reason, frozenset({probe_code})
     )
 
     # The validator reading the widened table is not interesting on its own
@@ -4139,10 +4145,10 @@ def test_reason_detail_producer_and_validator_read_one_table(monkeypatch):
     # directly. The writer moving in lockstep, with no code of its own
     # touched, is the evidence the two share one table.
     assert (
-        ca._attempt_reason_columns(probe_state, probe_code)["reason_detail"]
+        ca._attempt_reason_columns(probe_flat_state, probe_code)["reason_detail"]
         == probe_code
     )
-    assert ca._valid_reason_detail(probe_state, probe_code) is True
+    assert ca._valid_reason_detail(probe_reason, probe_code) is True
 
 
 def _schema_v1_attempt(attempt, wire_reason_code_by_state):
@@ -4752,6 +4758,13 @@ def test_every_refolded_pair_set_names_a_legal_pair():
     FLAT_STATE_MIGRATION 派生，而后者的 18 行由本文件的独立字面量 oracle
     （FOLDED_PAIR_BY_FLAT_STATE、FLAT_STATE_MIGRATION 覆盖域测试）钉住，所以
     这不是同义反复。
+
+    workflow.py 的 RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS 额外钉在一条**等值**
+    oracle 上，而不是子集：子集断言只能抓住『多出一个非法 pair』，对『少掉
+    一个合法 pair』完全瞎——而漏掉一个可续 poll 的 pair 正是这个集合最危险
+    的失效模式（resume 会对携带该 pair 的记录静默停止轮询）。等值右侧由
+    conversion_attempt 的 POLL_ACTIVE_ATTEMPT_PAIRS 和
+    _MANIFEST_STATE_BY_FOLDED_STATE 现算而来，不是同一张手写表的复制。
     """
     import conversion_attempt as ca
     import workflow as wf
@@ -4765,14 +4778,18 @@ def test_every_refolded_pair_set_names_a_legal_pair():
     for name, pairs in ca._REFOLDED_PAIR_SETS.items():
         assert pairs, name
         assert set(pairs) <= set(ca.LEGAL_STATE_REASON_PAIRS), name
-    # workflow.py 的那一处也一样，且它必须是可续 poll 的子集——否则 resume
-    # 会把一个 _poll_transition 立刻拒绝的记录送去重新轮询。
+    # workflow.py 的那一处也必须是合法 pair。
     assert set(wf.RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS) <= set(
         ca.LEGAL_STATE_REASON_PAIRS
     )
-    assert set(wf.RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS) <= set(
-        ca.POLL_ACTIVE_ATTEMPT_PAIRS
-    )
+    # ...而且必须恰好是 POLL_ACTIVE_ATTEMPT_PAIRS 里投影到 recoverable_error
+    # 的那些 pair——不多不少。子集断言抓不住『少了一个』，等值可以：右侧独立
+    # 现算，任何一处遗漏或多余都会让两边不等，从而让测试变红。
+    assert set(wf.RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS) == {
+        pair
+        for pair in ca.POLL_ACTIVE_ATTEMPT_PAIRS
+        if ca._MANIFEST_STATE_BY_FOLDED_STATE[pair] == "recoverable_error"
+    }
 
 
 def test_poll_admission_is_keyed_by_state_and_reason_not_state_alone():

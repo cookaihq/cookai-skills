@@ -50,18 +50,23 @@ ATTEMPT_KEYS = frozenset(
         "response_at",
         "http_status",
         # --- schema v2, replacing v1's single `reason_code` -----------------
-        # The closed, folded reason the state carries: a single-valued
-        # function of `state` via FLAT_STATE_MIGRATION's reason column, so it
-        # already speaks the post-fold vocabulary (task 2.1c changes `state`,
-        # not this field). It is *not* the wire reason code -- it disagrees
-        # with the wire on the two rows named in LEGAL_TRIPLES' docstring.
+        # The closed, folded reason a record carries: a single-valued
+        # function of the WIRE classification (FLAT_STATE_MIGRATION's key),
+        # via its reason column -- not of the stored, folded `state` alone:
+        # post-fold, `state == "failed"` alone spans ten distinct `reason`
+        # values (task 2.1c changes `state`, not this field). It is *not*
+        # the wire reason code -- it disagrees with the wire on the two rows
+        # named in LEGAL_TRIPLES' docstring.
         "reason",
         # The branch the wire actually took, kept only where `reason` cannot
-        # carry it: submission_unknown and poll_transient are the two states
+        # carry it: `no_task_id` and `poll_transient` are the two *reasons*
         # whose wire reason code ranges over a set rather than a single value
-        # (SUBMISSION_UNKNOWN_REASON_CODES / POLL_TRANSIENT_REASON_CODES).
-        # None everywhere else -- no information is lost, because for the
-        # other 16 states the wire value is recoverable from `state` alone.
+        # (SUBMISSION_UNKNOWN_REASON_CODES / POLL_TRANSIENT_REASON_CODES) --
+        # `_REASON_DETAIL_DOMAIN` has been keyed by `reason`, not by the flat
+        # state, since task 2.1c. None everywhere else -- no information is
+        # lost, because for every other legal (state, reason) pair the wire
+        # value is recoverable from that pair via LEGAL_TRIPLES' reason_code
+        # column, not from `state` alone.
         "reason_detail",
         # Placeholders this substep: authorization_kind is always None until
         # task 2.2/2.3 give the authorization vocabulary meaning, and
@@ -664,6 +669,17 @@ _POLL_WINDOW_RESET_PAIRS = frozenset(
 # test_every_refolded_pair_set_names_a_legal_pair can prove none of them
 # names a pair no record can ever carry. A mistyped reason in any of these
 # does not raise -- the rule it keys simply stops firing, silently.
+#
+# Not every inline `(state, reason) == (...)` comparison in the codebase is
+# registered here on purpose: registration exists for a pair that is *shared*
+# across multiple rules or call sites -- the way `_POLL_TRANSIENT_PAIR` is
+# spelled out five times -- where a typo in one copy would silently diverge
+# from the others. A pair literal compared exactly once, inline, at its own
+# call site (conversion_attempt.py's `elif active_pair == ("result_ready",
+# None):`; workflow.py's `== ("failed", "task_failed")` and
+# `== ("failed", "unsafe_result_url")`) has only one reader: a typo there
+# breaks that call site's own behaviour and its own test directly, not
+# silently, so it does not need this registry's cross-copy protection.
 _REFOLDED_PAIR_SETS = {
     "POLL_ACTIVE_ATTEMPT_PAIRS": POLL_ACTIVE_ATTEMPT_PAIRS,
     "CONFIRMABLE_PAIRS": CONFIRMABLE_PAIRS,

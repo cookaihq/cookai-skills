@@ -98,10 +98,13 @@ ERROR_PATH_ACTIONS = frozenset(
 # recoverable_error. Re-keyed by the 2.1c fold from a set of seven flat attempt
 # states that all fold onto `failed` -- note credential_source_changed's folded
 # reason is the renamed credential_fingerprint_changed, and poll_unauthorized's
-# is poll_authentication_rejected. A mistyped reason here does not raise; the
-# resume simply stops re-polling that failure, so
-# test_resumable_recoverable_pairs_are_legal_and_pollable pins the set against
-# conversion_attempt's own tables.
+# is poll_authentication_rejected. A mistyped *or missing* reason here does not
+# raise; the resume simply stops re-polling that failure, silently.
+# conversion_attempt.py's test_every_refolded_pair_set_names_a_legal_pair pins
+# this set with an equality, not a subset, against conversion_attempt's own
+# tables: it must equal exactly the POLL_ACTIVE_ATTEMPT_PAIRS members that
+# project to recoverable_error via _MANIFEST_STATE_BY_FOLDED_STATE, so a
+# dropped pair fails the test too, not only an added one.
 RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
     {
         ("failed", "credential_source_missing"),
