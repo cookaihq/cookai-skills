@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import re
 import sys
 from pathlib import Path
@@ -117,6 +118,39 @@ def sakura_config(layered: dict):
     frpc_path = layered.get("FRPC_LAUNCH_SAKURA_FRPC")
     return {"key": key[0], "tunnels": tunnels[0],
             "frpc_path": frpc_path[0] if frpc_path else None}, key[1]
+
+
+# ---------------------------------------------------------------------------
+# 模式判定
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class ModeDecision:
+    decision: str
+    modes: list
+    official: tuple
+    sakura: tuple
+
+
+def decide_mode(layered: dict, home: Path, requested_mode: str = "") -> ModeDecision:
+    o_path, o_source = official_config_path(layered, home)
+    o_ok = o_path is not None and official_config_valid(o_path)[0]
+    s_cfg, s_source = sakura_config(layered)
+    official = (o_path if o_ok else None, o_source if o_ok else "")
+    sakura = (s_cfg, s_source)
+    explicit = requested_mode or (layered.get("FRPC_LAUNCH_MODE") or ("",))[0]
+    if explicit:
+        if explicit not in ("official", "sakura"):
+            raise FrpcLaunchError(
+                "FRPC_LAUNCH_MODE/--mode 取值无效: %r（只接受 official / sakura）" % explicit)
+        return ModeDecision("explicit", [explicit], official, sakura)
+    available = [m for m, ok in [("official", o_ok), ("sakura", s_cfg is not None)] if ok]
+    if len(available) == 2:
+        return ModeDecision("ambiguous", available, official, sakura)
+    if len(available) == 1:
+        return ModeDecision("single", available, official, sakura)
+    return ModeDecision("none", [], official, sakura)
 
 
 def build_parser() -> argparse.ArgumentParser:
