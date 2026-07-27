@@ -4,15 +4,15 @@
 
 ## Normal 支持范围
 
-- AWS S3 (`aws-s3`)：单次 PutObject、private presigned GET。
-- Cloudflare R2 (`cloudflare-r2`)：单次 PutObject、private presigned GET。
-- `custom`：用户明确断言 exact endpoint 兼容同一单次 Put/presign 合同。
+- AWS S3 (`aws-s3`)：单次 PutObject（含 `If-None-Match: *` 条件写入，支持 `collision=reject|unique`）、private presigned GET。
+- Cloudflare R2 (`cloudflare-r2`)：单次 PutObject（含 `If-None-Match: *` 条件写入，支持 `collision=reject|unique`）、private presigned GET。
+- `custom`：用户明确断言 exact endpoint 兼容同一单次 Put/presign 合同；条件写入不启用。
 - 阿里云 OSS (`aliyun-oss`)：experimental 单次 PutObject、private current-key presign；`endpoint=null` 自动解析 `https://s3.oss-{region}.aliyuncs.com`，virtual addressing。
 - 腾讯云 COS (`tencent-cos`)：experimental 单次 PutObject、private current-key presign；`endpoint=null` 自动解析 `https://cos.{region}.myqcloud.com`，bucket 必须是完整 `BucketName-APPID`，virtual addressing。
 - Public Access：只从用户声明的 HTTPS Public Base URL 拼接，不修改 ACL/policy，不主动探测。
 - Retention：结果保存声明值；lifecycle 执行始终是 `external-unverified`。
 
-普通模式只执行 `collision=replace`。Delete、multipart、conditional write、HEAD reconciliation 和 assisted setup 都是 capability-gated，当前 normal baseline 不可用。OSS/COS 的 `experimental` 表示代码依据官方 endpoint/SDK 资料和离线向量完成，但尚无足以晋级 `enabled` 的完整 release evidence；OSS 只有单账号永久凭证的 bounded run，COS 尚无 live credential。先 dry-run，不能描述成 `enabled`。
+普通模式默认 `collision=replace`（同键覆盖）。aws-s3 / cloudflare-r2 baseline 已启用 conditional write：`--collision reject` 以 `If-None-Match: *` 原子 no-overwrite，撞 412 后经一次 presigned GET 全文比对，size+SHA-256 双等返回 `adopted`（`object_written=false`、退出码 0），不等以 collision 退出码 4 结束。`reconcile` 对 `put_unknown` checkpoint 的只读全文对账在 normal baseline 可用（零写请求）。Delete、multipart 和 assisted setup 仍是 capability-gated，当前 normal baseline 不可用。OSS/COS 的 `experimental` 表示代码依据官方 endpoint/SDK 资料和离线向量完成，但尚无足以晋级 `enabled` 的完整 release evidence；OSS 只有单账号永久凭证的 bounded run，COS 尚无 live credential。先 dry-run，不能描述成 `enabled`。
 
 ## 快速开始
 
@@ -35,7 +35,7 @@ python3 scripts/upload.py url \
   --json
 ```
 
-非 JSON 的 upload/url 成功时 stdout 只有一个 URL。JSON 始终使用固定 v1 result schema；遇到 `partial_success` 或 `ambiguous` 时，不要重放 Put，保留 `checkpoint_id`。
+非 JSON 的 upload/url 成功时 stdout 只有一个 URL。JSON 始终使用固定的 17 键闭合 result schema（v1 13 键原地扩展 + `remote`/`checkpoint`/`next_action`/`retry_safety`，不适用的值为显式 `null`）；`upload --result-out <path>` 把同一 result JSON 原子写入 caller 指定文件，与 stdout 逐字节一致。遇到 `partial_success` 或 `ambiguous` 时，不要重放 Put，保留 `checkpoint_id`，用 `reconcile --checkpoint <id>` 只读对账。
 
 ## 项目 Mapping
 
@@ -66,11 +66,11 @@ python3 /path/to/s3-upload/scripts/upload.py upload \
 ## CLI
 
 ```text
-upload FILE/TARGET options    normal 单次上传；multipart 由 capability gate 控制
+upload FILE/TARGET options    normal 单次上传；--collision reject / --result-out 见上；multipart 由 capability gate 控制
 url REFERENCE|TARGET+KEY      零远端请求生成 current-key URL
 delete                       capability-gated；normal baseline unavailable
 resume                       capability-gated multipart recovery
-reconcile                    capability-gated read-only recovery
+reconcile                    put_unknown 的只读全文对账在 normal baseline 可用；其余路径 capability-gated
 abort                        capability-gated multipart cleanup
 ```
 

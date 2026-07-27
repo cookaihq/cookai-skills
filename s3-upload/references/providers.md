@@ -4,23 +4,27 @@ Normal mode only advertises operations present in the exact Provider Capability 
 
 | Provider | Target endpoint/addressing | Normal operations | State |
 |---|---|---|---|
-| `aws-s3` | `endpoint=null`; AWS public endpoint derived from region; `addressing=null` resolves virtual | unconditional PutObject, presigned current-key GET | `enabled` |
-| `cloudflare-r2` | exact HTTPS account endpoint required; `region=auto`; path addressing | unconditional PutObject, presigned current-key GET | `enabled` |
+| `aws-s3` | `endpoint=null`; AWS public endpoint derived from region; `addressing=null` resolves virtual | PutObject incl. conditional `If-None-Match: *` (`collision=unique\|reject`), presigned current-key GET | `enabled` |
+| `cloudflare-r2` | exact HTTPS account endpoint required; `region=auto`; path addressing | PutObject incl. conditional `If-None-Match: *` (`collision=unique\|reject`), presigned current-key GET | `enabled` |
 | `custom` | exact endpoint, region and path/virtual addressing required; user asserts compatibility | unconditional PutObject, presigned current-key GET | `enabled` by explicit user assertion |
 | `aliyun-oss` | `endpoint=null` derives `https://s3.oss-{region}.aliyuncs.com`; `addressing=null` resolves virtual | unconditional fixed-length PutObject, presigned current-key GET | `experimental` |
 | `tencent-cos` | `endpoint=null` derives `https://cos.{region}.myqcloud.com`; complete `BucketName-APPID`; `addressing=null` resolves virtual | unconditional fixed-length PutObject, presigned current-key GET | `experimental` |
 
 Public URL construction is local and user-declared; it does not prove provider GET behavior. Target header defaults are signed with PutObject. Access Mode and Retention are independent, but this Skill never installs ACL, bucket policy, lifecycle or CORS.
 
-Normal contracts do not currently enable:
+Conditional Put (`ConditionalPutObject`, backing `collision=unique|reject` via `If-None-Match: *`) is enabled on the `aws-s3` and `cloudflare-r2` presets, with the providers' official conditional-write documentation as evidence. It stays disabled for `custom` and the OSS/COS experimental presets. Under `reject`, a remote 412 is followed by one presigned full-body GET: a size+SHA-256 double match against the planned source adopts the existing object (`adopted`, exit 0), anything less is a collision (exit 4).
 
-- conditional Put (`collision=unique|reject`);
+Read-only reconciliation of a `put_unknown` checkpoint runs on every normal baseline through the same presigned full-body GET (`PresignGetObject`); HEAD/reserved-metadata round-trips remain disabled and are not used as evidence.
+
+Normal contracts still do not enable:
+
+- conditional Put on `custom`, `aliyun-oss` or `tencent-cos`;
 - HEAD/reserved-metadata reconciliation;
 - current-key or exact-version Delete and observers;
 - multipart create/part/list/complete/abort;
 - browser-assisted bucket/identity/policy setup.
 
-Accordingly a normal Target uses `collision=replace` and null multipart threshold/part size. A formed dry-run for unavailable behavior returns `plan.executable=false` with capability blockers and sends zero requests.
+A normal Target defaults to `collision=replace` and null multipart threshold/part size; `reject`/`unique` are executable only where conditional Put is enabled. A formed dry-run for unavailable behavior returns `plan.executable=false` with capability blockers and sends zero requests.
 
 ## OSS/COS experimental status
 
