@@ -651,6 +651,13 @@ def test_a_reference_may_not_point_where_its_target_contract_does_not():
     # deleting them. This is the whole requirement -- nothing here asks
     # target_contract to be a complete contract_snapshot, which is Task 8's
     # shape to settle.
+    #
+    # The fourth case is a different refusal and is here deliberately: all five
+    # fields are present, one of them is null, and it is refused as drift
+    # ("location disagrees with target_contract: region"), not as absence --
+    # run, not assumed. A field that exists but carries null is not a missing
+    # field, so nothing in _bind_location's absence half would catch it; the
+    # equality half does.
     for absent in ({}, {"contract_version": 1}, {"lol": "not a contract"},
                    dict(CONTRACT, region=None)):
         with pytest.raises(ReferenceError):
