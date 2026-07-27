@@ -527,6 +527,13 @@ def test_a_descriptor_that_outlived_a_rollback_is_reported_and_keeps_its_checkpo
 
 
 def fail_the_first_checkpoint_replace(monkeypatch):
+    """Wedge the window between CheckpointStore.create and checkpoint_notice.
+
+    execute_single_put creates the checkpoint, moves it to put_in_flight with
+    a replace, and only then calls checkpoint_notice. Failing that first
+    replace lands the publish in the generic exception exit with a checkpoint
+    already on disk and nothing else durable.
+    """
     real = CheckpointStore.replace
     seen = {"count": 0}
 
@@ -661,6 +668,15 @@ def test_a_handoff_error_with_no_request_still_invites_a_retry(
 def test_a_definitive_no_write_keeps_its_checkpoint_consistent_with_the_operation_record(
     project, resolved, dry_run, snapshot, contract_digest
 ):
+    """The 403 exit leaves the record and the checkpoint agreeing.
+
+    execute_single_put retains the checkpoint on a definitive no-write
+    response, moved back to "not_started", instead of removing it while
+    operation.json keeps pointing at it. The record must stay behind either
+    way -- discarding it would let a replay lose the AlreadyHandedOff trigger
+    and send the Put a second time -- and now the checkpoint it names is
+    really on disk.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     outcome = run(project, resolved, store, issued.token, Recorder(status=403))
     record = operation_record(project, issued.plan_id)
@@ -675,9 +691,59 @@ def test_a_definitive_no_write_keeps_its_checkpoint_consistent_with_the_operatio
     assert outcome.checkpoint_id == record["checkpoint_id"]
 
 
+def test_a_definitive_no_write_survives_a_failed_checkpoint_retention_write(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    """A local retention write must not erase what the remote already said.
+
+    The remote's definitive refusal to write is established fact by the time
+    the checkpoint is moved back to "not_started"; a replace that fails there
+    (checkpoint directory drifted, ENOSPC) is a local bookkeeping failure. It
+    must not displace DefinitiveNoWrite into the generic exception exit, which
+    would report in_flight_unknown / retry_safe=False and leave reconcile
+    probing an object the server already refused.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    real = CheckpointStore.replace
+
+    def fail_retention_write(self, checkpoint):
+        if checkpoint["state"] == "not_started":
+            raise ArtifactError("injected retention write failure")
+        return real(self, checkpoint)
+
+    monkeypatch.setattr(CheckpointStore, "replace", fail_retention_write)
+    raw = Recorder(status=403)
+    outcome = run(project, resolved, store, issued.token, raw)
+    body = body_of(outcome.result)
+    assert len(raw.calls) == 1
+    assert outcome.transport_calls == 1
+    assert body["recovery_state"] == "known_not_applied"
+    assert body["retry_safe"] is True
+    assert open(project.result_out, "rb").read() == serialize_artifact(outcome.result)
+    record = operation_record(project, issued.plan_id)
+    assert record is not None
+    assert checkpoints_on_disk(project) == [record["checkpoint_id"]]
+    checkpoint = json.loads(
+        (project.state_root / "checkpoints" / (record["checkpoint_id"] + ".json"))
+        .read_text(encoding="utf-8")
+    )
+    assert checkpoint["state"] == "put_in_flight"
+    assert outcome.checkpoint_id == record["checkpoint_id"]
+
+
 def test_a_failure_before_the_notice_cleans_the_checkpoint_and_remains_retryable(
     project, resolved, dry_run, snapshot, contract_digest, monkeypatch
 ):
+    """A failure in the create-to-notice window rolls back and stays retryable.
+
+    checkpoint_created hands the id to the publish as soon as the checkpoint
+    is durable, so a failure before checkpoint_notice can prove nothing left
+    the process: no request was sent and no operation record exists. The exit
+    drops the checkpoint it created and answers known_not_applied with
+    retry_safe=True. Do NOT close a failure here by relabelling the exit
+    in_flight_unknown, which would turn a safely retryable failure into a
+    dead end.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     fail_the_first_checkpoint_replace(monkeypatch)
     real_remove = CheckpointStore.remove
@@ -716,6 +782,14 @@ def test_checkpoint_survival_lookup_keeps_an_id_rejected_by_store_validation(pro
 
 
 def fail_fstat_on(path, monkeypatch, *, limit=1):
+    """Fail os.fstat for one specific file, whichever descriptor reaches it.
+
+    handoff_io converts only the os.open of a handoff destination into a
+    HandoffError. The fstat that follows it -- the one that decides whether
+    the thing just opened is still a regular, single-linked, 0600 file -- is a
+    bare OSError, and this is how a read-back is made to fail after the file
+    has been opened.
+    """
     info = os.stat(path)
     identity = (info.st_dev, info.st_ino)
     real = os.fstat
@@ -735,6 +809,15 @@ def fail_fstat_on(path, monkeypatch, *, limit=1):
 def test_a_failed_read_back_never_escapes_over_an_answer_already_written(
     project, resolved, dry_run, snapshot, contract_digest, monkeypatch
 ):
+    """A read-back that fails must not take the publish with it.
+
+    The descriptor read at the end of emit runs after the object may already
+    be on the remote and after result_out has been written. An OSError from it
+    -- an fstat or a read failing on the open descriptor, neither of which
+    handoff_io converts -- would escape publish as a traceback, so the caller
+    would be handed an exception instead of the in_flight_unknown that is
+    sitting on disk, and would have no way to learn a request had been sent.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     raw = Recorder(status=503)
     state = {}

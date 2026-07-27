@@ -320,8 +320,10 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                 continue
             if parsed.classification != "success":
                 if retain_definitive_checkpoint:
-                    checkpoint = _set_state(checkpoint, "not_started", moment)
-                    store.replace(checkpoint)
+                    try:
+                        store.replace(_set_state(checkpoint, "not_started", moment))
+                    except (ArtifactError, OSError):
+                        pass
                 else:
                     try:
                         store.remove(checkpoint_id)

@@ -46,11 +46,23 @@ class HardCrash(BaseException):
 
 
 class Wedged(BaseException):
-    pass
+    """Raised out of a blocked syscall by the deadline below.
+
+    A BaseException so publish's own ``except Exception`` cannot swallow the
+    timeout and turn a wedged run into a structured result.
+    """
 
 
 @contextmanager
 def deadline(seconds):
+    """Bound a call that must not be able to block forever.
+
+    A publish that opens a handoff destination without O_NONBLOCK blocks in
+    os.open until a writer shows up on the FIFO, which never happens: no
+    assertion fails, the test never returns, and the whole suite stops. SIGALRM
+    interrupts the syscall and the handler raises, so the wedge surfaces as a
+    named failure in this test instead of a job that has to be killed.
+    """
     def expire(signum, frame):
         raise Wedged("the call did not return within %.1fs" % seconds)
 
@@ -729,6 +741,16 @@ def test_a_failed_checkpoint_drop_reports_the_checkpoint_it_left_behind(
 def test_a_checkpoint_the_directory_will_not_show_is_still_reported(
     project, resolved, dry_run, snapshot, contract_digest
 ):
+    """Only proven absence may drop a checkpoint id.
+
+    A checkpoint directory that has drifted off 0700 is one CheckpointStore
+    refuses to touch, so the checkpoint this call created is stranded there
+    and nothing will collect it. The publish reports the id it is carrying
+    unless a stat proves the directory let go of it, and here the stat is
+    refused rather than answered: a mode with no traversal bit fails every
+    lookup inside with EACCES. Answering None on that would tell the caller a
+    stranded checkpoint is gone.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     checkpoints = project.state_root / "checkpoints"
     out_mode = stat.S_IMODE(os.stat(project.out).st_mode)
@@ -806,6 +828,13 @@ def test_the_descriptor_and_the_result_agree_on_the_operation_chain(
 def test_a_descriptor_destination_that_turned_unsafe_reads_back_as_absent(
     project, resolved, dry_run, snapshot, contract_digest, swap
 ):
+    """The descriptor read must obey the same rules as the write.
+
+    Reading recovery_out back with a plain open() would follow a symlink,
+    accept a world-writable file or a hardlink alias, and block forever on a
+    FIFO. The read goes through the preflighted HandoffTarget instead, so a
+    destination swapped out after preflight reports no descriptor at all.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     first = run(project, resolved, store, issued.token, Recorder())
     assert first.recovery is not None
@@ -850,6 +879,19 @@ def test_a_descriptor_destination_that_turned_unsafe_reads_back_as_absent(
 def test_an_exit_after_the_plan_is_bound_still_answers_with_the_durable_result(
     project, resolved, dry_run, snapshot, contract_digest, damage
 ):
+    """A durable result outranks every exit taken once the plan is bound.
+
+    These exits all run before the recovery preflight -- two of them are the
+    preflight refusing recovery_out -- and each of them used to answer
+    "blocked" with allowed_actions=["inspect"], which is the one shape that
+    can never be acknowledged: the plan, the token and the spool stay behind
+    forever while a terminal_unacknowledged result sits on result_out. So
+    result_out is preflighted as soon as the plan is, and every exit from
+    there on reports what is durable rather than what this attempt hit.
+
+    The descriptor is a different matter: nothing preflighted recovery_out on
+    these paths, so it is not read at all and no descriptor is reported.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     first = run(project, resolved, store, issued.token, Recorder())
     assert first.recovery is not None
@@ -878,6 +920,13 @@ def test_an_exit_after_the_plan_is_bound_still_answers_with_the_durable_result(
 def test_an_exit_whose_result_destination_is_unsafe_reports_no_answer(
     project, resolved, dry_run, snapshot, contract_digest
 ):
+    """The one exit that may still answer "blocked" is the unreadable one.
+
+    Loosening result_out is not the defect the test above closes: the durable
+    answer cannot be read through a destination that just failed preflight, so
+    there is nothing to report and blocked is the honest reply. Do NOT close
+    this by reading result_out anyway.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     first = run(project, resolved, store, issued.token, Recorder())
     assert first.recovery is not None
@@ -897,6 +946,15 @@ def test_an_exit_whose_result_destination_is_unsafe_reports_no_answer(
 def test_a_result_destination_that_cannot_be_read_still_reaches_its_exit(
     project, resolved, dry_run, snapshot, contract_digest, monkeypatch
 ):
+    """Binding result_out early must not become a new way to raise.
+
+    The bind puts a filesystem read in front of exits that previously touched
+    nothing, so a read that fails there could stop those exits from being
+    reached at all: a source_drift that used to be answered would come back as
+    a traceback. preflight converts only the os.open of the destination; a
+    read failing after it comes out as a bare OSError, so the bind absorbs
+    that too, reports no durable result, and lets the exit below answer.
+    """
     store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
     run(project, resolved, store, issued.token, Recorder())
     assert os.path.exists(project.result_out)
@@ -924,6 +982,88 @@ def test_a_result_destination_that_cannot_be_read_still_reaches_its_exit(
     assert body["blocking_reasons"] == ["source_drift"]
     assert body["recovery_state"] == "blocked"
     assert outcome.recovery is None
+
+
+def test_a_late_preflight_oserror_is_reported_as_handoff_unsafe(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    """The gate preflight must absorb a bare OSError, not just HandoffError.
+
+    preflight converts only some failures into HandoffError; an fstat or
+    directory open failing with EIO comes out as a bare OSError. The late
+    preflight is the exit that judges the handoff destinations, so an I/O
+    failure there is the same verdict -- handoff_unsafe -- not a traceback
+    that takes the whole publish with it.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+
+    def eio(path, **kwargs):
+        raise OSError(errno.EIO, "injected preflight I/O failure")
+
+    monkeypatch.setattr("delivery_workflow.preflight", eio)
+    recorder = Recorder()
+    outcome = run(project, resolved, store, issued.token, recorder)
+    body = body_of(outcome.result)
+    assert recorder.calls == []
+    assert outcome.transport_calls == 0
+    assert body["blocking_reasons"] == ["handoff_unsafe"]
+    assert body["recovery_state"] == "blocked"
+    assert not os.path.exists(project.recovery_out)
+    assert not os.path.exists(project.result_out)
+
+
+def test_a_checkpoint_deleted_out_from_under_a_success_is_reported_absent(
+    project, resolved, dry_run, snapshot, contract_digest
+):
+    """The success exit answers from the directory, not from its own handle.
+
+    A checkpoint collected out from under the publish -- here deleted at the
+    after_request boundary -- is proven absent, so the success exit must
+    report checkpoint_id=None rather than replay the in-process handle it is
+    still carrying. Reporting the raw handle would point the caller at a
+    checkpoint that no longer exists.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+    checkpoints = project.state_root / "checkpoints"
+
+    def wound(name):
+        if name == "after_request":
+            for item in checkpoints.iterdir():
+                if item.suffix == ".json":
+                    item.unlink()
+
+    outcome = run(project, resolved, store, issued.token, Recorder(),
+                  on_boundary=wound)
+    body = body_of(outcome.result)
+    assert body["recovery_state"] == "terminal_unacknowledged"
+    assert durable_state(project, issued.plan_id)["checkpoints"] == []
+    assert outcome.checkpoint_id is None
+
+
+def test_an_identity_extraction_failure_is_answered_as_source_drift(
+    project, resolved, dry_run, snapshot, contract_digest, monkeypatch
+):
+    """A malformed source identity must not escape as a traceback.
+
+    _source_identity reads plan fields that carry an integrity hash, so a
+    plan whose identity no longer parses has no reachable trigger today; the
+    try around the call is defence in depth. If it ever fires, the publish
+    answers source_drift -- the identity could not be tied to the plan --
+    instead of handing the caller an exception.
+    """
+    store, issued = issue_plan(project, dry_run, snapshot, contract_digest)
+
+    def explode(plan):
+        raise ValueError("injected malformed source identity")
+
+    monkeypatch.setattr("delivery_workflow._source_identity", explode)
+    recorder = Recorder()
+    outcome = run(project, resolved, store, issued.token, recorder)
+    body = body_of(outcome.result)
+    assert recorder.calls == []
+    assert outcome.transport_calls == 0
+    assert body["blocking_reasons"] == ["source_drift"]
+    assert body["recovery_state"] == "blocked"
 
 
 def test_already_handed_off_is_disjoint_from_the_handoff_error_hierarchy():
