@@ -55,6 +55,24 @@ UNKNOWN_REASON_CODES = frozenset(
         "result_private_payload_lost",
     }
 )
+# Task 3.1a (design.md Decision 5's M6 review point) -- the single owner of
+# which pending_action `kind` a source-staging attempt state carries. Used to
+# be three separately-typed inline dict literals (_valid_pending_action,
+# _pending_action, commit_source_staging_decision's allowed_action lookup)
+# with no mechanical link between them. conversion_attempt.
+# project_conversion_action's precedence rule table (tier "2-source-staging")
+# passes this closed vocabulary's value through unchanged rather than folding
+# it into CONVERSION_ACTIONS -- design.md Decision 5's table says the
+# source-staging tier "沿用 source-staging 既有 kind（不属于 conversion 闭合
+# 表）" -- so the value domain needs a name of its own for the projector to
+# validate a value against at the point it reads one back out of a live
+# pending_action object.
+PENDING_ACTION_KIND_BY_STATE = {
+    "source_upload_unknown": "resolve_source_upload_unknown",
+    "source_upload_rejected": "retry_source_upload",
+    "source_upload_expired": "retry_expired_source_upload",
+}
+SOURCE_STAGING_ACTIONS = frozenset(PENDING_ACTION_KIND_BY_STATE.values())
 
 
 class SourceStagingError(ValueError):
@@ -191,15 +209,10 @@ def _valid_public_attempt(attempt, *, source_sha256: str) -> bool:
 def _valid_pending_action(value, *, manifest: dict, attempt: dict) -> bool:
     if value is None:
         return True
-    kinds = {
-        "source_upload_unknown": "resolve_source_upload_unknown",
-        "source_upload_rejected": "retry_source_upload",
-        "source_upload_expired": "retry_expired_source_upload",
-    }
     return (
         isinstance(value, dict)
         and set(value) == {"kind", "action_id", "generation", "evidence_hash"}
-        and value.get("kind") == kinds.get(attempt.get("state"))
+        and value.get("kind") == PENDING_ACTION_KIND_BY_STATE.get(attempt.get("state"))
         and isinstance(value.get("action_id"), str)
         and ACTION_ID_PATTERN.fullmatch(value["action_id"]) is not None
         and value.get("generation") == manifest.get("generation")
@@ -292,12 +305,7 @@ def _pending_action(manifest: dict, attempt: dict) -> dict | None:
         and attempt.get("state") != "source_upload_expired"
     ):
         return None
-    kinds = {
-        "source_upload_unknown": "resolve_source_upload_unknown",
-        "source_upload_rejected": "retry_source_upload",
-        "source_upload_expired": "retry_expired_source_upload",
-    }
-    kind = kinds.get(attempt.get("state"))
+    kind = PENDING_ACTION_KIND_BY_STATE.get(attempt.get("state"))
     if kind is None:
         return None
     evidence_hash = object_hash(attempt)
@@ -1037,11 +1045,7 @@ def commit_decision(
         if current_state == "source_upload_unknown"
         else "recoverable_error"
     )
-    allowed_action = {
-        "source_upload_unknown": "resolve_source_upload_unknown",
-        "source_upload_rejected": "retry_source_upload",
-        "source_upload_expired": "retry_expired_source_upload",
-    }.get(current_state)
+    allowed_action = PENDING_ACTION_KIND_BY_STATE.get(current_state)
     if (
         manifest.get("generation") != expected_generation
         or private_state.get("generation") != expected_generation

@@ -1789,7 +1789,11 @@ def test_completed_task_with_one_https_result_keeps_the_full_url_private(
     assert ready["outcome"] == "result_ready"
     assert ready["conversion_state"] == "result_downloading"
     assert ready["conversion_attempt_state"] == "result_ready"
-    assert ready["action_required"] is None
+    # Task 3.1a: design.md Decision 5 tier 4d now projects this action --
+    # attempt state result_ready with no reason -- as "adopt_conversion_
+    # result", replacing the old None (no wrapper covered this branch
+    # before project_conversion_action).
+    assert ready["action_required"] == "adopt_conversion_result"
     manifest_text = (bundle / "manifest.json").read_text()
     history_text = (bundle / ".state" / "history.ndjson").read_text()
     private_state = json.loads((bundle / ".state" / "private.json").read_text())
@@ -5664,7 +5668,7 @@ class _CapturedIO:
 _drive_to_flat_state_call_counter = itertools.count()
 
 
-def drive_to_flat_state(tmp_path, flat_state):
+def drive_to_flat_state(tmp_path, flat_state, *, capture_bundle=None):
     """Drive a fresh work bundle to `flat_state` through main()'s public
     CLI boundary and return the machine result JSON of the call that lands
     on it.
@@ -5683,6 +5687,16 @@ def drive_to_flat_state(tmp_path, flat_state):
     so that repeated calls for the *same* flat_state under one tmp_path --
     e.g. a fold-before/fold-after comparison -- get distinct scratch
     directories instead of colliding on mkdir().
+
+    `capture_bundle` (task 3.1a): purely additive side channel, `None` by
+    default and so a no-op for every existing caller. When a caller passes a
+    dict, this stores the driven work bundle's path under its "bundle" key --
+    the return value stays the machine result JSON either way. Callers that
+    need `manifest.json` off disk (project_conversion_action's precedence
+    tests build real, validator-passed manifests this way rather than
+    hand-rolling one) read it back through this side channel instead of this
+    function growing a second, tuple-shaped return type that would force
+    every existing call site to unpack differently.
     """
     call_root = tmp_path / (
         f"drive-{flat_state}-{next(_drive_to_flat_state_call_counter)}"
@@ -5693,6 +5707,8 @@ def drive_to_flat_state(tmp_path, flat_state):
             bundle, staged, dependencies, key, _source_url, _source_sha256 = (
                 ready_staged_bundle(call_root, capture, monkeypatch)
             )
+            if capture_bundle is not None:
+                capture_bundle["bundle"] = bundle
             create_environ = {**dependencies, "AIHUB_API_KEY": key}
 
             def _resume(transport, *, expected_generation, environ=None, now=NOW):
@@ -6523,9 +6539,21 @@ def test_poll_admission_is_keyed_by_state_and_reason_not_state_alone():
 # a distinct resolve_* name (submission_unknown, unexpected_result_count,
 # failed) now carry "authorize_new_conversion_attempt" -- the kind fold
 # test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else's
-# docstring used to defer to "not in this step". These three cells are the
-# only edit task 2.4 makes to this table; every other cell is still the
-# task-2.1c-era snapshot.
+# docstring used to defer to "not in this step".
+#
+# Task 3.1a update (design.md Decision 5's projector goes live, replacing the
+# four-layer result_from_manifest override chain): the eight rows below whose
+# action_required cell used to be `None` now carry the tier-3/4c/4d action
+# design.md Decision 5 assigns them -- these branches always had a real next
+# step, project_conversion_action is what first makes it observable:
+#   * result_ready -> "adopt_conversion_result" (tier 4d)
+#   * poll_transient / task_unavailable / poll_timeout /
+#     result_pending_timeout -> "resume_same_conversion_task" (tier 4c)
+#   * poll_unauthorized / credential_source_missing /
+#     credential_source_changed -> "restore_recorded_aihub_credential"
+#     (tier 3; poll_unauthorized folds to reason poll_authentication_rejected,
+#     one of tier 3's three credential reasons)
+# Every other cell, including the three task-2.4 edits above, is unchanged.
 FOLDED_STATE_OBSERVABLES = {
     "not_started": (
         "ready_to_submit", "authorized", "conversion_retry_authorized", None
@@ -6539,7 +6567,10 @@ FOLDED_STATE_OBSERVABLES = {
     "pending": ("submitted", "processing", "conversion_pending", None),
     "processing": ("submitted", "processing", "conversion_processing", None),
     "result_pending": ("submitted", "processing", "result_pending", None),
-    "result_ready": ("result_downloading", "result_ready", "result_ready", None),
+    "result_ready": (
+        "result_downloading", "result_ready", "result_ready",
+        "adopt_conversion_result",
+    ),
     "unsafe_result_url": ("terminal_error", "failed", "unsafe_result_url", None),
     "unexpected_result_count": (
         "terminal_error", "failed", "unexpected_result_count",
@@ -6549,20 +6580,33 @@ FOLDED_STATE_OBSERVABLES = {
         "awaiting_user", "failed", "task_failed",
         "authorize_new_conversion_attempt",
     ),
-    "poll_transient": ("recoverable_error", "failed", "poll_transient", None),
-    "poll_unauthorized": (
-        "recoverable_error", "failed", "poll_unauthorized", None
+    "poll_transient": (
+        "recoverable_error", "failed", "poll_transient",
+        "resume_same_conversion_task",
     ),
-    "task_unavailable": ("recoverable_error", "failed", "task_unavailable", None),
+    "poll_unauthorized": (
+        "recoverable_error", "failed", "poll_unauthorized",
+        "restore_recorded_aihub_credential",
+    ),
+    "task_unavailable": (
+        "recoverable_error", "failed", "task_unavailable",
+        "resume_same_conversion_task",
+    ),
     "credential_source_missing": (
-        "recoverable_error", "failed", "credential_source_missing", None,
+        "recoverable_error", "failed", "credential_source_missing",
+        "restore_recorded_aihub_credential",
     ),
     "credential_source_changed": (
-        "recoverable_error", "failed", "credential_source_changed", None,
+        "recoverable_error", "failed", "credential_source_changed",
+        "restore_recorded_aihub_credential",
     ),
-    "poll_timeout": ("recoverable_error", "failed", "poll_timeout", None),
+    "poll_timeout": (
+        "recoverable_error", "failed", "poll_timeout",
+        "resume_same_conversion_task",
+    ),
     "result_pending_timeout": (
-        "recoverable_error", "failed", "result_pending_timeout", None,
+        "recoverable_error", "failed", "result_pending_timeout",
+        "resume_same_conversion_task",
     ),
 }
 
@@ -6606,6 +6650,27 @@ _ACTION_REQUIRED_FOLDED_ROWS = frozenset(
     {"submission_unknown", "unexpected_result_count", "failed"}
 )
 
+# Task 3.1a (design.md Decision 5's projector goes live, replacing the four
+# `result_from_manifest` wrappers' override chain): these eight flat states
+# used to project no action at all -- no layer's own pending_action override
+# covered tier 3 (credential), tier 4c (recoverable) or tier 4d (ready) --
+# and now carry the action project_conversion_action assigns their folded
+# (attempt state, reason) pair. Keyed by flat_state and valued by the new
+# action_required, not a bare set like _ACTION_REQUIRED_FOLDED_ROWS above,
+# because these eight rows fold to three different actions (tier 4d for
+# result_ready, tier 4c for the four recoverable-poll rows, tier 3 for the
+# three credential rows), not one shared name.
+_ACTION_REQUIRED_PROJECTED_ROWS = {
+    "result_ready": "adopt_conversion_result",
+    "poll_transient": "resume_same_conversion_task",
+    "poll_unauthorized": "restore_recorded_aihub_credential",
+    "task_unavailable": "resume_same_conversion_task",
+    "credential_source_missing": "restore_recorded_aihub_credential",
+    "credential_source_changed": "restore_recorded_aihub_credential",
+    "poll_timeout": "resume_same_conversion_task",
+    "result_pending_timeout": "resume_same_conversion_task",
+}
+
 
 def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
     """折叠无损性的正面证明。
@@ -6622,8 +6687,10 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
       - 第 2 格 outcome：必须相等（两行命令派生的除外，见上方注释）；
       - 第 3 格 action_required：任务 2.4 落地后，_ACTION_REQUIRED_FOLDED_ROWS
         三行必须从各自的旧 resolve_* 名字精确变为
-        "authorize_new_conversion_attempt"；其余所有行仍必须与折叠前逐字节
-        相等（kind 折叠只碰这三行，一行不多一行不少）。
+        "authorize_new_conversion_attempt"；任务 3.1a 落地后，
+        _ACTION_REQUIRED_PROJECTED_ROWS 另外八行必须从 None 精确变为
+        project_conversion_action 按 design.md Decision 5 投影的新值；其余所有
+        行仍必须与折叠前逐字节相等（这两批改动加起来一行不多一行不少）。
 
     两张表都是独立字面量，迁移表是生产代码，所以本断言不会退化成同义反复。
     """
@@ -6646,6 +6713,10 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
         if flat in _ACTION_REQUIRED_FOLDED_ROWS:
             assert after[3] == "authorize_new_conversion_attempt", flat
             assert after[3] != before[3], flat
+        elif flat in _ACTION_REQUIRED_PROJECTED_ROWS:
+            assert before[3] is None, flat
+            assert after[3] == _ACTION_REQUIRED_PROJECTED_ROWS[flat], flat
+            assert after[3] != before[3], flat
         else:
             assert after[3] == before[3], flat
         if flat not in _COMMAND_DERIVED_OUTCOME_ROWS:
@@ -6658,9 +6729,11 @@ def test_the_fold_moves_exactly_the_attempt_state_cell_and_nothing_else():
     # 说明折叠没落地，多了说明迁移表被改动过。
     assert len(moved) == 12
     assert len({FOLDED_STATE_OBSERVABLES[f][1] for f in FLAT_STATE_OBSERVABLES}) == 7
-    # 任务 2.4 的 kind 折叠确实发生了，且**恰好**是这三行：不多不少，
-    # 与 _ACTION_REQUIRED_FOLDED_ROWS 精确相等（不是子集）。
-    assert action_required_folded == _ACTION_REQUIRED_FOLDED_ROWS
+    # 任务 2.4 的 kind 折叠、任务 3.1a 的新投影确实发生了，且**恰好**是这
+    # 十一行：不多不少，与两张表的并集精确相等（不是子集）。
+    assert action_required_folded == _ACTION_REQUIRED_FOLDED_ROWS | set(
+        _ACTION_REQUIRED_PROJECTED_ROWS
+    )
 
 
 # --- Task 2.1d: unconditional round accounting behind a disabled ceiling ---
@@ -7206,3 +7279,456 @@ def test_the_retry_decision_recovery_write_is_capacity_admitted(
     ]
     assert never.calls == []
     assert _bundle_state_snapshot(bundle) == before
+
+
+# --- Task 3.1a: the single ordered precedence table (design.md Decision 5) -
+
+
+def _flat_state_manifest(tmp_path, flat_state):
+    """A real, driven manifest for `flat_state`, read back off disk.
+
+    Thin wrapper over drive_to_flat_state's capture_bundle side channel
+    (see that function's docstring) -- every manifest this builds has
+    already passed through the real production write path (_valid_attempt
+    included), so there is nothing left to hand-validate.
+    """
+    capture = {}
+    drive_to_flat_state(tmp_path, flat_state, capture_bundle=capture)
+    return read_manifest(capture["bundle"])
+
+
+def _pending_conversion_operation_manifest(tmp_path, capsys, monkeypatch):
+    """A real "failed"/"task_failed"/confirm manifest -- which would
+    otherwise project tier 4b's authorize_new_conversion_attempt on its own
+    (see test_pending_operation_outranks_a_stable_conversion_action) -- with
+    the pending-operation signal set on top. Task 3.1a lands the projector
+    able to honor this flag; nothing in production sets it yet (see
+    _action_context's docstring), so this is the only way to exercise tier 1
+    until design.md Decision 8.1's `inspect` wiring (task 3.1b/c) lands.
+    """
+    del capsys, monkeypatch
+    manifest = _flat_state_manifest(tmp_path, "failed")
+    manifest[conversion_attempt._PENDING_CONVERSION_OPERATION_KEY] = True
+    return manifest
+
+
+def _source_staging_pending_manifest(tmp_path, capsys, monkeypatch):
+    """A real, confirm-mode manifest with a source-staging pending action
+    (tier 2) and no conversion_attempts yet -- the only shape tier 2 is
+    reachable in (see _action_context's docstring: source staging must reach
+    source_upload_ready before any attempt exists).
+    """
+    source = tmp_path / "input.pdf"
+    document = fitz.open()
+    page = document.new_page(width=72, height=72)
+    page.insert_text((8, 18), "Precedence tier 2")
+    document.save(source)
+    document.close()
+    dependencies = install_preflight_dependencies(tmp_path, monkeypatch)
+    start_rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source), "--interaction-mode", "confirm"],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert start_rc == 0
+    bundle = Path(started["work_bundle"])
+    advance_rc, advanced, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(started["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert advance_rc == 0
+    record_path = tmp_path / "preflight-for-staging-precedence.json"
+    record_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "summary": "pass",
+                "pages": [
+                    {
+                        "page_number": 1,
+                        "classification": "content",
+                        "risk_codes": [],
+                        "evidence": ["The page is readable."],
+                    }
+                ],
+            }
+        )
+    )
+    record_rc, recorded, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "preflight",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(advanced["generation"]),
+            "--action-id",
+            advanced["action_id"],
+            "--evidence-hash",
+            advanced["evidence_hash"],
+            "--input",
+            str(record_path),
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert record_rc == 0
+    # StatusCreate returns a canned (status, body) response regardless of
+    # which endpoint calls it -- it works as an upload transport exactly as
+    # it does as a create/poll transport elsewhere in this file.
+    upload_rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(recorded["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": "precedence-tier-2-key"},
+        transport=StatusCreate(401),
+    )
+    assert upload_rc == 0
+    assert unknown["source_upload_state"] == "source_upload_unknown"
+    assert unknown["action_required"] == "resolve_source_upload_unknown"
+    return read_manifest(bundle)
+
+
+def _raw_layout_pending_manifest(tmp_path, capsys, monkeypatch):
+    """A real, confirm-mode manifest with an ambiguous raw result layout
+    (tier 4a): the active conversion attempt is result_ready/None -- tier
+    4d's own shape -- with raw_conversion.pending_action set on top by the
+    layout-ambiguity rejection.
+    """
+    bundle, ready, dependencies, key, _result_url = ready_result_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    layout_rc, layout_error, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=ArchiveTransport(make_zip([("a.md", b"a"), ("b.md", b"b")])),
+    )
+    assert layout_rc == 0, json.dumps(layout_error, sort_keys=True)
+    assert layout_error["action_required"] == "authorize_new_conversion_attempt"
+    return read_manifest(bundle)
+
+
+def _result_url_expired_manifest(tmp_path, capsys, monkeypatch):
+    """A real manifest whose active attempt is result_ready/result_url_expired
+    (tier 4c's locally-detected pair, design.md Decision 5 case 4c) -- one
+    result_ready poll, then a resume 25h later that locally detects the
+    result reference has expired without any network access.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    environ = {**dependencies, "AIHUB_API_KEY": key}
+    task_id = "task-precedence-expiry"
+    _create_rc, submitted, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=SuccessfulCreate(task_id),
+    )
+    result_url = "https://results.example/precedence-expiry.zip?token=one"
+    _poll_rc, ready, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(submitted["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=PollStatus(task_id, "completed", results=[{"url": result_url}]),
+    )
+    expiry_at = NOW + timedelta(hours=25)
+    _expiry_rc, expired, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=CountingNeverNetwork(),
+        now=expiry_at,
+    )
+    assert expired["outcome"] == "result_url_unavailable"
+    return read_manifest(bundle)
+
+
+def _task_failed_confirm_manifest(tmp_path, capsys, monkeypatch):
+    del capsys, monkeypatch
+    return _flat_state_manifest(tmp_path, "failed")
+
+
+def _task_failed_auto_manifest(tmp_path, capsys, monkeypatch):
+    """The same failed/task_failed manifest _task_failed_confirm_manifest
+    builds, with interaction_mode flipped to "auto" and pending_action
+    cleared to match -- exactly the two fields production code's own confirm
+    gate (`_poll_transition`'s `pending_action_kind is not None and
+    interaction_mode == "confirm"` check) makes conditional on the mode.
+    _valid_pending_action never requires a pending_action to be present (it
+    only constrains one that *is*), so this is not an invented illegal
+    state: it is the same shape auto mode already produces in production.
+    """
+    del capsys, monkeypatch
+    manifest = _flat_state_manifest(tmp_path, "failed")
+    manifest["settings_snapshot"]["interaction_mode"] = "auto"
+    active = manifest["conversion_attempts"][-1]
+    active["pending_action"] = None
+    assert conversion_attempt._valid_attempt(
+        active, manifest=manifest, generation=manifest["generation"]
+    )
+    return manifest
+
+
+def _poll_transient_manifest(tmp_path, capsys, monkeypatch):
+    del capsys, monkeypatch
+    return _flat_state_manifest(tmp_path, "poll_transient")
+
+
+def _result_ready_manifest(tmp_path, capsys, monkeypatch):
+    del capsys, monkeypatch
+    return _flat_state_manifest(tmp_path, "result_ready")
+
+
+def _processing_manifest(tmp_path, capsys, monkeypatch):
+    del capsys, monkeypatch
+    return _flat_state_manifest(tmp_path, "processing")
+
+
+def _credential_missing_manifest(tmp_path, capsys, monkeypatch):
+    del capsys, monkeypatch
+    return _flat_state_manifest(tmp_path, "credential_source_missing")
+
+
+def _credential_drift_manifest(tmp_path, capsys, monkeypatch):
+    del capsys, monkeypatch
+    return _flat_state_manifest(tmp_path, "credential_source_changed")
+
+
+def _credential_poll_401_manifest(tmp_path, capsys, monkeypatch):
+    del capsys, monkeypatch
+    return _flat_state_manifest(tmp_path, "poll_unauthorized")
+
+
+ACTION_PRECEDENCE_CASES = [
+    (
+        "1-pending",
+        _pending_conversion_operation_manifest,
+        "resume_pending_conversion_operation",
+    ),
+    ("2-staging", _source_staging_pending_manifest, "resolve_source_upload_unknown"),
+    (
+        "3-credential-missing",
+        _credential_missing_manifest,
+        "restore_recorded_aihub_credential",
+    ),
+    (
+        "3-credential-drift",
+        _credential_drift_manifest,
+        "restore_recorded_aihub_credential",
+    ),
+    (
+        "3-credential-poll-401",
+        _credential_poll_401_manifest,
+        "restore_recorded_aihub_credential",
+    ),
+    ("4a-raw", _raw_layout_pending_manifest, "authorize_new_conversion_attempt"),
+    (
+        "4b-task-failed",
+        _task_failed_confirm_manifest,
+        "authorize_new_conversion_attempt",
+    ),
+    ("4b-auto-mode-is-silent", _task_failed_auto_manifest, None),
+    ("4c-recoverable", _poll_transient_manifest, "resume_same_conversion_task"),
+    ("4c-expired-url", _result_url_expired_manifest, "resume_same_conversion_task"),
+    ("4d-ready", _result_ready_manifest, "adopt_conversion_result"),
+    ("none", _processing_manifest, None),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "build", "expected"),
+    ACTION_PRECEDENCE_CASES,
+    ids=[case[0] for case in ACTION_PRECEDENCE_CASES],
+)
+def test_action_precedence_projects_the_expected_action(
+    tmp_path, capsys, monkeypatch, label, build, expected
+):
+    """design.md Decision 5's four-tier precedence table, end to end: every
+    case builds a real, driven-or-validator-checked manifest and asserts
+    conversion_attempt.project_conversion_action projects exactly the
+    action Decision 5 assigns that tier (or None for the catch-all / the
+    auto-mode-silences-4b case).
+    """
+    manifest = build(tmp_path, capsys, monkeypatch)
+    projected = conversion_attempt.project_conversion_action(manifest)
+    actual = None if projected is None else projected["action_required"]
+    assert actual == expected, label
+
+
+def test_pending_operation_outranks_a_stable_conversion_action(
+    tmp_path, capsys, monkeypatch
+):
+    """design.md Decision 5, precedence tier 1: pending-operation must beat
+    every stable-conversion tier, even when the manifest also looks exactly
+    like a tier 4b case (failed/task_failed/confirm) that would otherwise
+    project authorize_new_conversion_attempt on its own. Today's four-layer
+    override chain has no such precedence at all -- tier 1 has no consumer
+    in it (design.md's Context section).
+    """
+    manifest = _pending_conversion_operation_manifest(tmp_path, capsys, monkeypatch)
+    pending_action = manifest["conversion_attempts"][-1]["pending_action"]
+
+    # Confirm the manifest really would hit tier 4b if the flag were absent
+    # -- otherwise "tier 1 wins" would be true only because nothing else
+    # could ever have matched.
+    without_flag = dict(manifest)
+    del without_flag[conversion_attempt._PENDING_CONVERSION_OPERATION_KEY]
+    assert conversion_attempt.project_conversion_action(without_flag) == {
+        "action_required": "authorize_new_conversion_attempt",
+        "action_id": pending_action["action_id"],
+        "evidence_hash": pending_action["evidence_hash"],
+    }
+
+    projected = conversion_attempt.project_conversion_action(manifest)
+    assert projected["action_required"] == "resume_pending_conversion_operation"
+
+
+def test_raw_outranks_attempt_inside_the_stable_tier(tmp_path, capsys, monkeypatch):
+    """design.md Decision 5, tier 4a before 4b/4c/4d: a raw_conversion
+    pending_action must win over whatever the active attempt's own stable
+    action would otherwise be. The active attempt here is result_ready with
+    no reason -- tier 4d's own shape -- which raw's tier 4a must pre-empt,
+    preserving today's override chain's order (raw_conversion.result_from_
+    manifest is called last in that chain and its override always won).
+    """
+    manifest = _raw_layout_pending_manifest(tmp_path, capsys, monkeypatch)
+    active = manifest["conversion_attempts"][-1]
+    assert active["state"] == "result_ready"
+    assert active["reason"] is None
+
+    projected = conversion_attempt.project_conversion_action(manifest)
+    assert projected["action_required"] == "authorize_new_conversion_attempt"
+
+
+def test_no_result_from_manifest_wrapper_writes_action_required_directly():
+    """design.md Decision 5: project_conversion_action is the single source
+    of action_required/action_id/evidence_hash for the closed conversion
+    vocabulary. conversion_attempt.result_from_manifest and raw_conversion.
+    result_from_manifest -- the two wrappers that can import conversion_
+    attempt.py at all -- must call it rather than writing those three keys
+    from their own layer's pending_action, the way both used to.
+
+    preflight.py and source_staging.py are deliberately NOT scanned here.
+    conversion_attempt.py imports source_staging.py, which imports
+    preflight.py (source_staging.py's own `import preflight`,
+    conversion_attempt.py's own `import source_staging`), so neither of
+    those two modules can import conversion_attempt.py -- home of
+    project_conversion_action -- without a cycle. Leaving their existing
+    direct writes in place is not a leftover of the old override chain,
+    though: see project_conversion_action's docstring for why it is still
+    exactly one source of truth in practice -- preflight's own
+    pending_action vocabulary is outside design.md Decision 5 entirely (it
+    is not one of the four tiers), and source_staging's tier-2 value is
+    unreachable once any conversion_attempts exist (a pending source-staging
+    action and a conversion attempt structurally cannot coexist -- source
+    staging must reach source_upload_ready, which _submit_state requires,
+    before any attempt is created), so source_staging.result_from_manifest's
+    existing self-contained read already computes the one value tier 2
+    could ever produce.
+    """
+    import inspect
+    import re
+
+    # raw_conversion.result_from_manifest must not touch these three keys at
+    # all any more: conversion_attempt.result_from_manifest (which it calls
+    # as its first line) already has the fully precedence-correct answer,
+    # because project_conversion_action reads manifest["raw_conversion"]
+    # itself regardless of which wrapper calls it.
+    raw_source = inspect.getsource(raw_conversion.result_from_manifest)
+    for key in ("action_required", "action_id", "evidence_hash"):
+        assert f'result["{key}"]' not in raw_source, key
+
+    # conversion_attempt.result_from_manifest is the one wrapper allowed to
+    # write these three keys -- but only by copying project_conversion_
+    # action's own return value, never by reading a pending_action object
+    # directly the way both wrappers used to (the anti-pattern this task
+    # removes: `result["action_required"] = pending["kind"]` et al).
+    attempt_source = inspect.getsource(conversion_attempt.result_from_manifest)
+    assert "project_conversion_action(manifest)" in attempt_source
+    assert re.search(r'=\s*pending(\.get\(|\[)"kind"', attempt_source) is None
+    assert re.search(r'=\s*pending(\.get\(|\[)"action_id"', attempt_source) is None
+    assert re.search(r'=\s*pending(\.get\(|\[)"evidence_hash"', attempt_source) is None
+
+
+def test_action_rules_kind_domain_matches_conversion_actions_or_the_staging_sentinel():
+    """M6 (task 2.4 review, carried into 3.1a): every ACTION_RULES row's
+    static `kind` must be a CONVERSION_ACTIONS member, `None` (the
+    catch-all), or the staging sentinel -- never an unrelated string. This
+    exercises the same closure _validate_action_rules already enforced at
+    import time, so a future row that slips a raw literal past that guard
+    (e.g. by adding a new sentinel value) is still caught here.
+    """
+    for rule in conversion_attempt.ACTION_RULES:
+        if rule.kind is conversion_attempt._KIND_FROM_STAGING_PENDING_ACTION:
+            continue
+        assert (
+            rule.kind is None or rule.kind in conversion_attempt.CONVERSION_ACTIONS
+        ), rule.tier
+
+
+def test_project_conversion_action_fails_loud_on_an_unknown_staging_kind(
+    tmp_path, capsys, monkeypatch
+):
+    """M6: the staging tier's kind is read off live data, not a table
+    literal (design.md Decision 5: "沿用 source-staging 既有 kind"), so
+    project_conversion_action must itself validate it against
+    source_staging.SOURCE_STAGING_ACTIONS rather than passing an arbitrary
+    string through as action_required.
+    """
+    manifest = _source_staging_pending_manifest(tmp_path, capsys, monkeypatch)
+    manifest["source_staging"]["pending_action"]["kind"] = "not_a_real_kind"
+    with pytest.raises(ValueError):
+        conversion_attempt.project_conversion_action(manifest)

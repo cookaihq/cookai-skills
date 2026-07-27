@@ -2071,6 +2071,14 @@ def validate_committed_artifacts(*, descriptors: dict, manifest: dict) -> None:
 
 
 def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> dict:
+    # Task 3.1a (design.md Decision 5): action_required/action_id/
+    # evidence_hash are already fully projected by the conversion_attempt.
+    # result_from_manifest call below -- it calls
+    # conversion_attempt.project_conversion_action(manifest), which reads
+    # manifest["raw_conversion"] itself (tier 4a), so this layer no longer
+    # needs its own override. This replaces the fourth (and formerly last,
+    # thus "winning") link of the four-layer override chain design.md's
+    # Context section describes.
     result = conversion_attempt.result_from_manifest(
         manifest, work_bundle=work_bundle, outcome=outcome
     )
@@ -2078,9 +2086,4 @@ def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> d
     result["raw_conversion_state"] = (
         None if not isinstance(record, dict) else record.get("state")
     )
-    pending = record.get("pending_action") if isinstance(record, dict) else None
-    if isinstance(pending, dict):
-        result["action_required"] = pending["kind"]
-        result["action_id"] = pending["action_id"]
-        result["evidence_hash"] = pending["evidence_hash"]
     return result
