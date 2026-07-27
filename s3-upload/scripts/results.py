@@ -168,6 +168,8 @@ def validate_result(result: Any, *, validate_reference: bool = True) -> Dict[str
             raise ResultError("ambiguous result must not claim an object or URL")
     if result["status"] == "collision" and result["object_written"] is not False:
         raise ResultError("collision requires object_written=false")
+    if result["status"] == "not_started" and result["object_written"] is True:
+        raise ResultError("not_started must not claim a written object")
     if result["status"] == "ok":
         if result["object_written"] is False:
             raise ResultError("ok must not carry object_written=false")
@@ -192,6 +194,11 @@ def validate_result(result: Any, *, validate_reference: bool = True) -> Dict[str
         )
     if result["retry_safety"] != RETRY_SAFETY_BY_STATUS[result["status"]]:
         raise ResultError("retry_safety contradicts the result status")
+    # No rule forbids a retained checkpoint alongside retry_safety="safe":
+    # a conditional CompleteMultipartUpload that loses the race writes no
+    # object (safe to retry) yet leaves a live multipart session that only an
+    # explicit abort closes, so `collision` + `next_action=reconcile` is a
+    # reachable and truthful pair (multipart._finish_existing_session).
     return result
 
 

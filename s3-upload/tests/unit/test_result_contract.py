@@ -17,7 +17,7 @@ import json
 import pytest
 
 import upload
-from results import ResultError, build_result, validate_result
+from results import OPERATIONS, ResultError, build_result, validate_result
 from s3 import Response
 
 
@@ -230,6 +230,35 @@ def test_status_object_written_contradictions_are_rejected_at_construction():
         build_result("upload", "adopted", object_written=True, retention=RETAIN)
     with pytest.raises(ResultError):
         build_result("resume", "ok", object_written=False, retention=RETAIN)
+
+
+@pytest.mark.parametrize("operation", sorted(OPERATIONS))
+def test_not_started_must_not_claim_a_written_object(operation):
+    # not_started is the "no request reached the remote" status: it carries
+    # retry_safety="safe", so a written object would let one result claim
+    # both "the object is there" and "a blind retry is provably safe".
+    # Every operation is covered because build_result takes the operation as
+    # a free parameter -- the lock cannot live in one operation's branch.
+    with pytest.raises(ResultError, match="not_started"):
+        build_result(operation, "not_started", object_written=True, retention=RETAIN)
+    truthful = build_result(
+        operation, "not_started", object_written=False, retention=RETAIN,
+    )
+    assert truthful["object_written"] is False and truthful["retry_safety"] == "safe"
+
+
+def test_collision_may_retain_a_checkpoint_for_an_unclosed_session():
+    # retry_safety="safe" and a retained checkpoint are not contradictory: a
+    # conditional CompleteMultipartUpload that loses the race writes no
+    # object, yet leaves a live multipart session that only an explicit abort
+    # closes. That pair stays constructible on purpose.
+    result = build_result(
+        "upload", "collision", object_written=False, retention=RETAIN,
+        checkpoint_id=CHECKPOINT_ID,
+    )
+    assert result["retry_safety"] == "safe"
+    assert result["checkpoint"] == CHECKPOINT_ID
+    assert result["next_action"] == "reconcile"
 
 
 def test_cli_upload_success_reports_the_remote_identity(tmp_path, capsys):
