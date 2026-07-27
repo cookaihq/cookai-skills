@@ -9,10 +9,14 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -215,6 +219,102 @@ def md5_file(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# official 二进制自动安装（GitHub API + sha256 + 原子就位）
+# ---------------------------------------------------------------------------
+
+GITHUB_RELEASES = "https://api.github.com/repos/fatedier/frp/releases"
+CHECKSUMS_NAME = "frp_sha256_checksums.txt"
+
+
+def resolve_official_release(release: dict, os_name: str, arch: str):
+    version = str(release.get("tag_name", "")).lstrip("v")
+    asset_name = "frp_%s_%s_%s.tar.gz" % (version, os_name, arch)
+    asset_url = csum_url = ""
+    for asset in release.get("assets", []):
+        if asset.get("name") == asset_name:
+            asset_url = asset.get("browser_download_url", "")
+        elif asset.get("name") == CHECKSUMS_NAME:
+            csum_url = asset.get("browser_download_url", "")
+    if not version or not asset_url or not csum_url:
+        raise FrpcLaunchError(
+            "release 中找不到预期资产 %s 或 %s；官方命名可能已变化，停止自动安装，"
+            "请手动下载后用 FRPC_LAUNCH_FRPC 指定路径" % (asset_name, CHECKSUMS_NAME))
+    return version, asset_name, asset_url, csum_url
+
+
+def parse_checksums(text: str) -> dict:
+    result = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            result[parts[1]] = parts[0]
+    return result
+
+
+def extract_frpc_member(tar_path: Path, version, os_name, arch, dest: Path) -> None:
+    member_name = "frp_%s_%s_%s/frpc" % (version, os_name, arch)
+    with tarfile.open(tar_path, "r:gz") as tf:
+        try:
+            member = tf.getmember(member_name)
+        except KeyError:
+            raise FrpcLaunchError("归档中找不到预期成员 %s，停止安装" % member_name)
+        if not member.isreg():
+            raise FrpcLaunchError("归档成员 %s 不是常规文件，拒绝提取" % member_name)
+        src = tf.extractfile(member)
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+
+def install_official(home: Path, version: str = "",
+                     fetch_json=None, fetch_bytes=None) -> dict:
+    fetch_json = fetch_json or http_get_json
+    fetch_bytes = fetch_bytes or http_get
+    os_name, os_subdir, arch = detect_platform()
+    ensure_home_layout(home)
+    url = (GITHUB_RELEASES + "/latest") if not version else \
+          (GITHUB_RELEASES + "/tags/v" + version)
+    release = fetch_json(url)
+    ver, asset_name, asset_url, csum_url = resolve_official_release(release, os_name, arch)
+    checksums = parse_checksums(fetch_bytes(csum_url).decode("utf-8"))
+    expected = checksums.get(asset_name)
+    if not expected:
+        raise FrpcLaunchError("校验文件中找不到 %s 的 SHA-256，停止安装" % asset_name)
+    with tempfile.TemporaryDirectory(dir=str(home / "run")) as td:
+        tar_path = Path(td) / asset_name
+        tar_path.write_bytes(fetch_bytes(asset_url))
+        actual = sha256_file(tar_path)
+        if actual != expected:
+            raise FrpcLaunchError(
+                "SHA-256 校验不一致（期望 %s… 实际 %s…），已删除临时文件；"
+                "不重试第三方源" % (expected[:12], actual[:12]))
+        tmp_bin = Path(td) / "frpc.new"
+        extract_frpc_member(tar_path, ver, os_name, arch, tmp_bin)
+        final = home / "bin" / os_subdir / "frpc"
+        install_binary(tmp_bin, final)
+    meta = {"version": ver, "source_url": asset_url,
+            "sha256": sha256_file(final),
+            "installed_at": datetime.now(timezone.utc).isoformat()}
+    write_meta(home / "bin" / os_subdir / "frpc.meta.json", meta)
+    return meta
+
+
+def resolve_official_binary(layered: dict, home: Path):
+    explicit = layered.get("FRPC_LAUNCH_FRPC")
+    if explicit:
+        return Path(explicit[0]).expanduser(), "explicit"
+    _, os_subdir, _ = detect_platform()
+    managed = home / "bin" / os_subdir / "frpc"
+    if managed.is_file() and os.access(managed, os.X_OK):
+        return managed, "managed"
+    found = shutil.which("frpc")
+    if found:
+        r = subprocess.run([found, "--version"], capture_output=True, text=True)
+        if r.returncode == 0:
+            return Path(found), "path"
+    return None, ""
+
+
+# ---------------------------------------------------------------------------
 # 模式判定
 # ---------------------------------------------------------------------------
 
@@ -259,8 +359,54 @@ def build_parser() -> argparse.ArgumentParser:
         ("install", "安装受管二进制"), ("update", "显式升级受管二进制"),
         ("guide-init", "引导流程写配置（由 SKILL.md 编排调用）"),
     ]:
-        sub.add_parser(name, help=desc)
+        sp = sub.add_parser(name, help=desc)
+        if name in ("start", "stop", "status", "logs", "install", "update"):
+            sp.add_argument("--mode", choices=["official", "sakura"], default="",
+                            help="限定操作的模式")
+        if name in ("install", "update"):
+            sp.add_argument("--version", default="",
+                            help="official 模式指定版本（缺省为最新稳定版）")
     return p
+
+
+def _emit(args, payload: dict, human: str) -> None:
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        print(human)
+
+
+def cmd_install(args) -> int:
+    mode = args.mode or "official"
+    if mode == "official":
+        layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
+        binary, origin = resolve_official_binary(layered, args.home)
+        if origin == "managed":
+            _, os_subdir, _ = detect_platform()
+            meta = read_meta(args.home / "bin" / os_subdir / "frpc.meta.json")
+            _emit(args, {"result": "already_installed", "meta": meta},
+                  "已安装受管 frpc v%s，不重复下载；如需升级请用 update"
+                  % meta.get("version", "?"))
+            return 0
+        meta = install_official(args.home, args.version)
+        _emit(args, {"result": "installed", "meta": meta},
+              "已安装官方 frpc v%s（sha256 校验通过）" % meta["version"])
+        return 0
+    meta = install_sakura(args.home)
+    _emit(args, {"result": "installed", "meta": meta},
+          "已安装樱花定制 frpc %s（size/hash 校验通过）" % meta["version"])
+    return 0
+
+
+def cmd_update(args) -> int:
+    mode = args.mode or "official"
+    if mode == "official":
+        meta = install_official(args.home, args.version)
+    else:
+        meta = install_sakura(args.home)
+    _emit(args, {"result": "updated", "meta": meta},
+          "已更新 %s 模式受管二进制至 %s" % (mode, meta["version"]))
+    return 0
 
 
 def main(argv=None) -> int:
@@ -268,8 +414,19 @@ def main(argv=None) -> int:
     if args.command is None:
         build_parser().print_help()
         return 0
-    print("NOT_IMPLEMENTED: %s" % args.command, file=sys.stderr)
-    return 2
+    handlers = {
+        "install": cmd_install,
+        "update": cmd_update,
+    }
+    handler = handlers.get(args.command)
+    if handler is None:
+        print("NOT_IMPLEMENTED: %s" % args.command, file=sys.stderr)
+        return 2
+    try:
+        return handler(args)
+    except FrpcLaunchError as e:
+        print("错误: %s" % e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
