@@ -20,7 +20,7 @@ from delivery_schema import (
     build_typed, parse_typed,
 )
 from v2_schema import (
-    normalize_endpoint, normalize_public_base, validate_object_key,
+    SchemaError, normalize_endpoint, normalize_public_base, validate_object_key,
 )
 
 
@@ -151,6 +151,39 @@ def _text(value: Any, label: str) -> str:
     return value
 
 
+def _credentials(value: Any) -> Tuple[str, ...]:
+    """Materialise the credential screening material and check its type.
+
+    Raises TypeError, not ReferenceError, and does so before any field of the
+    artifact is looked at. Two reasons, both measured:
+
+    * Blame. Handing credentials=[7] to parse_object_reference_v2 used to
+      surface as ReferenceError("object reference body is not constructible"),
+      because the TypeError out of validate_provider_identifier was caught by
+      the except TypeError that guards the rebuild call. That reports a bug in
+      the caller's own argument as "the artifact somebody gave you is broken",
+      which inverts the one question this module exists to answer.
+    * One-shot iterables. The parameter is typed Iterable, so a generator is
+      legal. Consuming it lazily deep inside _location means it is consumed
+      only when location.version_id happens to be non-null, and never at all
+      otherwise -- so build_object_reference_v2(credentials=[7]) with a null
+      version_id used to be accepted in silence. Materialising here makes the
+      screen's input independent of the data being screened.
+    """
+    if isinstance(value, (str, bytes)):
+        # A bare secret is iterable, and iterating it screens for single
+        # characters instead of for the secret.
+        raise TypeError("credentials must be an iterable of strings")
+    try:
+        items = tuple(value)
+    except TypeError as exc:
+        raise TypeError("credentials must be an iterable of strings") from exc
+    for item in items:
+        if not isinstance(item, str):
+            raise TypeError("credentials must be an iterable of strings")
+    return items
+
+
 def _content(value: Any) -> Dict[str, Any]:
     item = _object(value, "content")
     _exact(item, ("sha256", "size"), "content")
@@ -175,11 +208,25 @@ def _location(value: Any, credentials: Iterable[str] = ()) -> Dict[str, Any]:
     # check against an artifact somebody else supplied.
     try:
         validate_object_key(key)
-    except ValueError as exc:
-        # Probing validate_object_key with bad keys, non-strings and lone
-        # surrogates only ever produced SchemaError, so the wider clause is
-        # not covering a known leak here -- it is kept uniform with the two
-        # normalizer clauses, where a bare ValueError is proven (below).
+    except SchemaError as exc:
+        # SchemaError, not the wider ValueError the two normalizer clauses
+        # below use. The three call sites are not the same shape:
+        # normalize_public_base and normalize_endpoint run urlsplit outside
+        # any try, so "https://[::1" leaves them as a bare
+        # ValueError("Invalid IPv6 URL") -- proven by running them, and each
+        # wide clause has a mutation showing it carries payload (#13 and R2).
+        # validate_object_key runs no urlsplit: _single_line, the
+        # startswith/endswith checks and the segment scan raise SchemaError
+        # and nothing else, so widening here catches no known leak. It does
+        # cost something: a bare ValueError out of validate_object_key could
+        # only be an implementation bug in that function, and reporting a
+        # library bug as "the caller's key is invalid" is exactly the kind of
+        # misattribution this module exists to prevent. Injecting a bare
+        # ValueError into validate_object_key was invisible to the whole
+        # suite under the wide clause (M18, full scope), and narrowing back
+        # to SchemaError changed nothing (M17, full scope) -- so the narrow
+        # clause is free, and test_a_library_bug_in_validate_object_key_is_
+        # not_reported_as_an_invalid_key keeps it that way.
         raise ReferenceError("invalid location.key") from exc
     try:
         normalized_endpoint = normalize_endpoint(endpoint)
@@ -203,11 +250,19 @@ def _location(value: Any, credentials: Iterable[str] = ()) -> Dict[str, Any]:
         try:
             version_id = validate_provider_identifier(version_id, credentials)
         except ArtifactError as exc:
-            # ArtifactError, not ValueError: IdentifierRejected is the only
-            # type validate_provider_identifier raises -- its charset gate
-            # runs before _strict_percent_decode, so unquote_to_bytes only
-            # ever sees printable ASCII. Checked against the source, not
-            # assumed. The message deliberately carries no value.
+            # ArtifactError, not ValueError, and the claim is scoped to the
+            # *value* argument: for any version_id whatsoever,
+            # IdentifierRejected is the only type validate_provider_identifier
+            # raises, because its charset gate runs before
+            # _strict_percent_decode and unquote_to_bytes therefore only ever
+            # sees printable ASCII (source check, scripts/artifacts.py:108-118).
+            # The credentials argument is a different matter and deliberately
+            # not converted: a malformed credentials sequence raises TypeError
+            # ("v-1", [7] and ("v-1", None) both do -- run, not assumed), and
+            # that is a bug in the caller's own argument, not evidence that
+            # the artifact is bad. _credentials refuses it at the entry of
+            # both halves so it can never reach here. The message deliberately
+            # carries no value.
             raise ReferenceError("invalid location.version_id") from exc
     return {
         "addressing": item["addressing"],
@@ -326,6 +381,7 @@ def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
     """
     if disposition not in DISPOSITIONS:
         raise ReferenceError("unregistered disposition")
+    credentials = _credentials(credentials)
     content = _content(content)
     location = _location(location, credentials)
     access = _access(access)
@@ -380,6 +436,11 @@ def parse_object_reference_v2(text: str,
     write side does. v1 took it on both halves too
     (``artifacts.parse_object_reference``).
     """
+    # Before the rebuild, not inside it: the except TypeError below is there
+    # to turn "this body does not fit the constructor's signature" into a
+    # verdict on the artifact, and a malformed credentials argument would
+    # otherwise be laundered through it into exactly the wrong verdict.
+    credentials = _credentials(credentials)
     item = parse_typed(text, expected_type="s3-upload.object-reference")
     body = body_of(item)
     supplied = {key: value for key, value in body.items()

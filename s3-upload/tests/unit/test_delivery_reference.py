@@ -1,4 +1,7 @@
+import ast
+import inspect
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -21,7 +24,14 @@ AT = "2026-07-27T00:00:00Z"
 # Credential-shaped material built here and nowhere else, so the credential
 # screen is exercised against a string the module under test has no other way
 # of knowing about. AWS's own documentation example key -- never a live secret.
-SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+# Deliberately not AWS-key-shaped. An earlier revision used AWS's own
+# documentation example secret key; it is public sample text and never a live
+# credential, but its shape trips secret scanners and push protection on the
+# public repository this module ships from. The screen does not look at the
+# shape of the string -- it refuses whatever the caller declared as a
+# credential when that string appears inside a version_id -- so an obvious
+# placeholder exercises exactly the same code path.
+SECRET = "CREDENTIAL/VALUE-THAT-MUST-NOT-APPEAR"
 
 
 def verification(channel="authenticated_full_get", **overrides):
@@ -231,6 +241,49 @@ def test_the_content_stability_vocabulary_is_locked_and_wired_to_the_scope_table
     assert CONTENT_STABILITIES == ("current_key_unpinned", "version_pinned")
     assert set(delivery_reference._SCOPES_FOR_STABILITY) == set(CONTENT_STABILITIES)
     assert body_of(reference())["content_stability"] in CONTENT_STABILITIES
+    # The three assertions above cannot see the wiring itself. Replacing
+    # `_UNPINNED, _PINNED = CONTENT_STABILITIES` with the same two literals
+    # spelled out by hand leaves the whole suite green (M9, full scope): the
+    # values are identical either way, so no behaviour distinguishes a
+    # vocabulary that is read from a vocabulary that is merely duplicated --
+    # and a duplicate is what let CONTENT_STABILITIES dangle in the first
+    # place. Same situation as gate.arm(), and the same answer: when the
+    # invariant is structural, pin the structure.
+    tree = ast.parse(inspect.getsource(delivery_reference))
+    binding = [
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Tuple)
+        and [getattr(name, "id", None) for name in node.targets[0].elts]
+        == ["_UNPINNED", "_PINNED"]
+    ]
+    assert len(binding) == 1, "_UNPINNED/_PINNED must be unpacked exactly once"
+    assert isinstance(binding[0].value, ast.Name)
+    assert binding[0].value.id == "CONTENT_STABILITIES"
+
+    table = next(
+        node.value for node in tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and "_SCOPES_FOR_STABILITY" in {
+            getattr(target, "id", None)
+            for target in (node.targets if isinstance(node, ast.Assign)
+                           else [node.target])
+        }
+    )
+    assert [getattr(key, "id", None) for key in table.keys] == ["_UNPINNED", "_PINNED"]
+
+    builder = next(node for node in tree.body
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name == "build_object_reference_v2")
+    derivation = next(node for node in ast.walk(builder)
+                      if isinstance(node, ast.Assign)
+                      and getattr(node.targets[0], "id", None) == "stability")
+    names = {child.id for child in ast.walk(derivation.value)
+             if isinstance(child, ast.Name)}
+    assert {"_PINNED", "_UNPINNED"} <= names
+    assert not [child for child in ast.walk(builder)
+                if isinstance(child, ast.Constant)
+                and child.value in CONTENT_STABILITIES]
 
 
 def test_a_content_field_set_is_exact():
@@ -420,8 +473,14 @@ def test_a_version_id_never_carries_credential_material():
     # SECRET is built at the top of this file and handed in as the caller's
     # credential material; the module has no other route to it, so nothing
     # here is comparing the implementation against itself.
-    for carrier in (SECRET, "v-" + SECRET,
-                    "v-wJalrXUtnFEMI%2FK7MDENG%2FbPxRfiCYEXAMPLEKEY"):
+    # The third carrier hides the secret behind percent-encoding, which is why
+    # the screen decodes before comparing. Derived rather than spelled out so
+    # it cannot drift away from SECRET, with the encoding itself asserted --
+    # a placeholder with nothing to encode would turn this into a duplicate of
+    # the second carrier without anyone noticing.
+    encoded = quote(SECRET, safe="")
+    assert encoded != SECRET
+    for carrier in (SECRET, "v-" + SECRET, "v-" + encoded):
         with pytest.raises(ReferenceError):
             reference(location=location(version_id=carrier),
                       credentials=[SECRET])
@@ -444,6 +503,66 @@ def test_the_credential_screen_runs_on_the_read_side_too():
     assert parse_object_reference_v2(raw) == leaked
     with pytest.raises(ReferenceError):
         parse_object_reference_v2(raw, credentials=[SECRET])
+
+
+class _LibraryBug(ValueError):
+    """A bare ValueError out of a v2_schema helper, i.e. a bug in that helper.
+
+    A ValueError subclass but not a SchemaError, so pytest.raises(_LibraryBug)
+    cannot be satisfied by the ReferenceError the module raises for genuinely
+    invalid keys -- ReferenceError is a ValueError too, which is why the
+    assertion names this type instead of ValueError.
+    """
+
+
+def test_a_library_bug_in_validate_object_key_is_not_reported_as_an_invalid_key(
+        monkeypatch):
+    # The narrow except SchemaError, stated as behaviour. Widening it back to
+    # except ValueError makes the raise below come out as
+    # ReferenceError("invalid location.key"), i.e. the caller is told their
+    # data is bad when in fact the validator is broken -- and nothing else in
+    # the suite can tell the difference (M18, full scope, survived).
+    # The patch lands on delivery_reference's own global rather than on
+    # v2_schema: _location resolves the name at call time through this
+    # module's namespace, so patching the source module would not be seen.
+    def boom(value, **kwargs):
+        raise _LibraryBug("simulated implementation bug")
+
+    monkeypatch.setattr(delivery_reference, "validate_object_key", boom)
+    with pytest.raises(_LibraryBug):
+        reference()
+    # And the real invalid keys are still refused as invalid keys, so this is
+    # a narrowing of blame and not a hole: SchemaError is all validate_object_key
+    # raises, checked against scripts/v2_schema.py:215-229.
+    monkeypatch.undo()
+    with pytest.raises(ReferenceError):
+        reference(location=location(key="/leading"))
+
+
+def test_malformed_credentials_are_the_callers_bug_not_the_artifacts():
+    # parse_object_reference_v2(raw, credentials=[7]) used to answer
+    # ReferenceError("object reference body is not constructible") -- a verdict
+    # on somebody else's artifact, produced by a TypeError raised inside this
+    # process because of this caller's own argument. The question this module
+    # answers is "can I trust the artifact I was handed", so getting that
+    # answer wrong is worse than any refusal.
+    raw = serialize_artifact(
+        reference(location=location(version_id="v-1"))).decode("utf-8")
+    for malformed in ([7], None, SECRET, object()):
+        with pytest.raises(TypeError):
+            parse_object_reference_v2(raw, credentials=malformed)
+        with pytest.raises(TypeError):
+            reference(location=location(version_id="v-1"), credentials=malformed)
+        # Screened independently of the data being screened: a null version_id
+        # gives the screen nothing to look at, and the malformed argument used
+        # to be accepted in silence on exactly that path.
+        with pytest.raises(TypeError):
+            reference(credentials=malformed)
+    # A one-shot iterable is legal and is consumed exactly once, at the entry.
+    assert body_of(reference(credentials=iter([SECRET])))["content"]
+    with pytest.raises(ReferenceError):
+        reference(location=location(version_id="v-" + SECRET),
+                  credentials=iter([SECRET]))
 
 
 def test_a_public_reference_may_still_carry_only_authenticated_evidence():
