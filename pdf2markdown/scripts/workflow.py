@@ -105,6 +105,10 @@ ERROR_PATH_ACTIONS = frozenset(
 # tables: it must equal exactly the POLL_ACTIVE_ATTEMPT_PAIRS members that
 # project to recoverable_error via _MANIFEST_STATE_BY_FOLDED_STATE, so a
 # dropped pair fails the test too, not only an added one.
+# Task 2.2c adds ("result_ready", "result_url_expired"): design.md Decision 5
+# case 4c admits the locally-detected result_url_expired pair to resume's
+# re-poll, so it must move in lockstep with conversion_attempt's
+# POLL_ACTIVE_ATTEMPT_PAIRS -- the equality oracle above forces exactly that.
 RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
     {
         ("failed", "credential_source_missing"),
@@ -114,6 +118,7 @@ RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
         ("failed", "poll_transient"),
         ("failed", "poll_timeout"),
         ("failed", "result_pending_timeout"),
+        ("result_ready", "result_url_expired"),
     }
 )
 

@@ -2357,9 +2357,17 @@ def _crash_resume(tmp_path, bundle, environ, generation, *, transport, now):
 REFRESH_RECOVERY_EXPECTATIONS = {
     # The rebuilt intent carries the reservation's own `at`, so a crash before
     # the intent is durable replays exactly the decision the `intent` boundary
-    # replays.
-    ("reservation", "new"): ("recoverable_error", "result_ready", None, None, 1),
-    ("intent", "new"): ("recoverable_error", "result_ready", None, None, 1),
+    # replays. Task 2.2c: both boundaries crash strictly before the local-
+    # expiry rejection is committed, so recovery is what actually commits it
+    # for the first time -- and now that raw_conversion.py's local-expiry
+    # branch folds the attempt onto ("result_ready", "result_url_expired"),
+    # the recovered reason is that value, not None.
+    ("reservation", "new"): (
+        "recoverable_error", "result_ready", "result_url_expired", None, 1,
+    ),
+    ("intent", "new"): (
+        "recoverable_error", "result_ready", "result_url_expired", None, 1,
+    ),
     ("prepared", "new"): ("converted", "result_ready", None, None, 2),
     # private.json never reached the disk, so the renewed URL is genuinely
     # gone: recovery must downgrade the decision instead of inventing a URL.
@@ -5246,13 +5254,47 @@ def _drive_and_run_command(tmp_path, capsys, monkeypatch, command):
     raise AssertionError(f"_drive_and_run_command: unknown command {command!r}")
 
 
+# The driven conversion_attempt_state each _drive_and_run_command branch
+# actually lands on. inspect/advance/resume all read (or recover into) the
+# submission_unknown record StatusCreate(401) produces; record replays a
+# "retry" decision through it, which re-authorizes a fresh not-yet-submitted
+# attempt -- authorized, not submission_unknown.
+_FOUR_COMMAND_DRIVEN_STATES = {
+    "inspect": "submission_unknown",
+    "advance": "submission_unknown",
+    "resume": "submission_unknown",
+    "record": "authorized",
+}
+
+
 @pytest.mark.parametrize("command", ["inspect", "advance", "resume", "record"])
-def test_all_four_commands_expose_the_same_reason_fields(
+def test_all_four_commands_expose_both_reason_fields(
     tmp_path, capsys, monkeypatch, command
 ):
+    """2.2b review front-load #1 -- the original name ("expose_the_same_
+    reason_fields") only proved all four commands expose the same *keys*, not
+    that the driven state is actually the one every branch below assumes.
+    Anchoring conversion_attempt_state pins the drive path itself, so a future
+    change to _drive_and_run_command that silently lands a different branch
+    turns this red instead of continuing to pass on an unintended state.
+    """
     result = _drive_and_run_command(tmp_path, capsys, monkeypatch, command)
+    assert (
+        result["conversion_attempt_state"] == _FOUR_COMMAND_DRIVEN_STATES[command]
+    ), command
     assert "conversion_attempt_reason" in result
     assert "conversion_attempt_reason_detail" in result
+
+
+# (reason, reason_detail) drive_to_flat_state actually lands on for the two
+# flat_states test_submission_unknown_and_poll_transient_branches_are_
+# visible_after_closure's main loop drives. Paired with FOLDED_STATE_
+# OBSERVABLES' four-tuple, this is the precise "every detail has at least one
+# exact-value assertion" companion 2.2b review front-load #2 requires.
+_DRIVE_TO_FLAT_STATE_REASON_PAIRS = {
+    "submission_unknown": ("no_task_id", "no_task_id"),
+    "poll_transient": ("poll_transient", "poll_transient"),
+}
 
 
 def test_submission_unknown_and_poll_transient_branches_are_visible_after_closure(
@@ -5281,6 +5323,16 @@ def test_submission_unknown_and_poll_transient_branches_are_visible_after_closur
     result_url 的 boundary="private" 分支）。只覆盖前者，「可观测性净增」就只
     证明了一半：本测试在主循环之后额外驱动崩溃恢复分支，把两个 reason 都摆到
     可观测这一侧。
+
+    2.2b review front-load #2: the loop below used to pin only "is not None"
+    on the two reason fields, which cannot distinguish "the right value" from
+    "some other non-null value a future regression accidentally produces".
+    _DRIVE_TO_FLAT_STATE_REASON_PAIRS closes that: submission_unknown is
+    driven by StatusCreate(401), whose wire reason_code doc2x._classify folds
+    to "no_task_id" -- both the folded reason and its reason_detail (task
+    2.1c's _attempt_reason_columns) land on that same value. poll_transient is
+    driven by StatusCreate(429) acting as the poll transport, whose wire
+    reason_code is "poll_transient" itself -- again identical on both columns.
     """
     for flat_state in ("submission_unknown", "poll_transient"):
         result = drive_to_flat_state(tmp_path, flat_state)
@@ -5293,8 +5345,10 @@ def test_submission_unknown_and_poll_transient_branches_are_visible_after_closur
             result["outcome"],
             result.get("action_required"),
         ) == FOLDED_STATE_OBSERVABLES[flat_state], flat_state
-        assert result["conversion_attempt_reason"] is not None, flat_state
-        assert result["conversion_attempt_reason_detail"] is not None, flat_state
+        assert (
+            result["conversion_attempt_reason"],
+            result["conversion_attempt_reason_detail"],
+        ) == _DRIVE_TO_FLAT_STATE_REASON_PAIRS[flat_state], flat_state
 
     # poll_transient's second reason_detail, result_private_payload_lost, is
     # never reached through drive_to_flat_state (which only exercises the
@@ -5338,8 +5392,8 @@ def test_submission_unknown_and_poll_transient_branches_are_visible_after_closur
                 str(submitted["generation"]),
             ],
             environ=environ,
-            cwd=str(tmp_path),
-            config_home=str(tmp_path / "config-home"),
+            cwd=str(lost_payload_root),
+            config_home=str(lost_payload_root / "config-home"),
             transport=PollStatus(
                 "task-lost-private-payload", "completed", results=[{"url": result_url}]
             ),
@@ -5361,7 +5415,7 @@ def test_submission_unknown_and_poll_transient_branches_are_visible_after_closur
             "--expected-generation",
             str(submitted["generation"]),
         ],
-        cwd=tmp_path,
+        cwd=lost_payload_root,
         environ=environ,
         transport=NeverNetwork(),
     )

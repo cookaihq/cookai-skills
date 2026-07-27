@@ -44,6 +44,12 @@ RECOVERABLE_ARCHIVE_REJECTIONS = frozenset({"result_url_unavailable"})
 # result host. They close a result reference that the same Doc2X task has
 # already proven it cannot replace.
 LEDGER_RESULT_REJECTIONS = frozenset({"result_url_not_renewed"})
+# Task 2.2c -- which code path decided a rejection. Decision 9.1: the local
+# expiry check (_reference_rejection, no network) and the archive host itself
+# (a ResultArchiveError raised while actually fetching) can both land on the
+# very same reason_code (result_url_unavailable), so this is the only field
+# that tells a resume replaying the record which one produced it.
+DETECTED_BY_VALUES = frozenset({"local_expiry", "archive_host"})
 
 
 class RawConversionError(ValueError):
@@ -249,12 +255,13 @@ def _desired_state(
     return desired_manifest, desired_private
 
 
-def _rejection_record(intent: dict, *, reason_code: str) -> dict:
+def _rejection_record(intent: dict, *, reason_code: str, detected_by: str) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "operation_id": intent["operation_id"],
         "state": "rejected",
         "reason_code": reason_code,
+        "detected_by": detected_by,
         "attempt_id": intent["attempt_id"],
         "task_id": intent["task_id"],
         "result_url_sha256": intent["result_url_sha256"],
@@ -282,6 +289,20 @@ def _desired_rejection(
         deepcopy(record),
     ]
     desired_manifest["raw_conversion"] = deepcopy(record)
+    if record.get("detected_by") == "local_expiry":
+        # design.md Decision 4 / task 2.2c -- the local-expiry branch is the
+        # one wire-independent source of LOCALLY_DETECTED_PAIRS' member
+        # ("result_ready", "result_url_expired"): an archive-host-reported
+        # rejection leaves the attempt's reason untouched (still None),
+        # because no wire classification produced *that* rejection at all.
+        attempts = desired_manifest.get("conversion_attempts")
+        if isinstance(attempts, list) and attempts:
+            active_attempt = deepcopy(attempts[-1])
+            active_attempt["reason"] = "result_url_expired"
+            desired_manifest["conversion_attempts"] = [
+                *attempts[:-1],
+                active_attempt,
+            ]
     desired_private = deepcopy(private_state)
     desired_private["generation"] = new_generation
     return desired_manifest, desired_private
@@ -336,9 +357,10 @@ def _commit_rejection(
     private_state: dict,
     intent: dict,
     reason_code: str,
+    detected_by: str,
     at: str,
 ) -> tuple[dict, dict]:
-    record = _rejection_record(intent, reason_code=reason_code)
+    record = _rejection_record(intent, reason_code=reason_code, detected_by=detected_by)
     desired_manifest, desired_private = _desired_rejection(
         manifest,
         private_state,
@@ -835,6 +857,7 @@ def adopt_ready_result(
             private_state=private_state,
             intent=intent,
             reason_code=reason_code,
+            detected_by="local_expiry",
             at=at,
         )
     _assert_directory_identity(
@@ -860,6 +883,7 @@ def adopt_ready_result(
                     private_state=private_state,
                     intent=intent,
                     reason_code=exc.code,
+                    detected_by="archive_host",
                     at=at,
                 )
             raise RawConversionError(exc.code, exc.message) from exc
@@ -1136,6 +1160,7 @@ def recover_interrupted_adoption(
                 private_state=prefix[1],
                 intent=intent,
                 reason_code=reason_code,
+                detected_by="local_expiry",
                 at=at,
             )
         try:
@@ -1156,6 +1181,7 @@ def recover_interrupted_adoption(
                     private_state=prefix[1],
                     intent=intent,
                     reason_code=exc.code,
+                    detected_by="archive_host",
                     at=at,
                 )
             raise
@@ -1378,6 +1404,7 @@ def _valid_rejection(record: dict, intent: dict) -> bool:
             "operation_id",
             "state",
             "reason_code",
+            "detected_by",
             "attempt_id",
             "task_id",
             "result_url_sha256",
@@ -1394,6 +1421,7 @@ def _valid_rejection(record: dict, intent: dict) -> bool:
             | RECOVERABLE_ARCHIVE_REJECTIONS
             | LEDGER_RESULT_REJECTIONS
         )
+        and record.get("detected_by") in DETECTED_BY_VALUES
         and record.get("attempt_id") == intent.get("attempt_id")
         and record.get("task_id") == intent.get("task_id")
         and record.get("result_url_sha256") == intent.get("result_url_sha256")

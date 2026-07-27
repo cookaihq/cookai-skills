@@ -10,7 +10,7 @@ import stat
 import struct
 import warnings
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import fitz
@@ -1918,6 +1918,174 @@ def test_expired_result_url_refreshes_the_same_task_then_adopts(
     assert len(private_state["result_urls"]) == 2
     assert old_result_url not in public_state
     assert new_result_url not in public_state
+
+
+def _drive_to_local_expiry_rejection(case_root, capsys, monkeypatch):
+    """Drive a ready result to a rejection detected purely from the local
+    24-hour validity window -- no archive host is ever contacted (the
+    NeverNetwork transport would raise if it were)."""
+    case_root.mkdir()
+    bundle, ready, dependencies, key, _result_url = ready_result_bundle(
+        case_root, capsys, monkeypatch
+    )
+    rejected_rc, rejected, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=case_root,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=NeverNetwork(),
+        now=NOW + timedelta(hours=24),
+    )
+    assert rejected_rc == 0, rejected
+    assert rejected["outcome"] == "result_url_unavailable"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    return manifest["raw_conversion"], manifest
+
+
+def _drive_to_archive_host_rejection(case_root, capsys, monkeypatch):
+    """Drive a ready result to a rejection the archive host itself reports
+    (HTTP 403), without ever advancing past the local validity window."""
+    case_root.mkdir()
+    bundle, ready, dependencies, key, _result_url = ready_result_bundle(
+        case_root, capsys, monkeypatch
+    )
+    rejected_rc, rejected, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=case_root,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=ArchiveTransport(response=ArchiveResponse(b"", status=403)),
+    )
+    assert rejected_rc == 0, rejected
+    assert rejected["outcome"] == "result_url_unavailable"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    return manifest["raw_conversion"], manifest
+
+
+def test_local_expiry_and_archive_host_rejections_are_distinguishable(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.2c -- both paths land on the same raw reason_code
+    (`result_url_unavailable`, Decision 9.1), so `detected_by` is the only
+    field that tells a resume replaying this record which one produced it."""
+    local_record, _local_manifest = _drive_to_local_expiry_rejection(
+        tmp_path / "local-expiry-detected-by", capsys, monkeypatch
+    )
+    assert local_record["reason_code"] == "result_url_unavailable"
+    assert local_record["detected_by"] == "local_expiry"
+
+    remote_record, _remote_manifest = _drive_to_archive_host_rejection(
+        tmp_path / "archive-host-detected-by", capsys, monkeypatch
+    )
+    assert remote_record["reason_code"] == "result_url_unavailable"
+    assert remote_record["detected_by"] == "archive_host"
+
+    # Decision 9.1 -- no new raw reason_code is invented for this
+    # distinction; RECOVERABLE_ARCHIVE_REJECTIONS stays exactly one value.
+    assert raw_conversion.RECOVERABLE_ARCHIVE_REJECTIONS == {"result_url_unavailable"}
+
+
+def test_local_expiry_sets_the_attempt_reason_but_archive_host_does_not(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.2c's write-side wiring: only the locally-detected branch folds
+    onto LOCALLY_DETECTED_PAIRS' ("result_ready", "result_url_expired");
+    an archive-host-reported rejection leaves the attempt's `reason` alone
+    (None), since no wire classification produced this rejection at all."""
+    _local_record, local_manifest = _drive_to_local_expiry_rejection(
+        tmp_path / "local-expiry-attempt-reason", capsys, monkeypatch
+    )
+    assert local_manifest["conversion_attempts"][-1]["reason"] == "result_url_expired"
+
+    _remote_record, remote_manifest = _drive_to_archive_host_rejection(
+        tmp_path / "archive-host-attempt-reason", capsys, monkeypatch
+    )
+    assert remote_manifest["conversion_attempts"][-1]["reason"] is None
+
+
+def test_locally_expired_attempt_resumes_to_a_successful_repoll(
+    tmp_path, capsys, monkeypatch
+):
+    """End-to-end pin for the 2.2a-review-identified collision: writing the
+    attempt's reason to "result_url_expired" makes workflow.py's resume admit
+    a further re-poll of the very same task through the
+    manifest["raw_conversion"].reason_code == "result_url_unavailable" branch
+    (workflow.py ~1984-1990), which then routes into commit_poll_result ->
+    _poll_transition. Before this task wired POLL_ACTIVE_ATTEMPT_PAIRS and
+    RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS to admit ("result_ready",
+    "result_url_expired") -- and before _POLL_WINDOW_RESET_PAIRS and the
+    result-field-clearing branch in _poll_transition were extended to the
+    same pair -- that re-poll raised invalid_state_transition /
+    integrity_violation (both reproduced live while building this task; see
+    the task report for the exact failure shapes). This test drives the real
+    collision path and pins the successful outcome on the other side of it.
+    """
+    case_root = tmp_path / "local-expiry-resumes-to-repoll"
+    case_root.mkdir()
+    bundle, ready, dependencies, key, old_result_url = ready_result_bundle(
+        case_root, capsys, monkeypatch
+    )
+    expired_rc, expired, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=case_root,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=NeverNetwork(),
+        now=NOW + timedelta(hours=24),
+    )
+    assert expired_rc == 0, expired
+    assert expired["outcome"] == "result_url_unavailable"
+    assert expired["conversion_state"] == "recoverable_error"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_attempts"][-1]["reason"] == "result_url_expired"
+
+    new_result_url = "https://results.example/result.zip?token=local-expiry-refresh"
+    refresh = JsonResponse(
+        {"status": "completed", "results": [{"url": new_result_url}]}
+    )
+    refreshed_rc, refreshed, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(expired["generation"]),
+        ],
+        cwd=case_root,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=refresh,
+        now=NOW + timedelta(hours=24),
+    )
+    assert refreshed_rc == 0, refreshed
+    assert refreshed["outcome"] == "result_ready"
+    assert len(refresh.calls) == 1
+    assert refresh.calls[0][0] == "GET"
+    assert "task-result-001" in refresh.calls[0][1]
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    # The successful re-poll folds the attempt back onto its wire-observed
+    # pair -- reason clears, this is no longer the locally-detected member.
+    assert manifest["conversion_attempts"][-1]["reason"] is None
+    assert old_result_url not in json.dumps(manifest)
 
 
 def test_second_raw_operation_recovers_after_prepared_without_network(

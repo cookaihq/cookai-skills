@@ -623,9 +623,23 @@ _LEGAL_TRIPLE_BY_FLAT_STATE = {
 # Spliced with LOCALLY_DETECTED_PAIRS, whose one member has no LEGAL_TRIPLES
 # row to read a conversion_state off (see that constant): the dict's values
 # *are* the top-level state those pairs project to.
-_MANIFEST_STATE_BY_FOLDED_STATE = {
+_WIRE_MANIFEST_STATE_BY_FOLDED_STATE = {
     (row.attempt_state, row.reason): row.conversion_state for row in LEGAL_TRIPLES
-} | LOCALLY_DETECTED_PAIRS
+}
+# Task 2.2c -- a plain `|` union has the right operand silently win on a key
+# collision (test_locally_detected_pairs_have_no_wire_row_key_collision pins
+# today's disjointness as a value-level assertion, but nothing short of that
+# test failing stopped a future colliding pair from being merged in
+# production). This mirrors _locally_detected_observations' single-element-
+# unpacking guard, which is the production-side counterpart already raising
+# at import time: a colliding addition here must fail exactly the same way,
+# not just when the test suite happens to run.
+assert not (
+    frozenset(LOCALLY_DETECTED_PAIRS) & frozenset(_WIRE_MANIFEST_STATE_BY_FOLDED_STATE)
+), "LOCALLY_DETECTED_PAIRS collides with a wire-derived (state, reason) pair"
+_MANIFEST_STATE_BY_FOLDED_STATE = (
+    _WIRE_MANIFEST_STATE_BY_FOLDED_STATE | LOCALLY_DETECTED_PAIRS
+)
 
 # The (http_status, upstream_status) pair each non-transient wire
 # classification must carry.
@@ -752,7 +766,13 @@ POLL_RESULT_STATES = frozenset(POLL_STATE_CONTRACT) - {"submitted"} | {
 
 # The folded (state, reason) pairs an active attempt may be in when a poll
 # observation is applied to it -- the re-keyed POLL_ACTIVE_ATTEMPT_STATES,
-# whose 13 flat members collapse onto these 11 pairs.
+# whose 13 flat members collapse onto these 11 pairs, plus task 2.2c's
+# locally-detected twelfth: design.md Decision 5 case 4c admits a
+# result_url_expired attempt to re-poll the very same Doc2X task in order to
+# refresh its result URL (resume_same_conversion_task semantics) --
+# raw_conversion.py's local-expiry branch now writes exactly this pair (see
+# LOCALLY_DETECTED_PAIRS), and that re-poll runs through the same
+# commit_poll_result -> _poll_transition path as every other admitted pair.
 #
 # The fold is why this had to become a pair set rather than a state set: eight
 # of the ten reasons `failed` now covers may keep polling, but
@@ -774,6 +794,7 @@ POLL_ACTIVE_ATTEMPT_PAIRS = frozenset(
         ("failed", "result_pending_timeout"),
         ("failed", "unsafe_result_url"),
         ("result_ready", None),
+        ("result_ready", "result_url_expired"),
     }
 )
 
@@ -811,12 +832,20 @@ _POLL_DEADLINE_PAIRS = frozenset(
 
 # The folded pairs whose successor poll restarts the poll window instead of
 # continuing it. Pre-fold flat set: {"poll_timeout", "result_pending_timeout",
-# "result_ready"}.
+# "result_ready"}. Task 2.2c adds ("result_ready", "result_url_expired"):
+# re-polling a locally-detected-expired result_ready attempt is the exact same
+# event ("restart the window, this task is being asked for its result again")
+# as re-polling a wire ("result_ready", None) one -- only the reason label
+# changed. Without this, the stale window from the original poll survives
+# untouched (reset_window stays False for the new pair) and last_polled_at
+# (set to the refresh's own `at`) ends up past the untouched poll_deadline_at,
+# failing _valid_poll_fields' `last > deadline` check.
 _POLL_WINDOW_RESET_PAIRS = frozenset(
     {
         ("failed", "poll_timeout"),
         _RESULT_PENDING_TIMEOUT_PAIR,
         ("result_ready", None),
+        ("result_ready", "result_url_expired"),
     }
 )
 
@@ -2868,7 +2897,14 @@ def _poll_transition(
         else:
             updated_attempt["result_observed_at"] = recorded_result.get("observed_at")
         updated_attempt["result_validity_hours"] = 24
-    elif active_pair == ("result_ready", None):
+    elif active.get("state") == "result_ready":
+        # Downgrading a ready attempt (a poll observation other than another
+        # result_ready) must clear its stale result reference regardless of
+        # which of the two legal result_ready reasons it carried -- task
+        # 2.2c's ("result_ready", "result_url_expired") is downgraded by the
+        # very same poll_transient/credential/timeout branches a wire
+        # ("result_ready", None) attempt is, and the non-result_ready branch
+        # of _valid_attempt requires these three fields to be None.
         updated_attempt["result_url_sha256"] = None
         updated_attempt["result_observed_at"] = None
         updated_attempt["result_validity_hours"] = None
