@@ -1,14 +1,27 @@
+"""Object Reference v2: construction, parsing, and the disposition lock.
+
+Naming note: ``ReferenceError`` below shadows the builtin of the same name.
+The builtin is *not* a ``ValueError`` subclass, so a module that imports this
+one bare would silently change what ``except ReferenceError`` means at its own
+call sites. The name is fixed by the plan and is deliberately not renamed in
+this task; importers must spell it ``delivery_reference.ReferenceError`` or
+alias it on import instead of pulling the bare name into their namespace.
+"""
+
 from __future__ import annotations
 
 import re
 from copy import deepcopy
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
+from artifacts import ArtifactError, validate_provider_identifier
 from delivery_schema import (
     DISPOSITIONS, DeliverySchemaError, VERIFICATION_CHANNELS, body_of,
     build_typed, parse_typed,
 )
-from v2_schema import normalize_public_base
+from v2_schema import (
+    normalize_endpoint, normalize_public_base, validate_object_key,
+)
 
 
 class ReferenceError(ValueError):
@@ -28,6 +41,15 @@ VERIFICATION_FIELDS: Tuple[str, ...] = (
 URL_SCOPES: Tuple[str, ...] = ("current-key", "exact-version")
 
 CONTENT_STABILITIES: Tuple[str, ...] = ("current_key_unpinned", "version_pinned")
+
+# Unpacked from the vocabulary rather than re-spelled below, so the vocabulary
+# is the single source of both literals: the scope table and the derivation in
+# build_object_reference_v2 cannot be left behind when a member is renamed.
+# Before this binding CONTENT_STABILITIES had no producer and no consumer
+# anywhere in the repository -- rewriting it to ("nonsense",) left the whole
+# suite green, which is the very "dangling vocabulary entry" this change keeps
+# nailing shut elsewhere.
+_UNPINNED, _PINNED = CONTENT_STABILITIES
 
 DISPOSITION_WRITE_CERTAINTY: Dict[str, Optional[bool]] = {
     "adopted": False,
@@ -51,8 +73,8 @@ DISPOSITION_REQUIRED_CHANNELS: Dict[str, Tuple[str, ...]] = {
 # calling that scope "exact-version" would turn a moment into a permanent
 # proof, so the unpinned side admits only the honest scope.
 _SCOPES_FOR_STABILITY: Dict[str, Tuple[str, ...]] = {
-    "current_key_unpinned": ("current-key",),
-    "version_pinned": ("current-key", "exact-version"),
+    _UNPINNED: ("current-key",),
+    _PINNED: ("current-key", "exact-version"),
 }
 
 # Derived from the rest of the body, never accepted from the caller.
@@ -69,6 +91,16 @@ _ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 _RFC3339_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 
 _MAX_PRESIGN_SECONDS = 604800
+
+# Same bound artifacts._validate_reference puts on v1 retention days
+# (scripts/artifacts.py:198). Without it the constructor returns an artifact
+# that serialize_artifact then refuses -- verified by running
+# build_object_reference_v2(retention={"mode": "expire", "days": 2 ** 53, ...}),
+# which succeeds and only blows up later as
+# DeliverySchemaError("artifact is not canonically serializable"). The
+# constructor's contract is "returns a writable artifact", so the refusal
+# belongs here, not at the fsync in front of result_out.
+_MAX_RETENTION_DAYS = (1 << 53) - 1
 
 
 def _object(value: Any, label: str) -> Dict[str, Any]:
@@ -125,21 +157,63 @@ def _content(value: Any) -> Dict[str, Any]:
     return {"sha256": _sha256(item["sha256"]), "size": _size(item["size"])}
 
 
-def _location(value: Any) -> Dict[str, Any]:
+def _location(value: Any, credentials: Iterable[str] = ()) -> Dict[str, Any]:
     item = _object(value, "location")
     keys = ("addressing", "bucket", "endpoint", "key", "provider", "region",
             "version_id")
     _exact(item, keys, "location")
     if item["addressing"] not in _ADDRESSING:
         raise ReferenceError("invalid location.addressing")
+    endpoint = _text(item["endpoint"], "location.endpoint")
+    key = _text(item["key"], "location.key")
+    # The checks v1 ran on key, endpoint and version_id
+    # (artifacts._validate_reference, scripts/artifacts.py:158-168); the
+    # version_id half is a few lines below. This module is the only place that
+    # both writes and reads an Object Reference v2, so "the producer would
+    # never emit a dirty value" is not an argument for skipping them:
+    # parse_object_reference_v2 exists precisely to re-run every construction
+    # check against an artifact somebody else supplied.
+    try:
+        validate_object_key(key)
+    except ValueError as exc:
+        # Probing validate_object_key with bad keys, non-strings and lone
+        # surrogates only ever produced SchemaError, so the wider clause is
+        # not covering a known leak here -- it is kept uniform with the two
+        # normalizer clauses, where a bare ValueError is proven (below).
+        raise ReferenceError("invalid location.key") from exc
+    try:
+        normalized_endpoint = normalize_endpoint(endpoint)
+    except ValueError as exc:
+        # Proven leak, same shape as _access: normalize_endpoint("https://[::1")
+        # raises a bare ValueError("Invalid IPv6 URL") out of urlsplit.
+        raise ReferenceError("invalid location.endpoint") from exc
+    if normalized_endpoint != endpoint:
+        # This comparison, not the exception above, is what refuses most bad
+        # endpoints: normalize_endpoint("not-a-url") does not raise, it
+        # returns "https://not-a-url". Measured, not assumed.
+        raise ReferenceError("location.endpoint is not normalized")
     version_id = item["version_id"]
     if version_id is not None:
-        _text(version_id, "location.version_id")
+        # Not _text: a version_id is provider-supplied text that lands in an
+        # artifact and in log lines, so it gets v1's screen -- 4096-byte cap,
+        # printable ASCII only, and a check that no credential the caller
+        # handed us appears in it raw or percent-encoded. Global Constraints
+        # forbid credential material reaching an artifact; _text alone made
+        # that a convention instead of a structural guarantee.
+        try:
+            version_id = validate_provider_identifier(version_id, credentials)
+        except ArtifactError as exc:
+            # ArtifactError, not ValueError: IdentifierRejected is the only
+            # type validate_provider_identifier raises -- its charset gate
+            # runs before _strict_percent_decode, so unquote_to_bytes only
+            # ever sees printable ASCII. Checked against the source, not
+            # assumed. The message deliberately carries no value.
+            raise ReferenceError("invalid location.version_id") from exc
     return {
         "addressing": item["addressing"],
         "bucket": _text(item["bucket"], "location.bucket"),
-        "endpoint": _text(item["endpoint"], "location.endpoint"),
-        "key": _text(item["key"], "location.key"),
+        "endpoint": endpoint,
+        "key": key,
         "provider": _text(item["provider"], "location.provider"),
         "region": _text(item["region"], "location.region"),
         "version_id": version_id,
@@ -190,7 +264,8 @@ def _retention(value: Any) -> Dict[str, Any]:
         if days is not None:
             raise ReferenceError("retain requires days=null")
     elif item["mode"] == "expire":
-        if not isinstance(days, int) or isinstance(days, bool) or days < 1:
+        if (not isinstance(days, int) or isinstance(days, bool)
+                or not 1 <= days <= _MAX_RETENTION_DAYS):
             raise ReferenceError("invalid retention days")
     else:
         raise ReferenceError("invalid retention mode")
@@ -240,18 +315,22 @@ def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
                               location: Any, operation_id: Any, plan_hash: Any,
                               plan_id: Any, retention: Any, root_recovery_id: Any,
                               target_contract: Any, target_contract_hash: Any,
-                              target_ref: Any,
-                              verifications: Any) -> Dict[str, Any]:
+                              target_ref: Any, verifications: Any,
+                              credentials: Iterable[str] = ()) -> Dict[str, Any]:
+    """Build an Object Reference v2 body and wrap it in a typed envelope.
+
+    ``credentials`` is the same screening material v1's build/parse pair took
+    (``artifacts.build_object_reference``): every string in it is refused
+    inside ``location.version_id``. It defaults to empty so the length and
+    charset half of the screen still runs for callers that hold no secrets.
+    """
     if disposition not in DISPOSITIONS:
         raise ReferenceError("unregistered disposition")
     content = _content(content)
-    location = _location(location)
+    location = _location(location, credentials)
     access = _access(access)
     retention = _retention(retention)
-    stability = (
-        "version_pinned" if location["version_id"] is not None
-        else "current_key_unpinned"
-    )
+    stability = _PINNED if location["version_id"] is not None else _UNPINNED
     entries = _verifications(verifications, content, stability)
     carried = {entry["channel"] for entry in entries}
     for channel in DISPOSITION_REQUIRED_CHANNELS[disposition]:
@@ -286,20 +365,27 @@ def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
         raise ReferenceError("object reference does not match its field set") from exc
 
 
-def parse_object_reference_v2(text: str) -> Dict[str, Any]:
+def parse_object_reference_v2(text: str,
+                              credentials: Iterable[str] = ()) -> Dict[str, Any]:
     """Parse and re-derive, so reading is as strict as writing.
 
     parse_typed only proves the envelope and the field set. Rebuilding the
     body from its own non-derived fields is what refuses a hand-edited
     artifact whose disposition and object_written disagree -- the read/write
     asymmetry that let serialize_artifact check type but not version.
+
+    ``credentials`` is threaded through for the same reason the whole rebuild
+    is: the read side handles an artifact somebody else produced, so it needs
+    the credential screen on ``location.version_id`` at least as much as the
+    write side does. v1 took it on both halves too
+    (``artifacts.parse_object_reference``).
     """
     item = parse_typed(text, expected_type="s3-upload.object-reference")
     body = body_of(item)
     supplied = {key: value for key, value in body.items()
                 if key not in DERIVED_FIELDS}
     try:
-        rebuilt = build_object_reference_v2(**supplied)
+        rebuilt = build_object_reference_v2(credentials=credentials, **supplied)
     except TypeError as exc:
         raise ReferenceError("object reference body is not constructible") from exc
     if body_of(rebuilt) != body:

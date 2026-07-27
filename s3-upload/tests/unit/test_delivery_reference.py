@@ -7,15 +7,21 @@ from delivery_schema import (
     OUTCOME_WRITE_CERTAINTY, VERIFICATION_CHANNELS, body_of, parse_typed,
     serialize_artifact,
 )
+import delivery_reference
 from delivery_reference import (
-    DISPOSITION_REQUIRED_CHANNELS, DISPOSITION_WRITE_CERTAINTY, ReferenceError,
-    build_object_reference_v2, build_verification, parse_object_reference_v2,
+    CONTENT_STABILITIES, DISPOSITION_REQUIRED_CHANNELS,
+    DISPOSITION_WRITE_CERTAINTY, ReferenceError, build_object_reference_v2,
+    build_verification, parse_object_reference_v2,
 )
 
 
 GOLDENS = Path(__file__).parents[1] / "goldens" / "delivery"
 SHA = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
 AT = "2026-07-27T00:00:00Z"
+# Credential-shaped material built here and nowhere else, so the credential
+# screen is exercised against a string the module under test has no other way
+# of knowing about. AWS's own documentation example key -- never a live secret.
+SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 
 def verification(channel="authenticated_full_get", **overrides):
@@ -50,6 +56,25 @@ def reference(**overrides):
     return build_object_reference_v2(**kwargs)
 
 
+def location(**overrides):
+    item = dict(body_of(reference())["location"])
+    item.update(overrides)
+    return item
+
+
+def retention(**overrides):
+    item = {"mode": "retain", "days": None, "enforcement": "external-unverified"}
+    item.update(overrides)
+    return item
+
+
+def access(**overrides):
+    item = {"mode": "private", "public_base_url": None,
+            "presign_expires_seconds": 3600}
+    item.update(overrides)
+    return item
+
+
 def test_object_reference_fields_are_locked():
     assert OBJECT_REFERENCE_FIELDS == (
         "access", "content", "content_stability", "disposition", "location",
@@ -60,8 +85,15 @@ def test_object_reference_fields_are_locked():
     assert BODY_FIELDS["s3-upload.object-reference"] == OBJECT_REFERENCE_FIELDS
 
 
-def test_every_registered_field_has_a_producer():
-    assert set(body_of(reference())) == set(OBJECT_REFERENCE_FIELDS)
+# test_every_registered_field_has_a_producer used to sit here, asserting
+# set(body_of(reference())) == set(OBJECT_REFERENCE_FIELDS). build_typed calls
+# _exact_body (scripts/delivery_schema.py:198-213), which raises unless those
+# two sets are already equal, so the assert line could never be the failure
+# point: deleting a produced field turns reference() itself into an exception
+# and reddens eleven tests, the assert among them only by collateral. Removed
+# rather than rewritten -- nothing is lost, because a registry entry with no
+# producer still fails test_object_reference_fields_are_locked and every test
+# that calls reference().
 
 
 def test_the_three_dispositions_are_mutually_exclusive_on_write_certainty():
@@ -191,11 +223,79 @@ def test_a_pinned_reference_still_accepts_a_current_key_verification():
     assert settled["verifications"][0]["url_scope"] == "current-key"
 
 
+def test_the_content_stability_vocabulary_is_locked_and_wired_to_the_scope_table():
+    # CONTENT_STABILITIES had no producer, no consumer and no test: rewriting
+    # it to ("nonsense",) left all 943 tests green. It is now the single source
+    # of both literals used by the scope table and by the derivation, and this
+    # is where that wiring is checked.
+    assert CONTENT_STABILITIES == ("current_key_unpinned", "version_pinned")
+    assert set(delivery_reference._SCOPES_FOR_STABILITY) == set(CONTENT_STABILITIES)
+    assert body_of(reference())["content_stability"] in CONTENT_STABILITIES
+
+
 def test_a_content_field_set_is_exact():
     with pytest.raises(ReferenceError):
         reference(content={"size": 11, "sha256": SHA, "etag": "w/x"})
     with pytest.raises(ReferenceError):
         reference(content={"size": 11})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("size", -1), ("size", True), ("size", "11"), ("size", 1.0), ("size", None),
+    ("sha256", SHA.upper()), ("sha256", SHA[:63]), ("sha256", SHA + "0"),
+    ("sha256", "sha256:" + SHA), ("sha256", ""), ("sha256", None),
+])
+def test_content_size_and_sha256_are_validated(field, value):
+    # disposition="created" with no verifications on purpose. Written the
+    # obvious way -- keeping the default adopted fixture and its one
+    # verification -- this test passed even with _size and _sha256 gutted to
+    # `return value`, because the verification-vs-content comparison then
+    # rejected the reference instead. Measured, not guessed: the mutation run
+    # came back 1044 passed. A created reference carries no verification, so
+    # nothing but _content can refuse these values.
+    with pytest.raises(ReferenceError):
+        reference(disposition="created", verifications=[],
+                  content=dict({"size": 11, "sha256": SHA}, **{field: value}))
+
+
+# Every bad value here is a literal written in this file, sharing no constant
+# with _ID_RE / _DIGEST_RE: the test states the shapes, it does not ask the
+# implementation what they are.
+_BAD_IDENTIFIERS = [
+    "0" * 31, "0" * 33, "A" * 32, "g" * 32, "", None, 0, "0" * 16 + "-" * 16,
+]
+_BAD_DIGESTS = [
+    "0" * 64, "sha256:" + "0" * 63, "sha256:" + "0" * 65, "sha256:" + "A" * 64,
+    "sha1:" + "0" * 64, "sha256:", "", None,
+]
+
+
+@pytest.mark.parametrize("field,value", [
+    (field, value)
+    for field in ("operation_id", "plan_id", "root_recovery_id")
+    for value in _BAD_IDENTIFIERS
+] + [
+    (field, value)
+    for field in ("plan_hash", "target_contract_hash")
+    for value in _BAD_DIGESTS
+])
+def test_identifiers_and_digests_are_shaped(field, value):
+    with pytest.raises(ReferenceError):
+        reference(**{field: value})
+
+
+@pytest.mark.parametrize("value", ["", None, 7, "project:\x00images",
+                                   "project:im\nages"])
+def test_the_target_ref_must_be_non_empty_single_line_text(value):
+    with pytest.raises(ReferenceError):
+        reference(target_ref=value)
+
+
+@pytest.mark.parametrize("value", ["", None, 7, "ex\x00ample", "ex\nample"])
+@pytest.mark.parametrize("field", ["bucket", "provider", "region"])
+def test_the_location_text_fields_must_be_non_empty_single_line_text(field, value):
+    with pytest.raises(ReferenceError):
+        reference(location=location(**{field: value}))
 
 
 def test_a_private_reference_never_carries_a_public_base():
@@ -232,6 +332,144 @@ def test_a_rejected_public_base_never_escapes_as_a_foreign_exception(base):
     with pytest.raises(ReferenceError):
         reference(access={"mode": "public", "public_base_url": base,
                           "presign_expires_seconds": None})
+
+
+@pytest.mark.parametrize("expires", [0, 604801, -1, True, None, "3600", 1.0])
+def test_presign_expiry_bounds_are_enforced(expires):
+    with pytest.raises(ReferenceError):
+        reference(access=access(presign_expires_seconds=expires))
+    assert body_of(reference(access=access(presign_expires_seconds=1)))
+    assert body_of(reference(access=access(presign_expires_seconds=604800)))
+
+
+@pytest.mark.parametrize("mode", ["", "Private", "public-read", "unlisted",
+                                  None, 1])
+def test_an_unknown_access_mode_is_refused(mode):
+    with pytest.raises(ReferenceError):
+        reference(access=access(mode=mode))
+
+
+def test_an_access_field_set_is_exact():
+    with pytest.raises(ReferenceError):
+        reference(access=dict(access(), acl="public-read"))
+    stripped = access()
+    del stripped["public_base_url"]
+    with pytest.raises(ReferenceError):
+        reference(access=stripped)
+
+
+@pytest.mark.parametrize("value", [
+    {"mode": "retain", "days": 5, "enforcement": "external-unverified"},
+    {"mode": "expire", "days": None, "enforcement": "external-unverified"},
+    {"mode": "expire", "days": 0, "enforcement": "external-unverified"},
+    {"mode": "expire", "days": -1, "enforcement": "external-unverified"},
+    {"mode": "expire", "days": True, "enforcement": "external-unverified"},
+    {"mode": "expire", "days": "7", "enforcement": "external-unverified"},
+    {"mode": "delete", "days": None, "enforcement": "external-unverified"},
+    {"mode": None, "days": None, "enforcement": "external-unverified"},
+    {"mode": "retain", "days": None, "enforcement": "provider-enforced"},
+    {"mode": "retain", "days": None, "enforcement": None},
+    {"mode": "retain", "days": None},
+    {"mode": "retain", "days": None, "enforcement": "external-unverified",
+     "locked": True},
+])
+def test_a_retention_policy_is_validated_field_by_field(value):
+    with pytest.raises(ReferenceError):
+        reference(retention=value)
+
+
+def test_a_retention_day_count_beyond_the_safe_integer_is_refused():
+    # The failure has to land in the constructor. Before this bound
+    # build_object_reference_v2 returned an artifact for days=2**53 and only
+    # serialize_artifact refused it -- i.e. the reference blew up at the write
+    # in front of result_out, after the caller had been told it was valid.
+    with pytest.raises(ReferenceError):
+        reference(retention=retention(mode="expire", days=1 << 53))
+    largest = reference(retention=retention(mode="expire", days=(1 << 53) - 1))
+    assert body_of(largest)["retention"]["days"] == (1 << 53) - 1
+    # Same value, proven writable: that is what the bound is protecting.
+    assert serialize_artifact(largest)
+
+
+@pytest.mark.parametrize("key", ["/leading", "trailing/", "a/../b", "a//b",
+                                 "a/./b", "", "a\nb"])
+def test_a_reference_refuses_an_invalid_object_key(key):
+    # v1 refused every one of these through validate_object_key
+    # (artifacts._validate_reference, scripts/artifacts.py:167); v2 accepted
+    # all four of the first ones until this check was restored.
+    with pytest.raises(ReferenceError):
+        reference(location=location(key=key))
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://S3.AMAZONAWS.COM:443",   # host case and default port
+    "https://s3.amazonaws.com:443",   # default port left in
+    "https://s3.amazonaws.com/",      # trailing slash
+    "s3.amazonaws.com",               # scheme implied, not written
+    "not-a-url",
+    "ftp://s3.amazonaws.com",
+    "https://s3.amazonaws.com?x=1",
+    "https://[::1",                   # bare ValueError from urlsplit
+])
+def test_a_reference_refuses_an_unnormalized_endpoint(endpoint):
+    with pytest.raises(ReferenceError):
+        reference(location=location(endpoint=endpoint))
+
+
+def test_a_version_id_never_carries_credential_material():
+    # SECRET is built at the top of this file and handed in as the caller's
+    # credential material; the module has no other route to it, so nothing
+    # here is comparing the implementation against itself.
+    for carrier in (SECRET, "v-" + SECRET,
+                    "v-wJalrXUtnFEMI%2FK7MDENG%2FbPxRfiCYEXAMPLEKEY"):
+        with pytest.raises(ReferenceError):
+            reference(location=location(version_id=carrier),
+                      credentials=[SECRET])
+    # Shape, not just leakage: v1's screen also caps the length and admits
+    # only printable ASCII.
+    for malformed in ("", "v 1", "v\x7f1", "v" * 4097, "v-é", 7):
+        with pytest.raises(ReferenceError):
+            reference(location=location(version_id=malformed))
+    clean = reference(location=location(version_id="v-1"), credentials=[SECRET])
+    assert body_of(clean)["location"]["version_id"] == "v-1"
+
+
+def test_the_credential_screen_runs_on_the_read_side_too():
+    # Read/write symmetry: an artifact produced elsewhere, with no credential
+    # known at construction time, must still be refused by the reader that
+    # does know the credential. This is why parse_object_reference_v2 takes
+    # credentials rather than only the constructor.
+    leaked = reference(location=location(version_id="v-" + SECRET))
+    raw = serialize_artifact(leaked).decode("utf-8")
+    assert parse_object_reference_v2(raw) == leaked
+    with pytest.raises(ReferenceError):
+        parse_object_reference_v2(raw, credentials=[SECRET])
+
+
+def test_a_public_reference_may_still_carry_only_authenticated_evidence():
+    # Records what the schema allows TODAY, deliberately. Task 8 has not
+    # implemented anonymous verification yet, so a rule requiring an anonymous
+    # channel here would make the references Task 6 and Task 7 produce
+    # unconstructible. Task 8 must FLIP this test to require the anonymous
+    # channel -- deleting it would remove the only place the gap is written
+    # down. Same shape as the Step 0 assertion that pins 403 to
+    # blocking_reasons == [].
+    public = body_of(reference(access=access(
+        mode="public", public_base_url="https://cdn.example.com",
+        presign_expires_seconds=None)))
+    assert public["access"]["mode"] == "public"
+    assert [entry["channel"] for entry in public["verifications"]] == [
+        "authenticated_full_get",
+    ]
+    # And the mirror image: created claims object_written=True while carrying
+    # only anonymous evidence.
+    created = body_of(reference(
+        disposition="created",
+        verifications=[verification("anonymous_public_get")]))
+    assert created["object_written"] is True
+    assert [entry["channel"] for entry in created["verifications"]] == [
+        "anonymous_public_get",
+    ]
 
 
 def test_the_reference_does_not_alias_the_callers_nested_objects():
