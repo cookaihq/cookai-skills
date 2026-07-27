@@ -4277,6 +4277,23 @@ def result_from_manifest(
     # manifest preflight.result_from_manifest already passed it, so asking it
     # again here reads the one implementation rather than second-guessing
     # which layer wrote `result["action_required"]`.
+    #
+    # WHAT THIS CHANGES IN PRODUCTION TODAY: nothing (task 3.1d review, I-2).
+    # The only tier that can outrank this layer's own pending_action is tier
+    # 1, and tier 1 is not reachable through the projector while design.md
+    # Decision 8.1 keeps `inspect` failing closed at a pending conversion
+    # boundary -- workflow._inspect_open_bundle raises before it dispatches
+    # here, so the flag threaded down to this call is False on every
+    # production path (measured twice, by the 3.1d review and again by its fix
+    # round: 324 of 325 calls in a full run project None, and the one that does
+    # not comes from a unit test passing the flag by hand -- there is no bundle
+    # in the suite for which this guard changes an answer). The guard is
+    # therefore structure in place, not a live behaviour
+    # change: it stops the erasure from being unconditional, so that the day
+    # Decision 8.1 changes, this layer does not have to be revisited. The
+    # unit-level proof that it really does stop the erasure is
+    # tests/unit/test_conversion_attempt.py::
+    # test_review_result_does_not_erase_the_projected_conversion_action.
     if (
         conversion_actions.project_conversion_action(
             manifest, pending_conversion_operation=pending_conversion_operation

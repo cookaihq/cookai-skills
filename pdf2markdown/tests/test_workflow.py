@@ -2097,7 +2097,13 @@ def _staging_helpers():
 
 
 def park_on_conversion_intent(
-    tmp_path, capsys, monkeypatch, intent_event, *, boundary="private"
+    tmp_path,
+    capsys,
+    monkeypatch,
+    intent_event,
+    *,
+    boundary="private",
+    previous_private_out=None,
 ):
     """Park a real bundle on an unclosed `intent_event`, at one of the three
     crash windows that intent can leave behind.
@@ -2125,6 +2131,14 @@ def park_on_conversion_intent(
     the wrong one for the second intent. The "commit" window is keyed the same
     way -- "the next event appended while this intent is the tail" -- so it
     needs no table of committed event names to stay in step with.
+
+    `previous_private_out`, when a list is passed, receives the exact bytes
+    private.json holds at the instant the intent's own private write is about
+    to replace them -- i.e. `previous_private`, read off disk rather than
+    recomputed. The one test that needs it builds the write order's forbidden
+    fourth state (`manifest` desired while `private` is previous), which no
+    crash can produce, and taking the real bytes keeps that fixture from
+    depending on the very prefix reduction the predicate under test performs.
 
     Returns (bundle, staged, environ).
     """
@@ -2239,6 +2253,16 @@ def park_on_conversion_intent(
         return original_append_history(value, state_fd=state_fd)
 
     def crash_after_the_intent(name, value, *, dir_fd):
+        if (
+            previous_private_out is not None
+            and name == "private.json"
+            and last_appended == intent_event
+        ):
+            # This call IS the intent's private write, so the file still holds
+            # the pre-intent state right now.
+            previous_private_out.append(
+                (bundle / ".state" / "private.json").read_bytes()
+            )
         if name == f"{boundary}.json" and last_appended == intent_event:
             raise helpers.SimulatedProcessCrash
         return original_atomic_write(name, value, dir_fd=dir_fd)
@@ -2477,11 +2501,518 @@ def test_inspect_names_resume_at_a_raw_bearing_pending_boundary(
     assert read_history_events(bundle)[-1]["event"] not in _conversion_intents()
 
 
+@pytest.mark.parametrize(
+    "intent_event", ["conversion_retry_intent", "conversion_poll_result_intent"]
+)
+def test_a_closed_boundary_dispatches_through_the_conversion_attempt_layer(
+    tmp_path, capsys, monkeypatch, intent_event
+):
+    """Plan step 3b's 3.1b-I2: the `has_conversion_attempt` dispatch, which
+    every boundary test above stops short of.
+
+    Those tests all end at rc 4 -- that is the point of them -- so
+    `_inspect_open_bundle` raises before it ever chooses a
+    `result_from_manifest` layer. The layer choice for the shape task 3.1b
+    was about (a non-empty `conversion_attempts` list with a retry or poll
+    operation in its history) therefore had no test at all: nothing proved
+    that once the boundary is closed the bundle reports through
+    conversion_attempt's wrapper rather than through source_staging's or
+    preflight's, nor that the action it carries is the projector's.
+
+    Both halves are here, on one bundle, in order: `resume` really closes the
+    boundary (rc 0, the intent is no longer the tail), and the closed bundle
+    then dispatches through the conversion-attempt layer -- proved by the
+    three keys only that layer adds -- with an action that is exactly what
+    the projector answers for the closed manifest, and specifically NOT
+    `resume_pending_conversion_operation`, which would mean the flag had
+    leaked onto a bundle with nothing left to resume.
+    """
+    helpers = _conversion_helpers()
+    import conversion_actions
+
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, intent_event
+    )
+    generation = json.loads((bundle / "manifest.json").read_text())["generation"]
+    resume_rc, resumed, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=_RESUME_TRANSPORT_BY_INTENT[intent_event](helpers),
+    )
+    assert resume_rc == 0, json.dumps(resumed, sort_keys=True)
+    assert read_history_events(bundle)[-1]["event"] not in _conversion_intents()
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["conversion_attempts"]
+    assert "raw_conversion" not in manifest and "review" not in manifest
+
+    transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 0, json.dumps(result, sort_keys=True)
+    assert transport.calls == []
+    # The three keys conversion_attempt.result_from_manifest is the only layer
+    # to add: their presence IS the dispatch having gone through it.
+    active = manifest["conversion_attempts"][-1]
+    assert result["conversion_attempt_state"] == active["state"]
+    assert result["conversion_attempt_reason"] == active["reason"]
+    assert result["conversion_attempt_reason_detail"] == active["reason_detail"]
+    assert "raw_conversion_state" not in result
+
+    projected = conversion_actions.project_conversion_action(manifest)
+    assert result["action_required"] != "resume_pending_conversion_operation"
+    assert result["action_required"] == (
+        None if projected is None else projected["action_required"]
+    )
+
+
 def read_history_events(bundle):
     return [
         json.loads(line)
         for line in (bundle / ".state" / "history.ndjson").read_text().splitlines()
     ]
+
+
+def read_private_state(bundle):
+    return json.loads((bundle / ".state" / "private.json").read_text())
+
+
+def _rewrite_state_file(path, value):
+    """Put `value` on disk the way the bundle writer would have."""
+    import bundle as bundle_module
+
+    path.write_bytes(bundle_module.canonical_json_bytes(value))
+
+
+def rewrite_private_state(bundle, private_state):
+    _rewrite_state_file(bundle / ".state" / "private.json", private_state)
+
+
+def rewrite_manifest(bundle, manifest):
+    _rewrite_state_file(bundle / "manifest.json", manifest)
+
+
+def retamper_tail_intent(bundle, key, value):
+    """Change one field of the dangling tail intent, keeping its key set.
+
+    Nothing verifies a history event's own contents on the way in --
+    bundle.read_history only checks that each event is a dict -- and the
+    prefix reduction the boundary predicate performs covers history[:-1], so
+    the tail intent is exactly the part of a bundle that arrives unchecked.
+    """
+    events = read_history_events(bundle)
+    assert key in events[-1], key
+    events[-1][key] = value
+    import bundle as bundle_module
+
+    (bundle / ".state" / "history.ndjson").write_bytes(
+        b"".join(bundle_module.canonical_json_bytes(event) for event in events)
+    )
+
+
+# --- Task 3.1d fix round 1 (review I-1 + plan step 3b's 3.1b-I1): the
+#     NEGATIVE side of the widened pending-boundary predicate.
+#
+# Task 3.1d widened conversion_attempt.at_pending_conversion_boundary from one
+# crash window to three, which meant four new ways for it to answer False --
+# a non-list `result_urls`, a replay that raises, a replay that returns None,
+# and the three-conjunct admission itself. A full-suite instrumentation run
+# over the 607 tests that shipped with it recorded ZERO executions of every
+# one of them: the only test that ever reached a False answer with a
+# conversion intent on the tail (test_a_genuinely_corrupt_bundle_still_says_
+# repair) returns at the earliest gate of all, the prefix reduction.
+#
+# That is the wrong half of the pair to leave uncovered. Everything the task
+# is worth rests on "the action inspect names is one resume can really
+# perform"; the fifteen cells above pin the affirmative half, and without
+# these, mis-writing any conjunct would hand `resume_pending_conversion_
+# operation` -- an instruction to go on running a conversion operation -- to a
+# genuinely damaged bundle, with nothing in the suite turning red.
+#
+# One test per branch, each constructed so that only its own branch can be the
+# one that answers False, and each asserting the same four things the positive
+# cells assert (rc 4, invalid_bundle, zero network, byte-identical bundle) so
+# a regression cannot hide behind a differently-shaped failure.
+
+
+@pytest.mark.parametrize("boundary", ["private", "manifest", "commit"])
+def test_a_tampered_intent_payload_is_still_named_by_the_tail_event(
+    tmp_path, capsys, monkeypatch, boundary
+):
+    """Plan step 3b's 3.1b-I1: the predicate judges legality BY NAME, and the
+    advice it gives is honest anyway because `resume` owns the deep check.
+
+    at_pending_conversion_boundary asks only whether the tail event's name is
+    a CONVERSION_INTENTS member; it never validates the intent's payload. The
+    obvious worry is that this makes `inspect` recommend `resume` for a bundle
+    whose intent has been tampered with. It does -- at window 1, where the
+    predicate answers True before looking at any payload -- and that
+    recommendation is nonetheless true: `resume` is precisely the command that
+    replays the payload, and it fails loud with `integrity_violation` rather
+    than acting on it. Duplicating that validation in the predicate would
+    rebuild the second implementation task 3.1d exists to delete;
+    recover_interrupted_attempt is its single owner.
+
+    At the other two windows the predicate must replay the intent to compute
+    `desired`, so the tampering reaches it there, and the fail-closed `except`
+    the task added (an untested branch until now) turns it into False -- the
+    caller keeps `repair_or_restore_work_bundle`. Both answers are honest;
+    they differ because the two windows genuinely know different amounts.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, "conversion_retry_intent", boundary=boundary
+    )
+    # The intent's evidence_hash must equal the placeholder authorization's;
+    # _authorize_state_from_intent refuses the pair outright when it does not.
+    # The key set is untouched, so this is a payload lie, not a shape error.
+    retamper_tail_intent(bundle, "evidence_hash", "sha256:" + "0" * 64)
+
+    before = state_snapshot(bundle)
+    inspect_transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=inspect_transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == (
+        "resume_pending_conversion_operation"
+        if boundary == "private"
+        else "repair_or_restore_work_bundle"
+    )
+    assert inspect_transport.calls == []
+    assert state_snapshot(bundle) == before
+
+    # Whichever action was named, `resume` tells the truth about the payload
+    # and changes nothing.
+    generation = json.loads((bundle / "manifest.json").read_text())["generation"]
+    resume_transport = helpers.CountingNeverNetwork()
+    resume_rc, resumed, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=resume_transport,
+    )
+
+    assert resume_rc == 4, json.dumps(resumed, sort_keys=True)
+    assert [error["code"] for error in resumed["errors"]] == ["integrity_violation"]
+    assert resume_transport.calls == []
+    assert state_snapshot(bundle) == before
+
+
+def test_a_boundary_whose_private_result_urls_are_not_a_list_says_repair(
+    tmp_path, capsys, monkeypatch
+):
+    """The `template_results` type gate, which nothing reached before.
+
+    Past window 1 the predicate has to hand the intent's replay the private
+    result payloads it may need, and it reads them straight off the private
+    state on disk -- which, at this point in `_inspect_open_bundle`, NOTHING
+    has validated yet: the predicate now runs before the private-state
+    consistency check. `result_urls` is whatever JSON the file happened to
+    hold, so an externally damaged bundle can present a dict there, and
+    iterating it inside the replay would be a TypeError escaping as rc 1 /
+    runtime_error on the very population this branch exists to diagnose.
+
+    Reaching this gate takes one specific shape, measured rather than assumed:
+    the tail intent must be the FIRST conversion event in the bundle's
+    history. Otherwise the prefix reduction gets there first --
+    _reduce_history hands the untouched private state to
+    apply_committed_operations as its template, and that function's own
+    `not isinstance(template_results, list)` check answers None, so the
+    predicate returns at `previous is None` instead. With no conversion
+    operation in the prefix, _reduce_history returns the source-staging
+    reduction directly (it forces `result_urls` to `[]` for that call), the
+    damaged value survives to here, and this is the gate that catches it. A
+    crash during the very first submission is exactly that shape.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, "conversion_submit_intent",
+        boundary="manifest",
+    )
+    assert not [
+        event
+        for event in read_history_events(bundle)[:-1]
+        if event.get("event") in _conversion_intents()
+    ], "the tail intent must be the first conversion event (see docstring)"
+    private_state = read_private_state(bundle)
+    assert isinstance(private_state["result_urls"], list)
+    private_state["result_urls"] = {}
+    rewrite_private_state(bundle, private_state)
+
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
+
+
+def test_a_poll_boundary_whose_result_payload_does_not_match_says_repair(
+    tmp_path, capsys, monkeypatch
+):
+    """The `replayed is None` gate, which nothing reached before.
+
+    A `result_ready` poll intent can only be replayed if the private payload
+    it recorded is findable by (attempt_id, url_sha256); the replay answers
+    None when it is not. Here it is present but its digest has been altered,
+    so the lookup finds nothing and the bundle is not at a recoverable
+    boundary -- and `resume` agrees, refusing the same bundle rather than
+    closing it.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, "conversion_poll_result_intent",
+        boundary="manifest",
+    )
+    private_state = read_private_state(bundle)
+    assert len(private_state["result_urls"]) == 1
+    private_state["result_urls"][-1]["url_sha256"] = "sha256:" + "1" * 64
+    rewrite_private_state(bundle, private_state)
+
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
+
+    generation = json.loads((bundle / "manifest.json").read_text())["generation"]
+    resume_transport = helpers.CountingNeverNetwork()
+    resume_rc, resumed, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=resume_transport,
+    )
+    assert resume_rc == 4, json.dumps(resumed, sort_keys=True)
+    assert resume_transport.calls == []
+    assert state_snapshot(bundle) == before
+
+
+def test_a_boundary_whose_manifest_is_neither_state_says_repair(
+    tmp_path, capsys, monkeypatch
+):
+    """The admission's FIRST conjunct: manifest must be `previous` or
+    `desired`.
+
+    The window-3 bundle below really is parked on a pending intent and really
+    would be closed by `resume` -- the fifteen cells above prove it -- so the
+    only thing standing between a tampered manifest and the instruction "carry
+    on with the conversion operation" is this conjunct. The tamper is a
+    changed attempt_id: still schema-shaped, so nothing before the predicate
+    rejects it, and not equal to either admitted state.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, "conversion_retry_intent", boundary="commit"
+    )
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    manifest["conversion_attempts"][-1]["attempt_id"] = "attempt-" + "9" * 24
+    rewrite_manifest(bundle, manifest)
+
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
+
+
+def test_a_boundary_whose_private_state_is_neither_state_says_repair(
+    tmp_path, capsys, monkeypatch
+):
+    """The admission's SECOND conjunct: private.json must be `previous` or
+    `desired`.
+
+    Window 2 leaves the manifest at `previous`, so the first conjunct holds no
+    matter what happens to private.json -- this cell is the second conjunct on
+    its own. The damage is a recorded result payload no journal event ever
+    produced, which belongs to neither admitted state.
+
+    It has to be damage the prefix reduction itself tolerates, or the
+    predicate returns at `previous is None` and this conjunct is never
+    evaluated (that is what happens to a tampered `source_uploads` entry, for
+    instance -- the staging reducer rejects it). `result_urls` is the one
+    private field the reduction structurally ignores: with the tail intent as
+    the first conversion event, _reduce_history reduces the staging prefix
+    with `result_urls` forced to `[]` and returns that, so the disk value is
+    never read on the way to here -- only compared against, which is exactly
+    what this conjunct is for.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, "conversion_submit_intent", boundary="manifest"
+    )
+    private_state = read_private_state(bundle)
+    assert private_state["result_urls"] == []
+    private_state["result_urls"] = [
+        {
+            "attempt_id": "attempt-" + "8" * 24,
+            "task_id": "task-that-was-never-polled",
+            "url": "https://results.aihubmax.com/never-observed.zip",
+            "url_sha256": "sha256:" + "2" * 64,
+            "observed_at": "2024-01-01T00:00:00Z",
+            "expires_at": None,
+            "validity_window_hours": 24,
+        }
+    ]
+    rewrite_private_state(bundle, private_state)
+
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
+
+
+def test_the_write_orders_forbidden_fourth_state_says_repair(
+    tmp_path, capsys, monkeypatch
+):
+    """The admission's THIRD conjunct: `manifest` desired while `private` is
+    previous is refused even though both halves are individually admitted.
+
+    No crash can produce this state -- private.json is written first -- so a
+    bundle in it did not get there by being interrupted, and
+    recover_interrupted_attempt refuses it for exactly that reason
+    ("partially inconsistent"). Without this conjunct the predicate would call
+    it a recoverable boundary and `inspect` would name an action `resume`
+    then refuses to perform: the two sides of the contract this whole task
+    exists to keep in step would disagree, on the one state the write order
+    says cannot happen.
+
+    It has to be built by hand, and `previous` is taken as the literal bytes
+    private.json held at the instant the intent's own write replaced them --
+    not recomputed from the journal, which would make the fixture depend on
+    the same prefix reduction the predicate under test performs.
+    """
+    helpers = _conversion_helpers()
+    captured = []
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path,
+        capsys,
+        monkeypatch,
+        "conversion_retry_intent",
+        boundary="commit",
+        previous_private_out=captured,
+    )
+    assert len(captured) == 1
+    desired_private = (bundle / ".state" / "private.json").read_bytes()
+    assert captured[0] != desired_private, (
+        "this intent must actually change private.json, or the state being "
+        "built here would be window 3 rather than the forbidden one"
+    )
+    (bundle / ".state" / "private.json").write_bytes(captured[0])
+
+    before = state_snapshot(bundle)
+    transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
+
+    # ...and the refusal is not merely conservative: `resume` refuses this
+    # same state too, which is what makes `repair_or_restore_work_bundle` the
+    # honest answer rather than a missed recovery.
+    generation = json.loads((bundle / "manifest.json").read_text())["generation"]
+    resume_transport = helpers.CountingNeverNetwork()
+    resume_rc, resumed, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=resume_transport,
+    )
+    assert resume_rc == 4, json.dumps(resumed, sort_keys=True)
+    assert [error["code"] for error in resumed["errors"]] == ["integrity_violation"]
+    assert resume_transport.calls == []
+    assert state_snapshot(bundle) == before
 
 
 def corrupt_history_prefix(bundle):
@@ -2721,8 +3252,16 @@ def test_a_pending_source_staging_intent_is_not_called_a_conversion_boundary(
     `resume_pending_conversion_operation` is a conversion-vocabulary action
     that must not be handed out for a staging operation (nor smuggled through
     the WorkflowError narrow gate on its behalf).
+
+    Pinned to the same standard as the conversion boundary cells (plan step
+    3b, 3.1b-I3): a COUNTING transport, so "no network" is an assertion about
+    a recorded call list rather than about an exception that happens not to
+    have been raised, and a byte-and-mtime snapshot of the whole bundle, so
+    "no writes" covers every file rather than the two the assertions happen
+    to read back.
     """
     helpers = _staging_helpers()
+    conversion_helpers = _conversion_helpers()
     bundle, ready, dependencies, _source_bytes = helpers.ready_bundle(
         tmp_path, capsys, monkeypatch
     )
@@ -2768,17 +3307,21 @@ def test_a_pending_source_staging_intent_is_not_called_a_conversion_boundary(
     history = read_history_events(bundle)
     assert history[-1]["event"] == "source_upload_result_intent"
 
+    before = state_snapshot(bundle)
+    transport = conversion_helpers.CountingNeverNetwork()
     rc, result, _stderr = helpers.invoke(
         capsys,
         ["inspect", "--work-bundle", str(bundle)],
         cwd=tmp_path,
         environ={**dependencies, "AIHUB_API_KEY": key},
-        transport=helpers.NeverNetwork(),
+        transport=transport,
     )
 
     assert rc == 4
     assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
     assert result["action_required"] == "repair_or_restore_work_bundle"
+    assert transport.calls == []
+    assert state_snapshot(bundle) == before
 
 
 def test_the_workflow_error_conversion_gate_admits_exactly_one_pair():

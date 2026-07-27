@@ -293,6 +293,21 @@ def _action_context(
     two paths cannot disagree about whether a bundle is at a pending
     boundary.
 
+    WHERE TIER 1 IS ACTUALLY OBSERVED TODAY (task 3.1d review, I-2): on the
+    two `WorkflowError` branches of workflow._inspect_open_bundle, and only
+    there. Tier 1 is NOT reachable through this projector in production, and
+    that is structural rather than an oversight in the wiring: the flag can
+    only be True for a bundle whose last history event is an unclosed
+    conversion intent, such a history cannot reduce back to disk, so
+    `valid_history` is necessarily False and the function raises before it
+    ever dispatches to a result_from_manifest. Making the projector-side tier
+    1 reachable requires changing design.md Decision 8.1 -- `inspect` fails
+    closed at a pending boundary -- which task 3.1d deliberately did not
+    touch. The signal path through the five wrappers is real, single-producer
+    and pinned by tests; it is structure in place, waiting on that decision,
+    and until the decision changes the only tier-1 answers a caller can
+    observe come from the two WorkflowError branches.
+
     `pending_conversion_operation` is not a persisted manifest field -- it is
     a signal the caller passes as an explicit keyword-only argument, not a
     key written onto the manifest dict. Task 3.1a fix round 1 (I5) closes a
@@ -527,7 +542,11 @@ def project_conversion_action(
     CALLER OBLIGATION for tier 1: `pending_conversion_operation` defaults to
     False and that default is fail-open -- see `_action_context`'s docstring.
     A caller at a pending conversion boundary that omits the argument gets a
-    projection with tier 1 silently not firing.
+    projection with tier 1 silently not firing. That docstring also records
+    where tier 1 can be observed today: on workflow._inspect_open_bundle's two
+    `WorkflowError` branches only, never through this projector, for as long
+    as design.md Decision 8.1 keeps `inspect` failing closed at a pending
+    boundary.
     """
     context = _action_context(
         manifest, pending_conversion_operation=pending_conversion_operation

@@ -124,11 +124,20 @@ RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
 )
 
 
-# The code `_inspect_open_bundle`'s `valid_history` branch reports under --
-# the ONE branch whose action can leave ERROR_PATH_ACTIONS, and the only one
-# this constant governs. Spelled once and read both by that construction site
-# and by CONVERSION_ACTION_EXCEPTIONS below, so the pair's code half cannot
-# drift from the code that branch raises.
+# The code BOTH of `_inspect_open_bundle`'s pending-boundary branches report
+# under -- its private-state check and its `valid_history` check, the two
+# branches whose action can leave ERROR_PATH_ACTIONS and the only two this
+# constant governs. Spelled once and read by both construction sites and by
+# CONVERSION_ACTION_EXCEPTIONS below, so the pair's code half cannot drift
+# from the code those branches raise.
+#
+# There are two of them because the three crash windows do not all reach the
+# same check: "before the manifest write" leaves private.json a generation
+# ahead of the manifest, which the private-state check catches first, while
+# the other two windows clear that check and stop at the history check. Task
+# 3.1b wired only the history branch, which is why this comment used to say
+# "the ONE branch"; task 3.1d added the private-state branch and this comment
+# is corrected with it.
 #
 # m1 (task 3.1b fix-round review, renamed in 3.1d): the old name
 # `HISTORY_CHECK_ERROR_CODE` overstated its scope. This module hardcodes
@@ -188,37 +197,31 @@ CONVERSION_ACTION_EXCEPTIONS = frozenset(
 )
 
 
-def _check_conversion_action_exceptions_are_real() -> None:
-    """Every admitted pair's action half must be live.
-
-    Without this check the exception list survives a rename of the action it
-    admits: the gate would keep letting a string through that no producer
-    writes any more, and the WorkflowError check would look closed while
-    quietly guarding nothing. `raise`, not `assert`, so `python -O` cannot
-    strip the check (same stance as conversion_attempt.py's own import-time
-    table guards).
-
-    The code half needs no matching runtime check: CONVERSION_ACTION_EXCEPTIONS
-    is built directly from PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE above, so
-    a table entry whose code has drifted from the history check's code is not a
-    state this module can construct in the first place.
-
-    What this does *not* check is that the construction site still produces the
-    pair at all; that is behaviour, and
-    tests/test_workflow.py::test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary's
-    outside_table == set(CONVERSION_ACTION_EXCEPTIONS) assertion owns it --
-    it statically resolves every WorkflowError(...) call site's own
-    action_required literal back to the code passed at that same call site.
-    """
-    for code, action in CONVERSION_ACTION_EXCEPTIONS:
-        if action not in conversion_attempt_module.CONVERSION_ACTIONS:
-            raise ValueError(
-                f"CONVERSION_ACTION_EXCEPTIONS admits {action!r} for {code!r}, "
-                "which is not a conversion action"
-            )
-
-
-_check_conversion_action_exceptions_are_real()
+# Neither half of that table needs an import-time self-check any more (task
+# 3.1d review, M-3, and the same call 3.1e made for the code half in commit
+# 013aa76: a check that can never fail is a design decision wearing a check's
+# clothes, and it charges the cost at import -- a later, legitimate second
+# entry would not turn a test red, it would make `import workflow` crash).
+#
+#   * The code half: the table is built FROM
+#     PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE, so drift is unrepresentable.
+#   * The action half, since task 3.1d: the table is built from
+#     conversion_actions.RESUME_PENDING_CONVERSION_OPERATION_KIND, and
+#     conversion_actions.py already validates that exact object against
+#     CONVERSION_ACTIONS in its own import-time loop -- so "the admitted
+#     action is a live conversion action" is enforced, on the same table, one
+#     module down. The deleted check re-read the same symbol against the same
+#     frozenset and could not fail.
+#
+# What actually protects the invariant the deleted docstring claimed -- that
+# the table does not survive a RENAME of the action it admits -- is
+# tests/test_workflow.py::
+# test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary,
+# which resolves each WorkflowError call site's own action_required literal
+# and asserts the resulting (code, action) set equals this table exactly; a
+# real rename (constant value plus the CONVERSION_ACTIONS member) turns it
+# red. test_the_workflow_error_conversion_gate_admits_exactly_one_pair
+# additionally asserts the membership the import-time loop used to assert.
 
 
 class WorkflowError(Exception):

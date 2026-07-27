@@ -1876,19 +1876,33 @@ def test_aihub_upload_valid_https_url_agrees_with_doc2x_valid_https_url():
 # TASK 3.1d REMOVED THE SECOND IMPLEMENTATION. The projector moved down to the
 # leaf conversion_actions.py, preflight.result_from_manifest applies it once for
 # the whole chain, and source_staging.result_from_manifest no longer writes any
-# of the three keys. This lock stays exactly as it is, per that task's brief: it
-# now pins that the one remaining implementation still produces, for every
-# staging-pending shape production can reach, the values the deleted one used to
-# -- which is what makes the deletion provably behaviour-preserving rather than
-# merely plausible.
+# of the three keys. The lock's ASSERTIONS stay exactly as they are, per that
+# task's brief: they now pin that the one remaining implementation still
+# produces, for every staging-pending shape production can reach, the values the
+# deleted one used to -- which is what makes the deletion provably
+# behaviour-preserving rather than merely plausible.
+#
+# Be precise about what that is worth now, because it is less than it was. With
+# the second implementation gone, `direct` reaches the same projector call that
+# `projected` does, one layer down, so the two sides are no longer independent
+# derivations of tier 2. What the comparison still pins is real but narrower:
+# that the projection survives the wrapper chain to the caller unaltered, and
+# that its VALUES on each reachable staging shape are the ones the deleted
+# implementation produced.
+#
+# What actually widened it is the mode dimension (task 3.1d fix round 1, plan
+# step 3b's 3.1a-M1): the domain below is now (state, mode) rather than state,
+# because `_pending_action` is mode-gated and the three states do not answer to
+# that gate alike. See the table's own comment for the four reachable cells and
+# the two that are unreachable by design.
 
 
-def _staging_pending_manifest_unknown(tmp_path, capsys, monkeypatch):
+def _staging_pending_manifest_unknown(tmp_path, capsys, monkeypatch, mode="confirm"):
     """source_upload_unknown (PENDING_ACTION_KIND_BY_STATE's
     resolve_source_upload_unknown kind): any non-403 abnormal status.
     """
     bundle, ready, dependencies, _source_bytes = ready_bundle(
-        tmp_path, capsys, monkeypatch
+        tmp_path, capsys, monkeypatch, interaction_mode=mode
     )
     rc, result, _stderr = invoke(
         capsys,
@@ -1910,12 +1924,12 @@ def _staging_pending_manifest_unknown(tmp_path, capsys, monkeypatch):
     return json.loads((bundle / "manifest.json").read_text())
 
 
-def _staging_pending_manifest_rejected(tmp_path, capsys, monkeypatch):
+def _staging_pending_manifest_rejected(tmp_path, capsys, monkeypatch, mode="confirm"):
     """source_upload_rejected (PENDING_ACTION_KIND_BY_STATE's
     retry_source_upload kind): the documented capacity-limit 403.
     """
     bundle, ready, dependencies, _source_bytes = ready_bundle(
-        tmp_path, capsys, monkeypatch
+        tmp_path, capsys, monkeypatch, interaction_mode=mode
     )
     rc, result, _stderr = invoke(
         capsys,
@@ -1937,7 +1951,7 @@ def _staging_pending_manifest_rejected(tmp_path, capsys, monkeypatch):
     return json.loads((bundle / "manifest.json").read_text())
 
 
-def _staging_pending_manifest_expired(tmp_path, capsys, monkeypatch):
+def _staging_pending_manifest_expired(tmp_path, capsys, monkeypatch, mode="confirm"):
     """source_upload_expired (PENDING_ACTION_KIND_BY_STATE's
     retry_expired_source_upload kind): a successful upload whose 72h local
     expiry window (source_staging.py's own check) has since closed, detected
@@ -1946,7 +1960,7 @@ def _staging_pending_manifest_expired(tmp_path, capsys, monkeypatch):
     drives above, trimmed to just the expiry step.
     """
     bundle, ready, dependencies, _source_bytes = ready_bundle(
-        tmp_path, capsys, monkeypatch, interaction_mode="confirm"
+        tmp_path, capsys, monkeypatch, interaction_mode=mode
     )
     staged_url = (
         "https://files.aihubmax.com/tier-2-equivalence-expiry.pdf?token=keep-private"
@@ -1989,42 +2003,199 @@ def _staging_pending_manifest_expired(tmp_path, capsys, monkeypatch):
     return json.loads((bundle / "manifest.json").read_text())
 
 
-STAGING_PENDING_MANIFEST_BUILDERS = {
+def _staging_pending_manifest_expired_auto(tmp_path, capsys, monkeypatch, mode="auto"):
+    """source_upload_expired in AUTO mode -- reachable, but only across a
+    crash (plan step 3b, 3.1a-M1's "first establish whether this is
+    reachable").
+
+    `_pending_action` raises `retry_expired_source_upload` whatever the mode,
+    so on the face of it this cell should be drivable the same way the confirm
+    one is. It is not: in `auto` the expiry is not a stopping point. The same
+    `advance` that commits `source_upload_expiry_committed` goes straight on
+    to open the next upload attempt, so by the time the command returns, the
+    active attempt is the new one and the persisted manifest never rests on
+    `source_upload_expired`. Driving it with a plain transport measures
+    exactly that -- the manifest comes back with a second attempt.
+
+    The state IS persisted, though, in the window between those two writes:
+    the expiry commit writes the manifest with a real pending action on it,
+    and a crash before the next attempt's intent lands leaves it there. That
+    is a genuine bundle an operator can hold in their hands and run `inspect`
+    against, not a hand-built dict, so the equivalence lock covers it as a
+    fourth cell instead of the mode dimension being written off as
+    unreachable.
+    """
+    assert mode == "auto"
+    bundle, ready, dependencies, _source_bytes = ready_bundle(
+        tmp_path, capsys, monkeypatch, interaction_mode="auto"
+    )
+    staged_url = (
+        "https://files.aihubmax.com/tier-2-equivalence-auto-expiry.pdf?token=private"
+    )
+    ready_rc, staged, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": "tier-2-equivalence-auto-key"},
+        transport=SuccessfulUpload(staged_url),
+    )
+    assert ready_rc == 0
+
+    original_append = source_staging.bundle.append_history
+    appended = []
+
+    def crash_after_the_expiry_commit(value, *, state_fd):
+        if appended and appended[-1] == "source_upload_expiry_committed":
+            raise SimulatedProcessCrash
+        appended.append(value.get("event"))
+        return original_append(value, state_fd=state_fd)
+
+    monkeypatch.setattr(
+        source_staging.bundle, "append_history", crash_after_the_expiry_commit
+    )
+    with pytest.raises(SimulatedProcessCrash):
+        workflow.main(
+            [
+                "advance",
+                "--work-bundle",
+                str(bundle),
+                "--expected-generation",
+                str(staged["generation"]),
+                "--visual-capability",
+                "available",
+            ],
+            environ={**dependencies, "AIHUB_API_KEY": "tier-2-equivalence-auto-key"},
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=SuccessfulUpload(staged_url + "-renewed"),
+            now=datetime(2024, 1, 5, 3, 4, 5, tzinfo=timezone.utc),
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(source_staging.bundle, "append_history", original_append)
+    assert appended[-1] == "source_upload_expiry_committed"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["source_staging"]["attempts"][-1]["state"] == (
+        "source_upload_expired"
+    )
+    return manifest
+
+
+_STAGING_PENDING_MANIFEST_BUILDER_BY_STATE = {
     "source_upload_unknown": _staging_pending_manifest_unknown,
     "source_upload_rejected": _staging_pending_manifest_rejected,
     "source_upload_expired": _staging_pending_manifest_expired,
 }
 
+# --- The MODE dimension (plan step 3b, 3.1a-M1)
+#
+# `_pending_action` is mode-gated, and not uniformly: it returns None outside
+# `confirm` mode UNLESS the attempt is `source_upload_expired`, which is the
+# one staging state that raises a pending action in `auto` too (an expired
+# upload URL cannot be re-used and the operator has to be told, whatever the
+# mode). So the (state, mode) product has four reachable cells, not six, and
+# the two unreachable ones are unreachable BY DESIGN rather than merely
+# undriven -- test_auto_mode_raises_no_staging_pending_action_except_expiry
+# below drives them and pins that they produce no pending action at all,
+# which is why they carry no equivalence cell here. Nothing is fabricated to
+# fill the grid.
+STAGING_PENDING_MANIFEST_BUILDERS = {
+    (state, "confirm"): builder
+    for state, builder in _STAGING_PENDING_MANIFEST_BUILDER_BY_STATE.items()
+}
+STAGING_PENDING_MANIFEST_BUILDERS[("source_upload_expired", "auto")] = (
+    _staging_pending_manifest_expired_auto
+)
+
+STAGING_NO_PENDING_IN_AUTO = ("source_upload_unknown", "source_upload_rejected")
+
 
 def test_staging_pending_manifest_builders_cover_every_pending_action_kind():
     """The equivalence lock below is only as strong as its coverage: this
-    pins the builder table's key set to source_staging.
+    pins the builder table's state domain to source_staging.
     PENDING_ACTION_KIND_BY_STATE's own domain (not a hand-copied literal), so
     a future fourth staging state fails this loudly instead of the lock
     quietly staying at three-of-four.
+
+    The second assertion does the same for the mode dimension: every state
+    is either driven under `auto` by the lock or listed as producing no
+    pending action there, so a state cannot go missing from both.
     """
-    assert set(STAGING_PENDING_MANIFEST_BUILDERS) == set(
+    assert {state for state, _mode in STAGING_PENDING_MANIFEST_BUILDERS} == set(
         source_staging.PENDING_ACTION_KIND_BY_STATE
     )
+    auto_cells = {
+        state for state, mode in STAGING_PENDING_MANIFEST_BUILDERS if mode == "auto"
+    }
+    assert auto_cells | set(STAGING_NO_PENDING_IN_AUTO) == set(
+        source_staging.PENDING_ACTION_KIND_BY_STATE
+    )
+    assert not auto_cells & set(STAGING_NO_PENDING_IN_AUTO)
+
+
+@pytest.mark.parametrize("state", STAGING_NO_PENDING_IN_AUTO)
+def test_auto_mode_raises_no_staging_pending_action_except_expiry(
+    tmp_path, capsys, monkeypatch, state
+):
+    """Why the tier-2 equivalence lock has four cells and not six.
+
+    These two staging states are mode-gated: in `auto` the operator has not
+    asked to be consulted and `_pending_action` returns None, so there is no
+    tier-2 answer for the projector to agree or disagree with. Measured here
+    rather than argued, because "this cell is unreachable" is exactly the
+    kind of claim that stops being true after an unrelated edit -- if either
+    of these ever starts raising a pending action, this test goes red and the
+    lock above is one cell short.
+    """
+    manifest = _STAGING_PENDING_MANIFEST_BUILDER_BY_STATE[state](
+        tmp_path, capsys, monkeypatch, mode="auto"
+    )
+    assert manifest["settings_snapshot"]["interaction_mode"] == "auto"
+    assert manifest["source_staging"]["attempts"][-1]["state"] == state
+    assert manifest["source_staging"]["pending_action"] is None
+    assert conversion_attempt.project_conversion_action(manifest) is None
 
 
 @pytest.mark.parametrize(
-    "state",
+    "state,mode",
     sorted(STAGING_PENDING_MANIFEST_BUILDERS),
-    ids=sorted(STAGING_PENDING_MANIFEST_BUILDERS),
+    ids=[
+        f"{state}-{mode}"
+        for state, mode in sorted(STAGING_PENDING_MANIFEST_BUILDERS)
+    ],
 )
 def test_tier_2_projection_agrees_with_source_staging_result_from_manifest(
-    tmp_path, capsys, monkeypatch, state
+    tmp_path, capsys, monkeypatch, state, mode
 ):
     """I3 (task 3.1a fix round 1): locks source_staging.result_from_manifest
     and conversion_attempt.project_conversion_action's tier-2 row to the same
-    answer on every staging-pending shape production can reach today (see
-    the module comment above this block for why the two are still
-    independent implementations and why that is a real drift channel, not
-    dead code). A future edit that changes one implementation without the
-    other fails here rather than shipping silently.
+    answer on every staging-pending shape production can reach today.
+
+    When this was written the two really were independent implementations and
+    this was the barrier between them. Task 3.1d deleted the second one, so
+    what is pinned now is narrower and the module comment above states it
+    exactly: the projection reaches the caller through the wrapper chain
+    unaltered, and its values on each reachable shape are the ones the deleted
+    implementation produced.
+
+    The domain is (state, mode), not state (task 3.1d fix round 1, plan step
+    3b's 3.1a-M1): `_pending_action` is mode-gated and `source_upload_expired`
+    is the one state that answers past the gate, so `auto` contributes a
+    fourth cell -- reachable only across a crash, see that builder -- while
+    the other two `auto` combinations are pinned as producing nothing by
+    test_auto_mode_raises_no_staging_pending_action_except_expiry.
     """
-    manifest = STAGING_PENDING_MANIFEST_BUILDERS[state](tmp_path, capsys, monkeypatch)
+    manifest = STAGING_PENDING_MANIFEST_BUILDERS[(state, mode)](
+        tmp_path, capsys, monkeypatch, mode=mode
+    )
+    assert manifest["settings_snapshot"]["interaction_mode"] == mode
     pending = manifest["source_staging"]["pending_action"]
     assert pending["kind"] == source_staging.PENDING_ACTION_KIND_BY_STATE[state]
     assert manifest["conversion_attempts"] == []

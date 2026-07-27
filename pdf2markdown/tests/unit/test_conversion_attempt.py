@@ -7714,6 +7714,15 @@ def _projected_key_assignments(tree):
     Name-agnostic on both halves: it matches the *key* being written, never
     the local variable holding the result dict or the projection, so renaming
     either cannot make a direct write invisible to this check.
+
+    Polarity-aware (task 3.1d review, M-2): an `else` body is recorded under
+    `not <test>`, not under `<test>`. The first version of this helper reused
+    the unnegated test for both bodies, which made the whole check blind to
+    the single most obvious way of reintroducing the defect -- moving the
+    review layer's three writes into the `else`, i.e. overwriting the
+    projection exactly when there IS one. That mutation left this test green
+    and only the behaviour test red, so the two were not the independent pair
+    they were claimed to be.
     """
     import ast
 
@@ -7723,8 +7732,9 @@ def _projected_key_assignments(tree):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.If):
                 walk(child, (*guards, child.test))
+                negated = ast.UnaryOp(op=ast.Not(), operand=child.test)
                 for orelse in child.orelse:
-                    walk(orelse, (*guards, child.test))
+                    walk(orelse, (*guards, negated))
                 continue
             if isinstance(child, ast.Assign):
                 for target in child.targets:
@@ -7739,6 +7749,13 @@ def _projected_key_assignments(tree):
 
     walk(tree, ())
     return found
+
+
+def _is_negated(guard) -> bool:
+    """Was this guard recorded off an `else` body (or a literal `not ...`)?"""
+    import ast
+
+    return isinstance(guard, ast.UnaryOp) and isinstance(guard.op, ast.Not)
 
 
 def _calls_the_projector(node) -> bool:
@@ -7841,10 +7858,20 @@ def test_no_result_from_manifest_wrapper_writes_action_required_directly():
     # nothing. An unguarded write here is the design.md correction ① defect:
     # workflow._inspect_open_bundle dispatches on `has_review` first, so it
     # would discard the projection for every review-carrying bundle.
+    # ...and guarded by it POSITIVELY -- the guard that mentions the projector
+    # must be the one the write sits *under*, not the one it sits in the
+    # `else` of. Without the polarity check, moving these writes into the
+    # `else` branch -- "overwrite the projection whenever there IS one",
+    # precisely the erasure this test forbids -- reads as guarded and passes.
     review_writes = _projected_key_assignments(trees["review"])
     assert review_writes
     for key, _value, guards in review_writes:
-        assert any(_calls_the_projector(guard) for guard in guards), key
+        assert any(
+            _calls_the_projector(guard) and not _is_negated(guard)
+            for guard in guards
+        ), key
+
+
 def test_review_result_does_not_erase_the_projected_conversion_action(
     tmp_path, capsys, monkeypatch
 ):

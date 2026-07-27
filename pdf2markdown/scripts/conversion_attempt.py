@@ -4876,7 +4876,19 @@ def at_pending_conversion_boundary(
 
     Read-only and allocation-only: `history` is already in memory, and both
     `resolve_history` and _replay_conversion_intent are pure reduces over it
-    (no file descriptors, no network). It runs only on the failure path.
+    (no file descriptors, no network).
+
+    Task 3.1d moved the call site: task 3.1b's version ran only after the
+    history check had already failed, and this docstring used to say so. It
+    now runs unconditionally, once per `_inspect_open_bundle`, BEFORE the
+    private-state consistency check -- because the "before the manifest
+    write" window never reaches the history check at all (private.json is
+    already a generation ahead of the manifest, which that earlier check
+    catches first), so its answer has to exist before either branch raises.
+    The cost of the move is bounded by the `not a conversion intent`
+    short-circuit above, which is the tail shape of every healthy bundle: a
+    bundle whose last event is not an intent pays one dict lookup and one
+    frozenset membership test and never reduces anything.
 
     `resolve_history` reduces the durable prefix and must be supplied by the
     caller, for exactly the reason recover_interrupted_attempt states for its
@@ -4911,9 +4923,47 @@ def at_pending_conversion_boundary(
     event = last.get("event") if isinstance(last, dict) else None
     if not isinstance(event, str) or event not in CONVERSION_INTENTS:
         return False
-    previous = resolve_history(
-        history[:-1], manifest_template=manifest, private_template=private_state
-    )
+    # Task 3.1b-I1: "is this a legal intent" is decided BY NAME here, and
+    # deliberately not by validating the intent's payload. The single owner of
+    # the deep payload check is recover_interrupted_attempt -- it replays the
+    # intent against the reduced prefix and raises `integrity_violation` when
+    # any field disagrees (_authorize_state_from_intent /
+    # _submission_result_state_from_intent / _started_state_from_intent /
+    # _poll_state_from_intent each carry that check). Duplicating it here
+    # would recreate the second implementation task 3.1d exists to remove,
+    # and it is not needed for this predicate to be honest: at window 1 a
+    # tampered payload still gets `resume_pending_conversion_operation`,
+    # because `resume` is genuinely the command that inspects the payload and
+    # fails loud about it. Answering `repair_or_restore_work_bundle` instead
+    # would be this module guessing at a verdict it has not computed.
+    # tests/test_workflow.py::
+    # test_a_tampered_intent_payload_is_still_named_by_the_tail_event pins the
+    # whole chain, at all three windows.
+    try:
+        previous = resolve_history(
+            history[:-1], manifest_template=manifest, private_template=private_state
+        )
+    except Exception:
+        # Fail closed, exactly as the replay below does: the caller keeps its
+        # `repair_or_restore_work_bundle` verdict, which is the right answer
+        # for a bundle whose own history a reducer cannot read.
+        #
+        # The broad clause is deliberate and is INSURANCE, not the handling of
+        # a known path. `resolve_history` is supplied by the caller precisely
+        # because the layers above this one own event vocabularies this module
+        # cannot see, so it also cannot name their exception types
+        # (review.ReviewError and friends are defined above it in the import
+        # DAG). Today the two resolvers whose behaviour is established --
+        # this module's and raw_conversion's -- wrap their own reduce and
+        # answer None rather than raising, so no covered path reaches this
+        # clause; workflow._conversion_history_resolver's third choice,
+        # review.resolve_history_state, has no wrapper at all, and whether a
+        # review-bearing bundle can park on a conversion intent is a question
+        # nobody has yet answered either way. Without this clause that unproven
+        # shape would turn the caller's rc 4 / invalid_bundle into rc 1 /
+        # runtime_error -- and the predicate now runs BEFORE the private-state
+        # check, so it would be fed a private_state nothing has validated yet.
+        return False
     if previous is None:
         return False
     previous_manifest, previous_private = previous
@@ -4968,6 +5018,33 @@ def result_from_manifest(
     # below -- applies it once for the whole chain. The projection is
     # identical wherever it is applied: it reads the WHOLE manifest, never a
     # per-layer slice.
+    #
+    # A SECOND, SEPARATE SEMANTIC WENT WITH IT (task 3.1d review, I-3). Task
+    # 3.1a's version did not only call the projector; when the projection came
+    # back None it also blanked the three keys:
+    #
+    #     if projected is None:
+    #         result["action_required"] = None
+    #         result["action_id"] = None
+    #
+    # That blanking OVERRODE whatever preflight had already put there, so
+    # deleting it is a real behaviour change and not merely the removal of a
+    # duplicate call: on a manifest that projects nothing while preflight's own
+    # pending_action is set, this layer used to answer null/null and now passes
+    # preflight's answer through (the 3.1d review ran one manifest against both
+    # versions and recorded `null` / `null` before, `correct_preflight_record`
+    # after).
+    #
+    # The new behaviour is the one design.md asks for -- preflight's
+    # pending_action vocabulary sits outside Decision 5's tiers, so when no
+    # tier matches, preflight's own answer IS the answer -- and the shape is
+    # in any case unreachable: preflight only writes a non-None pending_action
+    # together with conversion_state in {preflight_pending, preflight_warning,
+    # preflight_blocked}, while any manifest carrying conversion_attempts is
+    # forced by valid_private_state to a conversion_state drawn from
+    # _MANIFEST_STATE_BY_FOLDED_STATE's values, and those two sets are
+    # disjoint (measured: the intersection is empty). This layer is only
+    # reached for manifests that carry attempts.
     result = source_staging.result_from_manifest(
         manifest,
         work_bundle=work_bundle,
