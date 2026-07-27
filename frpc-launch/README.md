@@ -37,6 +37,8 @@ python3 scripts/frpc_launch.py stop           # 停止
 | 3 | `$PWD/.env` | 项目级，不向上递归 |
 | 4 | `~/.config/frpc-launch/` | 全局（official 为 `frpc.toml`，sakura 为 `.env`）；使用时会在输出中标明 |
 
+**首次引导默认写项目级 `$PWD/.env.local`**（official 另生成项目级 `frpc.toml`）；只有你明确要求「全局 / 长期保存 / 多项目共用」时，才写入 `~/.config/frpc-launch/`。
+
 变量：`FRPC_LAUNCH_MODE`（official/sakura）、`FRPC_LAUNCH_CONFIG`（项目级 frpc.toml 路径）、`FRPC_LAUNCH_FRPC`（自备官方 frpc 路径）、`FRPC_LAUNCH_SAKURA_KEY` / `FRPC_LAUNCH_SAKURA_TUNNELS` / `FRPC_LAUNCH_SAKURA_FRPC`。
 
 ## 受管目录布局

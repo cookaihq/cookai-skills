@@ -43,9 +43,11 @@ run/                 # {official,sakura}.pid / .log
 
 ## 引导流程编排（start 退出码 4 时，Agent 按序执行）
 
-1. **询问作用域**（二选一）：
-   - 全局：写 `~/.config/frpc-launch/`（多项目共用）
-   - 当前项目：写 `$PWD/.env.local`（official 另生成项目级 frpc.toml 并以 `FRPC_LAUNCH_CONFIG` 指向）。**注意**：项目在 git 工作树内时，须先把 `frpc.toml` 与 `.env.local` 加入 `.gitignore`，否则 guide-init 会以退出码 6 拒绝写入 Secret——这是防止凭证被提交的保护，引导用户补 `.gitignore` 后重试
+1. **确定作用域（默认项目级，不询问）**：
+   - **默认**：写当前项目 `$PWD/.env.local`（official 另生成项目级 frpc.toml 并以 `FRPC_LAUNCH_CONFIG` 指向），即 `guide-init --scope project`。用户没有明确要求全局时一律走这条，不要把作用域问题抛给用户
+   - **仅当用户在本轮明确要求「全局」「长期保存」「多项目共用」时**，才用 `--scope global` 写 `~/.config/frpc-launch/`
+   - 落盘后必须告知用户实际写入的作用域与文件路径
+   - **注意**：项目在 git 工作树内时，须先把 `frpc.toml` 与 `.env.local` 加入 `.gitignore`，否则 guide-init 会以退出码 6 拒绝写入 Secret——这是防止凭证被提交的保护，引导用户补 `.gitignore` 后重试
 2. **询问是否需要配置帮助**：
    - 不需要 → 告知所选作用域的文件位置与最小模板（official：`serverAddr`/`serverPort`/`auth.token` + `[[proxies]]`；sakura：`FRPC_LAUNCH_SAKURA_KEY` + `FRPC_LAUNCH_SAKURA_TUNNELS`），等用户自行配置后重试 start
 3. **需要帮助 → 三来源分支**：
@@ -57,13 +59,15 @@ run/                 # {official,sakura}.pid / .log
    ```bash
    # official（frps/baota）：
    FRPC_LAUNCH_INIT_TOKEN=<token> python3 <skill>/scripts/frpc_launch.py --json \
-     guide-init --scope global --source frps \
+     guide-init --scope project --source frps \
      --server-addr <host> --server-port <port> \
      --proxy "name=web;type=http;localPort=8080;customDomains=a.example.com"
    # sakura：
    FRPC_LAUNCH_SAKURA_KEY=<密钥> FRPC_LAUNCH_SAKURA_TUNNELS=<id,id> \
-     python3 <skill>/scripts/frpc_launch.py --json guide-init --scope global --source sakura
+     python3 <skill>/scripts/frpc_launch.py --json guide-init --scope project --source sakura
    ```
+
+   （只有用户明确要求全局时才把 `--scope project` 换成 `--scope global`）
 
 5. 生成后询问用户是否立即 `start` 做真实连通验证（official 启动前会自动 `frpc verify` 预检）。
 
