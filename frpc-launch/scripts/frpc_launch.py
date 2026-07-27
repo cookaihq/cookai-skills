@@ -391,6 +391,70 @@ def resolve_sakura_binary(layered: dict, home: Path):
 
 
 # ---------------------------------------------------------------------------
+# pid 记录、进程身份核对与配置摘要
+# ---------------------------------------------------------------------------
+
+
+def pid_paths(home: Path, mode: str):
+    return home / "run" / (mode + ".pid"), home / "run" / (mode + ".log")
+
+
+def write_pid_record(path: Path, record: dict) -> None:
+    write_meta(path, record)
+
+
+def read_pid_record(path: Path) -> dict:
+    return read_meta(path)
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def process_command(pid: int) -> str:
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip()
+
+
+def pid_identity_ok(record: dict) -> bool:
+    pid = record.get("pid")
+    if not isinstance(pid, int) or not pid_alive(pid):
+        return False
+    exe = record.get("exe", "")
+    return bool(exe) and exe in process_command(pid)
+
+
+def config_digest_official(config_path: Path, binary: Path) -> str:
+    try:
+        body = config_path.read_bytes()
+    except OSError:
+        body = b""
+    return hashlib.sha256(body + b"\0" + str(binary).encode("utf-8")).hexdigest()
+
+
+def config_digest_sakura(key: str, tunnels: str, binary: Path) -> str:
+    return hashlib.sha256(
+        (key + "\n" + tunnels + "\n" + str(binary)).encode("utf-8")).hexdigest()
+
+
+def read_log_tail(log_path: Path, lines: int = 50) -> str:
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+# ---------------------------------------------------------------------------
 # 模式判定
 # ---------------------------------------------------------------------------
 
