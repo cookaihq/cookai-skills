@@ -506,7 +506,171 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("install", "update"):
             sp.add_argument("--version", default="",
                             help="official 模式指定版本（缺省为最新稳定版）")
+        if name == "start":
+            sp.add_argument("--wait", type=float, default=15.0,
+                            help="启动验证的有界等待秒数（默认 15）")
     return p
+
+
+# ---------------------------------------------------------------------------
+# start：后台拉起、有界启动验证、重复保护、配置变更不静默替换
+# ---------------------------------------------------------------------------
+
+OFFICIAL_SUCCESS_MARKERS = ("login to server success",)
+OFFICIAL_FAILURE_MARKERS = ("login to server failed",)
+SAKURA_SUCCESS_MARKERS = ("login to server success", "start proxy success")
+SAKURA_FAILURE_MARKERS = ("login to server failed",)
+
+
+def spawn_daemon(argv: list, env: dict, log_path: Path) -> int:
+    log_f = open(log_path, "ab")
+    try:
+        proc = subprocess.Popen(argv, env=env, stdout=log_f,
+                                stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+    finally:
+        log_f.close()
+    return proc.pid
+
+
+def wait_for_ready(pid: int, log_path: Path, success_markers, failure_markers,
+                   timeout: float, poll: float = 0.5):
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while True:
+        tail = read_log_tail(log_path, 100)
+        if any(m in tail for m in failure_markers):
+            return "failed", tail
+        if any(m in tail for m in success_markers) and pid_alive(pid):
+            return "ok", tail
+        if not pid_alive(pid):
+            return "exited", tail
+        if _time.monotonic() >= deadline:
+            return "timeout", tail
+        _time.sleep(poll)
+
+
+def _extract_official_secrets(toml_text: str) -> list:
+    return re.findall(r'token\s*=\s*"([^"]+)"', toml_text)
+
+
+def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> dict:
+    home = args.home
+    ensure_home_layout(home)
+    pid_file, log_file = pid_paths(home, mode)
+    secrets = []
+    if mode == "official":
+        config_path, config_source = decision.official
+        if config_path is None:
+            raise FrpcLaunchError("official 模式配置无效或缺失")
+        try:
+            secrets = _extract_official_secrets(config_path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+        binary, origin = resolve_official_binary(layered, home)
+        if binary is None:
+            meta = install_official(home)
+            print("已自动安装官方 frpc v%s（sha256 校验通过）" % meta["version"],
+                  file=sys.stderr)
+            binary, origin = resolve_official_binary(layered, home)
+        verify = subprocess.run([str(binary), "verify", "-c", str(config_path)],
+                                capture_output=True, text=True)
+        if verify.returncode != 0:
+            raise FrpcLaunchError(
+                "frpc verify 未通过:\n%s" % mask_text(
+                    (verify.stdout or "") + (verify.stderr or ""), secrets))
+        digest = config_digest_official(config_path, binary)
+        argv = [str(binary), "-c", str(config_path)]
+        env = dict(os.environ)
+        success_markers, failure_markers = OFFICIAL_SUCCESS_MARKERS, OFFICIAL_FAILURE_MARKERS
+    else:
+        s_cfg, config_source = decision.sakura
+        if not s_cfg:
+            raise FrpcLaunchError("sakura 模式配置无效或缺失")
+        secrets = [s_cfg["key"]]
+        binary, origin = resolve_sakura_binary(layered, home)
+        if binary is None:
+            meta = install_sakura(home)
+            print("已自动安装樱花定制 frpc %s（size/hash 校验通过）" % meta["version"],
+                  file=sys.stderr)
+            binary, origin = resolve_sakura_binary(layered, home)
+        digest = config_digest_sakura(s_cfg["key"], s_cfg["tunnels"], binary)
+        argv = [str(binary)]
+        env = dict(os.environ)
+        env["NATFRP_TOKEN"] = s_cfg["key"]
+        env["NATFRP_TARGET"] = s_cfg["tunnels"]
+        success_markers, failure_markers = SAKURA_SUCCESS_MARKERS, SAKURA_FAILURE_MARKERS
+
+    record = read_pid_record(pid_file)
+    if record:
+        if pid_identity_ok(record):
+            if record.get("config_digest") == digest:
+                return {"mode": mode, "result": "already_running",
+                        "pid": record["pid"], "config_source": config_source,
+                        "exit_code": 0}
+            return {"mode": mode, "result": "config_changed",
+                    "pid": record["pid"], "config_source": config_source,
+                    "detail": "运行中进程使用的配置与当前解析结果不一致；"
+                              "请确认后先 stop 再 start，不会静默替换", "exit_code": 5}
+        pid_file.unlink(missing_ok=True)
+        print("发现 stale pid 记录（进程身份核对不通过），已清理 pid 文件", file=sys.stderr)
+
+    log_file.write_text("")
+    pid = spawn_daemon(argv, env, log_file)
+    state, tail = wait_for_ready(pid, log_file, success_markers, failure_markers,
+                                 timeout=args.wait)
+    meta = read_meta(binary.with_name(binary.name + ".meta.json"))
+    result = {"mode": mode, "result": state, "pid": pid,
+              "config_source": config_source,
+              "binary_version": meta.get("version", ""),
+              "log_tail": mask_text(tail, secrets)}
+    if state == "ok":
+        write_pid_record(pid_file, {
+            "pid": pid, "exe": str(binary), "mode": mode,
+            "config_digest": digest,
+            "started_at": datetime.now(timezone.utc).isoformat()})
+        result["exit_code"] = 0
+    else:
+        result["exit_code"] = 1
+        if state == "timeout" and pid_alive(pid):
+            write_pid_record(pid_file, {
+                "pid": pid, "exe": str(binary), "mode": mode,
+                "config_digest": digest,
+                "started_at": datetime.now(timezone.utc).isoformat()})
+            result["detail"] = "进程存活但未见成功证据（超时）；已保留进程与 pid 记录"
+    return result
+
+
+def cmd_start(args) -> int:
+    layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
+    decision = decide_mode(layered, args.home, args.mode)
+    if decision.decision == "none":
+        _emit(args, {"result": "unconfigured", "exit_code": 4},
+              "未检测到任何配置（official frpc.toml 或 sakura 变量均无）。"
+              "请先完成配置；可由 Agent 走引导流程（guide-init）。")
+        return 4
+    if decision.decision == "ambiguous":
+        _emit(args, {"result": "ambiguous", "modes": decision.modes, "exit_code": 3},
+              "official 与 sakura 配置同时存在且未指定模式，请用 --mode 指定"
+              "（或由 Agent 询问用户选择）。")
+        return 3
+    mode = decision.modes[0]
+    result = _start_one_mode(args, mode, decision, layered)
+    exit_code = result.pop("exit_code")
+    human_map = {
+        "ok": "frpc（%s 模式）启动成功，配置来源: %s%s" % (
+            mode, result.get("config_source", ""),
+            "（使用了全局配置）" if result.get("config_source") == "global" else ""),
+        "already_running": "frpc（%s 模式）已在运行（pid %s），未重复拉起" % (
+            mode, result.get("pid")),
+        "config_changed": result.get("detail", "配置已变更，需确认"),
+    }
+    human = human_map.get(result["result"],
+                          "frpc（%s 模式）启动失败: %s\n%s" % (
+                              mode, result["result"], result.get("log_tail", "")))
+    _emit(args, result, human)
+    return exit_code
 
 
 def _emit(args, payload: dict, human: str) -> None:
@@ -564,6 +728,7 @@ def main(argv=None) -> int:
         build_parser().print_help()
         return 0
     handlers = {
+        "start": cmd_start,
         "install": cmd_install,
         "update": cmd_update,
     }
