@@ -67,6 +67,37 @@ def test_guide_init_global_official_writes_toml_0600(tmp_path):
     assert json.loads(r.stdout)["token"] == "tok_****1234"
 
 
+def test_parse_proxy_spec_rejects_non_numeric_port():
+    # review N5：端口必须是 1–65535 的整数，违规抛 FrpcLaunchError 而非裸 ValueError
+    with pytest.raises(FrpcLaunchError):
+        parse_proxy_spec("name=w;type=tcp;localPort=abc;remotePort=1")
+    with pytest.raises(FrpcLaunchError):
+        parse_proxy_spec("name=w;type=tcp;localPort=22;remotePort=99999")
+
+
+def test_update_env_file_refuses_overwrite_on_unreadable(tmp_path):
+    # review N7：已有文件读取失败时必须中止，不得静默清空
+    f = tmp_path / ".env.local"
+    f.write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(FrpcLaunchError):
+        update_env_file(f, {"FRPC_LAUNCH_SAKURA_KEY": "k"})
+    assert f.read_bytes() == b"\xff\xfe\x00bad"
+
+
+def test_guide_init_project_official_checks_env_local_git(tmp_path):
+    # review N6：official 项目作用域写 .env.local 前同样要过 git 安全检查
+    home = tmp_path / "home"
+    cwd = tmp_path / "repo2"
+    cwd.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(cwd), check=True)
+    (cwd / ".gitignore").write_text("frpc.toml\n")   # 只忽略 toml，不忽略 .env.local
+    r = _run_guide(home, cwd, {"FRPC_LAUNCH_INIT_TOKEN": "tok_abcdefgh1234"},
+                   "--scope", "project", "--source", "frps",
+                   "--server-addr", "h.example.com", "--server-port", "7000")
+    assert r.returncode == 6
+    assert not (cwd / ".env.local").exists()
+
+
 def test_guide_init_project_refuses_unignored_secret_in_git(tmp_path):
     home = tmp_path / "home"
     cwd = tmp_path / "repo"

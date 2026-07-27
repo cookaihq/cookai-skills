@@ -39,13 +39,13 @@ run/                 # {official,sakura}.pid / .log
 | `update` | 显式升级二进制（唯一会替换二进制的入口） | `--mode`、`--version X` |
 | `guide-init` | 引导流程落盘配置（见下节） | `--scope`、`--source`、`--proxy` 等 |
 
-**退出码语义**：`0` 成功/已在运行；`1` 失败（含启动验证失败，log_tail 有真实原因）；`2` 用法错误；`3` 模式歧义（两模式配置同存，须询问用户）；`4` 未配置（进入引导流程）；`5` 配置已变更（须用户确认 stop 后再 start）；`6` git 安全拒绝（Secret 目标未被忽略）。
+**退出码语义**：`0` 成功/已在运行；`1` 失败（含启动验证失败与 `running_unverified`——进程存活但从未见登录成功证据，log_tail 有真实原因）；`2` 用法错误；`3` 模式歧义（两模式配置同存，须询问用户）；`4` 未配置（进入引导流程，含显式指定模式但该模式无配置）；`5` 配置已变更（须用户确认 stop 后再 start）；`6` git 安全拒绝（Secret 目标未被忽略——引导用户先把该文件加入 `.gitignore` 再重试，或经用户明确同意后加 `--allow-tracked`）。
 
 ## 引导流程编排（start 退出码 4 时，Agent 按序执行）
 
 1. **询问作用域**（二选一）：
    - 全局：写 `~/.config/frpc-launch/`（多项目共用）
-   - 当前项目：写 `$PWD/.env.local`（official 另生成项目级 frpc.toml 并以 `FRPC_LAUNCH_CONFIG` 指向）
+   - 当前项目：写 `$PWD/.env.local`（official 另生成项目级 frpc.toml 并以 `FRPC_LAUNCH_CONFIG` 指向）。**注意**：项目在 git 工作树内时，须先把 `frpc.toml` 与 `.env.local` 加入 `.gitignore`，否则 guide-init 会以退出码 6 拒绝写入 Secret——这是防止凭证被提交的保护，引导用户补 `.gitignore` 后重试
 2. **询问是否需要配置帮助**：
    - 不需要 → 告知所选作用域的文件位置与最小模板（official：`serverAddr`/`serverPort`/`auth.token` + `[[proxies]]`；sakura：`FRPC_LAUNCH_SAKURA_KEY` + `FRPC_LAUNCH_SAKURA_TUNNELS`），等用户自行配置后重试 start
 3. **需要帮助 → 三来源分支**：

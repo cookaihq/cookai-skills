@@ -138,6 +138,17 @@ def test_logs_masks_secrets(tmp_path):
     assert "supe****en99" in r.stdout
 
 
+def test_logs_masks_single_quoted_token(tmp_path):
+    # review M1：TOML 字面量字符串（单引号）里的 token 同样必须掩码
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    (home / "frpc.toml").write_text(
+        "serverAddr = \"example.com\"\nserverPort = 7000\nauth.token = 'sqsupersecret99x'\n")
+    (home / "run").mkdir(exist_ok=True)
+    (home / "run" / "official.log").write_text("auth with sqsupersecret99x done\n")
+    r = run_cli(home, cwd, "logs", "--mode", "official")
+    assert "sqsupersecret99x" not in r.stdout
+
+
 def test_unconfigured_start_exits_4(tmp_path):
     home = tmp_path / "empty_home"
     cwd = tmp_path / "proj2"
@@ -145,3 +156,84 @@ def test_unconfigured_start_exits_4(tmp_path):
     r = run_cli(home, cwd, "start")
     assert r.returncode == 4
     assert json.loads(r.stdout)["result"] == "unconfigured"
+
+
+# review M2：不打印任何 marker 的 fake（模拟超时后进程仍存活）
+FAKE_FRPC_SILENT = """#!/bin/sh
+if [ "$1" = "verify" ]; then echo "syntax is ok"; exit 0; fi
+echo "starting..."
+sleep 60
+"""
+
+
+def test_timeout_then_second_start_not_reported_as_success(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_SILENT)
+    try:
+        r1 = run_cli(home, cwd, "start", "--wait", "2")
+        assert r1.returncode == 1
+        assert json.loads(r1.stdout)["result"] == "timeout"
+        r2 = run_cli(home, cwd, "start", "--wait", "2")
+        assert r2.returncode != 0
+        out2 = json.loads(r2.stdout)
+        assert out2["result"] == "running_unverified"
+        st = json.loads(run_cli(home, cwd, "status").stdout)
+        assert st["modes"]["official"]["verified"] is False
+    finally:
+        run_cli(home, cwd, "stop")
+
+
+def test_explicit_mode_without_config_enters_guide(tmp_path):
+    home = tmp_path / "empty_home"
+    cwd = tmp_path / "proj3"
+    cwd.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FRPC_LAUNCH_")}
+    env["FRPC_LAUNCH_MODE"] = "official"
+    r = subprocess.run([sys.executable, SCRIPT, "--home", str(home), "--json", "start"],
+                       capture_output=True, text=True, cwd=str(cwd), env=env)
+    assert r.returncode == 4
+    assert json.loads(r.stdout)["result"] == "unconfigured"
+
+
+def test_logs_json_output(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    (home / "run").mkdir(exist_ok=True)
+    (home / "run" / "official.log").write_text("hello log\n")
+    r = run_cli(home, cwd, "logs", "--mode", "official")
+    out = json.loads(r.stdout)
+    assert "hello log" in out["modes"]["official"]
+
+
+def test_already_running_payload_schema(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    try:
+        assert run_cli(home, cwd, "start", "--wait", "10").returncode == 0
+        out = json.loads(run_cli(home, cwd, "start", "--wait", "10").stdout)
+        assert out["result"] == "already_running"
+        assert "log_tail" in out and "binary_version" in out
+    finally:
+        run_cli(home, cwd, "stop")
+
+
+def test_explicit_binary_path_missing_is_friendly_error(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FRPC_LAUNCH_")}
+    env["FRPC_LAUNCH_FRPC"] = "/does/not/exist/frpc"
+    r = subprocess.run([sys.executable, SCRIPT, "--home", str(home), "--json",
+                        "start", "--wait", "5"],
+                       capture_output=True, text=True, cwd=str(cwd), env=env)
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert "错误:" in r.stderr
+
+
+def test_stop_dead_pid_message_says_exited(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    (home / "run").mkdir(exist_ok=True)
+    (home / "run" / "official.pid").write_text(json.dumps({
+        "pid": dead.pid, "exe": "/managed/bin/frpc",
+        "mode": "official", "config_digest": "x", "started_at": "t"}))
+    out = json.loads(run_cli(home, cwd, "stop").stdout)
+    assert out["modes"]["official"]["result"] == "stale_pid_cleaned"
+    assert "已退出" in out["modes"]["official"]["detail"]

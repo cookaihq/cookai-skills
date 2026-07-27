@@ -48,3 +48,5 @@ def test_read_log_tail(tmp_path):
     tail = read_log_tail(log, 3)
     assert tail.splitlines() == ["line97", "line98", "line99"]
     assert read_log_tail(tmp_path / "missing.log") == ""
+    # review NIT：lines<=0 不得退化为输出整个文件
+    assert read_log_tail(log, 0).splitlines() == ["line99"]
