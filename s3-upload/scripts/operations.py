@@ -98,13 +98,6 @@ def connection_for(resolved: ResolvedTarget) -> Connection:
     )
 
 
-def _header(response: Response, name: str) -> Optional[str]:
-    for key, value in (response.headers or {}).items():
-        if key.lower() == name.lower():
-            return value
-    return None
-
-
 def _unknown_status(status: int) -> bool:
     return 300 <= status < 400 or status in {408, 425, 429} or status >= 500
 
@@ -707,14 +700,87 @@ def reconcile_delete(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
     raise OperationError("checkpoint state is not reconcilable as a Delete")
 
 
+class _RemoteObjectAbsent(Exception):
+    """The verifying GET answered 404: the object definitively is not there.
+
+    Deliberately a plain Exception subclass: verify_body names HTTPError,
+    URLError, TransportError, HTTPException, OSError and ValueError as the
+    families it folds into verification_incomplete, and this signal must
+    escape that folding to reach reconcile_put as its own answer.
+    """
+
+
+def _absence_signalling(open_stream: Callable[..., Any]) -> Callable[..., Any]:
+    def opened(method, url, headers, timeout=30):
+        try:
+            return open_stream(method, url, headers, timeout=timeout)
+        except HTTPError as exc:
+            if exc.code == 404:
+                raise _RemoteObjectAbsent() from exc
+            raise
+    return opened
+
+
+def _reconcile_full_read(*, resolved: ResolvedTarget, connection: Connection,
+                         checkpoint: Dict[str, Any], moment: datetime,
+                         open_stream: Callable[..., Any]) -> str:
+    """Settle a put_unknown checkpoint with one presigned full-body GET.
+
+    Returns "verified" only when the remote bytes match the checkpointed
+    source size and SHA-256 in full, "absent" only on a definitive 404, and
+    "unknown" for everything else. Same shape as _adopt_planned_content:
+    URL parameter derivation, presigning and the verifying read share one
+    try, and the except names every family the three can raise --
+    HTTPException included, because http.client.IncompleteRead descends
+    from it and from neither OSError nor ValueError.
+    """
+    try:
+        requested = checkpoint["upload_plan"]["presign_expires_seconds"]
+        if not isinstance(requested, int) or isinstance(requested, bool) \
+                or requested < 1:
+            requested = ADOPTION_PRESIGN_SECONDS
+        effective = resolved.presign_effective_seconds(requested, moment)
+        if not isinstance(effective, int) or isinstance(effective, bool) \
+                or effective < 1:
+            return "unknown"
+        url = presign_get(
+            connection,
+            checkpoint["object_reference_draft"]["location"]["key"],
+            effective,
+            moment,
+        )
+        verify_body(
+            open_stream=_absence_signalling(open_stream),
+            url=url,
+            headers={},
+            channel="authenticated_full_get",
+            url_scope="current-key",
+            expected_size=checkpoint["source"]["size"],
+            expected_sha256=checkpoint["source"]["sha256"],
+            now=moment,
+        )
+        return "verified"
+    except _RemoteObjectAbsent:
+        return "absent"
+    except (VerificationError, OperationError, HTTPError, URLError,
+            TransportError, HTTPException, OSError, ValueError):
+        return "unknown"
+
+
 def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                   store: CheckpointStore, transport: Callable[..., Response],
-                  config_home: str, now: ClockInput) -> OperationOutcome:
+                  config_home: str, now: ClockInput,
+                  open_stream: Optional[Callable[..., Any]] = None) -> OperationOutcome:
     moment = _moment(now)
     checkpoint_id = checkpoint["checkpoint_id"]
     reference = checkpoint["object_reference_draft"]
     retention = reference["retention"]
     state = checkpoint["state"]
+    # A checkpoint that arrives already complete was proven written by the
+    # Put's own 2xx; a checkpoint converged below by the verifying read
+    # proves presence and content but claims no writer identity, so its
+    # results carry object_written=null throughout.
+    written_claim: Optional[bool] = True
     if state == "prepared":
         checkpoint = _set_state(checkpoint, "not_started", moment)
         store.replace(checkpoint)
@@ -727,37 +793,35 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
         store.replace(checkpoint)
         state = "put_unknown"
     if state == "put_unknown":
+        # Read-only reconciliation: one presigned GET, zero write requests.
+        # The transport that carries mutations is never invoked on this
+        # branch.
         contract_key = derive_contract_key(resolved.target)
         registry = registry_for_target(resolved.target, contract_key)
-        head = registry.lookup(contract_key, "HeadObject")
-        metadata = registry.lookup(contract_key, "ReservedMetadataRoundTrip")
-        if head.state != "enabled" or metadata.state != "enabled":
+        if registry.lookup(contract_key, "PresignGetObject").state \
+                not in EXECUTABLE_CAPABILITY_STATES:
             result = build_result(
                 "reconcile", "ambiguous", object_written=None,
                 retention=retention, checkpoint_id=checkpoint_id,
             )
             return OperationOutcome(result, store, checkpoint_id, True)
         request_moment = _signed_moment(resolved, now)
-        signed = build_signed_request(
-            connection_for(resolved), method="HEAD",
-            key=reference["location"]["key"], now=request_moment,
+        read = _reconcile_full_read(
+            resolved=resolved,
+            connection=connection_for(resolved),
+            checkpoint=checkpoint,
+            moment=request_moment,
+            open_stream=open_body_stream if open_stream is None else open_stream,
         )
-        try:
-            response = transport(signed.method, signed.url, signed.headers, signed.body)
-        except Exception:
-            response = None
-        if response is not None and 200 <= response.status < 300:
-            operation_id = _header(response, "x-amz-meta-s3-upload-operation-id")
-            source_hash = _header(response, "x-amz-meta-s3-upload-sha256")
-            content_length = _header(response, "content-length")
-            if (
-                operation_id == checkpoint["operation_id"]
-                and source_hash == checkpoint["source"]["sha256"]
-                and content_length == str(checkpoint["source"]["size"])
-            ):
-                checkpoint = _set_state(checkpoint, "complete", request_moment)
-                store.replace(checkpoint)
-                state = "complete"
+        if read == "verified":
+            checkpoint = _set_state(checkpoint, "complete", request_moment)
+            store.replace(checkpoint)
+            state = "complete"
+            written_claim = None
+        elif read == "absent":
+            checkpoint = _set_state(checkpoint, "not_started", request_moment)
+            store.replace(checkpoint)
+            state = "not_started"
         if state == "put_unknown":
             result = build_result(
                 "reconcile", "ambiguous", object_written=None,
@@ -780,7 +844,7 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
             result = build_result(
                 "reconcile",
                 "partial_success",
-                object_written=True,
+                object_written=written_claim,
                 object_reference=checkpoint["object_reference_draft"],
                 url_kind=(
                     "public"
@@ -812,7 +876,7 @@ def reconcile_put(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                 result = build_result(
                     "reconcile",
                     "partial_success",
-                    object_written=True,
+                    object_written=written_claim,
                     object_reference=generated["object_reference"],
                     url=generated["url"],
                     url_kind=generated["url_kind"],

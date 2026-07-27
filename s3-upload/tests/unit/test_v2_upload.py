@@ -523,7 +523,9 @@ def test_delete_dry_run_is_scope_specific_and_blocked_without_capability(tmp_pat
     assert not (tmp_path / ".s3-upload" / "checkpoints").exists()
 
 
-def test_unknown_put_reconcile_never_repeats_mutation_without_observer_capability(tmp_path, capsys):
+def test_unknown_put_reconcile_never_repeats_mutation_when_the_read_proves_nothing(
+    tmp_path, capsys, monkeypatch
+):
     configure(tmp_path)
     source = tmp_path / "cover.png"
     source.write_bytes(b"png-bytes")
@@ -542,17 +544,27 @@ def test_unknown_put_reconcile_never_repeats_mutation_without_observer_capabilit
     assert first_rc == 1 and first["status"] == "ambiguous"
     assert first["checkpoint_id"] is not None and len(calls) == 1
 
+    # The read-only reconciliation is a presigned GET through the body
+    # opener; here it proves nothing, and the mutation transport must stay
+    # untouched either way.
+    gets = []
+
+    def unreadable(method, url, headers, timeout=30):
+        gets.append((method, url))
+        raise OSError("connection lost")
+
+    monkeypatch.setattr(operations, "open_body_stream", unreadable)
     reconcile_rc = upload.main(
         ["reconcile", "--checkpoint", first["checkpoint_id"], "--json"],
         environ={}, cwd=str(tmp_path), config_home=str(tmp_path / "home"),
-        transport=lambda *args: (_ for _ in ()).throw(AssertionError("unexpected observer")),
+        transport=lambda *args: (_ for _ in ()).throw(AssertionError("unexpected mutation")),
         now=NOW,
     )
     recovered = json.loads(capsys.readouterr().out)
     assert reconcile_rc == 1
     assert recovered["operation"] == "reconcile" and recovered["status"] == "ambiguous"
     assert recovered["checkpoint_id"] == first["checkpoint_id"]
-    assert len(calls) == 1
+    assert len(calls) == 1 and len(gets) == 1
 
 
 def test_checkpoint_identifier_is_revalidated_after_target_resolution(tmp_path, capsys):

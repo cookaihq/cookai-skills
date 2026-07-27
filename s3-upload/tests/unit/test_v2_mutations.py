@@ -464,7 +464,7 @@ def test_delete_reconcile_rechecks_temporary_credential_before_head(
     assert first.store.load(first.checkpoint_id)["state"] == "delete_unknown"
 
 
-def test_put_reconcile_rechecks_temporary_credential_before_head(
+def test_put_reconcile_rechecks_temporary_credential_before_the_verifying_get(
     tmp_path, monkeypatch
 ):
     configured = target()
@@ -479,8 +479,6 @@ def test_put_reconcile_rechecks_temporary_credential_before_head(
         monkeypatch,
         "PutObject",
         "PresignGetObject",
-        "HeadObject",
-        "ReservedMetadataRoundTrip",
     )
     resolved = resolve_target(
         cwd=str(tmp_path),
