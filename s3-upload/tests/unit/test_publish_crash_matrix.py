@@ -6,7 +6,7 @@ import pytest
 
 from conftest import CALLER
 from delivery_schema import body_of, parse_typed
-from delivery_workflow import BOUNDARIES, acknowledge, publish
+from delivery_workflow import BOUNDARIES, WorkflowError, acknowledge, publish
 from plan_store import PlanStore, build_plan_body, new_plan_id
 from planning import build_upload_dry_run, derive_contract_key, registry_for_target
 from s3 import Response
@@ -291,7 +291,9 @@ def test_crash_between_handoff_and_request_leaves_a_readable_descriptor(
                                       "after_recovery_fsync", "before_request",
                                       "after_request", "before_result_fsync",
                                       "after_result_fsync", "before_stdout"])
-def test_replay_after_a_post_handoff_crash_sends_nothing(project, resolved, boundary):
+def test_replay_after_a_crash_past_the_operation_record_sends_nothing(
+    project, resolved, boundary
+):
     store, issued = issue_plan(project, resolved)
     first = Recorder()
     with pytest.raises(Crash):
@@ -334,6 +336,15 @@ def test_ambiguous_crash_leaves_only_read_only_reconcile(project, resolved):
     assert "ack" not in body["allowed_actions"]
     assert body["retry_safe"] is False
     assert durable_result_body(project) == body
+    with pytest.raises(WorkflowError, match="only a terminal result"):
+        acknowledge(
+            store=store, token=issued.token, caller=CALLER,
+            executable_path=EXECUTABLE, cwd=str(project.root),
+            result_text=open(project.result_out, encoding="utf-8").read(),
+            ack_out=project.ack_out, project_root=str(project.root),
+            config_home=str(project.home),
+        )
+    assert not os.path.exists(project.ack_out)
 
 
 def test_crash_before_ack_leaves_everything_recoverable(project, resolved):
@@ -356,6 +367,8 @@ def test_crash_before_ack_leaves_everything_recoverable(project, resolved):
         project_root=str(project.root), config_home=str(project.home),
     )
     assert outcome.state == "acknowledged"
+    assert os.path.exists(project.ack_out)
+    assert not os.path.exists(project.state_root / "plans" / issued.plan_id / "spool")
 
 
 def test_crash_before_cleanup_leaves_the_receipt_and_allows_a_retry(project, resolved):
@@ -381,15 +394,54 @@ def test_crash_before_cleanup_leaves_the_receipt_and_allows_a_retry(project, res
     assert not os.path.exists(project.state_root / "plans" / issued.plan_id / "spool")
 
 
-def test_no_crash_path_ever_produces_a_second_remote_mutation(project, resolved):
+def test_a_wedged_plan_never_sends_again_however_often_it_is_replayed(
+    project, resolved
+):
+    """A before_recovery_fsync crash wedges the plan: operation.json is durable
+    but no descriptor is, so every replay converges through AlreadyHandedOff
+    into in_flight_unknown without ever arming the transport. Replays still
+    re-cross "revalidated" and "checkpoint_durable" on their way to that
+    convergence (pinned by the BOUNDARIES comment in delivery_workflow), so a
+    crash hook at those two boundaries legitimately fires again; every later
+    boundary is never reached, so those replays must complete without
+    crashing -- and none of them, crashed or completed, may send a request.
+    """
     store, issued = issue_plan(project, resolved)
-    totals = []
+    with pytest.raises(Crash):
+        run(project, resolved, store, issued.token, Recorder(),
+            on_boundary=crash_at("before_recovery_fsync"))
     for boundary in PUBLISH_BOUNDARIES:
         recorder = Recorder()
-        try:
-            run(project, resolved, store, issued.token, recorder,
-                on_boundary=crash_at(boundary))
-        except Crash:
-            pass
-        totals.append(len(recorder.calls))
-    assert sum(totals) <= 1
+        if boundary in ("revalidated", "checkpoint_durable"):
+            with pytest.raises(Crash):
+                run(project, resolved, store, issued.token, recorder,
+                    on_boundary=crash_at(boundary))
+        else:
+            outcome = run(project, resolved, store, issued.token, recorder,
+                          on_boundary=crash_at(boundary))
+            assert outcome.transport_calls == 0
+            assert body_of(outcome.result)["recovery_state"] == "in_flight_unknown"
+        assert recorder.calls == []
+    assert not os.path.exists(project.recovery_out)
+
+
+@pytest.mark.parametrize("boundary", ["before_ack", "before_cleanup"])
+def test_a_publish_replay_after_an_ack_crash_sends_nothing(
+    project, resolved, boundary
+):
+    store, issued = issue_plan(project, resolved)
+    run(project, resolved, store, issued.token, Recorder())
+    raw = open(project.result_out, encoding="utf-8").read()
+    with pytest.raises(Crash):
+        acknowledge(
+            store=store, token=issued.token, caller=CALLER,
+            executable_path=EXECUTABLE, cwd=str(project.root), result_text=raw,
+            ack_out=project.ack_out, project_root=str(project.root),
+            config_home=str(project.home), on_boundary=crash_at(boundary),
+        )
+    replay = Recorder()
+    outcome = run(project, resolved, store, issued.token, replay)
+    assert replay.calls == []
+    assert outcome.transport_calls == 0
+    assert body_of(outcome.result)["recovery_state"] == "terminal_unacknowledged"
+    assert open(project.result_out, encoding="utf-8").read() == raw
