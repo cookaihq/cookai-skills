@@ -1235,6 +1235,13 @@ def test_a_blocked_credential_gate_reuses_an_authorized_retry_placeholder(
 
     assert gate_rc == 0, json.dumps(gated, sort_keys=True)
     assert gated["outcome"] == "credential_source_missing"
+    # Deliberate asymmetry vs. the *initial*-placeholder reuse (which reports
+    # conversion_attempt_reason == "credential_source_missing"): `outcome`
+    # says why THIS run stopped; `reason` says why the RECORD exists. A retry
+    # placeholder exists because an operator's retry decision authorized it,
+    # so its reason stays None -- writing the gate's observation into it
+    # would fabricate the record's provenance.
+    assert gated["conversion_attempt_reason"] is None
     assert gated["generation"] == authorized["generation"]
     assert never.calls == []
     assert _bundle_state_snapshot(bundle) == before

@@ -3667,6 +3667,13 @@ def active_attempt_is_authorized(manifest: dict) -> bool:
     sides: "is the active attempt a placeholder the next create will
     consume?" A caller that finds this true has nothing to authorize and
     nothing to write; it should report the bundle's current state as-is.
+
+    "The next create consumes it" holds only under `_submit_state`'s own
+    preconditions (`conversion_state == "ready_to_submit"` and
+    `source_staging.state == "source_upload_ready"`); a caller that has not
+    already confirmed those may find this true on a bundle -- e.g. an
+    authorized placeholder under `conversion_state == "recoverable_error"`
+    -- where a create would still refuse with `invalid_state_transition`.
     """
     attempts = manifest.get("conversion_attempts")
     if not isinstance(attempts, list) or not attempts:
@@ -3697,7 +3704,7 @@ def _initial_authorization_state(
         # The gate authorizes attempt #1 and only attempt #1: an "initial"
         # authorization is legal nowhere else (valid_private_state's index
         # branches), so a non-empty list here means the caller skipped the
-        # `initial_authorization_is_recorded` reuse check.
+        # `active_attempt_is_authorized` reuse check.
         or attempts
         or private_state.get("generation") != manifest.get("generation")
     ):
@@ -3813,7 +3820,7 @@ def authorize_initial_attempt(
     Idempotent by construction: if the gate has already authorized this
     bundle's first attempt, the manifest is returned untouched -- no second
     attempt, no history event, no generation bump. Callers still have to ask
-    `initial_authorization_is_recorded` first, because only they can decide
+    `active_attempt_is_authorized` first, because only they can decide
     whether to spend a capacity admission on a write that may not happen.
     """
     if initial_authorization_is_recorded(manifest):
