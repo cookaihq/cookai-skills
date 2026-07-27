@@ -14,6 +14,7 @@ from artifacts import (
     build_object_reference,
     parse_checkpoint,
     parse_object_reference,
+    preflight_result_output,
 )
 from capabilities import LiveTestInterlock
 from operations import (
@@ -36,8 +37,8 @@ from planning import (
 from probe import build_probe
 from provider_candidates import build_candidate_request
 from resolver import ResolutionError, resolve_target
-from results import build_result, exit_code_for_result
-from safe_io import FileSecurityError, read_regular_file
+from results import ResultError, build_result, exit_code_for_result, validate_result
+from safe_io import FileSecurityError, atomic_write, read_regular_file
 from source_file import SourceError
 from v2_schema import EXPERIMENTAL_PROVIDERS, SchemaError
 from s3 import (
@@ -89,6 +90,7 @@ def v2_parser() -> argparse.ArgumentParser:
     upload.add_argument("--collision", choices=["replace", "unique", "reject"])
     upload.add_argument("--presign-expires", type=int)
     upload.add_argument("--reference-out")
+    upload.add_argument("--result-out")
     upload.add_argument("--json", action="store_true")
     upload.add_argument("--dry-run", action="store_true")
     upload.add_argument("--use-local-key", action="store_true")
@@ -281,6 +283,44 @@ def _v2_delete(args, *, environ, cwd, config_home, transport, now) -> int:
     except OperationError as exc:
         print(f"[s3-upload] runtime_error: {exc}", file=sys.stderr)
         return 1
+
+
+def _existing_result_check(data: bytes) -> None:
+    # A pre-existing --result-out destination must be a prior result handoff;
+    # anything else is a foreign file this command refuses to clobber.
+    try:
+        validate_result(json.loads(data.decode("utf-8")), validate_reference=False)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ArtifactError("existing result output is not a prior result") from exc
+
+
+def _result_out_preflight(path, *, cwd, config_home, source):
+    try:
+        return preflight_result_output(
+            path,
+            project_root=cwd,
+            config_home=config_home,
+            source_identity=(source.snapshot.device, source.snapshot.inode),
+            existing_content_check=_existing_result_check,
+        )
+    except (ArtifactError, FileSecurityError, OSError) as exc:
+        raise PlanError(f"result output preflight failed: {exc}") from exc
+
+
+def _result_payload(result) -> bytes:
+    # Byte-for-byte the line stdout --json prints, newline included.
+    return (
+        json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+
+def _write_result_out(snapshot, result) -> bool:
+    try:
+        atomic_write(snapshot.value["path"], _result_payload(result))
+        return True
+    except (ArtifactError, FileSecurityError, OSError) as exc:
+        print(f"[s3-upload] result_error: {exc}", file=sys.stderr, flush=True)
+        return False
 
 
 def _checkpoint_request_builder(resolved):
@@ -575,6 +615,16 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
             live_test_interlock=live_interlock,
             collision_override=args.collision,
         )
+        # The --result-out destination is preflighted here, after the local
+        # plan exists (its source identity guards aliasing) and before any
+        # remote request can exist; a rejection therefore leaves zero
+        # requests behind.
+        result_snapshot = None
+        if args.result_out is not None:
+            result_snapshot = _result_out_preflight(
+                args.result_out, cwd=cwd, config_home=config_home,
+                source=dry_run.source,
+            )
         if args.dry_run:
             result = build_result(
                 "upload",
@@ -584,12 +634,25 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 retention=dry_run.plan["retention"],
                 plan=dry_run.plan,
             )
+            wrote = result_snapshot is None or _write_result_out(result_snapshot, result)
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
             else:
                 print("[s3-upload] dry_run " + json.dumps(dry_run.plan, ensure_ascii=False, separators=(",", ":")), file=sys.stderr)
-            return exit_code_for_result(result)
+            code = exit_code_for_result(result)
+            return code if wrote or code != 0 else 1
         if not dry_run.executable:
+            if result_snapshot is not None:
+                # Rejected before any request: the handoff file still gets
+                # the full nine-field result, with every inapplicable value
+                # an explicit null.
+                _write_result_out(
+                    result_snapshot,
+                    build_result(
+                        "upload", "not_started", object_written=False,
+                        retention=dry_run.plan["retention"],
+                    ),
+                )
             print("[s3-upload] config_error: upload plan is blocked", file=sys.stderr)
             return 2
         if (
@@ -628,6 +691,7 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 source=dry_run.source,
             )
         result = outcome.result
+        wrote = result_snapshot is None or _write_result_out(result_snapshot, result)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
         elif result["url"] is not None:
@@ -639,7 +703,8 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 flush=True,
             )
         outcome.finalize()
-        return exit_code_for_result(result)
+        code = exit_code_for_result(result)
+        return code if wrote or code != 0 else 1
     except (LocalFileError, SourceError) as exc:
         print(f"[s3-upload] file_error: {exc}", file=sys.stderr)
         return 3

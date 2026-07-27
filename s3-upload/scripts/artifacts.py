@@ -9,7 +9,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import unquote_to_bytes
 
 from safe_io import (
@@ -537,23 +537,25 @@ def _atomic_write_at(parent_fd: int, name: str, data: bytes, *, replace: bool) -
                 pass
 
 
-def preflight_reference_output(path: str, *, project_root: str, config_home: str,
-                               source_identity: Optional[Tuple[int, int]]) -> ReferenceOutputSnapshot:
+def _preflight_caller_output(path: str, *, project_root: str, config_home: str,
+                             source_identity: Optional[Tuple[int, int]],
+                             existing_content_check: Callable[[bytes], None],
+                             description: str) -> ReferenceOutputSnapshot:
     absolute = lexical_absolute(path)
     project_root = lexical_absolute(project_root)
     config_home = lexical_absolute(config_home)
     if _protected(absolute, project_root, config_home):
-        raise ArtifactError("reference output is in a protected namespace")
+        raise ArtifactError(f"{description} is in a protected namespace")
     parent = os.path.dirname(absolute)
     try:
         parent_fd = open_directory(parent)
     except (OSError, FileSecurityError) as exc:
-        raise ArtifactError("reference output parent is unsafe") from exc
+        raise ArtifactError(f"{description} parent is unsafe") from exc
     try:
         parent_info = os.fstat(parent_fd)
         parent_mode = stat.S_IMODE(parent_info.st_mode)
         if parent_info.st_uid != os.geteuid() or parent_mode & 0o022:
-            raise ArtifactError("reference output parent must be owned and not group/world-writable")
+            raise ArtifactError(f"{description} parent must be owned and not group/world-writable")
     finally:
         os.close(parent_fd)
     parent_snapshot = {
@@ -570,11 +572,8 @@ def preflight_reference_output(path: str, *, project_root: str, config_home: str
         raise
     else:
         if source_identity is not None and (info.st_dev, info.st_ino) == source_identity:
-            raise ArtifactError("reference output aliases the upload source")
-        try:
-            parse_object_reference(data.decode("utf-8"))
-        except (UnicodeDecodeError, ArtifactError) as exc:
-            raise ArtifactError("existing output is not a valid Object Reference") from exc
+            raise ArtifactError(f"{description} aliases the upload source")
+        existing_content_check(data)
         final_snapshot = {
             "state": "existing-reference",
             "identity": {
@@ -587,6 +586,46 @@ def preflight_reference_output(path: str, *, project_root: str, config_home: str
     value = {"path": absolute, "parent_snapshot": parent_snapshot, "final_snapshot": final_snapshot}
     _validate_reference_out(value)
     return ReferenceOutputSnapshot(value, project_root, config_home, source_identity)
+
+
+def _existing_reference_check(data: bytes) -> None:
+    try:
+        parse_object_reference(data.decode("utf-8"))
+    except (UnicodeDecodeError, ArtifactError) as exc:
+        raise ArtifactError("existing output is not a valid Object Reference") from exc
+
+
+def preflight_reference_output(path: str, *, project_root: str, config_home: str,
+                               source_identity: Optional[Tuple[int, int]]) -> ReferenceOutputSnapshot:
+    return _preflight_caller_output(
+        path,
+        project_root=project_root,
+        config_home=config_home,
+        source_identity=source_identity,
+        existing_content_check=_existing_reference_check,
+        description="reference output",
+    )
+
+
+def preflight_result_output(path: str, *, project_root: str, config_home: str,
+                            source_identity: Optional[Tuple[int, int]],
+                            existing_content_check: Callable[[bytes], None]) -> ReferenceOutputSnapshot:
+    """The --result-out twin of preflight_reference_output.
+
+    Same protected-namespace, parent-safety, file-safety and source-alias
+    checks; only the reading of an existing destination differs, and the
+    caller supplies that check (a prior result JSON, validated in results.py
+    -- named here as a callable because artifacts.py sits below results.py
+    in the import order).
+    """
+    return _preflight_caller_output(
+        path,
+        project_root=project_root,
+        config_home=config_home,
+        source_identity=source_identity,
+        existing_content_check=existing_content_check,
+        description="result output",
+    )
 
 
 def _same_parent(snapshot: Dict[str, Any], info: os.stat_result) -> bool:
