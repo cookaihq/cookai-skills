@@ -104,7 +104,8 @@ def test_kill_before_recovery_fsync_leaves_no_descriptor_and_no_request(
 ):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "before_recovery_fsync", "publish", counter)
+    completed = run_child(project, issued, "before_recovery_fsync", "publish", counter)
+    assert completed.returncode == -signal.SIGKILL, completed.stderr
     assert on_disk_requests(counter) == 0
     assert not os.path.exists(project.recovery_out)
     assert not os.path.exists(project.result_out)
@@ -113,7 +114,8 @@ def test_kill_before_recovery_fsync_leaves_no_descriptor_and_no_request(
 def test_kill_after_recovery_fsync_leaves_a_durable_descriptor(project, resolved):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "after_recovery_fsync", "publish", counter)
+    completed = run_child(project, issued, "after_recovery_fsync", "publish", counter)
+    assert completed.returncode == -signal.SIGKILL, completed.stderr
     assert on_disk_requests(counter) == 0
     descriptor = parse_typed(open(project.recovery_out, encoding="utf-8").read(),
                              expected_type="s3-upload.recovery-descriptor")
@@ -126,7 +128,8 @@ def test_kill_after_recovery_fsync_leaves_a_durable_descriptor(project, resolved
 def test_new_process_after_recovery_fsync_kill_sends_nothing(project, resolved):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "after_recovery_fsync", "publish", counter)
+    completed = run_child(project, issued, "after_recovery_fsync", "publish", counter)
+    assert completed.returncode == -signal.SIGKILL, completed.stderr
     recorder = Recorder()
     outcome = publish(
         resolved=resolved, store=PlanStore(str(project.state_root)), token=issued.token,
@@ -145,7 +148,8 @@ def test_kill_before_result_fsync_records_exactly_one_on_disk_request(
 ):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "before_result_fsync", "publish", counter)
+    completed = run_child(project, issued, "before_result_fsync", "publish", counter)
+    assert completed.returncode == -signal.SIGKILL, completed.stderr
     assert on_disk_requests(counter) == 1
     assert os.path.exists(project.recovery_out)
     assert not os.path.exists(project.result_out)
@@ -154,7 +158,8 @@ def test_kill_before_result_fsync_records_exactly_one_on_disk_request(
 def test_new_process_after_result_fsync_kill_never_repeats_the_put(project, resolved):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "after_result_fsync", "publish", counter)
+    completed = run_child(project, issued, "after_result_fsync", "publish", counter)
+    assert completed.returncode == -signal.SIGKILL, completed.stderr
     assert on_disk_requests(counter) == 1
     durable = open(project.result_out, "rb").read()
     recorder = Recorder()
@@ -174,10 +179,11 @@ def test_kill_inside_the_transport_window_records_the_request_first(
     project, resolved
 ):
     """Cover the operations.py transport-call window no BOUNDARIES hook reaches:
-    the request has left the process but the in-flight checkpoint was never
-    advanced. The child's transport fsyncs the counter and then SIGKILLs
-    itself before returning the response, so the on-disk order is pinned:
-    descriptor first, then the request, and no result ever."""
+    the transport has been invoked but its response will never be observed,
+    and the in-flight checkpoint was never advanced. The child's transport
+    fsyncs the counter and then SIGKILLs itself before returning the
+    response, so the on-disk order is pinned: descriptor first, then the
+    request, and no result ever."""
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
     completed = run_child(project, issued, "in_transport", "publish", counter)
@@ -192,7 +198,8 @@ def test_kill_inside_the_transport_window_records_the_request_first(
 def test_new_process_after_a_transport_window_kill_sends_nothing(project, resolved):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "in_transport", "publish", counter)
+    completed = run_child(project, issued, "in_transport", "publish", counter)
+    assert completed.returncode == -signal.SIGKILL, completed.stderr
     assert on_disk_requests(counter) == 1
     recorder = Recorder()
     outcome = publish(
@@ -210,7 +217,8 @@ def test_new_process_after_a_transport_window_kill_sends_nothing(project, resolv
 def test_kill_before_ack_keeps_every_recoverable_artifact(project, resolved):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "after_result_fsync", "publish", counter)
+    published = run_child(project, issued, "after_result_fsync", "publish", counter)
+    assert published.returncode == -signal.SIGKILL, published.stderr
     completed = run_child(project, issued, "before_ack", "ack", counter)
     assert completed.returncode == -signal.SIGKILL, completed.stderr
     assert on_disk_requests(counter) == 1
@@ -224,7 +232,8 @@ def test_kill_before_cleanup_keeps_the_receipt_and_allows_an_idempotent_retry(
 ):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
-    run_child(project, issued, "after_result_fsync", "publish", counter)
+    published = run_child(project, issued, "after_result_fsync", "publish", counter)
+    assert published.returncode == -signal.SIGKILL, published.stderr
     completed = run_child(project, issued, "before_cleanup", "ack", counter)
     assert completed.returncode == -signal.SIGKILL, completed.stderr
     receipt = open(project.ack_out, "rb").read()
@@ -246,6 +255,7 @@ def test_the_counter_is_written_by_the_child_not_the_parent(project, resolved):
     store, issued = issue_plan(project, resolved)
     counter = project.root / "requests.count"
     assert on_disk_requests(counter) == 0
-    run_child(project, issued, "after_result_fsync", "publish", counter)
+    completed = run_child(project, issued, "after_result_fsync", "publish", counter)
+    assert completed.returncode == -signal.SIGKILL, completed.stderr
     assert on_disk_requests(counter) == 1
     assert open(counter, "rb").read() == b"1"
