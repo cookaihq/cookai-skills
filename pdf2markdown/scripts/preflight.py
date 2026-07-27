@@ -14,6 +14,7 @@ from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 import bundle
+import conversion_actions
 import markdown_structure
 
 
@@ -3744,10 +3745,43 @@ def validate_baseline_artifacts(*, descriptors: dict, manifest: dict) -> None:
             raise PreflightError("integrity_violation", "The preflight record hash changed.")
 
 
-def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> dict:
+def result_from_manifest(
+    manifest: dict,
+    *,
+    work_bundle: str,
+    outcome: str,
+    pending_conversion_operation: bool = False,
+) -> dict:
+    """The base result every other layer's result_from_manifest builds on --
+    and, since task 3.1d, the ONE place design.md Decision 5's action
+    projection is applied.
+
+    The four wrappers above this one (source_staging, conversion_attempt,
+    raw_conversion, review) each call their own base and then add only their
+    layer-specific keys; none of them overrides action_required / action_id /
+    evidence_hash off its own pending_action any more. That is what removes
+    the "whoever is called last wins" override chain design.md's Context
+    section describes: project_conversion_action reads the WHOLE manifest,
+    not a per-layer slice, so applying it once at the bottom already yields
+    the precedence-correct answer no matter which layer workflow.py actually
+    dispatched to. review.result_from_manifest is the single exception, and
+    only on the branch where the projection came back None -- see its own
+    comment.
+
+    `preflight`'s own pending_action vocabulary is outside Decision 5's tiers
+    entirely, so it stays the answer whenever the projection produces none.
+    A projected action outranks it: tier 1 (a pending conversion operation)
+    is defined to outrank everything, and by the time any other tier can
+    match, the bundle has moved past preflight's own gate.
+
+    `pending_conversion_operation` is tier 1's signal and is fail-open by
+    default -- see conversion_actions._action_context's docstring for the
+    caller's obligation. workflow._inspect_open_bundle is its only production
+    producer.
+    """
     artifacts = {"manifest": "manifest.json", **manifest["artifacts"]}
     pending_action = manifest.get("preflight", {}).get("pending_action")
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "work_bundle": work_bundle,
         "generation": manifest["generation"],
@@ -3764,6 +3798,21 @@ def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> d
         "artifacts": artifacts,
         "errors": [],
     }
+    projected = conversion_actions.project_conversion_action(
+        manifest, pending_conversion_operation=pending_conversion_operation
+    )
+    if projected is not None:
+        result["action_required"] = projected["action_required"]
+        result["action_id"] = projected["action_id"]
+        # I2 (task 3.1a fix round 1): evidence_hash is replaced only when the
+        # projection actually binds a stored pending_action. The informational
+        # tiers (1/3/4c/4d) answer "what should the caller do next", not
+        # "which prior decision does this respond to", and carry
+        # evidence_hash=None; blanket-copying that None would discard the
+        # `sha256:<source sha256>` fallback SKILL.md:58 promises callers.
+        if projected["evidence_hash"] is not None:
+            result["evidence_hash"] = projected["evidence_hash"]
+    return result
 
 
 def dependency_result(manifest: dict, *, work_bundle: str) -> dict:

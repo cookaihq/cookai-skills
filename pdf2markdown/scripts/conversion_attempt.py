@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Callable, NamedTuple
 
 import bundle
+import conversion_actions
 import doc2x
 import source_staging
 
@@ -328,58 +329,15 @@ POLL_TRANSIENT_REASON_CODES = frozenset(
 
 # design.md Decision 1 -- the single enumeration of the 18 *wire* (flat)
 # classifications doc2x still produces and the folded (attempt state, reason,
-# conversion_state) triple each one stores from task 2.1c onward.
-#
-# --- What "flat state" means after the 2.1c fold ---------------------------
-#
-# Before 2.1c the 18 keys of this table were simultaneously (a) the value
-# doc2x._classify / _classify_poll return in CreateResult.state /
-# PollResult.state and (b) the value an attempt record stored in its `state`
-# field. Task 2.1c splits those two roles apart:
-#
-#   * the KEYS stay the wire vocabulary -- doc2x.py is untouched by this
-#     task, so a poll observation is still classified as one of these 18;
-#   * the stored attempt `state` is now the folded value in column 0, drawn
-#     from the closed 7-value ATTEMPT_STATES, with column 1's `reason`
-#     carrying the discrimination the folded name gave up.
-#
-# So every table below that is keyed by one of these 18 names is keyed by a
-# WIRE classification, not by a stored attempt state; the names say so
-# (`_..._BY_FLAT_STATE`, `_poll_response_branches`). Anything that reads a
-# stored record keys on `(state, reason)` instead -- and, for the one place
-# the fold is not injective, on `upstream_status` as well (see
-# _MANIFEST_STATE_BY_FOLDED_STATE below).
-FLAT_STATE_MIGRATION = {
-    # flat state: (attempt state, reason, top-level conversion_state)
-    "not_started": ("authorized", None, "ready_to_submit"),
-    "submitting": ("submitting", None, "submitting"),
-    "submitted": ("submitted", None, "submitted"),
-    "submission_unknown": ("submission_unknown", "no_task_id", "submission_unknown"),
-    "pending": ("processing", None, "submitted"),
-    "processing": ("processing", None, "submitted"),
-    "result_pending": ("processing", None, "submitted"),
-    "result_ready": ("result_ready", None, "result_downloading"),
-    "unsafe_result_url": ("failed", "unsafe_result_url", "terminal_error"),
-    "unexpected_result_count": (
-        "failed", "unexpected_result_count", "terminal_error"
-    ),
-    "failed": ("failed", "task_failed", "awaiting_user"),
-    "poll_transient": ("failed", "poll_transient", "recoverable_error"),
-    "poll_unauthorized": (
-        "failed", "poll_authentication_rejected", "recoverable_error"
-    ),
-    "task_unavailable": ("failed", "task_unavailable", "recoverable_error"),
-    "credential_source_missing": (
-        "failed", "credential_source_missing", "recoverable_error"
-    ),
-    "credential_source_changed": (
-        "failed", "credential_fingerprint_changed", "recoverable_error"
-    ),
-    "poll_timeout": ("failed", "poll_timeout", "recoverable_error"),
-    "result_pending_timeout": (
-        "failed", "result_pending_timeout", "recoverable_error"
-    ),
-}
+# conversion_state) triple each one stores from task 2.1c onward. Task 3.1d
+# moved the table itself down into conversion_actions.py (the leaf module the
+# action projector lives in, which derives tier 3's and tier 4c's reason
+# domains from it and cannot import this module); this is a re-export of the
+# very same object, not a copy, so every derivation below still reads one
+# owner. See conversion_actions.py's header for why the move was necessary
+# and its FLAT_STATE_MIGRATION comment for what "flat state" means after the
+# 2.1c fold.
+FLAT_STATE_MIGRATION = conversion_actions.FLAT_STATE_MIGRATION
 FLAT_STATE_DOMAIN = frozenset(FLAT_STATE_MIGRATION)
 
 # design.md Decision 1 -- the closed seven-value domain a stored attempt
@@ -395,10 +353,10 @@ ATTEMPT_STATES = frozenset(
 # classification ever produces it, so it lives outside the two
 # characterization tables (FLAT_STATE_MIGRATION / LEGAL_TRIPLES stay 18
 # rows of measured wire domain) and is spliced into every derivation
-# that defines pair legality. Write side lands in 2.2c.
-LOCALLY_DETECTED_PAIRS = {
-    ("result_ready", "result_url_expired"): "recoverable_error",
-}
+# that defines pair legality. Write side lands in 2.2c. Re-exported from
+# conversion_actions.py (task 3.1d) -- tier 4c's guard reads it, so it had to
+# move down with the rule table; same object, not a copy.
+LOCALLY_DETECTED_PAIRS = conversion_actions.LOCALLY_DETECTED_PAIRS
 
 # --- The recorded-credential gate's own pairs (task 2.3c) ------------------
 #
@@ -415,14 +373,15 @@ LOCALLY_DETECTED_PAIRS = {
 #
 # The two ConfigError codes the gate can fail with are FLAT_STATE_MIGRATION
 # keys, so design Decision 4's boundary rename (credential_source_changed ->
-# credential_fingerprint_changed) is *read off* the migration table here
-# rather than restated -- this dict is the one place the create-path gate's
+# credential_fingerprint_changed) is *read off* the migration table rather
+# than restated -- this dict is the one place the create-path gate's
 # code -> reason mapping lives, and _CREDENTIAL_ERROR_PAIRS below is derived
 # from it instead of carrying a second copy of the two folded names.
-CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR = {
-    config_error_code: FLAT_STATE_MIGRATION[config_error_code][1]
-    for config_error_code in ("credential_source_missing", "credential_source_changed")
-}
+# Re-exported from conversion_actions.py (task 3.1d): tier 3's reason domain
+# is derived from it, so it moved down with the rule table.
+CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR = (
+    conversion_actions.CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR
+)
 
 # The top-level conversion_state a gate record projects to: `ready_to_submit`,
 # the same value the `retry` placeholder's ("authorized", None) pair projects
@@ -973,421 +932,72 @@ POLL_ACTIVE_ATTEMPT_PAIRS = frozenset(
     }
 )
 
-# The folded pairs whose records may carry a pending action, and the kind each
-# one takes. Pre-fold this was three flat states -- submission_unknown,
-# failed, unexpected_result_count -- and both _valid_pending_action's
-# expected_kinds and valid_private_state's confirm-mode invariant listed them
-# separately. They are one table now: `failed` covers ten reasons after the
-# fold, and reusing the flat set would demand a pending action from all ten,
-# instantly invalidating every recoverable record (poll_transient,
-# task_unavailable, ...).
+# The closed action vocabularies and the folded pending-action table below
+# all moved down into conversion_actions.py in task 3.1d, together with the
+# rule table whose guards read them (design.md Decision 5's tiers name
+# CONVERSION_ACTIONS members, and tier 2 validates a live staging kind
+# against SOURCE_STAGING_ACTIONS). conversion_actions.py is a leaf -- it
+# imports none of the five result_from_manifest layers, which is what lets
+# preflight.py and source_staging.py reach the projector at all -- so it
+# cannot read these tables across an import and they had to travel with it.
+# The names below are re-exports of the very same objects, so this module's
+# import surface is unchanged and there is no second copy to drift.
 #
-# Task 2.4 (design.md Decision 5/9.3): the closed, workflow-facing action
-# vocabulary a conversion attempt or a raw_conversion record's pending_action
-# may carry. The four `resolve_*` kinds this replaces --
-# resolve_submission_unknown, resolve_task_failed,
-# resolve_unexpected_result_count (all three below) and
-# raw_conversion.py's resolve_unexpected_result_layout -- all asked the
-# operator for the exact same decision (authorize a new, separately charged
-# conversion attempt), so distinguishing them by kind name was spurious
-# detail, not real discrimination. Folding them here means
-# commit_retry_decision's old `pending.kind` comparison loses the (state,
-# reason) information it used to get for free from the kind name; that
-# information moves onto RETRY_AUTHORIZABLE_TRIPLES below, which
-# discriminates directly on (conversion_state, attempt state, reason)
-# instead.
+# What each one is:
+#   * CONVERSION_ACTIONS -- task 2.4 / Decision 5/9.3's closed,
+#     workflow-facing action vocabulary a conversion attempt or a
+#     raw_conversion record's pending_action may carry.
+#   * AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND -- the single member every
+#     confirmable pending_action carries, named once so the submission-result
+#     and poll-result writers below and raw_conversion.py's layout-ambiguity
+#     writer read one value.
+#   * CONFIRMABLE_PENDING_KINDS / CONFIRMABLE_PAIRS -- the folded (state,
+#     reason) pairs whose records may carry a pending action, and the kind
+#     each takes. Pre-fold this was three flat states (submission_unknown,
+#     failed, unexpected_result_count) listed separately by
+#     _valid_pending_action's expected_kinds and valid_private_state's
+#     confirm-mode invariant; they are one table now, because `failed` covers
+#     ten reasons after the fold and reusing the flat set would demand a
+#     pending action from all ten.
+CONVERSION_ACTIONS = conversion_actions.CONVERSION_ACTIONS
+AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND = (
+    conversion_actions.AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND
+)
+CONFIRMABLE_PENDING_KINDS = conversion_actions.CONFIRMABLE_PENDING_KINDS
+CONFIRMABLE_PAIRS = conversion_actions.CONFIRMABLE_PAIRS
+
+# Task 3.1d (design.md Decision 5, correction ①): the ordered rule table and
+# the projector that reads it now live in conversion_actions.py, a leaf
+# module every one of the five result_from_manifest layers can import. Task
+# 3.1a had to define them here, in the middle of the wrapper chain's import
+# DAG (preflight <- source_staging <- conversion_attempt <- raw_conversion
+# <- review), which left the bottom two layers unable to see the projector
+# and forced source_staging.result_from_manifest to keep a second
+# implementation of tier 2. The names below are re-exports of the same
+# objects, so this module's import surface -- and every test that reads
+# conversion_attempt.ACTION_RULES / .project_conversion_action -- is
+# unchanged.
 #
-# Disjoint from workflow.ERROR_PATH_ACTIONS by production mechanism, not by
-# value-clash avoidance -- workflow.py:57-66 spells out why the two tables
-# are allowed to share the action_required key without being each other's
-# complement. Some members (e.g. resume_pending_conversion_operation) have no
-# consumer yet; task 3.1 wires those up. This table only has to be closed and
-# disjoint from the error-path vocabulary now.
-CONVERSION_ACTIONS = frozenset(
-    {
-        "resume_pending_conversion_operation",
-        "restore_recorded_aihub_credential",
-        "resume_same_conversion_task",
-        "authorize_new_conversion_attempt",
-        "adopt_conversion_result",
-    }
+# This module no longer applies the projection itself: preflight.
+# result_from_manifest, at the bottom of the chain, is the single
+# application point, and result_from_manifest below only adds its own
+# attempt-specific keys (see its comment).
+_ActionContext = conversion_actions._ActionContext
+_action_context = conversion_actions._action_context
+Rule = conversion_actions.Rule
+ACTION_RULES = conversion_actions.ACTION_RULES
+_KIND_FROM_STAGING_PENDING_ACTION = conversion_actions._KIND_FROM_STAGING_PENDING_ACTION
+_EVIDENCE_SOURCE_BY_TIER = conversion_actions._EVIDENCE_SOURCE_BY_TIER
+_validate_action_rules = conversion_actions._validate_action_rules
+project_conversion_action = conversion_actions.project_conversion_action
+RESUME_PENDING_CONVERSION_OPERATION_KIND = (
+    conversion_actions.RESUME_PENDING_CONVERSION_OPERATION_KIND
 )
-
-# The single CONVERSION_ACTIONS member every confirmable pending_action now
-# carries. Named once so every producer -- CONFIRMABLE_PENDING_KINDS below,
-# the submission-result and poll-result writers further down, and
-# raw_conversion.py's layout-ambiguity writer -- reads the same value instead
-# of repeating the string literal.
-AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND = "authorize_new_conversion_attempt"
-# Minor fix (task 3.1a fix round 1, carried from the 2.4 review's M4): a bare
-# `assert` is stripped under `python -O`, silently dropping this import-time
-# guard in exactly the deployment mode where it matters most -- the same
-# reasoning the 4-kind loop just below (and _MANIFEST_STATE_BY_FOLDED_STATE's
-# collision guard above) already apply. `raise` makes this unconditional.
-if AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND not in CONVERSION_ACTIONS:
-    raise ValueError(
-        f"{AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND!r} is not a member of "
-        "CONVERSION_ACTIONS"
-    )
-
-CONFIRMABLE_PENDING_KINDS = {
-    ("submission_unknown", "no_task_id"): AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
-    ("failed", "task_failed"): AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
-    ("failed", "unexpected_result_count"): AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
-}
-CONFIRMABLE_PAIRS = frozenset(CONFIRMABLE_PENDING_KINDS)
-
-# Task 3.1a (design.md Decision 5): the single ordered rule table that
-# replaces the four `result_from_manifest` wrappers' sequential override
-# chain (preflight.py -> source_staging.py -> conversion_attempt.py ->
-# raw_conversion.py -- "whoever is called last wins", design.md's Context
-# section). project_conversion_action (below the table) is now the only
-# producer of action_required/action_id/evidence_hash for the closed
-# conversion vocabulary; conversion_attempt.result_from_manifest and
-# raw_conversion.result_from_manifest call it once instead of each
-# overriding those three keys themselves off their own layer's
-# pending_action (preflight.py and source_staging.py cannot call it -- see
-# _action_context's docstring -- and do not need to: see project_
-# conversion_action's docstring for why the two-layer split is still
-# correct).
-#
-# _ActionContext is the read-only view every Rule's guard may see: design.md
-# Decision 5 pins this to "(conversion_state, attempt state, reason) 加
-# pending flag、staging state、interaction_mode" -- explicitly NOT
-# reason_detail (task 3.2's cartesian-product uniqueness proof depends on
-# that exclusion holding). `conversion_state` itself is not a separate field
-# here: for every LEGAL (attempt_state, reason) pair it is a single-valued
-# function of that pair (_MANIFEST_STATE_BY_FOLDED_STATE), so re-reading it
-# from the manifest would only ever repeat information the pair already
-# carries, never add new information a guard could act on.
-
-
-class _ActionContext(NamedTuple):
-    pending_conversion_operation: bool
-    staging_pending_action: dict | None
-    raw_pending_action: dict | None
-    raw_conversion_exists_for_active_attempt: bool
-    attempt_state: str | None
-    attempt_reason: str | None
-    attempt_pending_action: dict | None
-    interaction_mode: str | None
-
-
-def _action_context(
-    manifest: dict, *, pending_conversion_operation: bool = False
-) -> _ActionContext:
-    """Build the guard-visible view of `manifest` project_conversion_action
-    scans ACTION_RULES against.
-
-    `pending_conversion_operation` is not a persisted manifest field -- it is
-    a signal the caller passes as an explicit keyword-only argument, not a
-    key written onto the manifest dict. Task 3.1a fix round 1 (I5) closes a
-    sentinel key (`manifest["_pending_conversion_operation"]`) this used to
-    read instead: bundle.py / workflow.py's exact-key-set comparisons
-    (`set(manifest) == <closed key set>`) would fold a manifest carrying
-    that key into `invalid_bundle`, and nothing structurally stopped a
-    `deepcopy(manifest)` call along some future path from writing it to
-    disk. A keyword-only parameter cannot leak into the persisted manifest
-    key set at all, closing that illegal state at the type level rather than
-    trusting every caller to strip the key back out.
-
-    Task 3.1a lands the projector able to honor this flag; wiring a real
-    producer of it -- `inspect`'s pending-boundary detection, design.md
-    Decision 8.1 -- is a separate task (3.1b/c). It is never written to
-    manifest.json: nothing in this module or its callers persists it.
-
-    `raw_pending_action` and `raw_conversion_exists_for_active_attempt` are
-    both scoped to the *active* attempt (matched by attempt_id), not to
-    whatever `manifest["raw_conversion"]` happens to hold. A retry
-    authorized after a raw rejection (design.md Decision 5's own case 9.3)
-    appends a new attempt but does not clear the old raw_conversion record
-    (commit_retry_decision only ever touches generation/conversion_state/
-    conversion_attempts) -- so an unscoped read would let a *previous*
-    attempt's already-resolved raw record either wrongly re-arm tier 4a for
-    an attempt that never asked for adoption, or wrongly suppress tier 4d
-    for a fresh result_ready attempt that has never been adopted at all.
-    Scoping by attempt_id is what test_layout_retry_action_is_removed_when_
-    override_switches_to_auto (tests/unit/test_raw_conversion.py) requires:
-    once raw_conversion concludes (committed or terminally rejected) for the
-    active attempt with no pending_action, tier 4d must not re-offer
-    "adopt_conversion_result" for a result that was never re-submitted.
-    """
-    attempts = manifest.get("conversion_attempts")
-    active = attempts[-1] if isinstance(attempts, list) and attempts else None
-    active_attempt_id = active.get("attempt_id") if isinstance(active, dict) else None
-    staging = manifest.get("source_staging")
-    raw = manifest.get("raw_conversion")
-    raw_belongs_to_active_attempt = (
-        active_attempt_id is not None
-        and isinstance(raw, dict)
-        and raw.get("attempt_id") == active_attempt_id
-    )
-    settings_snapshot = manifest.get("settings_snapshot")
-    return _ActionContext(
-        pending_conversion_operation=pending_conversion_operation,
-        staging_pending_action=(
-            staging.get("pending_action") if isinstance(staging, dict) else None
-        ),
-        raw_pending_action=(
-            raw.get("pending_action") if raw_belongs_to_active_attempt else None
-        ),
-        raw_conversion_exists_for_active_attempt=raw_belongs_to_active_attempt,
-        attempt_state=active.get("state") if isinstance(active, dict) else None,
-        attempt_reason=active.get("reason") if isinstance(active, dict) else None,
-        attempt_pending_action=(
-            active.get("pending_action") if isinstance(active, dict) else None
-        ),
-        interaction_mode=(
-            settings_snapshot.get("interaction_mode")
-            if isinstance(settings_snapshot, dict)
-            else None
-        ),
-    )
-
-
-# design.md Decision 5, tier 3's reason domain -- read literally off the
-# table: "attempt reason ∈ {...}", no attempt-state qualifier. That also
-# covers Decision 2's "initial" credential-gate placeholder (attempt state
-# "authorized", not "failed" -- see AUTHORIZED_STATE_REASONS_BY_KIND
-# ["initial"] / CREDENTIAL_GATE_AUTHORIZED_PAIRS), which never reaches
-# "failed" at all: the gate blocking before create and a credential failure
-# observed while polling an already-submitted task both mean "go fix the
-# recorded credential", so both project the same action. Derived from
-# FLAT_STATE_MIGRATION/CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR rather than
-# restated, same as every other folded-name table in this module.
-_CREDENTIAL_TIER_REASONS = frozenset(
-    CREDENTIAL_GATE_REASON_BY_CONFIG_ERROR.values()
-) | {FLAT_STATE_MIGRATION["poll_unauthorized"][1]}
-
-# design.md Decision 5, tier 4c's `failed`-branch reasons: the recoverable,
-# auto-resumable observations (excludes the two confirmable reasons, which
-# are tier 4b's, and the three credential reasons, which are tier 3's).
-_RECOVERABLE_TASK_REASONS = frozenset(
-    FLAT_STATE_MIGRATION[flat_state][1]
-    for flat_state in (
-        "task_unavailable",
-        "poll_transient",
-        "poll_timeout",
-        "result_pending_timeout",
-    )
+RESTORE_RECORDED_AIHUB_CREDENTIAL_KIND = (
+    conversion_actions.RESTORE_RECORDED_AIHUB_CREDENTIAL_KIND
 )
-
-RESUME_PENDING_CONVERSION_OPERATION_KIND = "resume_pending_conversion_operation"
-RESTORE_RECORDED_AIHUB_CREDENTIAL_KIND = "restore_recorded_aihub_credential"
-RESUME_SAME_CONVERSION_TASK_KIND = "resume_same_conversion_task"
-ADOPT_CONVERSION_RESULT_KIND = "adopt_conversion_result"
-for _literal_kind in (
-    RESUME_PENDING_CONVERSION_OPERATION_KIND,
-    RESTORE_RECORDED_AIHUB_CREDENTIAL_KIND,
-    RESUME_SAME_CONVERSION_TASK_KIND,
-    ADOPT_CONVERSION_RESULT_KIND,
-):
-    if _literal_kind not in CONVERSION_ACTIONS:
-        raise ValueError(f"{_literal_kind!r} is not a member of CONVERSION_ACTIONS")
-del _literal_kind
-
-# The one value Rule.kind may hold instead of a literal action string: "this
-# tier's action is not ours to name, read it back off the matched
-# pending_action instead" (design.md Decision 5 tier 2: "沿用 source-staging
-# 既有 kind（不属于 conversion 闭合表）"). A plain object() so it can never
-# collide with a real action name by accident.
-_KIND_FROM_STAGING_PENDING_ACTION = object()
-
-
-class Rule(NamedTuple):
-    """One row of the ordered precedence table design.md Decision 5 defines.
-
-    `matches` reads only the fields _ActionContext exposes -- never
-    reason_detail. `kind` is a literal CONVERSION_ACTIONS member, `None`
-    (the catch-all: no action), or `_KIND_FROM_STAGING_PENDING_ACTION` for
-    the one tier whose action is not from the closed conversion vocabulary
-    at all.
-    """
-
-    tier: str
-    matches: Callable[[_ActionContext], bool]
-    kind: str | None
-
-
-# design.md Decision 5's four-tier precedence table, in matching order:
-# scanned top to bottom, first match wins. "唯一性" (task 3.2) is the claim
-# that for every legal combination exactly one row matches; this table does
-# not prove that on its own, it only has to be consistent with it. The
-# trailing catch-all (kind=None) is design.md's "null 视为一条兜底规则":
-# every _ActionContext matches something.
-ACTION_RULES: tuple[Rule, ...] = (
-    Rule(
-        "1-pending-operation",
-        lambda context: context.pending_conversion_operation,
-        RESUME_PENDING_CONVERSION_OPERATION_KIND,
-    ),
-    Rule(
-        "2-source-staging",
-        lambda context: context.staging_pending_action is not None,
-        _KIND_FROM_STAGING_PENDING_ACTION,
-    ),
-    Rule(
-        "3-credential",
-        lambda context: context.attempt_reason in _CREDENTIAL_TIER_REASONS,
-        RESTORE_RECORDED_AIHUB_CREDENTIAL_KIND,
-    ),
-    Rule(
-        "4a-raw",
-        lambda context: context.raw_pending_action is not None,
-        AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
-    ),
-    Rule(
-        "4b-attempt",
-        lambda context: (
-            (context.attempt_state, context.attempt_reason) in CONFIRMABLE_PAIRS
-            and context.interaction_mode == "confirm"
-        ),
-        AUTHORIZE_NEW_CONVERSION_ATTEMPT_KIND,
-    ),
-    Rule(
-        "4c-recoverable",
-        lambda context: (
-            context.attempt_state == "failed"
-            and context.attempt_reason in _RECOVERABLE_TASK_REASONS
-        )
-        or (context.attempt_state, context.attempt_reason) in LOCALLY_DETECTED_PAIRS,
-        RESUME_SAME_CONVERSION_TASK_KIND,
-    ),
-    Rule(
-        "4d-ready",
-        lambda context: (
-            context.attempt_state == "result_ready"
-            and context.attempt_reason is None
-            and not context.raw_conversion_exists_for_active_attempt
-        ),
-        ADOPT_CONVERSION_RESULT_KIND,
-    ),
-    Rule("none", lambda context: True, None),
-)
-
-
-# M6 (task 2.4 review, carried into 3.1a): import-time closure check on the
-# rule table. "conversion" tiers (every row except the staging one and the
-# catch-all) must name a CONVERSION_ACTIONS member; the staging tier must
-# NOT -- it is a different, independently-closed vocabulary
-# (source_staging.SOURCE_STAGING_ACTIONS) -- so a blanket
-# `kind in CONVERSION_ACTIONS` check across the whole table would be wrong,
-# not just incomplete (design.md Decision 5's own table: "source-staging ->
-# 沿用 source-staging 既有 kind（不属于 conversion 闭合表）"). `python -O`
-# strips bare `assert`, so this raises explicitly -- the same fail-loud
-# shape as CONVERSION_ACTIONS' and _MANIFEST_STATE_BY_FOLDED_STATE's own
-# import-time guards above.
-def _validate_action_rules() -> None:
-    if source_staging.SOURCE_STAGING_ACTIONS & CONVERSION_ACTIONS:
-        raise ValueError(
-            "source_staging.SOURCE_STAGING_ACTIONS collides with "
-            "CONVERSION_ACTIONS -- the staging and conversion action "
-            "vocabularies must stay disjoint."
-        )
-    for rule in ACTION_RULES:
-        if rule.kind is _KIND_FROM_STAGING_PENDING_ACTION:
-            continue
-        if rule.kind is not None and rule.kind not in CONVERSION_ACTIONS:
-            raise ValueError(
-                f"ACTION_RULES row {rule.tier!r} names {rule.kind!r}, which "
-                "is not a member of CONVERSION_ACTIONS"
-            )
-
-
-_validate_action_rules()
-
-# The stored pending_action object each matched tier's action_id/
-# evidence_hash come from, keyed by tier. Tiers not listed here (1, 3, 4c,
-# 4d, and the catch-all) are informational: design.md Decision 5 projects an
-# action for them from (state, reason, mode) alone, not from a stored
-# confirmable decision -- "resume the pending operation", "go fix the
-# credential" and "just resume/adopt" are none of them answered through
-# `record conversion --decision`, so there is no pending_action object to
-# bind an action_id/evidence_hash to. Tier 2 and 4a/4b's actions ARE
-# `record ... --decision`-shaped confirmable decisions in the well-formed
-# manifests these rules' guards are matched against -- e.g. tier 4b's
-# mode==confirm guard is exactly the condition production code already
-# gates writing that pending_action on (_submission_result_state /
-# _poll_transition) -- so a stored pending_action is present whenever these
-# three tiers match.
-_EVIDENCE_SOURCE_BY_TIER: dict[str, Callable[[_ActionContext], dict | None]] = {
-    "2-source-staging": lambda context: context.staging_pending_action,
-    "4a-raw": lambda context: context.raw_pending_action,
-    "4b-attempt": lambda context: context.attempt_pending_action,
-}
-# Minor fix (task 3.1a fix round 1): _EVIDENCE_SOURCE_BY_TIER's keys must
-# name real ACTION_RULES rows -- a typo'd or stale tier name here would
-# silently never fire (dict.get returns None, same as "this tier has no
-# evidence source") rather than raising, which is indistinguishable from an
-# intentionally informational tier. `raise`, not a bare `assert`, for the
-# same `python -O` reason as every other import-time guard in this module.
-_ACTION_RULE_TIERS = frozenset(rule.tier for rule in ACTION_RULES)
-_evidence_source_tier_overreach = frozenset(_EVIDENCE_SOURCE_BY_TIER) - _ACTION_RULE_TIERS
-if _evidence_source_tier_overreach:
-    raise ValueError(
-        "_EVIDENCE_SOURCE_BY_TIER has keys outside ACTION_RULES' tier "
-        f"domain: {sorted(_evidence_source_tier_overreach)!r}"
-    )
-del _evidence_source_tier_overreach
-
-
-def project_conversion_action(
-    manifest: dict, *, pending_conversion_operation: bool = False
-) -> dict | None:
-    """The single source of `action_required` / `action_id` / `evidence_hash`
-    for the closed conversion action vocabulary (design.md Decision 5).
-
-    Scans ACTION_RULES in order and returns the first match's projection
-    (`None` when only the trailing catch-all matches). This replaces the
-    four `result_from_manifest` wrappers' sequential override chain.
-
-    `pending_conversion_operation` is the tier-1 signal, passed straight
-    through to `_action_context` -- see that function's docstring for why it
-    is a keyword-only argument rather than a manifest key.
-
-    Only conversion_attempt.result_from_manifest and raw_conversion.
-    result_from_manifest call this -- preflight.py and source_staging.py
-    cannot: conversion_attempt.py imports source_staging.py, which imports
-    preflight.py (source_staging.py:15, conversion_attempt.py:14), so a
-    call in either direction would be a cycle. This is safe rather than a
-    gap: this function reads the WHOLE manifest, not a per-layer slice, so
-    whichever layer happens to be the one workflow.py actually calls for a
-    given bundle still gets the fully precedence-correct answer once it
-    reaches conversion_attempt.result_from_manifest, which every bundle
-    that has any conversion_attempts does (raw_conversion.result_from_
-    manifest calls it as its first step, so it never needs to override
-    again either). A bundle with no conversion_attempts yet can only match
-    tier 1 or tier 2 -- source_staging.result_from_manifest's own existing
-    pending_action read already computes tier 2's value exactly (design.md
-    Decision 5: "沿用 source-staging 既有 kind"), and tier 1 has no real
-    producer yet (see _action_context's docstring), so leaving that one
-    layer's pre-existing logic in place is not a divergent second
-    implementation of the same rule -- it is the only reachable case, and
-    it was already correct.
-    """
-    context = _action_context(
-        manifest, pending_conversion_operation=pending_conversion_operation
-    )
-    rule = next(candidate for candidate in ACTION_RULES if candidate.matches(context))
-    if rule.kind is _KIND_FROM_STAGING_PENDING_ACTION:
-        pending = context.staging_pending_action
-        kind = pending["kind"]
-        if kind not in source_staging.SOURCE_STAGING_ACTIONS:
-            raise ValueError(
-                "source_staging pending_action kind is not a member of "
-                f"SOURCE_STAGING_ACTIONS: {kind!r}"
-            )
-    else:
-        kind = rule.kind
-    if kind is None:
-        return None
-    evidence_source = _EVIDENCE_SOURCE_BY_TIER.get(rule.tier)
-    evidence = None if evidence_source is None else evidence_source(context)
-    return {
-        "action_required": kind,
-        "action_id": None if evidence is None else evidence["action_id"],
-        "evidence_hash": None if evidence is None else evidence["evidence_hash"],
-    }
+RESUME_SAME_CONVERSION_TASK_KIND = conversion_actions.RESUME_SAME_CONVERSION_TASK_KIND
+ADOPT_CONVERSION_RESULT_KIND = conversion_actions.ADOPT_CONVERSION_RESULT_KIND
 
 
 # The folded pairs timeout_before_poll judges against the *poll* deadline.
@@ -4764,6 +4374,108 @@ def _valid_committed_event(
     )
 
 
+def _replay_conversion_intent(
+    intent: dict,
+    *,
+    manifest: dict,
+    private_state: dict,
+    template_results: list,
+    committed: dict | None,
+) -> tuple[dict, dict, set[str]] | None:
+    """Replay one durable conversion intent against the state it opened on.
+
+    Returns `(desired_manifest, desired_private, expected_committed_events)`
+    -- what the bundle looks like once this intent is closed -- or None when
+    the intent is not one this module replays, or when the private payload a
+    `result_ready` intent needs is not on file.
+
+    Pure: reads `manifest` / `private_state` / `template_results`, allocates,
+    and touches neither the filesystem nor the network. It may raise the
+    exception types apply_committed_operations already catches
+    (KeyError/IndexError/TypeError/ValueError/ConversionAttemptError) on a
+    malformed intent; each caller decides how that intent is judged.
+
+    Task 3.1d extracts this from apply_committed_operations' own dispatch so
+    that at_pending_conversion_boundary can ask the SAME replay "what would
+    closing this intent produce" without a second copy of the four branches.
+    `committed` is the already-durable committed event where there is one
+    (apply_committed_operations' case) and None while the intent is still
+    open (the pending-boundary case): the only thing it is read for is
+    whether the poll branch is replaying a recovered-transient close, which
+    an unclosed intent by definition is not.
+    """
+    event = intent.get("event")
+    if event == "conversion_submit_intent":
+        (
+            _previous_manifest,
+            _previous_private,
+            desired_manifest,
+            desired_private,
+        ) = _started_state_from_intent(manifest, private_state, intent)
+        return desired_manifest, desired_private, {"conversion_submit_started"}
+    if event == "conversion_submit_result_intent":
+        (
+            _previous_manifest,
+            _previous_private,
+            desired_manifest,
+            desired_private,
+        ) = _submission_result_state_from_intent(manifest, private_state, intent)
+        return (
+            desired_manifest,
+            desired_private,
+            {"conversion_submit_result_committed"},
+        )
+    if event in _AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT:
+        desired_manifest, desired_private = _authorize_state_from_intent(
+            manifest, private_state, intent
+        )
+        return (
+            desired_manifest,
+            desired_private,
+            {_AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT[event]},
+        )
+    if event == "conversion_poll_result_intent":
+        recovered = (
+            isinstance(committed, dict)
+            and committed.get("event") == "conversion_poll_result_recovered_transient"
+        )
+        intended_attempt = intent.get("attempt")
+        replay_attempt = committed.get("attempt") if recovered else intended_attempt
+        private_payload = None
+        if (
+            isinstance(replay_attempt, dict)
+            and replay_attempt.get("state") == "result_ready"
+        ):
+            matching = [
+                record
+                for record in template_results
+                if isinstance(record, dict)
+                and record.get("attempt_id") == replay_attempt.get("attempt_id")
+                and record.get("url_sha256")
+                == replay_attempt.get("result_url_sha256")
+            ]
+            if len(matching) != 1:
+                return None
+            private_payload = matching[0]
+        desired_manifest, desired_private = _poll_state_from_intent(
+            manifest,
+            private_state,
+            intent,
+            private_payload=private_payload,
+            recovered_attempt=replay_attempt if recovered else None,
+        )
+        return (
+            desired_manifest,
+            desired_private,
+            {
+                "conversion_poll_result_recovered_transient"
+                if recovered
+                else "conversion_poll_result_committed"
+            },
+        )
+    return None
+
+
 def apply_committed_operations(
     history: list[dict],
     *,
@@ -4787,70 +4499,16 @@ def apply_committed_operations(
             if not isinstance(operation_id, str) or operation_id in operation_ids:
                 return None
             committed = history[offset + 1]
-            event = intent.get("event")
-            if event == "conversion_submit_intent":
-                (
-                    _previous_manifest,
-                    _previous_private,
-                    desired_manifest,
-                    desired_private,
-                ) = _started_state_from_intent(current_manifest, current_private, intent)
-                expected_events = {"conversion_submit_started"}
-            elif event == "conversion_submit_result_intent":
-                (
-                    _previous_manifest,
-                    _previous_private,
-                    desired_manifest,
-                    desired_private,
-                ) = _submission_result_state_from_intent(
-                    current_manifest, current_private, intent
-                )
-                expected_events = {"conversion_submit_result_committed"}
-            elif event in _AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT:
-                desired_manifest, desired_private = _authorize_state_from_intent(
-                    current_manifest, current_private, intent
-                )
-                expected_events = {
-                    _AUTHORIZE_COMMITTED_EVENT_BY_INTENT_EVENT[event]
-                }
-            elif event == "conversion_poll_result_intent":
-                recovered = (
-                    isinstance(committed, dict)
-                    and committed.get("event")
-                    == "conversion_poll_result_recovered_transient"
-                )
-                intended_attempt = intent.get("attempt")
-                replay_attempt = committed.get("attempt") if recovered else intended_attempt
-                private_payload = None
-                if (
-                    isinstance(replay_attempt, dict)
-                    and replay_attempt.get("state") == "result_ready"
-                ):
-                    matching = [
-                        record
-                        for record in template_results
-                        if isinstance(record, dict)
-                        and record.get("attempt_id") == replay_attempt.get("attempt_id")
-                        and record.get("url_sha256")
-                        == replay_attempt.get("result_url_sha256")
-                    ]
-                    if len(matching) != 1:
-                        return None
-                    private_payload = matching[0]
-                desired_manifest, desired_private = _poll_state_from_intent(
-                    current_manifest,
-                    current_private,
-                    intent,
-                    private_payload=private_payload,
-                    recovered_attempt=replay_attempt if recovered else None,
-                )
-                expected_events = {
-                    "conversion_poll_result_recovered_transient"
-                    if recovered
-                    else "conversion_poll_result_committed"
-                }
-            else:
+            replayed = _replay_conversion_intent(
+                intent,
+                manifest=current_manifest,
+                private_state=current_private,
+                template_results=template_results,
+                committed=committed,
+            )
+            if replayed is None:
                 return None
+            desired_manifest, desired_private, expected_events = replayed
             if not _valid_committed_event(
                 committed,
                 intent=intent,
@@ -5156,47 +4814,168 @@ def resolve_history_state(
     return _reduce_history(history, private_template=private_template)
 
 
-def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> dict:
+def at_pending_conversion_boundary(
+    history: list[dict], manifest: dict, private_state: dict, *, resolve_history
+) -> bool:
+    """Is this bundle merely parked on an unclosed conversion intent?
+
+    The ONE implementation of that question (task 3.1d). Two production
+    consumers read it, and reading the same function is what keeps them from
+    answering differently about the same bundle:
+
+      * workflow._inspect_open_bundle's `WorkflowError` narrow mouth, which
+        keeps `invalid_bundle` / rc 4 / zero writes but must name the action
+        that actually closes the boundary (design.md Decision 8.1); and
+      * conversion_actions.project_conversion_action's tier 1, through the
+        `pending_conversion_operation` flag threaded down the
+        result_from_manifest chain.
+
+    Both get the boolean from here, and the action NAME from the rule table's
+    tier-1 row, so neither the predicate nor the action has a second place to
+    be updated.
+
+    --- Why `valid_history` cannot answer this on its own ---
+
+    `valid_history` demands that reducing the WHOLE history reproduce the
+    manifest and private state on disk. A durable intent whose committed
+    event never landed breaks that equality by construction, so a bundle
+    waiting to be recovered is indistinguishable from a damaged one at that
+    call site.
+
+    --- The three crash windows, all of them ---
+
+    Every conversion operation writes in the same order: append the intent,
+    write private.json, write manifest.json, append the committed event
+    (conversion_attempt.py's four intent/committed pairs all follow it). A
+    crash can therefore leave disk in exactly three states, and
+    recover_interrupted_attempt admits exactly these three -- `manifest` and
+    `private_state` each equal to either the pre-intent (`previous`) or the
+    post-intent (`desired`) value, with `(manifest desired, private
+    previous)` forbidden because it is not reachable in that write order:
+
+      1. before the private write   -- previous / previous
+      2. before the manifest write  -- previous manifest, desired private
+      3. before the committed append -- desired / desired
+
+    Task 3.1b's version of this predicate only recognised window 1 (it
+    compared the prefix reduction to disk and stopped). Windows 2 and 3 were
+    reported as `repair_or_restore_work_bundle` -- "go repair or restore this
+    work bundle" -- even though `resume` closes all three with rc 0 and zero
+    network calls, so two thirds of the pending boundaries were being
+    answered with a destructive instruction about a perfectly healthy bundle.
+    That is design.md:318's defect, and design.md:230's tier-1 guard already
+    said "previous 或允许的 partial 边界"; this covers the full set.
+
+    Window 1 is answered first and on its own terms, exactly as before: it is
+    admissible whether or not the intent can be replayed at all. That matters
+    for the one case where the replay legitimately fails -- a `result_ready`
+    poll intent whose private payload never reached disk -- which
+    recover_interrupted_attempt closes by writing a `poll_transient`
+    recovered record instead. Disk is `previous`/`previous` there by
+    construction (the payload is the private write), so window 1 covers it.
+
+    Read-only and allocation-only: `history` is already in memory, and both
+    `resolve_history` and _replay_conversion_intent are pure reduces over it
+    (no file descriptors, no network). It runs only on the failure path.
+
+    `resolve_history` reduces the durable prefix and must be supplied by the
+    caller, for exactly the reason recover_interrupted_attempt states for its
+    own identically-shaped parameter: once a bundle carries raw conversion or
+    review records, its history holds events this module does not know, and
+    only the caller knows which layer's reducer understands every event the
+    bundle can hold. Required rather than defaulted so a caller cannot
+    silently fall back to a reducer that is too narrow -- which is not
+    hypothetical: a retry authorized after a raw layout rejection parks a
+    raw-bearing bundle on `conversion_retry_intent`
+    (test_layout_retry_journal_recovers_inside_a_raw_bearing_bundle drives
+    exactly that), and this module's own reducer answers None for it. Passing
+    the SAME resolver `recover_interrupted_attempt` is given is what makes
+    "what inspect says" and "what resume can do" one answer rather than two.
+
+    The tail intent itself is always replayed by this module -- it is a
+    conversion intent by construction, the check above -- on top of whatever
+    prefix the caller's reducer produced. That is the same division
+    recover_interrupted_attempt uses.
+    """
+    if not history:
+        return False
+    last = history[-1]
+    # The event name has to be pinned to `str` before it is looked up, not
+    # just compared: read_history admits any JSON value under the "event" key
+    # (it only checks that the event itself is a dict), and
+    # `x not in frozenset` raises TypeError rather than returning False for
+    # an unhashable x. That exception has no handler between here and
+    # workflow.main's last-resort one, so a dict or list event name would
+    # turn the caller's rc 4 / invalid_bundle into rc 1 / runtime_error -- on
+    # precisely the externally damaged bundles the branch exists to diagnose.
+    event = last.get("event") if isinstance(last, dict) else None
+    if not isinstance(event, str) or event not in CONVERSION_INTENTS:
+        return False
+    previous = resolve_history(
+        history[:-1], manifest_template=manifest, private_template=private_state
+    )
+    if previous is None:
+        return False
+    previous_manifest, previous_private = previous
+    if manifest == previous_manifest and private_state == previous_private:
+        return True
+    template_results = private_state.get("result_urls")
+    if not isinstance(template_results, list):
+        return False
+    try:
+        replayed = _replay_conversion_intent(
+            last,
+            manifest=previous_manifest,
+            private_state=previous_private,
+            template_results=template_results,
+            committed=None,
+        )
+    except (KeyError, IndexError, TypeError, ValueError, ConversionAttemptError):
+        # A tampered or malformed intent is not a recoverable boundary. Fail
+        # closed to False, which leaves the caller's original
+        # `repair_or_restore_work_bundle` verdict in place -- the same
+        # exception domain apply_committed_operations already treats as "this
+        # history does not reduce".
+        return False
+    if replayed is None:
+        return False
+    desired_manifest, desired_private, _expected_events = replayed
+    manifest_is_desired = manifest == desired_manifest
+    private_is_desired = private_state == desired_private
+    # The same admission recover_interrupted_attempt applies before it writes
+    # anything (its "partially inconsistent" guard). Window 1 already
+    # returned above, so `previous`-valued halves here are the partial
+    # windows only.
+    return (
+        (manifest == previous_manifest or manifest_is_desired)
+        and (private_state == previous_private or private_is_desired)
+        and not (manifest_is_desired and private_state == previous_private)
+    )
+
+
+def result_from_manifest(
+    manifest: dict,
+    *,
+    work_bundle: str,
+    outcome: str,
+    pending_conversion_operation: bool = False,
+) -> dict:
+    # Task 3.1d: this layer no longer writes action_required / action_id /
+    # evidence_hash either. Task 3.1a made it call project_conversion_action
+    # here because this was the lowest layer that could see the projector;
+    # now the projector lives in the leaf conversion_actions.py and
+    # preflight.result_from_manifest -- reached through the two base calls
+    # below -- applies it once for the whole chain. The projection is
+    # identical wherever it is applied: it reads the WHOLE manifest, never a
+    # per-layer slice.
     result = source_staging.result_from_manifest(
-        manifest, work_bundle=work_bundle, outcome=outcome
+        manifest,
+        work_bundle=work_bundle,
+        outcome=outcome,
+        pending_conversion_operation=pending_conversion_operation,
     )
     attempt = manifest["conversion_attempts"][-1]
     result["conversion_attempt_state"] = attempt["state"]
     result["conversion_attempt_reason"] = attempt["reason"]
     result["conversion_attempt_reason_detail"] = attempt["reason_detail"]
-    # Task 3.1a (design.md Decision 5): project_conversion_action is now the
-    # single source of action_required/action_id/evidence_hash for the
-    # closed conversion vocabulary -- this used to override those three keys
-    # directly from `attempt.pending_action` alone, one link of the four-
-    # layer "whoever is called last wins" override chain design.md's Context
-    # section describes. Reading the WHOLE manifest (not just this attempt)
-    # is what lets one call here also get raw_conversion's tier (4a) right
-    # when this function is entered directly -- raw_conversion.result_from_
-    # manifest now relies on this call instead of repeating its own
-    # override; see project_conversion_action's docstring.
-    #
-    # I2 (task 3.1a fix round 1): evidence_hash is overridden only when the
-    # projection actually binds a stored pending_action (a non-None
-    # evidence). project_conversion_action returns evidence_hash=None for
-    # every informational tier (1/3/4c/4d and the catch-all) -- those tiers
-    # answer "what should the caller do next", not "which prior decision
-    # does this respond to", so they were never meant to have their own
-    # evidence at all. Blanket-copying that None onto `result` was an
-    # unauthorized narrowing of what callers upstream in the chain already
-    # receive: `source` is already settled by the time preflight.py's
-    # result_from_manifest is entered (SKILL.md:58 promises evidence_hash
-    # stays populated), so preflight.py:3759-3763 fills it with
-    # `sha256:<source sha256>` whenever there is no pending_action at its own
-    # layer -- and every wrapper up the chain, this one included, is
-    # expected to leave that fallback alone unless it has a real
-    # pending_action's evidence to replace it with.
-    projected = project_conversion_action(manifest)
-    if projected is None:
-        result["action_required"] = None
-        result["action_id"] = None
-    else:
-        result["action_required"] = projected["action_required"]
-        result["action_id"] = projected["action_id"]
-        if projected["evidence_hash"] is not None:
-            result["evidence_hash"] = projected["evidence_hash"]
     return result

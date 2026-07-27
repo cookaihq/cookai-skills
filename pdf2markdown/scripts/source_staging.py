@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import aihub_upload
 import bundle
 import config
+import conversion_actions
 import preflight
 import settings
 
@@ -59,20 +60,21 @@ UNKNOWN_REASON_CODES = frozenset(
 # which pending_action `kind` a source-staging attempt state carries. Used to
 # be three separately-typed inline dict literals (_valid_pending_action,
 # _pending_action, commit_source_staging_decision's allowed_action lookup)
-# with no mechanical link between them. conversion_attempt.
-# project_conversion_action's precedence rule table (tier "2-source-staging")
-# passes this closed vocabulary's value through unchanged rather than folding
-# it into CONVERSION_ACTIONS -- design.md Decision 5's table says the
-# source-staging tier "沿用 source-staging 既有 kind（不属于 conversion 闭合
-# 表）" -- so the value domain needs a name of its own for the projector to
-# validate a value against at the point it reads one back out of a live
-# pending_action object.
-PENDING_ACTION_KIND_BY_STATE = {
-    "source_upload_unknown": "resolve_source_upload_unknown",
-    "source_upload_rejected": "retry_source_upload",
-    "source_upload_expired": "retry_expired_source_upload",
-}
-SOURCE_STAGING_ACTIONS = frozenset(PENDING_ACTION_KIND_BY_STATE.values())
+# with no mechanical link between them.
+#
+# Task 3.1d moved the table itself down into conversion_actions.py and left
+# these two names as re-exports of the very same objects. The projector's
+# tier "2-source-staging" passes this closed vocabulary's value through
+# unchanged rather than folding it into CONVERSION_ACTIONS -- design.md
+# Decision 5's table says the source-staging tier "沿用 source-staging 既有
+# kind（不属于 conversion 闭合表）" -- so the projector has to validate a
+# live pending_action's kind against this domain, and it cannot import this
+# module (conversion_actions.py is a leaf, which is the whole reason
+# preflight.py and source_staging.py can reach the projector at all).
+# Copying the three values down instead of moving them would have recreated
+# the drift channel 3.1d exists to remove.
+PENDING_ACTION_KIND_BY_STATE = conversion_actions.PENDING_ACTION_KIND_BY_STATE
+SOURCE_STAGING_ACTIONS = conversion_actions.SOURCE_STAGING_ACTIONS
 
 
 class SourceStagingError(ValueError):
@@ -1881,17 +1883,34 @@ def valid_history(history: list[dict], manifest: dict, private_state: dict) -> b
     )
 
 
-def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> dict:
+def result_from_manifest(
+    manifest: dict,
+    *,
+    work_bundle: str,
+    outcome: str,
+    pending_conversion_operation: bool = False,
+) -> dict:
+    # Task 3.1d: this layer no longer writes action_required / action_id /
+    # evidence_hash. It used to carry a SECOND implementation of design.md
+    # Decision 5's tier 2 -- reading `source_staging.pending_action` directly
+    # -- because task 3.1a had to define project_conversion_action in
+    # conversion_attempt.py, which this module cannot import (it is to the
+    # left of conversion_attempt in the wrapper chain's import DAG). Task
+    # 3.1a fix round 1 could only lock the two implementations together with
+    # an equivalence test (tests/unit/test_source_staging.py::
+    # test_tier_2_projection_agrees_with_source_staging_result_from_manifest);
+    # the projector's move down to the leaf conversion_actions.py removes the
+    # second implementation outright, and preflight.result_from_manifest --
+    # the base call below -- now applies tier 2 for this layer. That
+    # equivalence test stays as a regression guard.
     result = preflight.result_from_manifest(
-        manifest, work_bundle=work_bundle, outcome=outcome
+        manifest,
+        work_bundle=work_bundle,
+        outcome=outcome,
+        pending_conversion_operation=pending_conversion_operation,
     )
     staging = manifest.get("source_staging")
     result["source_upload_state"] = (
         None if not isinstance(staging, dict) else staging.get("state")
     )
-    pending_action = staging.get("pending_action") if isinstance(staging, dict) else None
-    if isinstance(pending_action, dict):
-        result["action_required"] = pending_action["kind"]
-        result["action_id"] = pending_action["action_id"]
-        result["evidence_hash"] = pending_action["evidence_hash"]
     return result

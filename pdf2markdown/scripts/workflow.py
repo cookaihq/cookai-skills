@@ -20,6 +20,7 @@ import aihub_upload
 import bundle as bundle_module
 import config as config_module
 import correction as correction_module
+import conversion_actions
 import conversion_attempt as conversion_attempt_module
 import doc2x as doc2x_module
 import pdf_source
@@ -123,12 +124,22 @@ RESUMABLE_RECOVERABLE_ATTEMPT_PAIRS = frozenset(
 )
 
 
-# The code `_inspect_open_bundle`'s history check reports under. Spelled once
-# and read both by that construction site and by CONVERSION_ACTION_EXCEPTIONS
-# below, so the pair's code half cannot drift from the code the history check
-# actually raises -- there is no separate literal for a future edit to catch
-# out of sync.
-HISTORY_CHECK_ERROR_CODE = "invalid_bundle"
+# The code `_inspect_open_bundle`'s `valid_history` branch reports under --
+# the ONE branch whose action can leave ERROR_PATH_ACTIONS, and the only one
+# this constant governs. Spelled once and read both by that construction site
+# and by CONVERSION_ACTION_EXCEPTIONS below, so the pair's code half cannot
+# drift from the code that branch raises.
+#
+# m1 (task 3.1b fix-round review, renamed in 3.1d): the old name
+# `HISTORY_CHECK_ERROR_CODE` overstated its scope. This module hardcodes
+# "invalid_bundle" in eighteen other places, and one of them -- the
+# `read_history` failure just above the branch, "Work bundle history could not
+# be read safely." -- is *also* a history check, so the old name invited the
+# reading "every history check's code comes from here". It does not, and it
+# must not: those eighteen all pair the code with
+# `repair_or_restore_work_bundle`, which is an ERROR_PATH_ACTIONS member and
+# therefore never reaches the narrow-mouth gate at all.
+PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE = "invalid_bundle"
 
 # The only (code, action_required) pairs a WorkflowError may carry from
 # outside ERROR_PATH_ACTIONS. Task 3.1b (design.md Decision 1) is the whole of
@@ -148,8 +159,8 @@ HISTORY_CHECK_ERROR_CODE = "invalid_bundle"
 # test_the_workflow_error_conversion_gate_admits_exactly_one_pair pins both
 # halves of that.
 #
-# The code half is built from HISTORY_CHECK_ERROR_CODE rather than a literal
-# "invalid_bundle" (task 3.1d review follow-up #3): there is no closed
+# The code half is built from PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE
+# rather than a literal "invalid_bundle" (review follow-up #3): there is no closed
 # vocabulary of WorkflowError codes to test membership against, so an
 # import-time check that compared this table's code to that constant would
 # only ever be comparing the constant to itself -- not verifying an
@@ -158,8 +169,22 @@ HISTORY_CHECK_ERROR_CODE = "invalid_bundle"
 # "the code this table admits" and "the code the history check reports"
 # structurally unrepresentable, without an import-time crash gating every
 # command whenever a second, legitimately different-code pair is added later.
+#
+# Task 3.1d does the same to the ACTION half: it is built from
+# conversion_actions.RESUME_PENDING_CONVERSION_OPERATION_KIND, the very object
+# ACTION_RULES' tier-1 row carries. The construction site below still spells
+# the action as a literal -- the static closure scan in test_workflow.py
+# refuses a computed action_required -- but that scan also asserts the site's
+# (code, action) pair equals this table exactly, so the literal, this table
+# and the projector's tier 1 are chained to one owner: rename tier 1 and the
+# scan goes red instead of the narrow mouth quietly admitting a dead action.
 CONVERSION_ACTION_EXCEPTIONS = frozenset(
-    {(HISTORY_CHECK_ERROR_CODE, "resume_pending_conversion_operation")}
+    {
+        (
+            PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE,
+            conversion_actions.RESUME_PENDING_CONVERSION_OPERATION_KIND,
+        )
+    }
 )
 
 
@@ -174,9 +199,9 @@ def _check_conversion_action_exceptions_are_real() -> None:
     table guards).
 
     The code half needs no matching runtime check: CONVERSION_ACTION_EXCEPTIONS
-    is built directly from HISTORY_CHECK_ERROR_CODE above, so a table entry
-    whose code has drifted from the history check's code is not a state this
-    module can construct in the first place.
+    is built directly from PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE above, so
+    a table entry whose code has drifted from the history check's code is not a
+    state this module can construct in the first place.
 
     What this does *not* check is that the construction site still produces the
     pair at all; that is behaviour, and
@@ -1097,59 +1122,6 @@ def _assert_bundle_descriptors_current(bundle: Path, descriptors: dict) -> None:
         ) from None
 
 
-def _at_pending_conversion_boundary(
-    history: list[dict], manifest: dict, private_state: dict
-) -> bool:
-    """Is this history merely parked on an unclosed conversion intent?
-
-    `valid_history` demands that reducing the whole history reproduce the
-    manifest and private state on disk. A durable intent whose committed event
-    never landed breaks that equality by construction -- the reducer applies
-    the operation the intent opened, disk does not have it yet -- so a bundle
-    waiting to be recovered is indistinguishable from a damaged one at that
-    call site. Reducing the history *without* its last event separates them:
-    if the prefix reproduces disk exactly, everything before the intent is
-    intact and the only thing outstanding is the operation the intent opened,
-    which is precisely what recover_interrupted_attempt replays.
-
-    Read-only and allocation-only: `history` is already in memory, and
-    resolve_history_state is a pure reduce over it (no file descriptors, no
-    network). It runs only on the failure path.
-
-    conversion_attempt's reducer is the right one to ask even though
-    valid_history above may have dispatched the *bundle* to another layer: it
-    reduces its own conversion segment and hands the part before it to
-    source_staging (conversion_attempt.py:4895), which chains on down to
-    preflight, so it covers every history a conversion intent can currently
-    sit at the end of. A bundle carrying a raw-conversion or review slice is
-    outside what it can reduce; that returns None here and keeps the original
-    `repair_or_restore_work_bundle` verdict rather than guessing.
-    """
-    if not history:
-        return False
-    last = history[-1]
-    # The event name has to be pinned to `str` before it is looked up, not just
-    # compared: read_history admits any JSON value under the "event" key (it
-    # only checks that the event itself is a dict), and `x not in frozenset`
-    # raises TypeError rather than returning False for an unhashable x. That
-    # exception has no handler between here and main's last-resort one, so a
-    # dict or list event name would turn this branch's rc 4 / invalid_bundle
-    # into rc 1 / runtime_error -- on precisely the externally damaged bundles
-    # the branch exists to diagnose.
-    event = last.get("event") if isinstance(last, dict) else None
-    if (
-        not isinstance(event, str)
-        or event not in conversion_attempt_module.CONVERSION_INTENTS
-    ):
-        return False
-    reduced = conversion_attempt_module.resolve_history_state(
-        history[:-1],
-        manifest_template=manifest,
-        private_template=private_state,
-    )
-    return reduced == (manifest, private_state)
-
-
 def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     try:
         manifest = _read_json("manifest.json", dir_fd=descriptors["root"])
@@ -1285,6 +1257,46 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     has_conversion_attempt = bool(manifest.get("conversion_attempts"))
     has_raw_conversion = "raw_conversion" in manifest
     has_review = "review" in manifest
+    # Task 3.1d: the ONE predicate for "is this bundle merely parked on an
+    # unclosed conversion intent". Computed once, here, because TWO of the
+    # branches below can be the one a pending boundary lands on -- and read a
+    # third time further down as the tier-1 signal every result_from_manifest
+    # layer forwards to project_conversion_action, so the narrow mouth and the
+    # projector cannot answer differently about the same bundle.
+    #
+    # Which branch a boundary lands on depends on its crash window (see
+    # conversion_attempt.at_pending_conversion_boundary's docstring for the
+    # three):
+    #
+    #   * "before the private write" and "before the committed append" leave
+    #     manifest and private.json agreeing with each other, so they clear the
+    #     private-state check and stop at the history check;
+    #   * "before the manifest write" leaves private.json one generation ahead
+    #     of the manifest, which the private-state check catches FIRST -- it
+    #     never reaches the history check at all.
+    #
+    # Task 3.1b only wired the history branch and only recognised the first
+    # window, so the other two were told to "repair or restore" a bundle
+    # `resume` closes with rc 0. Both branches keep their code, their rc 4 and
+    # their zero writes; only the action they name changes, and only when this
+    # predicate -- an exact match against the two states the recovery admits --
+    # says the bundle is healthy.
+    # The reducer handed in is the same one `_resume` hands
+    # recover_interrupted_attempt for this bundle, so "what inspect says" and
+    # "what resume can do" are computed off one prefix reduction, not two.
+    # Without it a raw-bearing bundle parked on `conversion_retry_intent` (a
+    # retry authorized after a raw layout rejection --
+    # test_layout_retry_journal_recovers_inside_a_raw_bearing_bundle drives
+    # it) would be answered "repair or restore" by a reducer that simply does
+    # not know raw events, while `record`/`resume` closes it with rc 0.
+    pending_conversion_boundary = (
+        conversion_attempt_module.at_pending_conversion_boundary(
+            history,
+            manifest,
+            private_state,
+            resolve_history=_conversion_history_resolver(manifest),
+        )
+    )
     if (
         type(private_state.get("schema_version")) is not int
         or private_state["schema_version"] != SCHEMA_VERSION
@@ -1322,10 +1334,23 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
         )
     ):
         raise WorkflowError(
-            "invalid_bundle",
+            PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE,
             "Private work bundle state uses an unknown or inconsistent schema.",
             return_code=4,
-            action_required="repair_or_restore_work_bundle",
+            # The "before the manifest write" window lands here rather than on
+            # the history check: private.json already carries the post-intent
+            # generation while the manifest still carries the pre-intent one,
+            # which `private_state["generation"] != manifest["generation"]`
+            # above catches first. The bundle is not damaged -- that skew is
+            # what the write order produces -- and `resume` closes it with rc
+            # 0, so naming `repair_or_restore_work_bundle` here was the same
+            # wrong instruction design.md Decision 8.1 removed from the
+            # history branch.
+            action_required=(
+                "resume_pending_conversion_operation"
+                if pending_conversion_boundary
+                else "repair_or_restore_work_bundle"
+            ),
             context=state_context,
         )
     valid_history = (
@@ -1354,12 +1379,25 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             # Read from the same symbol CONVERSION_ACTION_EXCEPTIONS is checked
             # against, so the code this branch actually reports and the code the
             # gate admits cannot drift apart.
-            HISTORY_CHECK_ERROR_CODE,
+            PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE,
             "Work bundle history uses an unknown or inconsistent schema.",
             return_code=4,
+            # This literal stays a literal on purpose. test_workflow.py::
+            # test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary
+            # statically resolves every WorkflowError call site's
+            # action_required and refuses a dynamic one, because a computed
+            # value would make the "the error-path vocabulary is closed"
+            # claim unverifiable. It is still not a second place to update:
+            # that same test asserts the call site's (code, action) pair
+            # equals CONVERSION_ACTION_EXCEPTIONS exactly, and that table's
+            # action half is now built from conversion_actions.
+            # RESUME_PENDING_CONVERSION_OPERATION_KIND -- the very object
+            # ACTION_RULES' tier-1 row carries -- so renaming tier 1 turns
+            # this literal red rather than leaving the narrow mouth naming a
+            # stale action.
             action_required=(
                 "resume_pending_conversion_operation"
-                if _at_pending_conversion_boundary(history, manifest, private_state)
+                if pending_conversion_boundary
                 else "repair_or_restore_work_bundle"
             ),
             context=state_context,
@@ -1422,25 +1460,47 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             ) from None
     _assert_bundle_descriptors_current(bundle, descriptors)
     print(f"[pdf2markdown] inspected work bundle {bundle.name}", file=sys.stderr)
+    # Task 3.1d (design.md Decision 5's missed fifth wrapper): every layer
+    # takes the tier-1 signal and forwards it down to the one place the
+    # projection is applied. On this path the flag is False by construction --
+    # `valid_history` is True here, and a bundle whose last event is an
+    # unclosed intent cannot reduce to disk -- so these calls carry the
+    # predicate's answer rather than a hardcoded False: the signal has exactly
+    # one producer, and no reader of this code has to re-derive that argument.
     if has_review:
         return review_module.result_from_manifest(
-            manifest, work_bundle=str(bundle), outcome="inspected"
+            manifest,
+            work_bundle=str(bundle),
+            outcome="inspected",
+            pending_conversion_operation=pending_conversion_boundary,
         )
     if has_raw_conversion:
         return raw_conversion_module.result_from_manifest(
-            manifest, work_bundle=str(bundle), outcome="inspected"
+            manifest,
+            work_bundle=str(bundle),
+            outcome="inspected",
+            pending_conversion_operation=pending_conversion_boundary,
         )
     if has_conversion_attempt:
         return conversion_attempt_module.result_from_manifest(
-            manifest, work_bundle=str(bundle), outcome="inspected"
+            manifest,
+            work_bundle=str(bundle),
+            outcome="inspected",
+            pending_conversion_operation=pending_conversion_boundary,
         )
     if has_source_staging:
         return source_staging_module.result_from_manifest(
-            manifest, work_bundle=str(bundle), outcome="inspected"
+            manifest,
+            work_bundle=str(bundle),
+            outcome="inspected",
+            pending_conversion_operation=pending_conversion_boundary,
         )
     if manifest["conversion_state"] != "preparing":
         return preflight_module.result_from_manifest(
-            manifest, work_bundle=str(bundle), outcome="inspected"
+            manifest,
+            work_bundle=str(bundle),
+            outcome="inspected",
+            pending_conversion_operation=pending_conversion_boundary,
         )
     return {
         "schema_version": SCHEMA_VERSION,

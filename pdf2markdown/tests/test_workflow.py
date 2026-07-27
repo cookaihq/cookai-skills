@@ -1935,9 +1935,11 @@ def test_every_action_required_literal_in_workflow_is_in_the_error_vocabulary():
         node = call.args[0]
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
-        # 唯一允许的间接写法：全大写的模块级字符串常量名。窄口那条构造点读的
-        # 就是 workflow.HISTORY_CHECK_ERROR_CODE，窄口表本身也直接用这个符号
-        # 构造（任务 3.1d 遗留项 3 之后不再靠一次单独的 import 时自校验比对
+        # 唯一允许的间接写法：全大写的模块级字符串常量名。窄口那两条构造点读的
+        # 都是 workflow.PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE（任务 3.1d
+        # 起是两条：history 检查和 private-state 检查，分别对应 pending 边界的
+        # 三个崩溃窗口里的不同窗口），窄口表本身也直接用这个符号
+        # 构造（三条审查遗留项之后不再靠一次单独的 import 时自校验比对
         # 两者，一致性由「同一个符号」这件事本身保证）。任务 3.1d 审查遗留项
         # 2：把这条间接写法收窄到全大写白名单，而不是任意 Name 都拿
         # getattr(workflow, node.id, None) 去解析——workflow.py 里以局部变量
@@ -2079,26 +2081,50 @@ def _conversion_helpers():
     return _unit_test_module("test_conversion_attempt")
 
 
+def _conversion_intents():
+    """The closed set of conversion intent events, read off production.
+
+    Used as a parametrisation domain, so a sixth intent added later widens the
+    boundary matrix automatically instead of leaving a silent hole.
+    """
+    import conversion_attempt
+
+    return conversion_attempt.CONVERSION_INTENTS
+
+
 def _staging_helpers():
     return _unit_test_module("test_source_staging")
 
 
-def park_on_conversion_intent(tmp_path, capsys, monkeypatch, intent_event):
-    """Park a real bundle on an unclosed `intent_event`.
+def park_on_conversion_intent(
+    tmp_path, capsys, monkeypatch, intent_event, *, boundary="private"
+):
+    """Park a real bundle on an unclosed `intent_event`, at one of the three
+    crash windows that intent can leave behind.
 
     Every conversion operation writes the same durable four steps: append the
     intent, write private.json, write manifest.json, append the committed
-    event. Crashing the private.json write that *follows this intent* leaves
-    the intent dangling with both authoritative files still holding the
-    pre-intent state -- the boundary `recover_interrupted_attempt` closes with
-    zero network calls, and the one `_inspect_open_bundle` used to call a
-    corrupt work bundle.
+    event. A crash can therefore land in three places, and
+    `recover_interrupted_attempt` admits all three:
+
+      * "private"  -- before the private write. Both authoritative files still
+        hold the pre-intent state.
+      * "manifest" -- after private, before manifest. private is post-intent,
+        manifest is pre-intent.
+      * "commit"   -- after both writes, before the committed event is
+        appended. Both files are post-intent; only the journal is behind.
+
+    Task 3.1b only ever drove the first one, which is why the predicate it
+    landed only recognised that one; task 3.1d parameterises the window so the
+    other two are driven too.
 
     Keying the crash on the last appended event name rather than on "the first
     private.json write" is what makes one helper serve all five intents: a
     single command can open two of these transactions in a row (a `resume`
     submits *and* records the submission result), so the first private write is
-    the wrong one for the second intent.
+    the wrong one for the second intent. The "commit" window is keyed the same
+    way -- "the next event appended while this intent is the tail" -- so it
+    needs no table of committed event names to stay in step with.
 
     Returns (bundle, staged, environ).
     """
@@ -2207,11 +2233,13 @@ def park_on_conversion_intent(tmp_path, capsys, monkeypatch, intent_event):
 
     def append_history(value, *, state_fd):
         nonlocal last_appended
+        if boundary == "commit" and last_appended == intent_event:
+            raise helpers.SimulatedProcessCrash
         last_appended = value.get("event")
         return original_append_history(value, state_fd=state_fd)
 
     def crash_after_the_intent(name, value, *, dir_fd):
-        if name == "private.json" and last_appended == intent_event:
+        if name == f"{boundary}.json" and last_appended == intent_event:
             raise helpers.SimulatedProcessCrash
         return original_atomic_write(name, value, dir_fd=dir_fd)
 
@@ -2249,6 +2277,204 @@ def drive_to_pending_conversion_intent(tmp_path, capsys, monkeypatch):
     return park_on_conversion_intent(
         tmp_path, capsys, monkeypatch, "conversion_submit_intent"
     )
+
+
+# What a `resume` needs to answer once it has closed the boundary and carried
+# on with the operation the intent opened. Closing itself is always zero
+# network -- it is a journal replay -- but the command does not stop there,
+# so a case whose next step is a create or a poll has to be given a transport
+# for it. NeverNetwork marks the cases whose whole `resume` is offline.
+_RESUME_TRANSPORT_BY_INTENT = {
+    # The gate re-blocks before any network call: this bundle is parked with
+    # no AIHUB_API_KEY in the environment.
+    "conversion_authorize_initial_intent": lambda helpers: helpers.NeverNetwork(),
+    # Closing the retry authorization leaves an `authorized` placeholder;
+    # submitting it needs a credential this environment does not have.
+    "conversion_retry_intent": lambda helpers: helpers.NeverNetwork(),
+    # The create never went out (begin_attempt writes before it calls), so the
+    # resumed command still has to send it.
+    "conversion_submit_intent": lambda helpers: helpers.SuccessfulCreate(
+        "task-at-the-boundary"
+    ),
+    # The create already answered; the resumed command polls next.
+    "conversion_submit_result_intent": lambda helpers: helpers.PollStatus(
+        "task-at-the-boundary", "processing"
+    ),
+    # The poll already answered with a result; nothing further goes out.
+    "conversion_poll_result_intent": lambda helpers: helpers.NeverNetwork(),
+}
+
+
+@pytest.mark.parametrize("boundary", ["private", "manifest", "commit"])
+@pytest.mark.parametrize(
+    "intent_event", sorted(_conversion_intents()), ids=sorted(_conversion_intents())
+)
+def test_inspect_and_resume_agree_at_every_pending_conversion_boundary(
+    tmp_path, capsys, monkeypatch, intent_event, boundary
+):
+    """Task 3.1d, the I1 root fix: `inspect`'s verdict must match what
+    `resume` can actually do, for EVERY conversion intent at EVERY crash
+    window -- fifteen combinations, not the one `conversion_submit_intent` /
+    "private" cell task 3.1b covered.
+
+    Before this task the predicate compared the history prefix's reduction to
+    disk and nothing else, so it recognised only the pre-private window. The
+    other two -- both of which `recover_interrupted_attempt` closes with rc 0
+    -- were answered `repair_or_restore_work_bundle`: "go repair or restore
+    this work bundle", about a bundle that is not damaged at all. Two thirds
+    of the pending boundaries carried that instruction.
+
+    The parametrisation is over `conversion_attempt.CONVERSION_INTENTS`
+    itself, so a sixth intent added later fails here (no driver parks it)
+    rather than quietly going uncovered.
+    """
+    helpers = _conversion_helpers()
+    bundle, _staged, environ = park_on_conversion_intent(
+        tmp_path, capsys, monkeypatch, intent_event, boundary=boundary
+    )
+
+    before = state_snapshot(bundle)
+    inspect_transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=environ,
+        transport=inspect_transport,
+    )
+
+    # design.md Decision 8.1's contract is unchanged: fail closed, rc 4, zero
+    # writes, zero network. Only the action changes.
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "resume_pending_conversion_operation"
+    assert inspect_transport.calls == []
+    assert state_snapshot(bundle) == before
+
+    # ...and the advice is true: resume really does close it.
+    generation = json.loads((bundle / "manifest.json").read_text())["generation"]
+    resume_rc, resumed, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(generation),
+        ],
+        cwd=tmp_path,
+        environ=environ,
+        transport=_RESUME_TRANSPORT_BY_INTENT[intent_event](helpers),
+    )
+    assert resume_rc == 0, json.dumps(resumed, sort_keys=True)
+    assert read_history_events(bundle)[-1]["event"] not in _conversion_intents()
+
+
+@pytest.mark.parametrize("boundary", ["private", "manifest", "commit"])
+def test_inspect_names_resume_at_a_raw_bearing_pending_boundary(
+    tmp_path, capsys, monkeypatch, boundary
+):
+    """Task 3.1d, the reachability question 3.1b left open and could not
+    construct a driver for: a bundle carrying a raw conversion slice CAN park
+    on a conversion intent.
+
+    A retry authorized after a raw layout rejection is exactly that shape --
+    tests/unit/test_conversion_attempt.py::
+    test_layout_retry_journal_recovers_inside_a_raw_bearing_bundle already
+    proves `record` closes all three of its crash windows with rc 0 and zero
+    network. `inspect` used to answer `repair_or_restore_work_bundle` for all
+    three anyway, and not because the bundle looked damaged: the boundary
+    predicate reduced the prefix with conversion_attempt's own reducer, which
+    does not know raw conversion events at all, so it returned None for every
+    such bundle. The predicate now takes the reducer as an argument and
+    `_inspect_open_bundle` hands it the same `_conversion_history_resolver`
+    choice `_resume` hands recover_interrupted_attempt.
+    """
+    helpers = _conversion_helpers()
+    import conversion_attempt
+
+    bundle, ready, dependencies, key, _result_url = helpers.ready_result_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    layout_rc, layout_error, _stderr = helpers.invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(ready["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=helpers.ArchiveTransport(
+            helpers.make_zip([("a.md", b"a"), ("b.md", b"b")])
+        ),
+    )
+    assert layout_rc == 0, json.dumps(layout_error, sort_keys=True)
+    argv = [
+        "record",
+        "conversion",
+        "--work-bundle",
+        str(bundle),
+        "--expected-generation",
+        str(layout_error["generation"]),
+        "--action-id",
+        layout_error["action_id"],
+        "--evidence-hash",
+        layout_error["evidence_hash"],
+        "--decision",
+        "retry",
+        "--basis",
+        "The ambiguous result layout requires a new conversion charge.",
+    ]
+    original_atomic_write, original_append_history = (
+        helpers._install_conversion_journal_crash(
+            monkeypatch, event="conversion_retry_committed", boundary=boundary
+        )
+    )
+    with pytest.raises(helpers.SimulatedProcessCrash):
+        workflow.main(
+            argv,
+            environ=dependencies,
+            cwd=str(tmp_path),
+            config_home=str(tmp_path / "config-home"),
+            transport=helpers.CountingNeverNetwork(),
+            now=NOW,
+        )
+    capsys.readouterr()
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "atomic_write_json", original_atomic_write
+    )
+    monkeypatch.setattr(
+        conversion_attempt.bundle, "append_history", original_append_history
+    )
+    assert read_history_events(bundle)[-1]["event"] == "conversion_retry_intent"
+    assert "raw_conversion" in json.loads((bundle / "manifest.json").read_text())
+
+    before = state_snapshot(bundle)
+    inspect_transport = helpers.CountingNeverNetwork()
+    rc, result, _stderr = helpers.invoke(
+        capsys,
+        ["inspect", "--work-bundle", str(bundle)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=inspect_transport,
+    )
+
+    assert rc == 4
+    assert [error["code"] for error in result["errors"]] == ["invalid_bundle"]
+    assert result["action_required"] == "resume_pending_conversion_operation"
+    assert inspect_transport.calls == []
+    assert state_snapshot(bundle) == before
+
+    close_transport = helpers.CountingNeverNetwork()
+    close_rc, closed, _stderr = helpers.invoke(
+        capsys, argv, cwd=tmp_path, environ=dependencies, transport=close_transport
+    )
+    assert close_rc == 0, json.dumps(closed, sort_keys=True)
+    assert close_transport.calls == []
+    assert read_history_events(bundle)[-1]["event"] not in _conversion_intents()
 
 
 def read_history_events(bundle):

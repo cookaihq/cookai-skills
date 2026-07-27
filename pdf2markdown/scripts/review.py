@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
 import bundle
+import conversion_actions
 import correction
 import markdown_assets
 import markdown_structure
@@ -4242,22 +4243,56 @@ def validate_committed_artifacts(
                 )
 
 
-def result_from_manifest(manifest: dict, *, work_bundle: str, outcome: str) -> dict:
+def result_from_manifest(
+    manifest: dict,
+    *,
+    work_bundle: str,
+    outcome: str,
+    pending_conversion_operation: bool = False,
+) -> dict:
     result = raw_conversion.result_from_manifest(
-        manifest, work_bundle=work_bundle, outcome=outcome
+        manifest,
+        work_bundle=work_bundle,
+        outcome=outcome,
+        pending_conversion_operation=pending_conversion_operation,
     )
     review = manifest.get("review")
     pending = review.get("pending_action") if isinstance(review, dict) else None
-    if isinstance(pending, dict):
-        result["action_required"] = pending["kind"]
-        result["action_id"] = pending["action_id"]
-        result["evidence_hash"] = pending["evidence_hash"]
-    else:
-        result["action_required"] = None
-        result["action_id"] = None
-        result["evidence_hash"] = (
-            None if not isinstance(review, dict) else review["evidence"]["sha256"]
+    # Task 3.1d: this is design.md Decision 5's MISSED FIFTH WRAPPER (its
+    # 2026-07-27 correction ①). Both branches below used to run
+    # unconditionally, so every bundle carrying a review slice -- and
+    # workflow._inspect_open_bundle dispatches on `has_review` FIRST -- had
+    # the projector's answer overwritten or blanked outright, no matter what
+    # tier had matched. Tier 1 (resume_pending_conversion_operation) is
+    # defined to outrank everything, so that erasure was unconditional
+    # precedence inversion, not a review-layer nicety.
+    #
+    # The review layer's own pending_action vocabulary is outside Decision
+    # 5's tiers entirely, exactly like preflight's, so the two answers never
+    # actually compete: whenever the projection produced nothing, the review
+    # layer's own answer (or its evidence-hash fallback) is the right one and
+    # this block behaves exactly as it always did; whenever it produced
+    # something, that answer stands and this layer only adds its own keys
+    # below. project_conversion_action is a pure function of the same
+    # manifest preflight.result_from_manifest already passed it, so asking it
+    # again here reads the one implementation rather than second-guessing
+    # which layer wrote `result["action_required"]`.
+    if (
+        conversion_actions.project_conversion_action(
+            manifest, pending_conversion_operation=pending_conversion_operation
         )
+        is None
+    ):
+        if isinstance(pending, dict):
+            result["action_required"] = pending["kind"]
+            result["action_id"] = pending["action_id"]
+            result["evidence_hash"] = pending["evidence_hash"]
+        else:
+            result["action_required"] = None
+            result["action_id"] = None
+            result["evidence_hash"] = (
+                None if not isinstance(review, dict) else review["evidence"]["sha256"]
+            )
     result["review_status"] = None if not isinstance(review, dict) else review["status"]
     result["review_coverage"] = (
         None if not isinstance(review, dict) else deepcopy(review["coverage"])

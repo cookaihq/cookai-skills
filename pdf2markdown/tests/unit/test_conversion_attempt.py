@@ -13,8 +13,12 @@ from types import SimpleNamespace
 
 import fitz
 import pytest
+import conversion_actions
 import conversion_attempt
+import preflight
 import raw_conversion
+import review
+import source_staging
 import workflow
 from test_raw_conversion import ArchiveTransport, make_zip, ready_result_bundle
 
@@ -7694,68 +7698,208 @@ def test_raw_outranks_attempt_inside_the_stable_tier(tmp_path, capsys, monkeypat
     assert projected["action_required"] == "authorize_new_conversion_attempt"
 
 
+def _result_from_manifest_tree(module):
+    """The `result_from_manifest` of one wrapper layer, as an AST."""
+    import ast
+    import inspect
+    import textwrap
+
+    return ast.parse(textwrap.dedent(inspect.getsource(module.result_from_manifest)))
+
+
+def _projected_key_assignments(tree):
+    """Every `<anything>["action_required"|"action_id"|"evidence_hash"] = ...`
+    statement in `tree`, paired with the enclosing `if` tests it sits under.
+
+    Name-agnostic on both halves: it matches the *key* being written, never
+    the local variable holding the result dict or the projection, so renaming
+    either cannot make a direct write invisible to this check.
+    """
+    import ast
+
+    found = []
+
+    def walk(node, guards):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.If):
+                walk(child, (*guards, child.test))
+                for orelse in child.orelse:
+                    walk(orelse, (*guards, child.test))
+                continue
+            if isinstance(child, ast.Assign):
+                for target in child.targets:
+                    if (
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value
+                        in ("action_required", "action_id", "evidence_hash")
+                    ):
+                        found.append((target.slice.value, child.value, guards))
+            walk(child, guards)
+
+    walk(tree, ())
+    return found
+
+
+def _calls_the_projector(node) -> bool:
+    import ast
+
+    return any(
+        isinstance(call.func, ast.Name)
+        and call.func.id == "project_conversion_action"
+        or isinstance(call.func, ast.Attribute)
+        and call.func.attr == "project_conversion_action"
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+    )
+
+
 def test_no_result_from_manifest_wrapper_writes_action_required_directly():
     """design.md Decision 5: project_conversion_action is the single source
     of action_required/action_id/evidence_hash for the closed conversion
-    vocabulary. conversion_attempt.result_from_manifest and raw_conversion.
-    result_from_manifest -- the two wrappers that can import conversion_
-    attempt.py at all -- must call it rather than writing those three keys
-    from their own layer's pending_action, the way both used to.
+    vocabulary -- and task 3.1d makes that true of ALL FIVE wrapper layers,
+    not just the two that could import it.
 
-    preflight.py and source_staging.py are deliberately NOT scanned here.
-    conversion_attempt.py imports source_staging.py, which imports
-    preflight.py (source_staging.py's own `import preflight`,
-    conversion_attempt.py's own `import source_staging`), so neither of
-    those two modules can import conversion_attempt.py -- home of
-    project_conversion_action -- without a cycle. Leaving their existing
-    direct writes in place is not a leftover of the old override chain,
-    though: see project_conversion_action's docstring for why it is still
-    exactly one source of truth in practice -- preflight's own
-    pending_action vocabulary is outside design.md Decision 5 entirely (it
-    is not one of the four tiers), and source_staging's tier-2 value is
-    unreachable once any conversion_attempts exist (a pending source-staging
-    action and a conversion attempt structurally cannot coexist -- source
-    staging must reach source_upload_ready, which _submit_state requires,
-    before any attempt is created), so source_staging.result_from_manifest's
-    existing self-contained read already computes the one value tier 2
-    could ever produce.
+    Task 3.1a could only scan conversion_attempt.py and raw_conversion.py:
+    the projector lived in conversion_attempt.py, and preflight.py /
+    source_staging.py sit to its left in the wrapper chain's import DAG
+    (preflight <- source_staging <- conversion_attempt <- raw_conversion <-
+    review), so neither could call it without a cycle -- which is exactly why
+    source_staging.result_from_manifest kept a second implementation of tier
+    2. review.py was missed entirely (design.md Decision 5's 2026-07-27
+    correction ①) even though it CAN import downward, and it overrode the
+    three keys unconditionally on both branches.
+
+    The projector now lives in the leaf conversion_actions.py, so the shape
+    this test pins is:
+
+      * preflight.result_from_manifest -- the bottom of the chain -- is the
+        single place the projection is APPLIED, and it copies the three keys
+        off the projection's own return value, never off a pending_action.
+      * source_staging / conversion_attempt / raw_conversion write none of
+        the three keys at all; they only forward the tier-1 signal down and
+        add their own layer-specific keys.
+      * review may still write them, but only inside a branch guarded by the
+        projection having produced nothing -- its own pending_action
+        vocabulary is outside Decision 5's tiers, so that branch is where it
+        is the right answer. It may not erase a real projection.
     """
-    import inspect
-    import re
+    import ast
 
-    # raw_conversion.result_from_manifest must not touch these three keys at
-    # all any more: conversion_attempt.result_from_manifest (which it calls
-    # as its first line) already has the fully precedence-correct answer,
-    # because project_conversion_action reads manifest["raw_conversion"]
-    # itself regardless of which wrapper calls it.
-    raw_source = inspect.getsource(raw_conversion.result_from_manifest)
-    for key in ("action_required", "action_id", "evidence_hash"):
-        assert f'result["{key}"]' not in raw_source, key
+    layers = {
+        "preflight": preflight,
+        "source_staging": source_staging,
+        "conversion_attempt": conversion_attempt,
+        "raw_conversion": raw_conversion,
+        "review": review,
+    }
+    trees = {name: _result_from_manifest_tree(module) for name, module in layers.items()}
 
-    # conversion_attempt.result_from_manifest is the one wrapper allowed to
-    # write these three keys -- but only by copying project_conversion_
-    # action's own return value, never by reading a pending_action object
-    # directly the way both wrappers used to (the anti-pattern this task
-    # removes: `result["action_required"] = pending["kind"]` et al).
-    # Minor fix (task 3.1a fix round 1): the three patterns below used to
-    # anchor on the exact local variable name `pending` -- a future
-    # implementation that renamed that local (to `action`, `decision`, ...)
-    # while still reading a raw pending_action object directly would slip
-    # past unnoticed. Matching any identifier except `projected` (the one
-    # name this function is actually allowed to read these three keys off
-    # of, per the assertion above and project_conversion_action's own return
-    # value) keeps the anti-pattern check variable-name-agnostic without
-    # flagging the legitimate `projected["evidence_hash"]` read the I2 fix
-    # (evidence_hash's fallback-preserving branch) added.
-    attempt_source = inspect.getsource(conversion_attempt.result_from_manifest)
-    assert "project_conversion_action(manifest)" in attempt_source
-    for key in ("kind", "action_id", "evidence_hash"):
-        assert (
-            re.search(
-                r'=\s*(?!projected\b)\w+(\.get\(|\[)"' + key + r'"', attempt_source
+    # Every layer takes the tier-1 signal, and every layer above the bottom
+    # forwards it to its base call -- otherwise the bottom layer, the one
+    # that applies the projection, would never see it.
+    for name, tree in trees.items():
+        function = tree.body[0]
+        assert any(
+            argument.arg == "pending_conversion_operation"
+            for argument in function.args.kwonlyargs
+        ), name
+        if name == "preflight":
+            continue
+        forwarded = [
+            call
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and any(
+                keyword.arg == "pending_conversion_operation"
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "pending_conversion_operation"
+                for keyword in call.keywords
             )
-            is None
-        ), key
+        ]
+        assert forwarded, name
+
+    # The three middle layers write none of the three keys.
+    for name in ("source_staging", "conversion_attempt", "raw_conversion"):
+        assert _projected_key_assignments(trees[name]) == [], name
+
+    # preflight applies the projection and reads the three keys back off its
+    # return value -- never off a pending_action object, the anti-pattern
+    # this task removes (`result["action_required"] = pending["kind"]`).
+    preflight_writes = _projected_key_assignments(trees["preflight"])
+    assert {key for key, _value, _guards in preflight_writes} == {
+        "action_required",
+        "action_id",
+        "evidence_hash",
+    }
+    for key, value, _guards in preflight_writes:
+        assert isinstance(value, ast.Subscript), key
+        assert isinstance(value.slice, ast.Constant) and value.slice.value == key, key
+    assert _calls_the_projector(trees["preflight"])
+
+    # review's writes are all guarded by the projection having produced
+    # nothing. An unguarded write here is the design.md correction ① defect:
+    # workflow._inspect_open_bundle dispatches on `has_review` first, so it
+    # would discard the projection for every review-carrying bundle.
+    review_writes = _projected_key_assignments(trees["review"])
+    assert review_writes
+    for key, _value, guards in review_writes:
+        assert any(_calls_the_projector(guard) for guard in guards), key
+def test_review_result_does_not_erase_the_projected_conversion_action(
+    tmp_path, capsys, monkeypatch
+):
+    """design.md Decision 5's 2026-07-27 correction ①, closed by task 3.1d:
+    `review.result_from_manifest` is the FIFTH result_from_manifest wrapper
+    the decision's own table forgot, and it overrode action_required /
+    action_id / evidence_hash on BOTH branches unconditionally.
+
+    That erasure was not academic: workflow._inspect_open_bundle dispatches on
+    `has_review` before every other layer, so for any bundle carrying a review
+    slice the projector's answer never survived to the caller -- including
+    tier 1, the tier design.md defines as outranking everything else.
+
+    The fix is "projection plus review's own supplement", not "review last
+    wins": the review layer's pending_action vocabulary sits outside Decision
+    5's tiers entirely, so it is the right answer exactly when the projection
+    produced none. Both halves are pinned here on one real bundle.
+    """
+    from test_review import correction_required_bundle
+
+    bundle, _required, _dependencies = correction_required_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    manifest = read_manifest(bundle)
+    assert "review" in manifest
+    review_pending = manifest["review"]["pending_action"]
+    assert isinstance(review_pending, dict)
+
+    # Half one, unchanged behaviour: this bundle projects no conversion action
+    # of its own, so the review layer's own pending action is what the caller
+    # gets, evidence and all.
+    assert conversion_actions.project_conversion_action(manifest) is None
+    without_signal = review.result_from_manifest(
+        manifest,
+        work_bundle="review-projection-probe",
+        outcome="review_projection_probe",
+    )
+    assert without_signal["action_required"] == review_pending["kind"]
+    assert without_signal["action_id"] == review_pending["action_id"]
+    assert without_signal["evidence_hash"] == review_pending["evidence_hash"]
+
+    # Half two, the fix: with the tier-1 signal the projection outranks the
+    # review layer's own pending action instead of being discarded by it --
+    # and review still contributes every key that is genuinely its own.
+    with_signal = review.result_from_manifest(
+        manifest,
+        work_bundle="review-projection-probe",
+        outcome="review_projection_probe",
+        pending_conversion_operation=True,
+    )
+    assert with_signal["action_required"] == "resume_pending_conversion_operation"
+    assert with_signal["review_status"] == manifest["review"]["status"]
+    assert with_signal["review_coverage"] == manifest["review"]["coverage"]
+    assert with_signal["final_markdown"] == manifest.get("final_markdown")
+    assert with_signal["raw_conversion_state"] == manifest["raw_conversion"]["state"]
 
 
 def test_action_rules_kind_domain_matches_conversion_actions_or_the_staging_sentinel():

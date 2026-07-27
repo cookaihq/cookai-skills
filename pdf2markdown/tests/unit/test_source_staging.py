@@ -1858,27 +1858,29 @@ def test_aihub_upload_valid_https_url_agrees_with_doc2x_valid_https_url():
         assert doc2x.valid_https_url(case) is False
 
 
-# --- I3 (task 3.1a fix round 1): tier-2 dual-implementation equivalence lock
+# --- I3 (task 3.1a fix round 1): tier-2 equivalence lock, now a regression
+#     guard
 #
-# source_staging.result_from_manifest and conversion_attempt.
-# project_conversion_action are two independent implementations of tier 2's
-# three keys (action_required/action_id/evidence_hash) until task 3.1d wires
-# project_conversion_action's own return value through the real
-# result_from_manifest call chain (conversion_attempt.result_from_manifest
-# today calls source_staging.result_from_manifest first and lets its tier-2
-# write stand -- see project_conversion_action's own docstring for why that
-# split is still correct as of this task, not a leftover). The review round
-# that produced this fix brief falsified "an attempt's existence structurally
-# rules out a non-empty staging pending_action": the retry placeholder and the
-# credential-gate placeholder both project onto design.md's `not_started`
-# row, the only precondition expire_ready_attempt checks, so the two tier-2
-# implementations diverging while an attempt also exists is not ruled out by
-# design -- it is merely unreached today because an unrelated bug (backlog
-# issue #1) independently blocks that path. Until 3.1d's wiring removes the
-# second implementation, this lock is what stands between that drift and
-# production; it holds the two implementations to the same answer on every
-# staging-pending shape reachable today (no conversion_attempts yet), and
-# keeps paying for itself as a regression guard once 3.1d lands.
+# WHEN THIS WAS WRITTEN (3.1a fix round 1), source_staging.result_from_manifest
+# and project_conversion_action really were two independent implementations of
+# tier 2's three keys (action_required/action_id/evidence_hash): the projector
+# lived in conversion_attempt.py, which source_staging.py cannot import, so
+# source_staging had to read `source_staging.pending_action` itself. The review
+# round that produced that fix brief falsified "an attempt's existence
+# structurally rules out a non-empty staging pending_action" -- the retry
+# placeholder and the credential-gate placeholder both project onto design.md's
+# `not_started` row, the only precondition expire_ready_attempt checks -- so the
+# two diverging was not ruled out by design, merely unreached today because an
+# unrelated bug (backlog issue #1) independently blocks that path.
+#
+# TASK 3.1d REMOVED THE SECOND IMPLEMENTATION. The projector moved down to the
+# leaf conversion_actions.py, preflight.result_from_manifest applies it once for
+# the whole chain, and source_staging.result_from_manifest no longer writes any
+# of the three keys. This lock stays exactly as it is, per that task's brief: it
+# now pins that the one remaining implementation still produces, for every
+# staging-pending shape production can reach, the values the deleted one used to
+# -- which is what makes the deletion provably behaviour-preserving rather than
+# merely plausible.
 
 
 def _staging_pending_manifest_unknown(tmp_path, capsys, monkeypatch):
