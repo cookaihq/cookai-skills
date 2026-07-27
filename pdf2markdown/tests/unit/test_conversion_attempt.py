@@ -519,6 +519,102 @@ def test_confirm_retry_action_appends_a_new_attempt_before_a_second_create(
     )
 
 
+def test_retry_authorization_is_a_pure_rename_with_a_kind_discriminator(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.3a: commit_retry_decision's placeholder now tags itself
+    `authorization_kind == "retry"` instead of the 2.1b/2.1c placeholder
+    `None`. Everything else about the authorized record -- its state, and
+    the five-key `authorization` shape -- is unchanged; this is a pure
+    rename plus one discriminator field, not a behaviour change.
+
+    The manifest-level assertions below only prove the writer
+    (commit_retry_decision) sets the new field -- the CLI round trip in this
+    test never reloads and re-validates the record it just wrote, so a
+    validator that wrongly still accepted the old `None` placeholder for an
+    "authorized" record would not be caught by them (a real record is never
+    written with `None` anymore, so a validator merely widened to also
+    accept `None` would never see a `None` to reject). The two
+    `ca._valid_attempt` calls at the end close that gap directly: the
+    control proves the real, unmodified record validates, and the mutant --
+    the same record with `authorization_kind` forced back to the old `None`
+    placeholder -- proves the validator actually rejects it rather than
+    merely reflecting whatever the writer happened to produce.
+    """
+    import conversion_attempt as ca
+
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    _rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=StatusCreate(401),
+    )
+
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unknown["generation"]),
+            "--action-id",
+            unknown["action_id"],
+            "--evidence-hash",
+            unknown["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "I accept the possible duplicate conversion charge.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, json.dumps(authorized, sort_keys=True)
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    attempt = manifest["conversion_attempts"][-1]
+    assert attempt["state"] == "authorized"
+    assert attempt["authorization_kind"] == "retry"
+    assert attempt["authorization"]["accepted_risk"] == (
+        "possible_duplicate_conversion_charge"
+    )
+    assert set(attempt["authorization"]) == {
+        "action_id", "evidence_hash", "authorized_at",
+        "basis_sha256", "accepted_risk",
+    }
+
+    generation = manifest["generation"]
+    # Control: the genuine "retry"-tagged record validates.
+    assert (
+        ca._valid_attempt(attempt, manifest=manifest, generation=generation)
+        is True
+    )
+    # Mutant: the same record, but with authorization_kind forced back to
+    # the pre-2.3a `None` placeholder, must be rejected -- proving the
+    # validator requires "retry" for an "authorized" record rather than
+    # merely tolerating whatever the writer produced.
+    stale_placeholder = dict(attempt, authorization_kind=None)
+    assert (
+        ca._valid_attempt(
+            stale_placeholder, manifest=manifest, generation=generation
+        )
+        is False
+    )
+
+
 def test_a_process_crash_after_create_recovers_unknown_and_two_resumes_do_not_replay(
     tmp_path, capsys, monkeypatch
 ):

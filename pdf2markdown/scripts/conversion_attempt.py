@@ -89,12 +89,14 @@ ATTEMPT_KEYS = frozenset(
         # value is recoverable from that pair via LEGAL_TRIPLES' reason_code
         # column, not from `state` alone.
         "reason_detail",
-        # authorization_kind is a placeholder: always None until task 2.2/2.3
-        # give the authorization vocabulary meaning. It is carried now
-        # because the field set may only change once (see the module
-        # docstring above). result_refresh_round_count is no longer a
-        # placeholder as of task 2.1d: it is the cumulative count of distinct
-        # result URLs _poll_transition has observed for this attempt (see
+        # authorization_kind was a global-None placeholder through task 2.1b;
+        # task 2.3a gives it its first real value, "retry", written only onto
+        # "authorized"-state records by commit_retry_decision. Every other
+        # state still requires None (see _valid_attempt). "initial" is not
+        # yet a legal value -- that is task 2.3b/2.3c's job.
+        # result_refresh_round_count is no longer a placeholder as of task
+        # 2.1d: it is the cumulative count of distinct result URLs
+        # _poll_transition has observed for this attempt (see
         # RESULT_REFRESH_ROUND_CEILING and result_refresh_rounds_exhausted).
         "authorization_kind",
         "result_refresh_round_count",
@@ -174,11 +176,38 @@ RESULT_URL_KEYS = frozenset(
 # putting it in POLL_IMMUTABLE_ATTEMPT_KEYS would turn every legitimate
 # refresh into a spurious integrity_violation.
 #
-# authorization_kind's membership is deliberately left undecided here: it is
-# still a global-None placeholder (ATTEMPT_KEYS above) until task 2.2/2.3
-# give it real values, so nothing today can observe whether it would need to
-# be immutable across a poll transition. That decision belongs to whichever
-# of 2.2/2.3 first gives the field a value that can change.
+# authorization_kind decision (task 2.3a, resolving the "left undecided"
+# note this comment used to carry): IN this set, alongside attempt_id and
+# authorization.
+#
+# The membership test is not "is the value physically frozen" but "does this
+# key change within the one poll transition the intent/active comparison
+# spans" -- the same test result_refresh_round_count's note above applies,
+# just with the opposite answer. Tracing every constructor and recovery path
+# that can produce a poll's `updated_attempt`:
+#   * commit_retry_decision is the only site that ever writes a non-None
+#     authorization_kind ("retry", as of 2.3a), and it only ever writes it
+#     onto a state == "authorized" record.
+#   * "authorized" is not a member of POLL_ACTIVE_ATTEMPT_PAIRS (see that
+#     set below), so _poll_transition's precondition check rejects any
+#     attempt in that state before doing anything else -- an authorized
+#     placeholder is never the `active` attempt a poll transition reads.
+#   * _submit_state (the "authorized" -> "submitting" transition) does not
+#     carry the placeholder's authorization_kind forward: it rebuilds the
+#     next attempt from _attempt_state_columns("submitting") with no
+#     authorization_kind argument, which defaults to None. So by the time an
+#     attempt becomes pollable, its authorization_kind is already back to
+#     None, same as every pre-2.3a record.
+#   * _poll_transition (L2880-ish) and _submission_result_state (the
+#     "submitting" -> "submitted"/"submission_unknown" fold) both call
+#     _attempt_reason_columns without an authorization_kind argument, so
+#     they always re-derive None -- an idempotent overwrite of the None the
+#     attempt already carried, not a real change.
+# So within any single poll transition's intent/active window,
+# authorization_kind's value never actually changes -- it is None going in
+# and None coming out, for the same structural reason attempt_id and
+# authorization can't change: the field that could vary it (the "retry"
+# value) never survives past the state that never gets polled.
 POLL_IMMUTABLE_ATTEMPT_KEYS = frozenset(
     {
         "schema_version",
@@ -192,6 +221,7 @@ POLL_IMMUTABLE_ATTEMPT_KEYS = frozenset(
         "response_at",
         "task_id",
         "authorization",
+        "authorization_kind",
     }
 )
 SUBMIT_INTENT_KEYS = frozenset(
@@ -398,11 +428,12 @@ REASON_DETAILS = {
 _REASON_DETAIL_DOMAIN = REASON_DETAILS
 
 
-def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
+def _attempt_reason_columns(
+    flat_state: str, reason_code: str | None, *, authorization_kind: str | None = None
+) -> dict:
     """The three schema v2 attempt columns recomputed fresh from the wire
     classification on every write: `reason`/`reason_detail`, which replace
-    v1's single `reason_code`, plus the still-inert `authorization_kind`
-    placeholder.
+    v1's single `reason_code`, plus `authorization_kind`.
 
     Every site that writes an attempt builds these three fields here, so the
     folded vocabulary has exactly one producer and cannot drift between the
@@ -417,8 +448,19 @@ def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
     the wire code, which disagrees with it on poll_unauthorized and
     credential_source_changed. reason_detail keeps the wire code only for the
     two reasons whose code is not implied by the classification.
-    authorization_kind is the placeholder task 2.1b carries without giving
-    it behaviour (see ATTEMPT_KEYS).
+
+    authorization_kind defaults to None -- the correct value for every write
+    site except one: commit_retry_decision's authorized placeholder is the
+    sole caller (task 2.3a) that passes `authorization_kind="retry"` through
+    _attempt_state_columns below, because it is the only site that is ever
+    writing a real, non-None discriminator. Every other call site (the
+    "submitting" columns in _submit_state/its crash-recovery twin, the
+    submission-result fold in _submission_result_state, and _poll_transition's
+    per-poll `.update()`) leaves the parameter at its default, which is why
+    the field never survives past the one "authorized" record it was set on:
+    _submit_state builds the next attempt from _attempt_state_columns("submitting")
+    fresh rather than carrying the placeholder's authorization_kind forward
+    (see _submit_state).
 
     `result_refresh_round_count` is deliberately NOT one of this function's
     columns as of task 2.1d, even though it was carried here (always 0) as a
@@ -440,11 +482,13 @@ def _attempt_reason_columns(flat_state: str, reason_code: str | None) -> dict:
             if reason_code in _REASON_DETAIL_DOMAIN.get(reason, frozenset())
             else None
         ),
-        "authorization_kind": None,
+        "authorization_kind": authorization_kind,
     }
 
 
-def _attempt_state_columns(flat_state: str) -> dict:
+def _attempt_state_columns(
+    flat_state: str, *, authorization_kind: str | None = None
+) -> dict:
     """The folded `state` a record for `flat_state` stores, plus its reason
     columns and a fresh `result_refresh_round_count` of 0.
 
@@ -457,10 +501,17 @@ def _attempt_state_columns(flat_state: str) -> dict:
     Fresh-attempt creation and recovery reconstruction of the submitting
     predecessor both use this helper. In either case 0 is correct: no
     distinct result URL has yet been recorded for that attempt.
+
+    `authorization_kind` passes straight through to _attempt_reason_columns;
+    see that function's docstring for why only commit_retry_decision's
+    "not_started" (folds to "authorized") call ever supplies a non-None
+    value.
     """
     return {
         "state": FLAT_STATE_MIGRATION[flat_state][0],
-        **_attempt_reason_columns(flat_state, None),
+        **_attempt_reason_columns(
+            flat_state, None, authorization_kind=authorization_kind
+        ),
         "result_refresh_round_count": 0,
     }
 
@@ -1687,9 +1738,25 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     # below total.
     if (state, reason) not in LEGAL_STATE_REASON_PAIRS:
         return False
+    # Task 2.3a gives authorization_kind its first real value: "retry", the
+    # only kind commit_retry_decision's placeholder ever writes, and the only
+    # state that placeholder ever folds to is "authorized" (see
+    # _attempt_state_columns's "not_started" caller). Every other state's
+    # attempt is still built through a write path that leaves the field at
+    # its _attempt_reason_columns default of None (see that function's
+    # docstring), so the two-way split below -- "authorized" requires exactly
+    # "retry", every other state still requires None -- is exhaustive over
+    # ATTEMPT_STATES today and fails closed on anything else (in particular
+    # "initial", which task 2.3b/2.3c have not yet introduced).
+    authorization_kind = attempt.get("authorization_kind")
+    valid_authorization_kind = (
+        authorization_kind == "retry"
+        if state == "authorized"
+        else authorization_kind is None
+    )
     if (
         not _valid_reason_detail(reason, attempt.get("reason_detail"))
-        or attempt.get("authorization_kind") is not None
+        or not valid_authorization_kind
         # task 2.1d: result_refresh_round_count is no longer pinned to
         # exactly 0 -- it is a real, cumulative counter now. Its only
         # snapshot-checkable self-consistency here is int/non-negative; the
@@ -1717,6 +1784,11 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
             # the same way poll_count/consecutive_transient_count are on the
             # two lines above.
             and attempt.get("result_refresh_round_count") == 0
+            # authorization_kind is excluded from the all-None sweep below,
+            # not because it can be anything, but because it is pinned to
+            # exactly "retry" by valid_authorization_kind above -- the same
+            # reason "authorization" itself is excluded rather than checked
+            # for None here.
             and all(
                 attempt.get(key) is None
                 for key in ATTEMPT_KEYS
@@ -1725,6 +1797,7 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
                     "attempt_id",
                     "state",
                     "authorization",
+                    "authorization_kind",
                     "poll_count",
                     "consecutive_transient_count",
                     "result_refresh_round_count",
@@ -3153,7 +3226,7 @@ def commit_retry_decision(
     placeholder = {
         "schema_version": SCHEMA_VERSION,
         "attempt_id": f"conversion-attempt-{len(attempts) + 1:04d}",
-        **_attempt_state_columns("not_started"),
+        **_attempt_state_columns("not_started", authorization_kind="retry"),
         "api_base": None,
         "request_summary": None,
         "request_hash": None,
