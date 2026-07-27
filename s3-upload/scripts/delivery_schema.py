@@ -184,6 +184,15 @@ RECOVERY_FIELDS: Tuple[str, ...] = (
 # The exemption covers this envelope only. contract_snapshot's field set and
 # target_contract._digest's input are published (github-cookaihq @ 87dcc1e,
 # 2026-07-27) and any change there must bump CONTRACT_VERSION.
+#
+# What the exemption costs if fact 2 turns out to be wrong, measured rather
+# than argued: a surviving 15-field instance of (s3-upload.result, 1) is not
+# refused as an *unsupported schema_version* -- the version still matches, so
+# parse_artifact lets it through and _exact_body rejects it as *missing
+# fields*. delivery_workflow._durable_result reads that refusal as "no durable
+# result exists", and the create-once commit that follows then fails, so the
+# caller is handed handoff_write_failed rather than anything naming a version
+# skew. That is the diagnostic the exemption is trading away.
 RESULT_FIELDS: Tuple[str, ...] = (
     "allowed_actions", "authorization_required", "blocking_reasons",
     "content_verification", "object_reference", "object_written", "operation",

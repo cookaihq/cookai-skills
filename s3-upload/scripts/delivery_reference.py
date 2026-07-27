@@ -19,7 +19,7 @@ from strict_json import StrictJSONError
 from target_contract import contract_hash
 from delivery_schema import (
     DISPOSITIONS, DeliverySchemaError, VERIFICATION_CHANNELS, body_of,
-    build_typed, parse_typed,
+    build_typed, parse_typed, serialize_artifact,
 )
 from v2_schema import (
     SchemaError, normalize_endpoint, normalize_public_base, validate_object_key,
@@ -81,6 +81,32 @@ _SCOPES_FOR_STABILITY: Dict[str, Tuple[str, ...]] = {
 
 # Derived from the rest of the body, never accepted from the caller.
 DERIVED_FIELDS: Tuple[str, ...] = ("content_stability", "object_written")
+
+# Which location fields the carried target_contract must name and agree with.
+# v1 recomputed target_fingerprint from exactly these five and compared it to
+# the value in the artifact (artifacts._validate_reference,
+# scripts/artifacts.py:170-179), so what it bound was "does this reference
+# point where its target says". _contract's recomputation is a different
+# question -- it proves the contract blob still hashes to the digest beside it
+# -- and the two are not equivalent: a reference whose contract named
+# https://s3.amazonaws.com while its location named https://evil.example, with
+# attacker-bucket, eu-west-9 and provider minio, was accepted by the
+# constructor and by the strict read side alike (run, not assumed).
+#
+# Only these five are required to be present. Nothing here says
+# target_contract is a full contract_snapshot: the snapshot's shape is Task 8's
+# to settle, and pinning a guessed shape now is the same mistake as pinning a
+# guessed snapshot would have been in Task 2.
+LOCATION_BINDING_FIELDS: Tuple[str, ...] = (
+    "addressing", "bucket", "endpoint", "provider", "region",
+)
+
+
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
 
 _ADDRESSING = frozenset({"path", "virtual", "bucket-bound"})
 
@@ -383,6 +409,13 @@ def _contract(value: Any, digest: str) -> Dict[str, Any]:
     from the same body and recomputed by whoever edits it, so it detects
     nothing that a hand edit does not also fix.
 
+    What this does NOT bind is where the reference points. The digest is a
+    checksum the blob carries about itself, so it is satisfied by any contract
+    that hashes to it -- including one describing a different endpoint, bucket
+    or region than location does. That half of v1's check lives in
+    _bind_location; see LOCATION_BINDING_FIELDS for why the two are not
+    interchangeable.
+
     Precedent for the assertion shape: tests/unit/test_probe.py:134.
     """
     item = _object(value, "target_contract")
@@ -401,21 +434,62 @@ def _contract(value: Any, digest: str) -> Dict[str, Any]:
     return item
 
 
+def _bind_location(location: Dict[str, Any], contract: Dict[str, Any]) -> None:
+    """Refuse a reference that points somewhere its target_contract does not.
+
+    Both sides are already validated when this runs: every location value
+    compared here is a non-empty string (_location), so the comparison cannot
+    be fooled by the True == 1 equality that DERIVED_FIELDS ran into.
+    """
+    absent = [key for key in LOCATION_BINDING_FIELDS if key not in contract]
+    if absent:
+        raise ReferenceError(
+            "target_contract does not address a location: " + ", ".join(absent)
+        )
+    drifted = [key for key in LOCATION_BINDING_FIELDS
+               if contract[key] != location[key]]
+    if drifted:
+        raise ReferenceError(
+            "location disagrees with target_contract: " + ", ".join(drifted)
+        )
+
+
 def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
                               location: Any, operation_id: Any, plan_hash: Any,
                               plan_id: Any, retention: Any, root_recovery_id: Any,
                               target_contract: Any, target_contract_hash: Any,
                               target_ref: Any, verifications: Any,
-                              credentials: Iterable[str] = ()) -> Dict[str, Any]:
+                              credentials: Any = _UNSET) -> Dict[str, Any]:
     """Build an Object Reference v2 body and wrap it in a typed envelope.
 
     ``credentials`` is the same screening material v1's build/parse pair took
     (``artifacts.build_object_reference``): every string in it is refused
-    inside ``location.version_id``. It defaults to empty so the length and
-    charset half of the screen still runs for callers that hold no secrets.
+    inside ``location.version_id``.
+
+    It is a sentinel rather than ``()`` for the same reason
+    ``delivery_records._object_reference`` uses one: a caller that simply
+    forgot would otherwise embed an unscreened provider string in a public
+    artifact and nothing would say so. The sentinel is here as well as one
+    layer out because this is the layer that actually writes ``version_id`` --
+    Task 6/7/8 call this constructor directly with real provider values, and
+    up here the "everybody remembers to pass credentials" discipline had no
+    structural backing at all (measured: build_object_reference_v2 with
+    ``version_id="v-" + SECRET`` and no ``credentials`` argument was accepted).
+    Declaring an empty sequence is still allowed and still runs the length and
+    charset half of the screen; what is refused is not declaring at all.
     """
     if disposition not in DISPOSITIONS:
         raise ReferenceError("unregistered disposition")
+    if isinstance(credentials, _Unset):
+        # Read off the raw argument, exactly as the outer sentinel does
+        # (delivery_records._object_reference): the decision is "did this
+        # caller have to declare", which cannot wait for _location to run,
+        # because _location is where the screen it is guarding lives.
+        if isinstance(location, dict) and location.get("version_id") is not None:
+            raise ReferenceError(
+                "a versioned object reference must be screened against credentials"
+            )
+        credentials = ()
     credentials = _credentials(credentials)
     content = _content(content)
     location = _location(location, credentials)
@@ -429,6 +503,9 @@ def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
             raise ReferenceError(
                 "disposition requires a verification channel it does not carry"
             )
+    digest = _digest(target_contract_hash, "target_contract_hash")
+    contract = _contract(target_contract, digest)
+    _bind_location(location, contract)
     body = {
         "access": access,
         "content": content,
@@ -445,10 +522,8 @@ def build_object_reference_v2(*, access: Any, content: Any, disposition: str,
         # (scripts/plan_store.py:83): the caller keeps its own handle on this
         # nested object and a shallow alias lets a later mutation reach inside
         # an artifact that has already been validated.
-        "target_contract": deepcopy(_contract(
-            target_contract, _digest(target_contract_hash, "target_contract_hash")
-        )),
-        "target_contract_hash": _digest(target_contract_hash, "target_contract_hash"),
+        "target_contract": deepcopy(contract),
+        "target_contract_hash": digest,
         "target_ref": _text(target_ref, "target_ref"),
         "verifications": entries,
     }
@@ -466,6 +541,11 @@ def parse_object_reference_v2(text: str,
     body from its own non-derived fields is what refuses a hand-edited
     artifact whose disposition and object_written disagree -- the read/write
     asymmetry that let serialize_artifact check type but not version.
+
+    It is also only as strict as the comparison it ends with. Comparing the
+    two bodies as dicts made the rebuild blind to JSON booleans written as
+    numbers, so "as strict as writing" was false in that dimension until the
+    comparison moved to canonical bytes; see the comment at the comparison.
 
     "As strict as writing" is only worth as much as the write side is strict,
     which is why _contract exists: until it did, a reference whose
@@ -491,6 +571,21 @@ def parse_object_reference_v2(text: str,
         rebuilt = build_object_reference_v2(credentials=credentials, **supplied)
     except TypeError as exc:
         raise ReferenceError("object reference body is not constructible") from exc
-    if body_of(rebuilt) != body:
+    # Canonical bytes, not dict equality. Python calls True == 1 and
+    # False == 0, and object_written is a DERIVED_FIELD -- stripped out of the
+    # rebuild input and re-derived as a bool -- so an artifact carrying
+    # "object_written":1 rebuilt to True and the two dicts compared equal.
+    # Run, not assumed: that artifact parsed clean here, and the only thing
+    # that refused it was delivery_records._object_reference's identity
+    # comparison, one layer out and only for a reference embedded in a result.
+    # A reference parsed on its own -- which is what Task 6/7/8 do -- had no
+    # defence at all. canonicalize writes False as `false` and 0 as `0`, so
+    # the byte comparison sees the difference dict equality cannot.
+    #
+    # serialize_artifact's own DeliverySchemaError is deliberately not
+    # converted: parse_typed on the line above already raises that type out of
+    # this function, so "this artifact is unusable" keeps a single exception
+    # type rather than gaining a second spelling here.
+    if serialize_artifact(rebuilt) != serialize_artifact(item):
         raise ReferenceError("object reference disagrees with its own derivation")
     return item

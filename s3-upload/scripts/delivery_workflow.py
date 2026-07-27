@@ -525,7 +525,11 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 handoff["checkpoint_id"] = None
             return surviving()
 
-        def compose(state, reasons, capabilities_ok, outcome):
+        # outcome is keyword-only, matching stop, emit and build_result: it is
+        # the one argument here that names what happened to the object, and a
+        # positional slot next to three others is how it would come to be
+        # passed in the wrong one.
+        def compose(state, reasons, capabilities_ok, *, outcome):
             return build_result(
                 operation="publish",
                 operation_id=operation_id,
@@ -558,7 +562,7 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                     durable, _durable_recovery(recovery_target, recovery_id),
                     gate.calls, checkpoint_id,
                 )
-            record = compose(state, reasons, capabilities_ok, outcome)
+            record = compose(state, reasons, capabilities_ok, outcome=outcome)
             hook("before_result_fsync")
             try:
                 commit(result_target, serialize_artifact(record))
@@ -572,7 +576,7 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
                 # write, and it is reported as such.
                 record = compose(
                     state, list(reasons) + ["handoff_write_failed"], capabilities_ok,
-                    outcome,
+                    outcome=outcome,
                 )
                 return PublishOutcome(
                     record, _durable_recovery(recovery_target, recovery_id),

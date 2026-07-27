@@ -33,7 +33,19 @@ AT = "2026-07-27T00:00:00Z"
 # credential when that string appears inside a version_id -- so an obvious
 # placeholder exercises exactly the same code path.
 SECRET = "CREDENTIAL/VALUE-THAT-MUST-NOT-APPEAR"
-CONTRACT = {"contract_version": 1}
+# The five addressing fields are here because the reference binds location to
+# them (LOCATION_BINDING_FIELDS); the rest of a contract_snapshot deliberately
+# is not, because the constructor does not require one and Task 8 owns that
+# shape. Spelled out once and read back by location() below, so the two sides
+# of the binding cannot drift apart in the fixture itself.
+CONTRACT = {
+    "contract_version": 1,
+    "addressing": "virtual",
+    "bucket": "example-bucket",
+    "endpoint": "https://s3.amazonaws.com",
+    "provider": "aws-s3",
+    "region": "us-east-1",
+}
 
 
 def verification(channel="authenticated_full_get", **overrides):
@@ -49,9 +61,11 @@ def reference(**overrides):
                    "presign_expires_seconds": 3600},
         "content": {"size": 11, "sha256": SHA},
         "disposition": "adopted",
-        "location": {"provider": "aws-s3", "endpoint": "https://s3.amazonaws.com",
-                     "addressing": "virtual", "region": "us-east-1",
-                     "bucket": "example-bucket", "key": "images/a.png",
+        "location": {"provider": CONTRACT["provider"],
+                     "endpoint": CONTRACT["endpoint"],
+                     "addressing": CONTRACT["addressing"],
+                     "region": CONTRACT["region"],
+                     "bucket": CONTRACT["bucket"], "key": "images/a.png",
                      "version_id": None},
         "operation_id": "0" * 32,
         "plan_hash": "sha256:" + "0" * 64,
@@ -218,8 +232,8 @@ def test_a_verification_field_set_is_exact():
 def test_content_stability_is_derived_from_the_version_id():
     unpinned = body_of(reference())
     assert unpinned["content_stability"] == "current_key_unpinned"
-    pinned = body_of(reference(location=dict(
-        body_of(reference())["location"], version_id="v-1")))
+    pinned = body_of(reference(location=location(version_id="v-1"),
+                               credentials=()))
     assert pinned["content_stability"] == "version_pinned"
 
 
@@ -229,11 +243,11 @@ def test_a_current_key_verification_never_claims_a_pinned_scope():
 
 
 def test_a_pinned_reference_still_accepts_a_current_key_verification():
-    pinned = dict(body_of(reference())["location"], version_id="v-1")
-    item = body_of(reference(location=pinned,
+    pinned = location(version_id="v-1")
+    item = body_of(reference(location=pinned, credentials=(),
                              verifications=[verification(url_scope="exact-version")]))
     assert item["verifications"][0]["url_scope"] == "exact-version"
-    settled = body_of(reference(location=pinned))
+    settled = body_of(reference(location=pinned, credentials=()))
     assert settled["verifications"][0]["url_scope"] == "current-key"
 
 
@@ -502,7 +516,8 @@ def test_the_credential_screen_runs_on_the_read_side_too():
     # known at construction time, must still be refused by the reader that
     # does know the credential. This is why parse_object_reference_v2 takes
     # credentials rather than only the constructor.
-    leaked = reference(location=location(version_id="v-" + SECRET))
+    leaked = reference(location=location(version_id="v-" + SECRET),
+                       credentials=())
     raw = serialize_artifact(leaked).decode("utf-8")
     assert parse_object_reference_v2(raw) == leaked
     with pytest.raises(ReferenceError):
@@ -551,7 +566,8 @@ def test_malformed_credentials_are_the_callers_bug_not_the_artifacts():
     # answers is "can I trust the artifact I was handed", so getting that
     # answer wrong is worse than any refusal.
     raw = serialize_artifact(
-        reference(location=location(version_id="v-1"))).decode("utf-8")
+        reference(location=location(version_id="v-1"),
+                  credentials=())).decode("utf-8")
     for malformed in ([7], None, SECRET, object()):
         with pytest.raises(TypeError):
             parse_object_reference_v2(raw, credentials=malformed)
@@ -596,10 +612,99 @@ def test_a_public_reference_may_still_carry_only_authenticated_evidence():
 
 
 def test_the_reference_does_not_alias_the_callers_nested_objects():
-    contract = {"contract_version": 1}
+    contract = dict(CONTRACT)
     item = reference(target_contract=contract)
     contract["contract_version"] = 99
-    assert body_of(item)["target_contract"] == {"contract_version": 1}
+    assert body_of(item)["target_contract"] == CONTRACT
+
+
+def test_a_reference_may_not_point_where_its_target_contract_does_not():
+    # v1 recomputed target_fingerprint from provider / endpoint / addressing /
+    # region / bucket and compared it against the value in the artifact
+    # (artifacts._validate_reference, scripts/artifacts.py:170-179). _contract
+    # is a different check and not a substitute: it proves the contract blob
+    # still hashes to the digest beside it, which any self-consistent pair
+    # satisfies. Measured before this binding existed: a contract naming
+    # https://s3.amazonaws.com beside a location naming https://evil.example,
+    # with attacker-bucket, eu-west-9 and provider minio, was accepted by the
+    # constructor and by the strict read side alike.
+    elsewhere = dict(CONTRACT, endpoint="https://evil.example",
+                     bucket="attacker-bucket", region="eu-west-9",
+                     provider="minio")
+    with pytest.raises(ReferenceError):
+        reference(target_contract=elsewhere,
+                  target_contract_hash=contract_hash(elsewhere))
+    # One field at a time, so no single comparison can stand in for the other
+    # four: with only the combined case above, four of the five could be
+    # dropped and nothing would say so.
+    here = body_of(reference())["location"]
+    for field, value in (("addressing", "path"), ("bucket", "other-bucket"),
+                         ("endpoint", "https://s3.eu-west-9.amazonaws.com"),
+                         ("provider", "minio"), ("region", "eu-west-9")):
+        drifted = dict(CONTRACT, **{field: value})
+        assert drifted[field] != here[field], field
+        with pytest.raises(ReferenceError):
+            reference(target_contract=drifted,
+                      target_contract_hash=contract_hash(drifted))
+    # A contract that names no location at all is refused rather than waved
+    # through: leaving the five optional would make the binding avoidable by
+    # deleting them. This is the whole requirement -- nothing here asks
+    # target_contract to be a complete contract_snapshot, which is Task 8's
+    # shape to settle.
+    for absent in ({}, {"contract_version": 1}, {"lol": "not a contract"},
+                   dict(CONTRACT, region=None)):
+        with pytest.raises(ReferenceError):
+            reference(target_contract=absent,
+                      target_contract_hash=contract_hash(absent))
+    # And the read side, which is where an artifact somebody else produced
+    # arrives. Serialized and re-parsed, so the constructor's own refusal
+    # cannot be what makes this pass.
+    item = dict(reference())
+    item["target_contract"] = elsewhere
+    item["target_contract_hash"] = contract_hash(elsewhere)
+    raw = serialize_artifact(item).decode("utf-8")
+    assert parse_typed(raw, expected_type="s3-upload.object-reference")
+    with pytest.raises(ReferenceError):
+        parse_object_reference_v2(raw)
+
+
+def test_a_versioned_reference_may_not_be_built_unscreened():
+    # The same discipline delivery_records._object_reference enforces one layer
+    # out, applied at the layer that actually writes version_id. Measured
+    # before the sentinel: build_object_reference_v2 with
+    # version_id="v-" + SECRET and no credentials argument at all was accepted,
+    # and Task 6/7/8 call this constructor directly with real provider values.
+    with pytest.raises(ReferenceError):
+        reference(location=location(version_id="v-1"))
+    with pytest.raises(ReferenceError):
+        reference(location=location(version_id="v-" + SECRET))
+    # What is refused is not declaring, not holding nothing: an explicit empty
+    # sequence still builds, and still runs the charset half of the screen.
+    assert body_of(reference(location=location(version_id="v-1"),
+                             credentials=()))["location"]["version_id"] == "v-1"
+    with pytest.raises(ReferenceError):
+        reference(location=location(version_id="v 1"), credentials=())
+    # An unversioned reference needs no declaration, which is what keeps this a
+    # rule about provider strings rather than about paperwork.
+    assert body_of(reference())["location"]["version_id"] is None
+
+
+def test_parse_refuses_a_boolean_written_as_a_json_number():
+    # Python calls False == 0 and True == 1, and object_written is stripped out
+    # of the rebuild input as a DERIVED_FIELD, so comparing the rebuilt body to
+    # the parsed one as dicts saw no difference between `false` and `0`: the
+    # rebuild produced False, the artifact carried 0, and the dicts compared
+    # equal. Run, not assumed -- this artifact parsed clean, and the only thing
+    # in the process that refused it was delivery_records' identity
+    # comparison, which a reference parsed on its own never reaches.
+    raw = serialize_artifact(reference()).decode("utf-8")
+    assert '"object_written":false' in raw
+    numeric = raw.replace('"object_written":false', '"object_written":0')
+    # The envelope and the field set are intact, so nothing ahead of the
+    # re-derivation has any reason to refuse it.
+    assert parse_typed(numeric, expected_type="s3-upload.object-reference")
+    with pytest.raises(ReferenceError):
+        parse_object_reference_v2(numeric)
 
 
 def test_the_reference_round_trips_through_the_typed_parser():

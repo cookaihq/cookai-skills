@@ -222,15 +222,26 @@ def _object_reference(value: Any, outcome: str, object_written: Optional[bool],
     if body["disposition"] != outcome:
         raise RecordError("object reference disposition disagrees with the outcome")
     if body["object_written"] is not object_written:
-        # Defence in depth, and known to be unreachable today: deleting it left
-        # the whole suite green (T12, full scope) and no input can currently
-        # reach it. Three facts have to hold at once for that -- the reference
-        # derives object_written from its disposition, this envelope derives it
-        # from the outcome, and the two certainty tables agree on the three
-        # shared keys (pinned by test_disposition_write_certainty_agrees_with_
-        # the_outcome_table). Break any one of them and this becomes the only
-        # thing standing between a result and a reference that contradict each
-        # other about whether bytes were written, so it is not dead code.
+        # Second line of defence, and reachable -- the earlier "no input can
+        # currently reach it" was wrong. The counterexample is a JSON boolean
+        # written as a number: an artifact carrying "object_written":1 parsed
+        # clean (the rebuild compared bodies as dicts, and Python calls
+        # 1 == True), and this identity comparison was the only thing in the
+        # process that refused it. The root of that is now closed one layer
+        # down, where parse_object_reference_v2 compares canonical bytes, so
+        # the numeric artifact is refused by the parse above before it gets
+        # here (measured both ways).
+        #
+        # What stays reachable from here is the disagreement this line names.
+        # Three facts keep it quiet -- the reference derives object_written
+        # from its disposition, this envelope derives it from the outcome, and
+        # the two certainty tables agree on the three shared keys (pinned by
+        # test_disposition_write_certainty_agrees_with_the_outcome_table).
+        # Break the third and this is the only thing standing between a result
+        # and a reference that contradict each other about whether bytes were
+        # written; test_an_object_reference_must_agree_with_the_result_it_
+        # travels_in breaks it on purpose and reddens when this comparison is
+        # disabled.
         raise RecordError("object reference disagrees with object_written")
     return item
 

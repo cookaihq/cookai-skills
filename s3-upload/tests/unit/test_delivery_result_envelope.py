@@ -3,6 +3,7 @@ import pytest
 from action_registry import (
     ACTIONS, AUTHORIZED_ACTION_ORDER, RECOVERY_STATES, allowed_actions,
 )
+import delivery_records
 import delivery_reference
 from delivery_reference import URL_SCOPES, build_object_reference_v2
 from delivery_records import (
@@ -18,7 +19,18 @@ from target_contract import contract_hash
 
 SHA = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
 AT = "2026-07-27T00:00:00Z"
-CONTRACT = {"contract_version": 1}
+# Carries the five addressing fields the reference binds location to
+# (delivery_reference.LOCATION_BINDING_FIELDS) and nothing else beyond the
+# version: the constructor does not require a full contract_snapshot, and this
+# file must not be the place that quietly decides it does.
+CONTRACT = {
+    "contract_version": 1,
+    "addressing": "virtual",
+    "bucket": "example-bucket",
+    "endpoint": "https://s3.amazonaws.com",
+    "provider": "aws-s3",
+    "region": "us-east-1",
+}
 # Credential-shaped material declared here and nowhere else, so the screen is
 # exercised against a string neither module has another route to. Obvious
 # placeholder text, not a key-shaped string: this file ships in a public
@@ -27,9 +39,9 @@ SECRET = "CREDENTIAL/VALUE-THAT-MUST-NOT-APPEAR"
 
 
 def reference(**overrides):
-    location = {"provider": "aws-s3", "endpoint": "https://s3.amazonaws.com",
-                "addressing": "virtual", "region": "us-east-1",
-                "bucket": "example-bucket", "key": "images/a.png",
+    location = {"provider": CONTRACT["provider"], "endpoint": CONTRACT["endpoint"],
+                "addressing": CONTRACT["addressing"], "region": CONTRACT["region"],
+                "bucket": CONTRACT["bucket"], "key": "images/a.png",
                 "version_id": None}
     location.update(overrides.pop("location", {}))
     kwargs = {
@@ -275,7 +287,7 @@ def test_a_pending_step_reaches_the_result_body():
     assert body_of(result())["authorization_required"] == []
 
 
-def test_an_object_reference_must_agree_with_the_result_it_travels_in():
+def test_an_object_reference_must_agree_with_the_result_it_travels_in(monkeypatch):
     item = reference()
     body = body_of(result(object_reference=item))
     assert body["object_reference"] == item
@@ -319,6 +331,29 @@ def test_an_object_reference_must_agree_with_the_result_it_travels_in():
                           object_reference=adopted))["object_written"] is False
     with pytest.raises(RecordError):
         result(outcome="created", object_reference=adopted)
+    # The object_written comparison, which none of the cases above can reach.
+    # While the two certainty tables agree on the three shared keys,
+    # disposition == outcome already implies the write certainties are equal,
+    # so disabling that comparison left the whole suite green (T12 / T12',
+    # full scope). The one counterexample that did reach it -- an artifact
+    # carrying "object_written":1, where 1 == True fooled the reference's
+    # dict-level re-derivation -- is now refused one layer down by the
+    # canonical byte comparison in parse_object_reference_v2, before this
+    # envelope ever sees it (measured both before and after).
+    #
+    # What is left reachable is exactly what the comment on that line claims:
+    # break the agreement between the tables and this comparison is the only
+    # thing standing between a result and a reference that contradict each
+    # other about whether bytes were written. Only delivery_records' view of
+    # the outcome table is patched, so the reference still derives True from
+    # its own disposition and the two artifacts genuinely disagree.
+    monkeypatch.setattr(delivery_records, "OUTCOME_WRITE_CERTAINTY",
+                        dict(OUTCOME_WRITE_CERTAINTY, created=False))
+    disagreeing = reference()
+    assert body_of(disagreeing)["disposition"] == "created"
+    assert body_of(disagreeing)["object_written"] is True
+    with pytest.raises(RecordError):
+        result(outcome="created", object_reference=disagreeing)
 
 
 def test_an_object_reference_is_re_parsed_not_trusted():
@@ -364,7 +399,7 @@ def test_a_versioned_reference_may_not_be_embedded_unscreened():
     # provider version_id is in play (operations.py:338, multipart.py:491) and
     # omits them only where version_id is None (operations.py:170). Here that
     # is structural rather than remembered.
-    versioned = reference(location={"version_id": "v-1"})
+    versioned = reference(location={"version_id": "v-1"}, credentials=())
     with pytest.raises(RecordError):
         result(object_reference=versioned)
     assert body_of(result(object_reference=versioned,
@@ -373,7 +408,7 @@ def test_a_versioned_reference_may_not_be_embedded_unscreened():
                           credentials=()))["object_reference"] == versioned
     # And the screen is real, not a formality: a version_id carrying the
     # caller's credential is refused once the credential is declared.
-    leaked = reference(location={"version_id": "v-" + SECRET})
+    leaked = reference(location={"version_id": "v-" + SECRET}, credentials=())
     assert body_of(result(object_reference=leaked,
                           credentials=[]))["object_reference"] == leaked
     with pytest.raises(RecordError):

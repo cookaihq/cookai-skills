@@ -198,6 +198,13 @@ def test_publish_after_acknowledge_reports_the_tombstone_and_sends_nothing(proje
     assert replay.transport_calls == 0
     assert body_of(replay.result)["blocking_reasons"] == ["already_acknowledged"]
     assert body_of(replay.result)["recovery_state"] == "terminal_acknowledged"
+    # The outcome half of this exit had no assertion anywhere in the suite:
+    # changing it to "created" left all 1085 tests green (probe, full scope).
+    # The result would then have claimed a write that this call demonstrably
+    # did not perform -- it sent nothing at all, as the two assertions above
+    # record -- so the reason and the outcome must both be pinned here.
+    assert body_of(replay.result)["outcome"] == "blocked"
+    assert body_of(replay.result)["object_written"] is False
 
 
 def test_a_tampered_result_with_the_recorded_hash_cannot_rewrite_a_lost_receipt(project, resolved):
