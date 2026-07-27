@@ -17,6 +17,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [template-preview](template-preview/) | 把「一批图片 + 文案」的文件夹渲染成模仿知名 App UI 的展示页（v1 内置小红书个人主页模板），产出自包含的 `index.html` + assets，可交给 preview-share 上传 | [README](template-preview/README.md) · [SKILL.md](template-preview/SKILL.md) |
 | [xhs-downloader](xhs-downloader/) | 从小红书作品链接下载图片 / 视频 / Livephoto 到本地，支持多链接；登录失效时弹二维码登录获取 Cookie | [SKILL.md](xhs-downloader/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
+| [frpc-launch](frpc-launch/) | 本地一键启动/管理 frpc 内网穿透：双模式（自部署 FRPS / 宝塔 frps 用官方 frpc，樱花FRP 用其定制客户端）、无配置时引导配置、二进制自动下载校验、后台常驻 + status/stop/logs、凭证全程掩码 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
 
 ## 安装
 
