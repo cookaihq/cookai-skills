@@ -615,6 +615,241 @@ def test_retry_authorization_is_a_pure_rename_with_a_kind_discriminator(
     )
 
 
+# The two authorization shapes task 2.3b admits, written out here rather than
+# read back from AUTHORIZATION_KEYS_BY_KIND: a test that asserted the
+# production table equals itself would pass under any edit to it.
+INITIAL_AUTHORIZATION_KEYS = {"evidence_hash", "authorized_at"}
+RETRY_AUTHORIZATION_KEYS = {
+    "action_id",
+    "evidence_hash",
+    "authorized_at",
+    "basis_sha256",
+    "accepted_risk",
+}
+AN_INITIAL_AUTHORIZATION = {
+    "evidence_hash": "sha256:" + "a1" * 32,
+    "authorized_at": "2024-01-02T03:04:05Z",
+}
+A_RETRY_AUTHORIZATION = {
+    "action_id": "conversion-decision-" + "d4" * 16,
+    "evidence_hash": "sha256:" + "b2" * 32,
+    "authorized_at": "2024-01-02T03:04:05Z",
+    "basis_sha256": "sha256:" + "c3" * 32,
+    "accepted_risk": "possible_duplicate_conversion_charge",
+}
+
+
+def _submitted_first_attempt_bundle(tmp_path, capsys, monkeypatch):
+    """A real, valid one-attempt bundle whose attempt #1 carries no
+    authorization -- the shape every first attempt has had until task 2.3b.
+    """
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    create_rc, submitted, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=SuccessfulCreate("task-initial-authorization"),
+    )
+    assert create_rc == 0
+    assert submitted["conversion_attempt_state"] == "submitted"
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    assert len(manifest["conversion_attempts"]) == 1
+    assert manifest["conversion_attempts"][0]["authorization"] is None
+    return manifest, private_state
+
+
+def _with_first_authorization(manifest, authorization):
+    replaced = json.loads(json.dumps(manifest))
+    replaced["conversion_attempts"][0]["authorization"] = json.loads(
+        json.dumps(authorization)
+    )
+    return replaced
+
+
+def test_authorization_key_sets_name_exactly_two_shapes_that_cannot_be_confused():
+    """Task 2.3b's discriminator is the authorization object's own key set,
+    not the `authorization_kind` column -- that column is dropped the moment
+    an authorized record folds to "submitting" (see _submit_state), while the
+    authorization object rides along for the attempt's whole life.
+
+    So the dispatch has to be total and unambiguous over key sets. The two
+    assertions that matter here are that the table names exactly the two
+    kinds `_valid_authorization` branches on (a third kind added without
+    touching that function would be silently validated as "retry"), and that
+    no single object can satisfy both key sets at once.
+    """
+    import conversion_attempt as ca
+
+    assert set(ca.AUTHORIZATION_KEYS_BY_KIND) == {"initial", "retry"}
+    assert set(ca.AUTHORIZATION_KEYS_BY_KIND["initial"]) == (
+        INITIAL_AUTHORIZATION_KEYS
+    )
+    assert set(ca.AUTHORIZATION_KEYS_BY_KIND["retry"]) == RETRY_AUTHORIZATION_KEYS
+    # Equality dispatch is mutually exclusive exactly when the two key sets
+    # differ as sets. They do -- even though "initial" is a proper subset of
+    # "retry", no object's key set can equal both.
+    assert INITIAL_AUTHORIZATION_KEYS != RETRY_AUTHORIZATION_KEYS
+
+    assert ca._valid_authorization(AN_INITIAL_AUTHORIZATION) is True
+    assert ca._valid_authorization(A_RETRY_AUTHORIZATION) is True
+    # A shape that is neither key set is refused rather than folded into the
+    # nearest one: the union, and a "retry" stripped of just accepted_risk.
+    assert (
+        ca._valid_authorization({**A_RETRY_AUTHORIZATION, "extra": "x"}) is False
+    )
+    assert (
+        ca._valid_authorization(
+            {
+                key: value
+                for key, value in A_RETRY_AUTHORIZATION.items()
+                if key != "accepted_risk"
+            }
+        )
+        is False
+    )
+    # An "initial" authorization accepts no duplicate-charge risk -- no create
+    # has happened yet -- so carrying retry evidence disqualifies it.
+    assert (
+        ca._valid_authorization(
+            {
+                **AN_INITIAL_AUTHORIZATION,
+                "accepted_risk": "possible_duplicate_conversion_charge",
+            }
+        )
+        is False
+    )
+
+
+def test_the_first_attempt_may_carry_an_initial_authorization(
+    tmp_path, capsys, monkeypatch
+):
+    """Task 2.3b relaxes the first of the two hard invariants: attempt #1's
+    `authorization` no longer has to be None. It may now also be an "initial"
+    authorization, which task 2.3c's blocked credential gate writes.
+
+    The record exercised here is a *submitted* attempt #1, not an
+    "authorized" one, because that is the state an initial authorization
+    spends almost all of its life in: `_submit_state` carries the
+    authorization forward into "submitting" while rebuilding
+    authorization_kind back to None, and valid_private_state re-validates the
+    whole attempt history on every read.
+    """
+    import conversion_attempt as ca
+
+    manifest, private_state = _submitted_first_attempt_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    # Control: the untouched bundle is valid, so a False below can only be
+    # attributed to the injected authorization.
+    assert ca.valid_private_state(private_state, manifest) is True
+
+    initial = _with_first_authorization(manifest, AN_INITIAL_AUTHORIZATION)
+    assert ca.valid_private_state(private_state, initial) is True
+
+
+def test_a_first_attempt_authorization_of_any_other_shape_stays_forbidden(
+    tmp_path, capsys, monkeypatch
+):
+    """The lock on task 2.3b: the first-attempt invariant is opened for the
+    "initial" shape only, not lifted.
+
+    A "retry" authorization on attempt #1 is still refused -- it claims an
+    action_id and evidence_hash that must equal a predecessor pending action,
+    and attempt #1 has no predecessor. Deleting the `index == 1` branch
+    outright, or widening it to "any valid authorization", makes this test
+    fail.
+    """
+    import conversion_attempt as ca
+
+    manifest, private_state = _submitted_first_attempt_bundle(
+        tmp_path, capsys, monkeypatch
+    )
+    retry_on_first = _with_first_authorization(manifest, A_RETRY_AUTHORIZATION)
+    assert ca.valid_private_state(private_state, retry_on_first) is False
+
+
+def test_a_later_attempt_still_has_to_match_its_predecessor_pending_action(
+    tmp_path, capsys, monkeypatch
+):
+    """The lock on task 2.3b's second relaxation: routing the predecessor
+    equality check through the authorization's shape must not stop it firing
+    for the "retry" authorizations it has always guarded.
+
+    A retry attempt #2 whose authorization disagrees with the pending action
+    it was authorized from is still refused, and an "initial" authorization
+    -- legal only on attempt #1, where there is no predecessor to match --
+    is refused on attempt #2.
+    """
+    import conversion_attempt as ca
+
+    bundle, staged, dependencies, key, _source_url, _source_sha256 = (
+        ready_staged_bundle(tmp_path, capsys, monkeypatch)
+    )
+    _rc, unknown, _stderr = invoke(
+        capsys,
+        [
+            "resume",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(staged["generation"]),
+        ],
+        cwd=tmp_path,
+        environ={**dependencies, "AIHUB_API_KEY": key},
+        transport=StatusCreate(401),
+    )
+    decision_rc, authorized, _stderr = invoke(
+        capsys,
+        [
+            "record",
+            "conversion",
+            "--work-bundle",
+            str(bundle),
+            "--expected-generation",
+            str(unknown["generation"]),
+            "--action-id",
+            unknown["action_id"],
+            "--evidence-hash",
+            unknown["evidence_hash"],
+            "--decision",
+            "retry",
+            "--basis",
+            "I accept the possible duplicate conversion charge.",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=NeverNetwork(),
+    )
+    assert decision_rc == 0, json.dumps(authorized, sort_keys=True)
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = json.loads((bundle / ".state" / "private.json").read_text())
+    assert len(manifest["conversion_attempts"]) == 2
+    assert ca.valid_private_state(private_state, manifest) is True
+
+    tampered = json.loads(json.dumps(manifest))
+    tampered["conversion_attempts"][1]["authorization"]["action_id"] = (
+        "conversion-decision-" + "e5" * 16
+    )
+    assert ca.valid_private_state(private_state, tampered) is False
+
+    downgraded = json.loads(json.dumps(manifest))
+    downgraded["conversion_attempts"][1]["authorization"] = json.loads(
+        json.dumps(AN_INITIAL_AUTHORIZATION)
+    )
+    assert ca.valid_private_state(private_state, downgraded) is False
+
+
 def test_a_process_crash_after_create_recovers_unknown_and_two_resumes_do_not_replay(
     tmp_path, capsys, monkeypatch
 ):
@@ -4631,9 +4866,10 @@ def test_a_schema_version_one_attempt_fails_closed(tmp_path, capsys, monkeypatch
 
     # Control: the v2 record this bundle actually holds is well formed, and
     # its four new columns carry their 2.1b values (`submitted` folds to no
-    # reason at all; authorization_kind remains the placeholder 2.2/2.3 will
-    # give meaning to, while result_refresh_round_count starts at 0 before any
-    # result URL is observed).
+    # reason at all; authorization_kind is None because only an "authorized"
+    # record ever carries a kind -- task 2.3a's "retry" -- and this attempt
+    # was submitted straight through, while result_refresh_round_count starts
+    # at 0 before any result URL is observed).
     assert set(attempt) == set(SCHEMA_V2_ATTEMPT_KEYS)
     assert attempt["schema_version"] == 2
     assert attempt["reason"] is None
@@ -5886,9 +6122,11 @@ def test_result_refresh_ceiling_is_off_by_default_and_injectable(tmp_path, monke
 def test_result_refresh_round_count_is_unchanged_when_the_same_result_url_is_redelivered(
     tmp_path, capsys, monkeypatch
 ):
-    """`_attempt_reason_columns` recomputes reason/reason_detail/
-    authorization_kind fresh from the wire classification on every poll
-    observation. If result_refresh_round_count rode along in that same
+    """`_attempt_reason_columns` rewrites reason/reason_detail/
+    authorization_kind fresh on every poll observation -- the first two
+    recomputed from the wire classification, authorization_kind reset to its
+    default of None because no poll site passes one.
+    If result_refresh_round_count rode along in that same
     producer, it would reset to 0 on this branch too:
     `_recorded_result_url` finds the redelivered
     URL already on file, so the new-URL increment branch in _poll_transition

@@ -89,11 +89,15 @@ ATTEMPT_KEYS = frozenset(
         # value is recoverable from that pair via LEGAL_TRIPLES' reason_code
         # column, not from `state` alone.
         "reason_detail",
-        # authorization_kind was a global-None placeholder through task 2.1b;
-        # task 2.3a gives it its first real value, "retry", written only onto
-        # "authorized"-state records by commit_retry_decision. Every other
-        # state still requires None (see _valid_attempt). "initial" is not
-        # yet a legal value -- that is task 2.3b/2.3c's job.
+        # authorization_kind was a global-None placeholder from task 2.1b
+        # through task 2.2; task 2.3a gives it its first real value, "retry",
+        # written only onto "authorized"-state records by
+        # commit_retry_decision. Every other state still requires None (see
+        # _valid_attempt). "initial" is still not a legal value of this
+        # column: task 2.3b admits initial *authorizations* (by their key
+        # set, see AUTHORIZATION_KEYS_BY_KIND), but the only writer of an
+        # initial authorized record is task 2.3c, which is what extends this
+        # column's domain.
         # result_refresh_round_count is no longer a placeholder as of task
         # 2.1d: it is the cumulative count of distinct result URLs
         # _poll_transition has observed for this attempt (see
@@ -134,15 +138,47 @@ STAGING_IDENTITY_KEYS = frozenset(
 PENDING_ACTION_KEYS = frozenset(
     {"kind", "action_id", "generation", "evidence_hash"}
 )
-AUTHORIZATION_KEYS = frozenset(
-    {
-        "action_id",
-        "evidence_hash",
-        "authorized_at",
-        "basis_sha256",
-        "accepted_risk",
-    }
-)
+# The two authorization shapes, keyed by the kind each one *is*. Task 2.3b
+# replaces the single AUTHORIZATION_KEYS this used to be, because there are
+# now two ways an attempt can come to be authorized and they carry different
+# evidence:
+#
+#   * "retry" -- a consumed confirm decision. It names the pending action it
+#     answers (action_id / evidence_hash), the basis text the operator typed
+#     (basis_sha256), and the risk that operator accepted.
+#   * "initial" -- task 2.3c's blocked recorded-credential gate, on the very
+#     first attempt. Its evidence is the frozen source/preflight evidence,
+#     and it accepts no duplicate-charge risk at all: not one create has been
+#     sent yet, so there is no duplicate to risk and no decision to record.
+#     action_id / basis_sha256 / accepted_risk are therefore absent, not None.
+#
+# This table is also the *discriminator*: a stored authorization declares its
+# kind by its own key set (see _authorization_kind_of). The alternative --
+# reading the attempt's `authorization_kind` column -- does not work, because
+# that column does not survive the "authorized" -> "submitting" fold (see
+# _submit_state and POLL_IMMUTABLE_ATTEMPT_KEYS' note below), while the
+# authorization object itself rides along for the attempt's whole life.
+#
+# Note that "initial" is a proper subset of "retry". That is safe here only
+# because every dispatch below tests set *equality*, never containment: no
+# object's key set can equal both, so the two kinds stay mutually exclusive.
+AUTHORIZATION_KEYS_BY_KIND = {
+    "initial": frozenset(
+        {
+            "evidence_hash",
+            "authorized_at",
+        }
+    ),
+    "retry": frozenset(
+        {
+            "action_id",
+            "evidence_hash",
+            "authorized_at",
+            "basis_sha256",
+            "accepted_risk",
+        }
+    ),
+}
 RESULT_URL_KEYS = frozenset(
     {
         "attempt_id",
@@ -431,9 +467,11 @@ _REASON_DETAIL_DOMAIN = REASON_DETAILS
 def _attempt_reason_columns(
     flat_state: str, reason_code: str | None, *, authorization_kind: str | None = None
 ) -> dict:
-    """The three schema v2 attempt columns recomputed fresh from the wire
-    classification on every write: `reason`/`reason_detail`, which replace
-    v1's single `reason_code`, plus `authorization_kind`.
+    """The three schema v2 attempt columns rewritten fresh on every write:
+    `reason`/`reason_detail`, which replace v1's single `reason_code` and are
+    recomputed from the wire classification, plus `authorization_kind`, which
+    is not derived from anything -- it is an explicit keyword argument that
+    defaults to None (see below).
 
     Every site that writes an attempt builds these three fields here, so the
     folded vocabulary has exactly one producer and cannot drift between the
@@ -1639,14 +1677,47 @@ def _valid_credential(value) -> bool:
     return False
 
 
+def _authorization_kind_of(value) -> str | None:
+    """The kind an authorization object declares by its own key set, or None
+    for anything that is not exactly one of the two shapes.
+
+    Fail-closed by construction: a shape that is neither key set -- a "retry"
+    missing a field, a superset carrying an unknown one, the union of the two
+    -- is not folded onto the nearest kind, it is refused. Callers rely on
+    this to be the only place a kind is derived, so that the validator and
+    valid_private_state's two invariants can never disagree about which kind
+    a stored authorization is.
+    """
+    if not isinstance(value, dict):
+        return None
+    keys = set(value)
+    for kind, expected in AUTHORIZATION_KEYS_BY_KIND.items():
+        if keys == expected:
+            return kind
+    return None
+
+
 def _valid_authorization(value) -> bool:
-    return (
-        isinstance(value, dict)
-        and set(value) == AUTHORIZATION_KEYS
-        and isinstance(value.get("action_id"), str)
-        and ACTION_ID_PATTERN.fullmatch(value["action_id"]) is not None
-        and _valid_hash(value.get("evidence_hash"))
+    kind = _authorization_kind_of(value)
+    if kind is None:
+        return False
+    # The two fields both kinds carry -- and the whole of "initial".
+    if not (
+        _valid_hash(value.get("evidence_hash"))
         and _valid_timestamp(value.get("authorized_at"))
+    ):
+        return False
+    if kind == "initial":
+        return True
+    # kind == "retry": the only other member of AUTHORIZATION_KEYS_BY_KIND,
+    # and _authorization_kind_of returns nothing outside that table. The
+    # exhaustiveness of this two-way split is pinned by the test that asserts
+    # the table names exactly {"initial", "retry"} -- adding a third kind
+    # without extending this function fails there rather than silently
+    # validating the newcomer against retry's rules.
+    return (
+        isinstance(value.get("action_id"), str)
+        and ACTION_ID_PATTERN.fullmatch(value["action_id"]) is not None
         and _valid_hash(value.get("basis_sha256"))
         and value.get("accepted_risk") == "possible_duplicate_conversion_charge"
     )
@@ -1748,6 +1819,28 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     # "retry", every other state still requires None -- is exhaustive over
     # ATTEMPT_STATES today and fails closed on anything else (in particular
     # "initial", which task 2.3b/2.3c have not yet introduced).
+    #
+    # Version stance (same shape as task 2.2c's): this is a deliberate hard
+    # break *inside an unreleased change*, not a compatible widening. The
+    # kind=None authorized placeholder that tasks 2.1c-2.2 wrote is rejected
+    # by the split below -- there is no migrator and no dual-write window,
+    # and SCHEMA_VERSION stays 2 precisely because no released version ever
+    # stored one. The blast radius is bounded to two things, both of which
+    # only exist mid-flight: a bundle currently parked in the "authorized"
+    # state, and a retry intent that has not been replayed yet. Authorized
+    # records do not accumulate in history (_submit_state replaces the
+    # placeholder in place rather than appending past it), so nothing older
+    # can be holding one. Once this change ships, any further edit to this
+    # column's value domain -- task 2.3c's "initial" included, if it lands
+    # after release -- must bump SCHEMA_VERSION instead.
+    #
+    # Task 2.3b deliberately does NOT widen this domain. It admits initial
+    # *authorizations*, discriminated by their key set
+    # (AUTHORIZATION_KEYS_BY_KIND), on records whose kind column is already
+    # None -- which is every state past "authorized". The only writer that
+    # would ever need kind == "initial" here is task 2.3c's blocked
+    # credential gate, so extending this split is that task's job, not this
+    # one's.
     authorization_kind = attempt.get("authorization_kind")
     valid_authorization_kind = (
         authorization_kind == "retry"
@@ -3679,8 +3772,27 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
             ):
                 return False
             authorization = attempt.get("authorization")
+            # Task 2.3b routes both invariants below through the
+            # authorization's own shape rather than the attempt's
+            # `authorization_kind` column. This loop runs over the whole
+            # attempt history, and an authorized record's kind is dropped the
+            # moment it folds to "submitting" (_submit_state rebuilds the
+            # columns from _attempt_state_columns), so keying on the column
+            # would mean an initial attempt's own history entry stops being
+            # recognisable one transition after it is written -- and, on the
+            # index >= 2 branch, would silently stop enforcing predecessor
+            # equality for every retry that has already been submitted.
+            authorization_shape = _authorization_kind_of(authorization)
             if index == 1:
-                if authorization is not None:
+                # Opened for exactly one shape, not lifted. "initial" is the
+                # only authorization with no predecessor pending action to
+                # answer for -- it is authorized against the frozen
+                # source/preflight evidence before any create has been sent.
+                # A "retry"-shaped authorization on attempt #1 claims an
+                # action_id and evidence_hash that must equal a predecessor
+                # that does not exist, so it stays refused here, exactly as
+                # every non-None authorization was before this task.
+                if authorization is not None and authorization_shape != "initial":
                     return False
             else:
                 previous_pending = attempts[index - 2].get("pending_action")
@@ -3697,8 +3809,15 @@ def valid_private_state(private_state: dict, manifest: dict) -> bool:
                     if isinstance(previous_pending, dict)
                     else raw_pending
                 )
+                # Only a "retry" authorization can stand here, and it still
+                # has to match the pending action it answers field for
+                # field. `authorization_shape != "retry"` subsumes the
+                # `not isinstance(authorization, dict)` this used to open
+                # with -- a None or non-dict authorization has no shape --
+                # and additionally refuses an "initial" authorization, which
+                # is legal only on attempt #1.
                 if (
-                    not isinstance(authorization, dict)
+                    authorization_shape != "retry"
                     or not isinstance(authorization_source, dict)
                     or authorization.get("action_id")
                     != authorization_source.get("action_id")
