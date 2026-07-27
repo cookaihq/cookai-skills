@@ -62,6 +62,63 @@ def parse_env_file(path: Path) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# 配置分层解析与来源标签
+# ---------------------------------------------------------------------------
+
+
+def resolve_layered(environ: dict, cwd: Path, home: Path) -> dict:
+    layers = [
+        ("env", {k: environ.get(k, "") for k in VAR_NAMES}),
+        (".env.local", parse_env_file(cwd / ".env.local")),
+        (".env", parse_env_file(cwd / ".env")),
+        ("global", parse_env_file(home / ".env")),
+    ]
+    resolved = {}
+    for name in VAR_NAMES:
+        for source, values in layers:
+            v = values.get(name, "")
+            if v:
+                resolved[name] = (v, source)
+                break
+    return resolved
+
+
+def official_config_path(layered: dict, home: Path):
+    if "FRPC_LAUNCH_CONFIG" in layered:
+        value, source = layered["FRPC_LAUNCH_CONFIG"]
+        return Path(value).expanduser(), source
+    global_toml = home / "frpc.toml"
+    if global_toml.is_file():
+        return global_toml, "global"
+    return None, ""
+
+
+def official_config_valid(path: Path):
+    if path is None or not path.is_file():
+        return False, "配置文件不存在: %s" % path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return False, "配置文件不可读: %s (%s)" % (path, e)
+    if not text.strip():
+        return False, "配置文件为空: %s" % path
+    if "serverAddr" not in text:
+        return False, ("配置缺少 serverAddr 字段: %s"
+                       "（本脚本只做朴素检查，完整语义校验由 frpc verify 执行）" % path)
+    return True, ""
+
+
+def sakura_config(layered: dict):
+    key = layered.get("FRPC_LAUNCH_SAKURA_KEY")
+    tunnels = layered.get("FRPC_LAUNCH_SAKURA_TUNNELS")
+    if not key or not tunnels:
+        return None, ""
+    frpc_path = layered.get("FRPC_LAUNCH_SAKURA_FRPC")
+    return {"key": key[0], "tunnels": tunnels[0],
+            "frpc_path": frpc_path[0] if frpc_path else None}, key[1]
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="frpc_launch", description="本地一键启动/管理 frpc")
     p.add_argument("--home", type=Path, default=DEFAULT_HOME,
