@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from artifacts import ArtifactError, CheckpointStore
-from delivery_records import build_recovery_descriptor, build_result, result_hash
+from delivery_records import (
+    build_ack, build_recovery_descriptor, build_result, result_hash,
+)
 from delivery_schema import (
     DeliverySchemaError, artifact_digest, body_of, parse_typed, serialize_artifact,
 )
@@ -688,3 +690,123 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
             outcome.result["status"], ("blocked", ("unclassified_outcome",))
         )
         return emit(state, reasons, checkpoint_id=surviving())
+
+
+@dataclass(frozen=True)
+class AckOutcome:
+    ack: Dict[str, Any]
+    state: str
+    tombstone: Dict[str, Any]
+
+
+def acknowledge(*, store: PlanStore, token: str, caller: str, executable_path: str,
+                cwd: str, result_text: str, ack_out: str, project_root: str,
+                config_home: str,
+                on_boundary: Optional[Callable[[str], None]] = None) -> AckOutcome:
+    """Confirm a durable publish result locally and only then clean up.
+
+    An ack has no transport channel on purpose: it certifies receipt of an
+    answer that is already durable, so nothing here may reach the remote. The
+    presented result is accepted only when its result_hash re-computes over its
+    own fields, it names this plan, and it matches what this store recorded --
+    the operation record for a first ack, the tombstone's result_hash for a
+    replay -- and, on a first ack, only when the bytes durable on result_out
+    say the same thing. Every one of those reads answers its own failure by
+    refusing the ack and cleaning nothing.
+
+    The receipt is committed to ack_out before any internal state is released,
+    so a lost response is always re-askable: a replay re-issues the
+    byte-identical receipt and re-runs the idempotent cleanup, which also
+    finishes a cleanup that failed after the tombstone was written. Checkpoint
+    removal stays best-effort -- a checkpoint that cannot be removed must not
+    take back an acknowledgement that is already durable on both sides.
+    """
+    hook = on_boundary or _no_hook
+    project_root = lexical_absolute(project_root)
+    try:
+        consumed = store.consume(token, caller=caller, executable_path=executable_path,
+                                 cwd=cwd, state_root=store.state_root)
+    except PlanStoreError as exc:
+        raise WorkflowError("acknowledgement token is not accepted") from exc
+    try:
+        item = parse_typed(result_text, expected_type="s3-upload.result")
+    except DeliverySchemaError as exc:
+        raise WorkflowError("acknowledged result is not a valid V2 result") from exc
+    body = body_of(item)
+    if body["result_hash"] != result_hash(body):
+        raise WorkflowError("acknowledged result hash does not match its content")
+    if body["plan_id"] != consumed.plan_id:
+        raise WorkflowError("acknowledged result belongs to another plan")
+    if body["operation"] != "publish":
+        raise WorkflowError("only a publish result can be acknowledged")
+    operation: Optional[Dict[str, Any]] = None
+    if consumed.state == "acknowledged":
+        if consumed.tombstone["result_hash"] != body["result_hash"]:
+            raise WorkflowError("acknowledged result does not match the recorded receipt")
+        state = "already_acknowledged"
+    else:
+        if body["recovery_state"] != "terminal_unacknowledged":
+            raise WorkflowError("only a terminal result can be acknowledged")
+        try:
+            operation = store.operation_record(consumed.plan_id)
+        except PlanStoreError as exc:
+            raise WorkflowError("the recorded operation could not be read back") from exc
+        if operation is None:
+            raise WorkflowError("no operation record exists for this plan")
+        if (
+            operation["recovery_id"] != body["recovery_id"]
+            or operation["root_recovery_id"] != body["root_recovery_id"]
+            or operation["operation_id"] != body["operation_id"]
+        ):
+            raise WorkflowError("acknowledged result does not match the recorded operation")
+        try:
+            durable = _read_artifact(preflight(
+                operation["result_out"], project_root=project_root,
+                config_home=config_home, state_root=store.state_root,
+                source_identity=None,
+            ))
+        except (HandoffError, OSError) as exc:
+            raise WorkflowError("the durable result-out could not be read back") from exc
+        if durable != serialize_artifact(item):
+            raise WorkflowError("acknowledged result does not match the durable result-out")
+        state = "acknowledged"
+    receipt = build_ack(
+        caller=caller, plan_id=consumed.plan_id, recovery_id=body["recovery_id"],
+        root_recovery_id=body["root_recovery_id"],
+        predecessor_operation_id=body["operation_id"],
+        result_hash_value=body["result_hash"],
+    )
+    hook("before_ack")
+    _commit_ack(receipt, ack_out, project_root=project_root, config_home=config_home,
+                state_root=store.state_root)
+    hook("before_cleanup")
+    try:
+        tombstone = store.acknowledge(consumed.plan_id, result_hash=body["result_hash"])
+    except PlanStoreError as exc:
+        raise WorkflowError(
+            "acknowledgement cleanup could not be completed durably"
+        ) from exc
+    if operation is None:
+        try:
+            operation = store.operation_record(consumed.plan_id)
+        except PlanStoreError:
+            operation = None
+    if operation is not None:
+        try:
+            CheckpointStore(project_root).remove(operation["checkpoint_id"])
+        except (ArtifactError, FileNotFoundError, OSError):
+            pass
+    return AckOutcome(receipt, state, tombstone)
+
+
+def _commit_ack(receipt: Dict[str, Any], ack_out: str, *, project_root: str,
+                config_home: str, state_root: str) -> None:
+    payload = serialize_artifact(receipt)
+    try:
+        target = preflight(ack_out, project_root=project_root, config_home=config_home,
+                           state_root=state_root, source_identity=None)
+        commit(target, payload)
+    except (HandoffError, OSError) as exc:
+        raise WorkflowError(
+            "acknowledgement receipt could not be written durably"
+        ) from exc
