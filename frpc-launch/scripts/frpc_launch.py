@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
+import json
+import os
+import platform
 import re
+import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -118,6 +125,93 @@ def sakura_config(layered: dict):
     frpc_path = layered.get("FRPC_LAUNCH_SAKURA_FRPC")
     return {"key": key[0], "tunnels": tunnels[0],
             "frpc_path": frpc_path[0] if frpc_path else None}, key[1]
+
+
+# ---------------------------------------------------------------------------
+# 平台探测、HTTP 辅助、meta 与原子安装原语
+# ---------------------------------------------------------------------------
+
+
+def detect_platform():
+    sysname = platform.system()
+    machine = platform.machine().lower()
+    os_map = {"Darwin": ("darwin", "macos"), "Linux": ("linux", "linux")}
+    arch_map = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+    if sysname not in os_map or machine not in arch_map:
+        raise FrpcLaunchError(
+            "暂不支持的平台: %s/%s（v1 支持 macOS/Linux 的 amd64/arm64；"
+            "bin/windows 目录为预留）" % (sysname, machine))
+    os_name, os_subdir = os_map[sysname]
+    return os_name, os_subdir, arch_map[machine]
+
+
+def http_get(url: str, timeout: int = 30) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except (urllib.error.URLError, OSError) as e:
+        raise FrpcLaunchError(
+            "网络请求失败: %s (%s)。请检查网络或自行配置代理；"
+            "本工具不自动切换第三方镜像。" % (url, e))
+
+
+def http_get_json(url: str, timeout: int = 30) -> dict:
+    try:
+        return json.loads(http_get(url, timeout).decode("utf-8"))
+    except ValueError as e:
+        raise FrpcLaunchError("响应不是合法 JSON: %s (%s)" % (url, e))
+
+
+def ensure_home_layout(home: Path) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    os.chmod(home, 0o700)
+    for sub in ("bin/macos", "bin/linux", "bin/windows", "run"):
+        (home / sub).mkdir(parents=True, exist_ok=True)
+
+
+def write_meta(meta_path: Path, meta: dict) -> None:
+    tmp = meta_path.with_name(meta_path.name + ".tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, meta_path)
+
+
+def read_meta(meta_path: Path) -> dict:
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def clear_quarantine(path: Path) -> None:
+    if platform.system() != "Darwin":
+        return
+    r = subprocess.run(["xattr", "-d", "com.apple.quarantine", str(path)],
+                       capture_output=True, text=True)
+    if r.returncode != 0 and "No such xattr" not in (r.stderr or ""):
+        print("警告: 清除 quarantine 失败（不中断）: %s" % r.stderr.strip(), file=sys.stderr)
+
+
+def install_binary(tmp_path: Path, final_path: Path) -> None:
+    os.chmod(tmp_path, 0o755)
+    clear_quarantine(tmp_path)
+    os.replace(tmp_path, final_path)
+
+
+def _hash_file(path: Path, algo) -> str:
+    h = algo()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    return _hash_file(path, hashlib.sha256)
+
+
+def md5_file(path: Path) -> str:
+    return _hash_file(path, hashlib.md5)
 
 
 # ---------------------------------------------------------------------------
