@@ -1839,15 +1839,17 @@ def _valid_attempt(attempt, *, manifest: dict, generation: int) -> bool:
     # valid_private_state's predecessor check has nothing to match against)
     # and the authorization's own shape (discriminated by key set, see
     # AUTHORIZATION_KEYS_BY_KIND) -- neither of which is this column. For
-    # the "authorized" state, the cross-check just above
+    # the "authorized" state, the cross-check in the authorized branch below
     # (_authorization_kind_of(authorization) == authorization_kind) pins
     # kind and shape to agree with each other, so an "authorized" record can
     # only ever carry kind "retry" paired with a "retry"-shaped
     # authorization -- an "initial" shape stays illegal here even though
-    # _valid_authorization alone would accept it. The only writer that would
-    # ever need kind == "initial" is task 2.3c's blocked credential gate,
-    # and its states are not "authorized", so widening authorization_kind's
-    # value domain to admit it is that task's job, not this one's.
+    # _valid_authorization alone would accept it. Task 2.3c's blocked
+    # credential gate record is itself state "authorized" paired with kind
+    # "initial" (per the delta spec and design Decision 2), so admitting it
+    # is exactly widening authorization_kind's authorized-state domain to
+    # {"retry", "initial"} -- that widening, and the seam that absorbs it
+    # below, are that task's job, not this one's.
     authorization_kind = attempt.get("authorization_kind")
     valid_authorization_kind = (
         authorization_kind == "retry"
