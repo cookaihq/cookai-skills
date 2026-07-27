@@ -334,6 +334,28 @@ def http_request(
     except (URLError, OSError) as exc:
         raise TransportError(str(exc.reason if isinstance(exc, URLError) else exc)) from exc
 
+
+def open_body_stream(method: str, url: str, headers: Dict[str, str],
+                     timeout: int = 30):
+    """Open a response for streaming, without reading it into memory.
+
+    http_request() is deliberately capped at 8 KiB of body: it exists to
+    classify a response, not to read one. A full-body verification cannot use
+    it and must not raise that cap, so it gets its own entry point sharing the
+    one redirect policy: _NoRedirectHandler refuses every 3xx, which surfaces
+    as an HTTPError the caller has to classify.
+
+    Unlike http_request this converts nothing. http_request turns an HTTPError
+    into a Response so callers can branch on a status code, and a URLError
+    into a TransportError; here the caller is a verifier that must treat a
+    3xx, a 4xx and a dead socket as the same answer -- no full body was read
+    -- so flattening them into a status here would only make it re-derive the
+    distinction it does not want.
+    """
+    request = Request(url, data=None, headers=headers, method=method)
+    return build_opener(_NoRedirectHandler()).open(request, timeout=timeout)
+
+
 def put_object(
     conn: Connection,
     key: str,
