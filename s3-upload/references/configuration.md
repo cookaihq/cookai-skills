@@ -26,7 +26,7 @@ v2 把三件事分开：selector 选择哪个 Upload Target；Target 保存完�
 }
 ```
 
-`.s3-upload/targets/website-images.json` 是完整 Target。`collision` 取 `replace`（默认，同键覆盖）/ `reject`（`If-None-Match: *` 原子 no-overwrite + 同内容采纳）/ `unique`；`reject`/`unique` 需要 ConditionalPutObject capability，当前仅 aws-s3 与 cloudflare-r2 preset 启用。CLI `--collision` 可对单次调用覆盖该字段。普通 baseline 关闭 multipart：
+`.s3-upload/targets/website-images.json` 是完整 Target。`collision` 取 `replace`（默认，同键覆盖）/ `reject`（`If-None-Match: *` 原子 no-overwrite + 同内容采纳）/ `unique`；`reject`/`unique` 需要 ConditionalPutObject capability，当前仅 aws-s3 与 cloudflare-r2 preset 启用。CLI `--collision` 可对单次调用覆盖该字段，**包括把配置为 `reject` 的 Target 放宽为 `replace`**（此时不发 `If-None-Match`，同键对象被直接覆盖）——该字段是默认策略，不是不可绕过的保护。普通 baseline 关闭 multipart：
 
 ```json
 {
