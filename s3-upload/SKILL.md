@@ -23,7 +23,7 @@ description: Use when the user explicitly wants to persist one local file in the
 
 - 先 `upload --dry-run --json`；默认 `collision=replace`，同 Object Key 会覆盖当前对象。aws-s3 / cloudflare-r2 baseline 另支持 `--collision reject`：条件 Put 携带 `If-None-Match: *` 实现原子 no-overwrite，撞 412 后经一次 presigned GET 全文比对，size+SHA-256 双等返回 `adopted`（`object_written=false`、退出码 0、不发第二次 Put），不等以 collision 退出码 4 结束。
 - `ambiguous` 或 `partial_success` 的写入不得自动重放。保留并报告 `checkpoint_id`，只使用对应恢复命令；`put_unknown` 的 `reconcile` 是只读全文对账（零写请求），双等收敛为成功但 `object_written` 保持 `null`。
-- `--json` 输出 17 键闭合 result（v1 13 键原地扩展 + `remote`/`checkpoint`/`next_action`/`retry_safety`），不适用的值为显式 `null`，不省字段；`--result-out <path>` 把同一 result JSON 原子写入 caller 指定文件（与 stdout 逐字节一致，preflight 与 `--reference-out` 同级、失败时零远端请求）。
+- `--json` 输出 17 键闭合 result（v1 13 键原地扩展 + `remote`/`checkpoint`/`next_action`/`retry_safety`），不适用的值为显式 `null`，不省字段；`--result-out <path>` 把同一 result JSON 原子写入 caller 指定文件（与 stdout 逐字节一致，preflight 与 `--reference-out` 同级、失败时零远端请求）。只读该文件的验证方可以直接采信 `not_started`：第一次远端请求发出后，任何没有产出终态 result 的退出都会把该文件改写成 `ambiguous`（带 checkpoint、`retry_safety=unsafe`），只有确定性 4xx 才保留 `not_started`。
 - Public Base URL 是用户声明，不做 GET/HEAD 探测；Skill 不发送 public ACL，也不修改 bucket policy/lifecycle/CORS。
 - Object Reference 中的 version id 只用于 exact-version delete 选择；所有 URL 都指向 current key。
 - Global Target 的间接选择必须显式 `--use-local-key`。Object Reference/checkpoint 本身不授权读取 home 配置。

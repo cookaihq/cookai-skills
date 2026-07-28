@@ -35,7 +35,7 @@ python3 scripts/upload.py url \
   --json
 ```
 
-非 JSON 的 upload/url 成功时 stdout 只有一个 URL。JSON 始终使用固定的 17 键闭合 result schema（v1 13 键原地扩展 + `remote`/`checkpoint`/`next_action`/`retry_safety`，不适用的值为显式 `null`）；`upload --result-out <path>` 把同一 result JSON 原子写入 caller 指定文件，与 stdout 逐字节一致。遇到 `partial_success` 或 `ambiguous` 时，不要重放 Put，保留 `checkpoint_id`，用 `reconcile --checkpoint <id>` 只读对账。
+非 JSON 的 upload/url 成功时 stdout 只有一个 URL。JSON 始终使用固定的 17 键闭合 result schema（v1 13 键原地扩展 + `remote`/`checkpoint`/`next_action`/`retry_safety`，不适用的值为显式 `null`）；`upload --result-out <path>` 把同一 result JSON 原子写入 caller 指定文件，与 stdout 逐字节一致，且第一次远端请求发出后不会再停留在 `not_started`（除确定性 4xx 外一律改写成带 checkpoint 的 `ambiguous`）。遇到 `partial_success` 或 `ambiguous` 时，不要重放 Put，保留 `checkpoint_id`，用 `reconcile --checkpoint <id>` 只读对账。
 
 ## 项目 Mapping
 
