@@ -19,6 +19,7 @@ from artifacts import (
 )
 from capabilities import LiveTestInterlock
 from operations import (
+    DefinitiveNoWrite,
     OperationError,
     execute_delete,
     execute_single_put,
@@ -328,6 +329,82 @@ def _write_result_out(snapshot, result):
         return None
 
 
+class _ResultHandoff:
+    """Owns the `--result-out` file for one upload invocation.
+
+    The `not_started` placeholder written before the first request is a
+    claim -- "no object was written, retrying is safe" -- and that claim
+    stops being true the moment the operation announces it is about to
+    issue its first remote request. Nothing inside the operation layer can
+    be trusted to retract it: any raise between a successful Put and the
+    terminal result (a checkpoint store that cannot be rewritten, an
+    unexpected OSError) would otherwise leave the claim standing over an
+    object that exists, and a handoff-only reader -- the whole point of the
+    file -- would read it as gospel.
+
+    So the retraction lives here, at the single place that owns the file,
+    and every exit is one of two kinds: `settle()` for an exit that knows
+    its own terminal truth (a durable result, a blocked plan, a definitive
+    no-write), and everything else, which `void()` downgrades to
+    `ambiguous` + the retained checkpoint. Which raise produced the exit
+    does not matter, so a raise site added later cannot reopen the hole.
+
+    `armed` is set from the checkpoint notice rather than from a request
+    counter because the notice both precedes the first request and carries
+    the checkpoint id an `ambiguous` result requires. It can therefore fire
+    for a run that dies between the notice and the request that never left;
+    that direction only costs one read-only reconcile, which converges to
+    `not_started` on its own.
+    """
+
+    def __init__(self):
+        self.snapshot = None
+        self.retention = None
+        self.checkpoint_id = None
+        self.settled = False
+
+    def arm(self, snapshot, retention):
+        self.snapshot = snapshot
+        self.retention = retention
+
+    def notice(self, checkpoint_id):
+        self.checkpoint_id = checkpoint_id
+        print(f"[s3-upload] checkpoint_id={checkpoint_id}", file=sys.stderr, flush=True)
+
+    def settle(self):
+        self.settled = True
+
+    def publish(self, result) -> bool:
+        """Write a terminal result. False means the write was refused."""
+        if self.snapshot is None:
+            self.settled = True
+            return True
+        updated = _write_result_out(self.snapshot, result)
+        # Set after the attempt, not before: a write that raises out of
+        # _write_result_out rather than returning None leaves the terminal
+        # result unpublished, and that exit still owes the reader a voided
+        # placeholder.
+        self.settled = True
+        if updated is None:
+            return False
+        self.snapshot = updated
+        return True
+
+    def void(self) -> None:
+        if self.settled or self.snapshot is None or self.checkpoint_id is None:
+            return
+        self.settled = True
+        result = build_result(
+            "upload", "ambiguous", object_written=None,
+            retention=self.retention, checkpoint_id=self.checkpoint_id,
+        )
+        if _write_result_out(self.snapshot, result) is not None:
+            print(
+                f"[s3-upload] ambiguous checkpoint_id={self.checkpoint_id}",
+                file=sys.stderr, flush=True,
+            )
+
+
 def _checkpoint_request_builder(resolved):
     candidate = provider_candidate_for_target(resolved.target)
     return (
@@ -591,6 +668,7 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
         print("[s3-upload] config_error: operation is not available in this implementation stage", file=sys.stderr)
         return 2
     dry_run = None
+    handoff = _ResultHandoff()
     try:
         execution_mode, live_interlock, allow_candidates = _live_test_context(environ)
         resolved = resolve_target(
@@ -624,7 +702,6 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
         # plan exists (its source identity guards aliasing) and before any
         # remote request can exist; a rejection therefore leaves zero
         # requests behind.
-        result_snapshot = None
         if args.result_out is not None:
             result_snapshot = _result_out_preflight(
                 args.result_out, cwd=cwd, config_home=config_home,
@@ -645,6 +722,7 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
             )
             if result_snapshot is None:
                 return 1
+            handoff.arm(result_snapshot, dry_run.plan["retention"])
         if args.dry_run:
             result = build_result(
                 "upload",
@@ -654,10 +732,7 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 retention=dry_run.plan["retention"],
                 plan=dry_run.plan,
             )
-            wrote = (
-                result_snapshot is None
-                or _write_result_out(result_snapshot, result) is not None
-            )
+            wrote = handoff.publish(result)
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
             else:
@@ -667,7 +742,9 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
         if not dry_run.executable:
             # Rejected before any request: the placeholder written above is
             # already the full nine-field not_started result this exit owes
-            # the caller, so there is nothing further to write here.
+            # the caller, so there is nothing further to write here. The void
+            # below leaves it alone on its own terms: no checkpoint was ever
+            # announced, so nothing retracts the "no object was written" claim.
             print("[s3-upload] config_error: upload plan is blocked", file=sys.stderr)
             return 2
         if (
@@ -683,9 +760,7 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 project_root=cwd,
                 config_home=config_home,
                 now=now,
-                checkpoint_notice=lambda value: print(
-                    f"[s3-upload] checkpoint_id={value}", file=sys.stderr, flush=True
-                ),
+                checkpoint_notice=handoff.notice,
                 execution_mode=execution_mode,
                 live_test_interlock=live_interlock,
                 allow_insecure_http=args.allow_insecure_http,
@@ -700,16 +775,11 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
                 project_root=cwd,
                 config_home=config_home,
                 now=now,
-                checkpoint_notice=lambda value: print(
-                    f"[s3-upload] checkpoint_id={value}", file=sys.stderr, flush=True
-                ),
+                checkpoint_notice=handoff.notice,
                 source=dry_run.source,
             )
         result = outcome.result
-        wrote = (
-            result_snapshot is None
-            or _write_result_out(result_snapshot, result) is not None
-        )
+        wrote = handoff.publish(result)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
         elif result["url"] is not None:
@@ -732,10 +802,24 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
         # traceback. Its --result-out twin already arrives here as PlanError.
         print(f"[s3-upload] config_error: {exc}", file=sys.stderr)
         return 2
+    except DefinitiveNoWrite as exc:
+        # A definitive 4xx is the one post-request exit that proves nothing
+        # was written, so the not_started placeholder already is this exit's
+        # truthful terminal result. Settling keeps the void below from
+        # downgrading a proof to a doubt.
+        handoff.settle()
+        print(f"[s3-upload] runtime_error: {exc}", file=sys.stderr)
+        return 1
     except (OperationError, MultipartError) as exc:
         print(f"[s3-upload] runtime_error: {exc}", file=sys.stderr)
         return 1
     finally:
+        # Every exit that did not establish its own terminal result passes
+        # through here. If the operation had already announced its first
+        # remote request, the placeholder's "nothing was written" is no
+        # longer a fact this command can vouch for, and leaving it would
+        # hand a cross-process reader a false all-clear.
+        handoff.void()
         if dry_run is not None:
             dry_run.close()
 

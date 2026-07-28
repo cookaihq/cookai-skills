@@ -274,6 +274,38 @@ def test_result_out_never_leaves_a_previous_run_result_behind(tmp_path, capsys):
     assert result["object_written"] is False and result["retry_safety"] == "safe"
 
 
+def test_result_out_is_voided_when_a_failure_escapes_after_the_put(tmp_path, capsys):
+    # The placeholder's claim -- "no object was written, safe to retry" --
+    # expires the instant the Put is answered. Here the object IS written
+    # (200) and the command still dies on the way to its terminal result:
+    # the checkpoint file its bookkeeping needs is gone. That removal is a
+    # plain filesystem fact injected from the transport double, independent
+    # of any code path under test. A handoff-only reader must not be told
+    # "not_started / safe" about an object that exists.
+    handoff = tmp_path / "handoff.json"
+    checkpoints = tmp_path / ".s3-upload" / "checkpoints"
+
+    def transport(*args):
+        for entry in checkpoints.glob("*.json"):
+            entry.unlink()
+        return Response(200)
+
+    rc = run_upload(tmp_path, handoff, transport=transport)
+
+    output = capsys.readouterr()
+    assert rc != 0 and output.out == ""
+    result = json.loads(handoff.read_text(encoding="utf-8"))
+    assert result["status"] == "ambiguous"
+    assert result["object_written"] is None
+    assert result["retry_safety"] == "unsafe"
+    assert result["next_action"] == "reconcile"
+    assert result["checkpoint"] is not None
+    assert result["checkpoint"] == result["checkpoint_id"]
+    # The voided result keeps the placeholder's retention rather than
+    # inventing an empty one.
+    assert result["retention"]["mode"] == "retain"
+
+
 def test_result_out_placeholder_precedes_every_remote_request(tmp_path, capsys):
     # The placeholder has to be on disk before the first request, not merely
     # before the terminal write: the counter below is read inside the
