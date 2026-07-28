@@ -4943,26 +4943,41 @@ def at_pending_conversion_boundary(
         previous = resolve_history(
             history[:-1], manifest_template=manifest, private_template=private_state
         )
-    except Exception:
-        # Fail closed, exactly as the replay below does: the caller keeps its
+    except (KeyError, IndexError, TypeError, ValueError, ConversionAttemptError):
+        # Fail closed, exactly as the replay below does -- literally the same
+        # exception tuple: the caller keeps its
         # `repair_or_restore_work_bundle` verdict, which is the right answer
         # for a bundle whose own history a reducer cannot read.
         #
-        # The broad clause is deliberate and is INSURANCE, not the handling of
-        # a known path. `resolve_history` is supplied by the caller precisely
-        # because the layers above this one own event vocabularies this module
-        # cannot see, so it also cannot name their exception types
-        # (review.ReviewError and friends are defined above it in the import
-        # DAG). Today the two resolvers whose behaviour is established --
-        # this module's and raw_conversion's -- wrap their own reduce and
-        # answer None rather than raising, so no covered path reaches this
-        # clause; workflow._conversion_history_resolver's third choice,
+        # This clause is INSURANCE, not the handling of a known path. The two
+        # resolvers whose behaviour is established -- this module's and
+        # raw_conversion's -- wrap their own reduce and answer None rather
+        # than raising, so no covered path reaches this clause;
+        # workflow._conversion_history_resolver's third choice,
         # review.resolve_history_state, has no wrapper at all, and whether a
         # review-bearing bundle can park on a conversion intent is a question
         # nobody has yet answered either way. Without this clause that unproven
         # shape would turn the caller's rc 4 / invalid_bundle into rc 1 /
         # runtime_error -- and the predicate now runs BEFORE the private-state
         # check, so it would be fed a private_state nothing has validated yet.
+        #
+        # It is deliberately NOT `except Exception`. This module cannot NAME
+        # the exception types of the layers above it -- `resolve_history` is
+        # supplied by the caller precisely because those layers own event
+        # vocabularies this module cannot see, and review.ReviewError and
+        # friends are defined above it in the import DAG, so importing them
+        # would close a cycle. But not being able to name a type does not mean
+        # the clause has to widen to `Exception`: every domain error under
+        # scripts/ derives from ValueError except settings.SettingsWriteError
+        # (OSError), raised on a write path this pure reduction never takes,
+        # and workflow.WorkflowError, which is defined in the CALLER and so
+        # cannot come out of a reducer the caller hands in. ReviewError is a
+        # ValueError subclass and is therefore already caught here without
+        # being named. Widening to `Exception` would add only the exceptions
+        # that come from OUR OWN bugs -- AttributeError, RecursionError, a
+        # mistyped attribute -- and swallowing those into rc 4 /
+        # invalid_bundle with no traceback would report our defect as the
+        # caller's damaged bundle.
         return False
     if previous is None:
         return False

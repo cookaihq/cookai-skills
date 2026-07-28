@@ -2591,6 +2591,35 @@ def read_private_state(bundle):
     return json.loads((bundle / ".state" / "private.json").read_text())
 
 
+def prefix_reduction(bundle):
+    """Reduce the bundle's history WITHOUT its tail event, exactly the way
+    `at_pending_conversion_boundary` does it.
+
+    The predicate's first act after naming the tail event is to call the
+    resolver `workflow._conversion_history_resolver` picked for this manifest,
+    on `history[:-1]`, with the on-disk manifest and private state as the two
+    templates -- and it returns False right there when the answer is None.
+    Every gate past that point is therefore only reachable when this call
+    answers something else.
+
+    Two cells below reach their gate only because the untouched private state
+    travels through as a template (see their docstrings). Asserting on this
+    first is what stops those cells from silently degrading into "the prefix
+    reduction rejected it" -- which would still be rc 4 /
+    repair_or_restore_work_bundle, so every other assertion in them would go on
+    passing while the branch they exist to cover went uncovered again. It calls
+    the resolver the predicate calls with the arguments the predicate passes,
+    so it needs no instrumentation and touches no production code.
+    """
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    private_state = read_private_state(bundle)
+    history = read_history_events(bundle)
+    resolve_history = workflow._conversion_history_resolver(manifest)
+    return resolve_history(
+        history[:-1], manifest_template=manifest, private_template=private_state
+    )
+
+
 def _rewrite_state_file(path, value):
     """Put `value` on disk the way the bundle writer would have."""
     import bundle as bundle_module
@@ -2766,6 +2795,10 @@ def test_a_boundary_whose_private_result_urls_are_not_a_list_says_repair(
     assert isinstance(private_state["result_urls"], list)
     private_state["result_urls"] = {}
     rewrite_private_state(bundle, private_state)
+    assert prefix_reduction(bundle) is not None, (
+        "the prefix must still reduce, or the predicate answers at "
+        "`previous is None` and never reaches the template_results gate"
+    )
 
     before = state_snapshot(bundle)
     transport = helpers.CountingNeverNetwork()
@@ -2905,6 +2938,11 @@ def test_a_boundary_whose_private_state_is_neither_state_says_repair(
     bundle, _staged, environ = park_on_conversion_intent(
         tmp_path, capsys, monkeypatch, "conversion_submit_intent", boundary="manifest"
     )
+    assert not [
+        event
+        for event in read_history_events(bundle)[:-1]
+        if event.get("event") in _conversion_intents()
+    ], "the tail intent must be the first conversion event (see docstring)"
     private_state = read_private_state(bundle)
     assert private_state["result_urls"] == []
     private_state["result_urls"] = [
@@ -2919,6 +2957,10 @@ def test_a_boundary_whose_private_state_is_neither_state_says_repair(
         }
     ]
     rewrite_private_state(bundle, private_state)
+    assert prefix_reduction(bundle) is not None, (
+        "the prefix must still reduce, or the predicate answers at "
+        "`previous is None` and never evaluates the second conjunct"
+    )
 
     before = state_snapshot(bundle)
     transport = helpers.CountingNeverNetwork()

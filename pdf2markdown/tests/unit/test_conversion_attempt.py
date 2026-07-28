@@ -7869,7 +7869,21 @@ def test_no_result_from_manifest_wrapper_writes_action_required_directly():
         assert any(
             _calls_the_projector(guard) and not _is_negated(guard)
             for guard in guards
-        ), key
+        ), (
+            f"{key}: this is a check on the SHAPE of the guard, not on the "
+            "behaviour it produces -- a semantically equivalent rewrite that "
+            "puts the write somewhere other than directly under an "
+            "un-negated test calling the projector turns it red while every "
+            "behaviour test stays green (`if project(...) is not None: pass "
+            "/ else: <the three writes>` is one such rewrite). That is "
+            "intended: the erasure defect and its harmless twin are the same "
+            "behaviour seen from different code, so the redundancy this "
+            "check adds to test_review_result_does_not_erase_the_projected_"
+            "conversion_action has to be formal. If you have satisfied "
+            "yourself that your rewrite really is equivalent, update this "
+            "check to recognise its shape rather than deleting or weakening "
+            "it."
+        )
 
 
 def test_review_result_does_not_erase_the_projected_conversion_action(
