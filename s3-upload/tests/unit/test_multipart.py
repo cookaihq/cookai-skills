@@ -234,6 +234,72 @@ def test_fresh_multipart_persists_each_mutation_boundary_and_uses_exact_parts(tm
     assert list((tmp_path / ".s3-upload" / "checkpoints").glob("*.json")) == []
 
 
+def test_multipart_reference_out_failure_downgrades_to_a_reconcilable_partial(tmp_path):
+    # The object completed remotely; only the caller's reference file could
+    # not be published. That is not a plain success, and it is not a blank
+    # failure either: the result has to keep the confirmed object, URL and
+    # remote identity while picking up the retained checkpoint and the
+    # reconcile/unsafe pair that a retained checkpoint implies. Editing the
+    # success result in place would keep next_action and retry_safety on
+    # their success values.
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"a" * PART_SIZE + b"tail")
+    resolved = resolved_target()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    reference_out = out_dir / "reference.json"
+    plan = upload_plan(source, resolved)
+    plan["reference_out"] = {"path": str(reference_out), "state": "absent"}
+    calls = []
+
+    def transport(method, url, headers, body):
+        calls.append(method)
+        if len(calls) == 1:
+            return Response(200, b"<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>")
+        if len(calls) in {2, 3}:
+            return Response(200, headers={"ETag": '"part-%d"' % (len(calls) - 1)})
+        # The destination preflight cleared stops matching what it cleared
+        # while the completion is in flight. The injection is a filesystem
+        # fact set from the transport double, independent of the assertions
+        # below.
+        out_dir.chmod(0o500)
+        return Response(200, b"<CompleteMultipartUploadResult><VersionId>version-1</VersionId></CompleteMultipartUploadResult>")
+
+    try:
+        outcome = execute_multipart(
+            resolved=resolved,
+            plan=plan,
+            transport=transport,
+            project_root=str(tmp_path),
+            config_home=str(tmp_path / "home"),
+            now=NOW,
+            checkpoint_notice=lambda checkpoint_id: None,
+            registry=multipart_registry(resolved),
+            execution_mode="test-only",
+            live_test_interlock=LiveTestInterlock(True, "project:images"),
+        )
+    finally:
+        out_dir.chmod(0o700)
+
+    result = outcome.result
+    assert result["status"] == "partial_success"
+    assert result["object_written"] is True
+    assert result["checkpoint"] == outcome.checkpoint_id
+    assert result["checkpoint"] == result["checkpoint_id"]
+    assert result["next_action"] == "reconcile"
+    assert result["retry_safety"] == "unsafe"
+    assert outcome.retain_checkpoint is True
+    # Nothing was published at the destination, and the completed object is
+    # still fully described by the result the caller does get.
+    assert not reference_out.exists()
+    assert result["object_reference"]["location"]["version_id"] == "version-1"
+    assert result["url"].startswith(
+        "https://project-artifacts.s3.amazonaws.com/multipart/source.bin?"
+    )
+    assert result["url_kind"] == "presigned" and result["expires_at"] is not None
+    assert result["remote"]["key"] == "multipart/source.bin"
+
+
 def test_resume_retries_only_the_same_unknown_part_after_persisting_next_attempt(tmp_path):
     source = tmp_path / "source.bin"
     source.write_bytes(b"a" * PART_SIZE + b"tail")
