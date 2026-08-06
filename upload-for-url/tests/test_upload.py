@@ -5,7 +5,7 @@ import pytest
 import upload
 from client import Resp
 
-BASE = "https://api.foxapi.cc"
+BASE = "https://api.aihubmax.com"
 
 
 def test_build_request_stream_multipart():
@@ -85,15 +85,15 @@ def test_interpret_upload_cloudflare_1010_is_not_reported_as_storage_full():
     assert "存储空间不足" not in error.value.message
 
 
-def test_parse_args_defaults_to_foxapi():
+def test_parse_args_defaults_to_aihubmax():
     args = upload.parse_args(["--url", "https://example.com/a.png"])
-    assert args.base_url == "https://api.foxapi.cc"
+    assert args.base_url == "https://api.aihubmax.com"
 
 
 def test_main_success_prints_url_and_72h_notice(monkeypatch, tmp_path, capsys):
     f = tmp_path / "clip.mp4"
     f.write_bytes(b"VIDEOBYTES")
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
 
     def fake_transport(method, url, headers, body=None, timeout=60):
         assert url.endswith("/v1/files/upload/stream")
@@ -112,7 +112,7 @@ def test_main_success_prints_url_and_72h_notice(monkeypatch, tmp_path, capsys):
 def test_main_no_key_returns_2(monkeypatch, tmp_path, capsys):
     f = tmp_path / "a.bin"
     f.write_bytes(b"x")
-    monkeypatch.delenv("X_API_KEY", raising=False)
+    monkeypatch.delenv("AIHUB_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)  # no .env / .env.local here
     code = upload.main(["--file", str(f)])
     assert code == 2
@@ -121,7 +121,7 @@ def test_main_no_key_returns_2(monkeypatch, tmp_path, capsys):
 def test_main_413_returns_1(monkeypatch, tmp_path, capsys):
     f = tmp_path / "big.mp4"
     f.write_bytes(b"x")
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     monkeypatch.setattr(upload, "http_request",
                         lambda *a, **k: Resp(413, {"error": {"message": "文件过大"}}, ""))
     code = upload.main(["--file", str(f)])
@@ -139,7 +139,7 @@ def test_interpret_upload_non_dict_json_raises_uploaderror():
 
 
 def test_main_missing_file_returns_1(monkeypatch, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     code = upload.main(["--file", "/nonexistent/definitely/missing.bin"])
     err = capsys.readouterr().err
     assert code == 1

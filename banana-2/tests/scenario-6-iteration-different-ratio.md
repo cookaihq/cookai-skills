@@ -4,7 +4,7 @@
 
 ## Setup
 
-env 已设有效 `X_API_KEY`。上一条已成功创建：
+env 已设有效 `AIHUB_API_KEY`。上一条已成功创建：
 
 - prompt = "A futuristic city skyline at dusk, cyberpunk style"
 - aspect_ratio = `16:9`，resolution = `1K`

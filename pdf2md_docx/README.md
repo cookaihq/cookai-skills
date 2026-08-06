@@ -4,10 +4,10 @@
 
 ```bash
 # 本地 PDF → Markdown（自动统计页数 + 上传换 URL + 解压到 {YYYYMMDD-HHMMSS}-{标签}/）
-X_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./report.pdf
+AIHUB_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./report.pdf
 
 # 转 DOCX，合并跨页表格
-X_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./report.pdf --convert-mode docx --merge-cross-page-forms
+AIHUB_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./report.pdf --convert-mode docx --merge-cross-page-forms
 ```
 
 - 异步任务：创建 → 轮询 `/v1/tasks/{id}?sync_upstream=true` → 下载 ZIP → 解压

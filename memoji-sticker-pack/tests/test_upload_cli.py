@@ -18,9 +18,9 @@ def test_file_upload_cli_retries_401_and_prints_only_public_url(
     source = tmp_path / "portrait.png"
     source.write_bytes(b"PNGDATA")
     (tmp_path / ".env.local").write_text(
-        "X_API_KEY=good-key-5678\n", encoding="utf-8"
+        "AIHUB_API_KEY=good-key-5678\n", encoding="utf-8"
     )
-    monkeypatch.setenv("X_API_KEY", "bad-key-1234")
+    monkeypatch.setenv("AIHUB_API_KEY", "bad-key-1234")
     monkeypatch.chdir(tmp_path)
     requests = []
 
@@ -84,7 +84,7 @@ def test_non_file_sources_use_matching_upload_endpoint(
     payload_key,
     payload_value,
 ):
-    monkeypatch.setenv("X_API_KEY", "test-key-1234")
+    monkeypatch.setenv("AIHUB_API_KEY", "test-key-1234")
     monkeypatch.chdir(tmp_path)
     requests = []
 
@@ -107,7 +107,7 @@ def test_upload_cli_reports_provider_error_without_exposing_key(
 ):
     source = tmp_path / "large.png"
     source.write_bytes(b"PNGDATA")
-    monkeypatch.setenv("X_API_KEY", "secret-key-1234")
+    monkeypatch.setenv("AIHUB_API_KEY", "secret-key-1234")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         upload,

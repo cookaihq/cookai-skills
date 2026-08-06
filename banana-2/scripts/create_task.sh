@@ -4,16 +4,19 @@ set -euo pipefail
 # Creates a Nano Banana 2 (gemini-3.1-flash-image-preview) task via aihubmax.com
 # and polls until terminal status.
 #
-# Key resolution chain (high -> low):
-#   1. env X_API_KEY
-#   2. $PWD/.env.local             (X_API_KEY=... line; auto-read, no flag needed)
-#   3. $PWD/.env                   (X_API_KEY=... line; auto-read, no flag needed)
+# Key resolution chain (high -> low). Every source accepts AIHUB_API_KEY first,
+# then the deprecated X_API_KEY:
+#   1. env AIHUB_API_KEY
+#   2. $PWD/.env.local             (AIHUB_API_KEY=... line; auto-read, no flag needed)
+#   3. $PWD/.env                   (AIHUB_API_KEY=... line; auto-read, no flag needed)
 #   4. ~/.config/banana-2/.env     (only with --use-local-key)
 #
 # On HTTP 401 (authentication_error) the script falls back to the next key in
 # the chain. 401 does not consume credits. Other errors (402/422/429/5xx,
 # network errors) stop the chain immediately.
 
+KEY_NAME="AIHUB_API_KEY"
+LEGACY_KEY_NAME="X_API_KEY"
 BASE_URL="${AIHUBMAX_BASE_URL:-https://api.aihubmax.com}"
 CREATE_ENDPOINT="/v1/images/generations"
 QUERY_ENDPOINT_PREFIX="/v1/tasks"
@@ -78,8 +81,9 @@ Runtime options:
   --use-local-key   Also try ~/.config/banana-2/.env after env / $PWD .env files
   -h, --help        Show help
 
-Key resolution (high -> low; on HTTP 401 falls back to next):
-  1. env X_API_KEY
+Key resolution (high -> low; on HTTP 401 falls back to next). Each source
+accepts AIHUB_API_KEY first, then the deprecated X_API_KEY:
+  1. env AIHUB_API_KEY
   2. $PWD/.env.local         (auto)
   3. $PWD/.env               (auto)
   4. ~/.config/banana-2/.env  (only with --use-local-key)
@@ -87,7 +91,7 @@ Key resolution (high -> low; on HTTP 401 falls back to next):
 Each key is sent as: Authorization: Bearer <key>
 
 Examples:
-  X_API_KEY=sk-xxx ./create_task.sh --prompt "A futuristic city skyline at dusk, cyberpunk style" --aspect-ratio 16:9 --resolution 1K
+  AIHUB_API_KEY=sk-xxx ./create_task.sh --prompt "A futuristic city skyline at dusk, cyberpunk style" --aspect-ratio 16:9 --resolution 1K
   cd my-project && ./create_task.sh --prompt "..." --aspect-ratio 1:1  # reads from ./.env
   ./create_task.sh --prompt "Replace the background with a tropical beach" \
     --image-url 'https://example.com/photo.jpg' --aspect-ratio match_input_image --resolution 2K --image-search
@@ -272,18 +276,18 @@ validate_resolution() {
   return 1
 }
 
-# Parse X_API_KEY value from a dotenv-style file.
+# Parse a key value for one variable name from a dotenv-style file.
 # Supports: leading whitespace, spaces around `=`, "value" / 'value' / value,
 #   `#` comment lines, blank lines; takes last occurrence if duplicated.
 # NOT supported: shell expansion (${VAR} / $VAR), command substitution ($(...) /
 #   backticks), line continuation (\). These are all treated as literal characters.
 # Returns empty string if not found.
-read_dotenv_key() {
-  local file="$1"
+read_dotenv_var() {
+  local file="$1" name="$2"
   [[ -f "$file" ]] || return 0
-  grep -E '^[[:space:]]*X_API_KEY[[:space:]]*=' "$file" 2>/dev/null \
+  grep -E "^[[:space:]]*${name}[[:space:]]*=" "$file" 2>/dev/null \
     | tail -n 1 \
-    | sed -E 's/^[[:space:]]*X_API_KEY[[:space:]]*=[[:space:]]*//; s/^"(.*)"[[:space:]]*$/\1/; s/^'\''(.*)'\''[[:space:]]*$/\1/; s/[[:space:]]+$//'
+    | sed -E "s/^[[:space:]]*${name}[[:space:]]*=[[:space:]]*//; s/^\"(.*)\"[[:space:]]*\$/\1/; s/^'(.*)'[[:space:]]*\$/\1/; s/[[:space:]]+\$//"
 }
 
 # Mask a key for safe display: head4****tail4 (or fewer chars if very short)
@@ -300,33 +304,52 @@ mask_key() {
 # Parallel arrays for the key chain
 KEY_VALUES=()
 KEY_SOURCES=()
+LEGACY_KEY_USED=0
 
 add_key_candidate() {
-  local v="$1" src="$2"
+  local v="$1" src="$2" is_legacy="${3:-0}"
   [[ -z "$v" ]] && return 0
   # Dedup by value to avoid retrying the same key
   local existing
   for existing in ${KEY_VALUES[@]+"${KEY_VALUES[@]}"}; do
     [[ "$existing" == "$v" ]] && return 0
   done
+  if [[ "$is_legacy" == "1" ]]; then
+    src="$src (${LEGACY_KEY_NAME}, deprecated)"
+    [[ ${#KEY_VALUES[@]} -eq 0 ]] && LEGACY_KEY_USED=1
+  fi
   KEY_VALUES+=("$v")
   KEY_SOURCES+=("$src")
 }
 
+# Add the first of AIHUB_API_KEY / X_API_KEY present in one dotenv file.
+add_key_from_file() {
+  local file="$1" src="$2" v
+  v="$(read_dotenv_var "$file" "$KEY_NAME")"
+  if [[ -n "$v" ]]; then
+    add_key_candidate "$v" "$src" 0
+    return 0
+  fi
+  v="$(read_dotenv_var "$file" "$LEGACY_KEY_NAME")"
+  add_key_candidate "$v" "$src" 1
+}
+
 collect_keys() {
-  local v
-  v="${X_API_KEY:-}"
-  add_key_candidate "$v" "env X_API_KEY"
+  if [[ -n "${AIHUB_API_KEY:-}" ]]; then
+    add_key_candidate "$AIHUB_API_KEY" "env $KEY_NAME" 0
+  elif [[ -n "${X_API_KEY:-}" ]]; then
+    add_key_candidate "$X_API_KEY" "env" 1
+  fi
 
-  v="$(read_dotenv_key "$PWD/.env.local")"
-  add_key_candidate "$v" "$PWD/.env.local"
-
-  v="$(read_dotenv_key "$PWD/.env")"
-  add_key_candidate "$v" "$PWD/.env"
+  add_key_from_file "$PWD/.env.local" "$PWD/.env.local"
+  add_key_from_file "$PWD/.env" "$PWD/.env"
 
   if [[ $USE_LOCAL_KEY -eq 1 ]]; then
-    v="$(read_dotenv_key "$HOME/.config/banana-2/.env")"
-    add_key_candidate "$v" "~/.config/banana-2/.env"
+    add_key_from_file "$HOME/.config/banana-2/.env" "~/.config/banana-2/.env"
+  fi
+
+  if [[ $LEGACY_KEY_USED -eq 1 ]]; then
+    echo "⚠️ ${LEGACY_KEY_NAME} 已废弃，请改用 ${KEY_NAME}（本次仍按 ${LEGACY_KEY_NAME} 读取，来源：${KEY_SOURCES[0]}）" >&2
   fi
 }
 
@@ -393,7 +416,7 @@ is_positive_int "$MAX_ATTEMPTS" || { echo "Error: --max-attempts must be a posit
 collect_keys
 if [[ ${#KEY_VALUES[@]} -eq 0 ]]; then
   echo "Error: no API key found in any of:" >&2
-  echo "  - env X_API_KEY" >&2
+  echo "  - env $KEY_NAME" >&2
   echo "  - $PWD/.env.local" >&2
   echo "  - $PWD/.env" >&2
   if [[ $USE_LOCAL_KEY -eq 1 ]]; then

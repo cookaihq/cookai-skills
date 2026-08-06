@@ -38,13 +38,15 @@ description: Use when the user asks to generate, render, or recreate an image �
 
 **读取优先级（从高到低）**：
 
-1. 本轮对话显式提供的 key（通过 `X_API_KEY=...` 注入给脚本）
-2. 环境变量 `X_API_KEY`
-3. `$PWD/.env.local` 中的 `X_API_KEY=...`（**自动读取**，无需 flag）
-4. `$PWD/.env` 中的 `X_API_KEY=...`（**自动读取**，无需 flag）
+1. 本轮对话显式提供的 key（通过 `AIHUB_API_KEY=...` 注入给脚本）
+2. 环境变量 `AIHUB_API_KEY`
+3. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+4. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
 5. `~/.config/image-2/.env`（仅 `--use-local-key` 时读）
 
-环境变量名 `X_API_KEY` 是历史延续命名；值通过 `Authorization: Bearer <key>` 提交给 aihubmax.com。
+值通过 `Authorization: Bearer <key>` 提交给 aihubmax.com。
+
+**旧变量名 `X_API_KEY` 仍然可用**：上面每一层都先找 `AIHUB_API_KEY`，找不到再找 `X_API_KEY`；命中旧名时会在日志打一行废弃提示。已有配置无需立即改动，但新配置请一律用 `AIHUB_API_KEY`。
 
 **401 自动 fallback**：
 
@@ -69,22 +71,22 @@ echo 'sk-xxx' | ./scripts/set_key.sh --stdin
 **会话级使用（推荐）**：
 
 ```bash
-export X_API_KEY='sk-xxx'
+export AIHUB_API_KEY='sk-xxx'
 ```
 
 **项目级使用**：在项目根目录建 `.env` 或 `.env.local`：
 
 ```ini
 # .env.local（不入版本控制）
-X_API_KEY=sk-xxx
+AIHUB_API_KEY=sk-xxx
 ```
 
 `.env` / `.env.local` 解析规则（极简，不等同于 shell）：
 
 - 支持：`KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首的注释行、空行
-- 文件中 `X_API_KEY` 出现多次时取**最后一次**
+- 文件中 `AIHUB_API_KEY` 出现多次时取**最后一次**
 - **不支持** shell 展开（`${OTHER}` / `$OTHER`）、命令替换（`$(...)` / 反引号）、续行符 `\` ——这些都会被当作字面字符串
-- 只识别变量名 `X_API_KEY`，不识别 `OPENAI_API_KEY` / `FOXAPI_KEY` 等其他命名
+- 只识别变量名 `AIHUB_API_KEY`，不识别 `OPENAI_API_KEY` / `AIHUBMAX_API_KEY` 等其他命名（旧名 `X_API_KEY` 仍兼容）
 
 ## Required & Optional Parameters
 
@@ -154,30 +156,30 @@ X_API_KEY=sk-xxx
 
 ```bash
 # 文生图（默认 1024x1024）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "生成科技风产品海报" \
   --resolution 1920x1080
 
 # 图生图（多张参考图重复传 --image-url，最多按 aihubmax.com 实际上限）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "基于参考图重绘成极简海报" \
   --image-url 'https://example.com/a.png' \
   --image-url 'https://example.com/b.png' \
   --resolution 1024x1536
 
 # 精简版（仅 3 种预设、num_outputs 必须 1）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --model gpt-image-2-limit \
   --prompt "极简产品图" \
   --resolution 1536x1024
 
 # 自定义分辨率（仅完整版）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "宽屏 banner" \
   --resolution 2400x800
 
 # 保存到指定目录 + 指定文件名（用户在上下文中明确要求时）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "Logo 设计" \
   --resolution 1024x1024 \
   --output-dir ~/Desktop \
@@ -185,11 +187,11 @@ X_API_KEY='sk-xxx' ./scripts/create_task.sh \
 
 # 用环境变量统一指定保存目录（适合反复生成场景）
 IMAGE_2_OUTPUT_DIR=~/Pictures/image-2 \
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "宣传图" --resolution 1920x1080
 
 # 只要 URL，不下载
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "..." --resolution 1024x1024 --no-save
 ```
 

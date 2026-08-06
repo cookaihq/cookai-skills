@@ -60,7 +60,7 @@ npx skills add <your-org>/<your-repo> --skill image-2 -a claude-code
 
 ```bash
 # 1. 在当前项目根目录配置 API Key
-echo 'X_API_KEY=sk-xxx' >> .env
+echo 'AIHUB_API_KEY=sk-xxx' >> .env
 
 # 2. 启动 Claude Code，发起对话
 你：帮我生成一张 16:9 的科技感产品海报，prompt 是「未来感无线耳机，霓虹光效，电影构图」
@@ -74,15 +74,15 @@ Agent 自动识别意图 → 调用脚本 → 轮询任务 → 下载到 `./2026
 
 ### API Key
 
-环境变量名固定为 **`X_API_KEY`**（值会作为 `Authorization: Bearer <key>` 提交）。
+环境变量名固定为 **`AIHUB_API_KEY`**（值会作为 `Authorization: Bearer <key>` 提交）。
 
 读取优先级（高 → 低）：
 
 | 优先级 | 来源 | 触发方式 |
 |---|---|---|
-| 1 | shell 环境变量 `X_API_KEY` | 已 `export` |
-| 2 | `$PWD/.env.local` 中的 `X_API_KEY=...` | 自动 |
-| 3 | `$PWD/.env` 中的 `X_API_KEY=...` | 自动 |
+| 1 | shell 环境变量 `AIHUB_API_KEY` | 已 `export` |
+| 2 | `$PWD/.env.local` 中的 `AIHUB_API_KEY=...` | 自动 |
+| 3 | `$PWD/.env` 中的 `AIHUB_API_KEY=...` | 自动 |
 | 4 | `~/.config/image-2/.env` | 加 `--use-local-key` 启用 |
 
 **HTTP 401 自动 fallback**：如果上一层 key 调用 API 返回 401（认证失败），会自动尝试下一层；其他错误（402/422/429/5xx）立即停止。
@@ -131,11 +131,11 @@ echo 'sk-xxx' | ./scripts/set_key.sh --stdin
 
 ```bash
 # 最小调用：文生图默认参数
-X_API_KEY=sk-xxx ./scripts/create_task.sh \
+AIHUB_API_KEY=sk-xxx ./scripts/create_task.sh \
   --prompt "未来城市夜景海报" --resolution 1920x1080
 
 # 图生图 + 指定保存位置
-X_API_KEY=sk-xxx ./scripts/create_task.sh \
+AIHUB_API_KEY=sk-xxx ./scripts/create_task.sh \
   --prompt "极简风格重绘" \
   --image-url https://example.com/ref.png \
   --resolution 1024x1536 \
@@ -210,11 +210,11 @@ image-2/
 
 | 现象 | 处理 |
 |---|---|
-| `Error: no API key found in any of:` | 在 `.env` 加 `X_API_KEY=...` 或 `export X_API_KEY=sk-xxx` |
+| `Error: no API key found in any of:` | 在 `.env` 加 `AIHUB_API_KEY=...` 或 `export AIHUB_API_KEY=sk-xxx` |
 | 所有 key 都返回 HTTP 401 | 去 [aihubmax.com](https://aihubmax.com) 控制台确认 key 未过期、未禁用、有调用 image API 的权限 |
 | HTTP 402 `insufficient_quota` | 余额不足，去 aihubmax.com 充值 |
 | HTTP 422 `validation_error` | 检查 `resolution`（精简版只支持 3 种）、`num_outputs`（精简版只能 1）、互斥字段（`mask_url` vs `background`） |
-| 长时间停留 `processing` 直到超时 | 用返回的 task_id 手动查询：`curl https://api.aihubmax.com/v1/tasks/{task_id}?sync_upstream=true -H "Authorization: Bearer $X_API_KEY"` |
+| 长时间停留 `processing` 直到超时 | 用返回的 task_id 手动查询：`curl https://api.aihubmax.com/v1/tasks/{task_id}?sync_upstream=true -H "Authorization: Bearer $AIHUB_API_KEY"` |
 | 报错 `status=completed but results empty` 后继续轮询 | 这是脚本对上游竞态的保护，无需处理；几秒内会拿到 `results` |
 
 ## License

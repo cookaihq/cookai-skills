@@ -9,7 +9,7 @@ usage() {
 Usage:
   set_key.sh                # interactive input
   set_key.sh --stdin        # read key from stdin
-  set_key.sh "<x-api-key>"   # pass as arg (less secure)
+  set_key.sh "<aihub-api-key>"   # pass as arg (less secure)
 EOF
 }
 
@@ -29,7 +29,7 @@ elif [[ -n "${1:-}" ]]; then
 fi
 
 if [[ "$MODE" == "interactive" ]]; then
-  read -r -s -p "Enter X_API_KEY: " KEY
+  read -r -s -p "Enter AIHUB_API_KEY: " KEY
   echo
 elif [[ "$MODE" == "stdin" ]]; then
   IFS= read -r KEY
@@ -42,10 +42,10 @@ fi
 
 mkdir -p "$CONFIG_DIR"
 cat >"$ENV_FILE" <<EOF
-X_API_KEY=$KEY
+AIHUB_API_KEY=$KEY
 EOF
 chmod 600 "$ENV_FILE"
 
 MASKED="${KEY:0:4}****${KEY: -4}"
-echo "Saved X_API_KEY to $ENV_FILE"
+echo "Saved AIHUB_API_KEY to $ENV_FILE"
 echo "Key preview: $MASKED"

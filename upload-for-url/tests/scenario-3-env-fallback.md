@@ -3,8 +3,8 @@
 **目标**：进程 env 里的 key 返回 401 时，自动尝试 `$PWD/.env.local` 里的下一把 key。
 
 ## Setup
-- `export X_API_KEY=sk-invalid`（会 401）
-- `$PWD/.env.local` 内有一把有效 `X_API_KEY=sk-valid`
+- `export AIHUB_API_KEY=sk-invalid`（会 401）
+- `$PWD/.env.local` 内有一把有效 `AIHUB_API_KEY=sk-valid`
 
 ## Expected (with skill)
 - 先用 sk-invalid → 401 → 自动换 sk-valid → 成功

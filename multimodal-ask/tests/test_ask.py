@@ -9,7 +9,7 @@ def _models_ok(*a, **k):
 
 
 def test_main_text_only_success(monkeypatch, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     monkeypatch.setattr(ask, "fetch_models", _models_ok)
     monkeypatch.setattr(ask, "submit_llm", lambda body, keys, **k: ({"id": "task-llm-1"}, "k1"))
     monkeypatch.setattr(ask, "poll_task", lambda tid, key, **k: {
@@ -22,21 +22,21 @@ def test_main_text_only_success(monkeypatch, capsys):
 
 
 def test_main_no_key_returns_2(monkeypatch, tmp_path):
-    monkeypatch.delenv("X_API_KEY", raising=False)
+    monkeypatch.delenv("AIHUB_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
     code = ask.main(["--model", "gpt-5.5", "--prompt", "hi"])
     assert code == 2
 
 
 def test_main_no_prompt_no_media_returns_2(monkeypatch, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     code = ask.main(["--model", "gpt-5.5"])  # neither prompt nor media
     assert code == 2
     assert "至少" in capsys.readouterr().err
 
 
 def test_main_capability_precheck_fails_returns_3_without_submit(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     monkeypatch.setattr(ask, "fetch_models", _models_ok)
 
     def _boom(*a, **k):
@@ -53,7 +53,7 @@ def test_main_capability_precheck_fails_returns_3_without_submit(monkeypatch, tm
 
 
 def test_main_local_media_uploaded_then_submitted(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     monkeypatch.setattr(ask, "fetch_models", _models_ok)
     monkeypatch.setattr(ask, "upload_local_file", lambda path, keys, **k: "https://files/x.png")
     captured = {}
@@ -74,7 +74,7 @@ def test_main_local_media_uploaded_then_submitted(monkeypatch, tmp_path, capsys)
 
 
 def test_main_failed_task_returns_1(monkeypatch, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     monkeypatch.setattr(ask, "fetch_models", _models_ok)
     monkeypatch.setattr(ask, "submit_llm", lambda body, keys, **k: ({"id": "t"}, "k1"))
     monkeypatch.setattr(ask, "poll_task", lambda tid, key, **k: {
@@ -85,7 +85,7 @@ def test_main_failed_task_returns_1(monkeypatch, capsys):
 
 
 def test_main_upload_failure_returns_1(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     monkeypatch.setattr(ask, "fetch_models", _models_ok)
 
     def _raise(path, keys, **k):
@@ -100,7 +100,7 @@ def test_main_upload_failure_returns_1(monkeypatch, tmp_path, capsys):
 
 
 def test_main_youtube_passthrough_normalized_no_upload(monkeypatch, capsys):
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
     monkeypatch.setattr(ask, "fetch_models", _models_ok)
 
     def _no_upload(*a, **k):
@@ -126,7 +126,7 @@ def test_main_youtube_passthrough_normalized_no_upload(monkeypatch, capsys):
 
 def test_main_precheck_urlerror_proceeds(monkeypatch, capsys):
     import urllib.error
-    monkeypatch.setenv("X_API_KEY", "sk-abcd1234efgh")
+    monkeypatch.setenv("AIHUB_API_KEY", "sk-abcd1234efgh")
 
     def _raise(*a, **k):
         raise urllib.error.URLError("net down")

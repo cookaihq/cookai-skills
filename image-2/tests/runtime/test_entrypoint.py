@@ -12,7 +12,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "create_task.sh"
 class EntrypointTests(unittest.TestCase):
     def run_script(self, *arguments):
         environment = dict(os.environ)
-        environment.pop("X_API_KEY", None)
+        environment.pop("AIHUB_API_KEY", None)
         environment.pop("AIHUBMAX_BASE_URL", None)
         with tempfile.TemporaryDirectory() as cwd:
             return subprocess.run(

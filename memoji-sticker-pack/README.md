@@ -2,7 +2,7 @@
 
 从**一张人物照片**生成一套 **Apple Memoji 风格（拟我表情）** 的表情贴纸包：先把照片转成一张「基准 Memoji」头像锁定长相，再以它为参考并发生成多个表情（默认 16 个），输出**透明底 PNG** + 可浏览的 `index.html` 画廊。
 
-本 skill 用 [`image-2`](../image-2/)（`gpt-image-2`）的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），并用自身 `scripts/upload.py` 把参考图上传到 foxapi 换成公网 URL。**参考图统一走「上传取 URL」，不再内联 base64**——传给生成接口的 `image_urls` 全是 foxapi CDN 链接。
+本 skill 用 [`image-2`](../image-2/)（`gpt-image-2`）的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），并用自身 `scripts/upload.py` 把参考图上传到 aihubmax 换成公网 URL。**参考图统一走「上传取 URL」，不再内联 base64**——传给生成接口的 `image_urls` 全是 aihubmax CDN 链接。
 
 ## 效果
 
@@ -14,7 +14,7 @@
 
 ## 工作原理
 
-1. **预处理 + 上传**：本地照片用 `sips`（缺失回退 `ffmpeg`）缩到 ≤768px，再经内置上传器上传到 foxapi 换成公网 URL（不再内联 base64）。
+1. **预处理 + 上传**：本地照片用 `sips`（缺失回退 `ffmpeg`）缩到 ≤768px，再经内置上传器上传到 aihubmax 换成公网 URL（不再内联 base64）。
 2. **基准 Memoji**：`gpt-image-2` 图生图 → `base.png`，锁定人物长相与风格。
 3. **基准图上传**：`base.png` 缩到 ≤640px 上传换 URL（上传 1 次，全套表情复用该 URL）。
 4. **逐表情（并发）**：以基准图 URL 为参考、只改表情/动作，**并发提交** N 张（墙钟≈单张耗时，而非 N×）。每张失败自动重试一次再跳过。
@@ -25,7 +25,7 @@
 
 - 需要生成图片时，安装 [`image-2`](../image-2/) skill（脚本按 `~/.claude/skills/image-2*/scripts/create_task.sh` 定位）。
 - 上传实现已内置，无需安装额外上传 Skill。只有 `--base-url ... --mode single` 完全不需要 image-2。
-- foxapi.cc 的 key（生成与上传共用 `X_API_KEY`；`--use-local-key` 时 image-2 读 `~/.config/image-2/.env`，内置上传器读 `~/.config/memoji-sticker-pack/.env`，最省事是放进程 env 或 `$PWD/.env`）。
+- aihubmax.com 的 key（生成与上传共用 `AIHUB_API_KEY`；`--use-local-key` 时 image-2 读 `~/.config/image-2/.env`，内置上传器读 `~/.config/memoji-sticker-pack/.env`，最省事是放进程 env 或 `$PWD/.env`）。
 - Python3 + `Pillow` + `numpy`（用于抠图）；macOS `sips`（或 `ffmpeg`）用于缩图。
 
 ## 用法
@@ -65,7 +65,7 @@ bash scripts/gen_pack.sh --image "./me.jpg" \
 
 不复用基准图时，一套 pack 无重试 = **1（基准）+ N（表情）** 次 `gpt-image-2` 调用（默认 17 次）；默认每次失败生成最多重试一次，因此最大 `2 + 2N`。`single` 无重试 1 次、最大 2 次。另有**文件上传调用**（转存参考图，非生成调用）：pack 2 次、single 1 次。
 
-使用 `--base-url` 复用基准图时，pack 无重试 = N 次生成、最大 2N 次、上传 1 次；single 不生成也不上传。运行前请务必用 `--plan` 获取本次准确计数并向用户确认——**会消耗 foxapi 积分**。
+使用 `--base-url` 复用基准图时，pack 无重试 = N 次生成、最大 2N 次、上传 1 次；single 不生成也不上传。运行前请务必用 `--plan` 获取本次准确计数并向用户确认——**会消耗 aihubmax 积分**。
 
 ## 输出结构
 

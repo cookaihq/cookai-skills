@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 from collections import namedtuple
 
-DEFAULT_BOUNDARY = "----foxapiUploadBoundaryXyZ"
+DEFAULT_BOUNDARY = "----aihubmaxUploadBoundaryXyZ"
 
 # api.aihubmax.com sits behind Cloudflare, which rejects urllib's default
 # "Python-urllib/x.y" User-Agent with HTTP 403 / "error code: 1010" (banned
@@ -69,7 +69,7 @@ def call_with_key_fallback(keys: list, attempt) -> tuple[Resp, str]:
     401 (auth error; 401 does not consume credits). Any other status (or success)
     stops immediately. Returns (Resp, used_key). Raises ValueError if no keys."""
     if not keys:
-        raise ValueError("no API key available (X_API_KEY not found)")
+        raise ValueError("no API key available (AIHUB_API_KEY not found)")
     last = None
     for k in keys:
         last = attempt(k)

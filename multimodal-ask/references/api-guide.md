@@ -1,6 +1,6 @@
 # multimodal-ask — API 参考
 
-Server: `https://api.aihubmax.com` ｜ Auth: `Authorization: Bearer <X_API_KEY>`（`sk-...`）。统一 `llm-custom` 协议，异步：提交 → 轮询任务。
+Server: `https://api.aihubmax.com` ｜ Auth: `Authorization: Bearer <AIHUB_API_KEY>`（`sk-...`）。统一 `llm-custom` 协议，异步：提交 → 轮询任务。
 
 ## 1. 模型清单（能力预校验，不消耗积分）
 

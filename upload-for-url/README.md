@@ -1,9 +1,9 @@
 # upload-for-url
 
-把本地文件 / 远程 URL / base64 通过 foxapi 文件接口托管成一个 **72 小时公网 URL**，供只接受 URL 的 AI 接口消费。默认网关为 `https://api.foxapi.cc`。
+把本地文件 / 远程 URL / base64 通过 aihubmax 文件接口托管成一个 **72 小时公网 URL**，供只接受 URL 的 AI 接口消费。默认网关为 `https://api.aihubmax.com`。
 
 ```bash
-X_API_KEY='sk-xxx' python3 scripts/upload.py --file ./clip.mp4   # → stdout 打印一行 URL
+AIHUB_API_KEY='sk-xxx' python3 scripts/upload.py --file ./clip.mp4   # → stdout 打印一行 URL
 ```
 
 - 三种来源：`--file`（本地，multipart）/ `--base64`（base64 或 data URL）/ `--url`（远程转存）

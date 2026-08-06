@@ -24,6 +24,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 
 DEFAULT_BASE_URL = "https://api.aihubmax.com"
+# Canonical key variable name; `X_API_KEY` is the historical name still accepted
+# as a fallback in every source.
+KEY_NAME = "AIHUB_API_KEY"
+LEGACY_KEY_NAME = "X_API_KEY"
+KEY_NAMES = (KEY_NAME, LEGACY_KEY_NAME)
 CREATE_ENDPOINT = "/v1/images/generations"
 QUERY_ENDPOINT_PREFIX = "/v1/tasks"
 MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -123,6 +128,7 @@ class DownloadRequest:
 class KeyCandidate:
     value: str
     source: str
+    legacy: bool = False
 
 
 @dataclass(frozen=True)
@@ -443,25 +449,30 @@ def parse_response_object(body: bytes) -> dict[str, Any]:
     return value
 
 
-def _parse_dotenv_key(path: Path) -> str:
+def _parse_dotenv_key(path: Path) -> tuple[str, str]:
+    """Return (value, var_name) for the first key name present in the file,
+    canonical name before the legacy one; ("", "") when neither is set."""
     if not path.exists():
-        return ""
+        return "", ""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
         raise ConfigurationProblem(f"cannot read {path}") from exc
-    selected = ""
+    selected: dict[str, str] = {}
     for line in lines:
         if re.match(r"^[ \t]*#", line) or not line.strip():
             continue
-        match = re.match(r"^[ \t]*X_API_KEY[ \t]*=[ \t]*(.*)$", line)
+        match = re.match(r"^[ \t]*(AIHUB_API_KEY|X_API_KEY)[ \t]*=[ \t]*(.*)$", line)
         if match is None:
             continue
-        value = match.group(1).rstrip()
+        value = match.group(2).rstrip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
-        selected = value
-    return selected
+        selected[match.group(1)] = value
+    for name in KEY_NAMES:
+        if selected.get(name):
+            return selected[name], name
+    return "", ""
 
 
 def collect_keys(
@@ -473,16 +484,26 @@ def collect_keys(
     candidates: list[KeyCandidate] = []
     seen: set[str] = set()
 
-    def add(value: str, source: str) -> None:
+    def add(value: str, source: str, var_name: str) -> None:
         if value and value not in seen:
             seen.add(value)
-            candidates.append(KeyCandidate(value, source))
+            legacy = var_name == LEGACY_KEY_NAME
+            label = f"{source} ({LEGACY_KEY_NAME}, deprecated)" if legacy else source
+            candidates.append(KeyCandidate(value, label, legacy))
 
-    add(environ.get("X_API_KEY", ""), "env X_API_KEY")
-    add(_parse_dotenv_key(cwd / ".env.local"), f"{cwd}/.env.local")
-    add(_parse_dotenv_key(cwd / ".env"), f"{cwd}/.env")
+    def add_from_file(path: Path, source: str) -> None:
+        value, var_name = _parse_dotenv_key(path)
+        add(value, source, var_name)
+
+    for name in KEY_NAMES:
+        env_value = environ.get(name, "")
+        if env_value:
+            add(env_value, f"env {name}" if name == KEY_NAME else "env", name)
+            break
+    add_from_file(cwd / ".env.local", f"{cwd}/.env.local")
+    add_from_file(cwd / ".env", f"{cwd}/.env")
     if use_local_key:
-        add(_parse_dotenv_key(home / ".config" / "image-2" / ".env"), "~/.config/image-2/.env")
+        add_from_file(home / ".config" / "image-2" / ".env", "~/.config/image-2/.env")
     return candidates
 
 
@@ -920,6 +941,11 @@ def _log_summary(
     logger.info("- key chain (high to low):")
     for index, key in enumerate(keys, start=1):
         logger.info(f"    {index}. {key.source} ({mask_key(key.value)})")
+    if keys and keys[0].legacy:
+        logger.info(
+            f"⚠️ {LEGACY_KEY_NAME} 已废弃，请改用 {KEY_NAME}"
+            f"（本次仍按 {LEGACY_KEY_NAME} 读取，来源：{keys[0].source}）"
+        )
     logger.info(f"- poll interval: {namespace.poll_interval}s")
     logger.info(f"- max attempts: {namespace.max_attempts}")
     logger.info("- save: disabled (--no-save)" if namespace.no_save else f"- save directory: {output_dir}")

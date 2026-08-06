@@ -5,7 +5,7 @@ import os
 import sys
 import urllib.error
 
-from config import mask_key, resolve_api_keys
+from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates
 from dedup import dedup_key  # noqa: F401  (exposed for callers/tests; same-round guard is Agent-side)
 from media import (CAPABILITY_BY_KIND, classify_source, normalize_youtube, size_warning)
 from messages import build_messages
@@ -72,11 +72,15 @@ def main(argv=None) -> int:
         print("需要至少提供 --prompt 或一个媒体（--image/--video/--audio/--file）", file=sys.stderr)
         return 2
 
-    keys = resolve_api_keys(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
-    if not keys:
-        print("未找到 X_API_KEY（检查进程 env / $PWD/.env.local / $PWD/.env / --use-local-key）",
+    candidates = resolve_api_key_candidates(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
+    if not candidates:
+        print("未找到 %s（检查进程 env / $PWD/.env.local / $PWD/.env / --use-local-key）" % KEY_NAME,
               file=sys.stderr)
         return 2
+    notice = legacy_key_notice(candidates)
+    if notice:
+        print(notice, file=sys.stderr)
+    keys = [c.value for c in candidates]
 
     needed_caps = sorted({CAPABILITY_BY_KIND[kind] for kind, _ in raw_media})
 

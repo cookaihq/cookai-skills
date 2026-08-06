@@ -173,7 +173,7 @@ class ImageToS3HandoffTests(unittest.TestCase):
             download_transport=download,
             resolver=lambda host, port: ["8.8.8.8"],
             sleeper=lambda seconds: None,
-            environ={"X_API_KEY": "test-handoff-image-key"},
+            environ={"AIHUB_API_KEY": "test-handoff-image-key"},
             cwd=project,
             home=project / "home",
             stdout=stdout,

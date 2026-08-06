@@ -12,7 +12,7 @@ Provider docs:
 
 - Header: `Authorization: Bearer <YOUR_API_KEY>` (required)
 - The local skill resolves the key via the following chain (high → low) and forwards it as a Bearer token:
-  1. env `X_API_KEY`
+  1. env `AIHUB_API_KEY`
   2. `$PWD/.env.local` (auto)
   3. `$PWD/.env` (auto)
   4. `~/.config/image-2/.env` (only with `--use-local-key`)
@@ -66,7 +66,7 @@ Constraints:
 
 ```bash
 curl -X POST 'https://api.aihubmax.com/v1/images/generations' \
-  -H "Authorization: Bearer $X_API_KEY" \
+  -H "Authorization: Bearer $AIHUB_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "gpt-image-2",
@@ -107,7 +107,7 @@ Status enum at creation: `pending` / `processing` / `completed` / `failed` (typi
 
 ```bash
 curl -X GET "https://api.aihubmax.com/v1/tasks/${TASK_ID}?sync_upstream=true" \
-  -H "Authorization: Bearer $X_API_KEY"
+  -H "Authorization: Bearer $AIHUB_API_KEY"
 ```
 
 ### Query Response

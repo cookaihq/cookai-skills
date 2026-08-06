@@ -36,29 +36,29 @@ description: Use when the user names a specific model and wants it to generate t
 
 ## Auth & Key Handling
 
-与 `upload-for-url` 一致：`X_API_KEY` 分层读取（进程 env → `$PWD/.env.local` → `$PWD/.env` → `~/.config/multimodal-ask/.env` 仅 `--use-local-key`）；401 触发 key 链 fallback；key 一律掩码。首次配置：`./scripts/set_key.sh`。
+与 `upload-for-url` 一致：`AIHUB_API_KEY` 分层读取（进程 env → `$PWD/.env.local` → `$PWD/.env` → `~/.config/multimodal-ask/.env` 仅 `--use-local-key`）；401 触发 key 链 fallback；key 一律掩码。每一层都先找 `AIHUB_API_KEY`，找不到再找旧名 `X_API_KEY`（仍兼容，命中会打废弃提示）。首次配置：`./scripts/set_key.sh`。
 
 ## Usage
 
 ```bash
 # 纯文本，指定模型
-X_API_KEY='sk-xxx' python3 scripts/ask.py --model gpt-5.5 --prompt "用一句话解释相对论"
+AIHUB_API_KEY='sk-xxx' python3 scripts/ask.py --model gpt-5.5 --prompt "用一句话解释相对论"
 
 # 视频理解（本地文件，自动上传换 URL）
-X_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash --video ./clip.mp4 --prompt "这段视频讲了什么"
+AIHUB_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash --video ./clip.mp4 --prompt "这段视频讲了什么"
 
 # 音频转写
-X_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash --audio ./talk.mp3 --prompt "转写并总结"
+AIHUB_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash --audio ./talk.mp3 --prompt "转写并总结"
 
 # YouTube（仅 Gemini 家族；Shorts 会自动改写为 watch?v=）
-X_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash --video 'https://youtu.be/abc123' --prompt "概述"
+AIHUB_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash --video 'https://youtu.be/abc123' --prompt "概述"
 
 # 混合媒体（图 + 视频 + 文档）单次提问
-X_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash \
+AIHUB_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash \
   --image ./a.png --video ./b.mp4 --file ./c.pdf --prompt "汇总这些素材的核心信息"
 
 # 文档理解 + claude（claude 家族 max_tokens 必填，脚本会自动补 1024）
-X_API_KEY='sk-xxx' python3 scripts/ask.py --model claude-opus-4-7 --file ./report.pdf --prompt "提炼要点"
+AIHUB_API_KEY='sk-xxx' python3 scripts/ask.py --model claude-opus-4-7 --file ./report.pdf --prompt "提炼要点"
 ```
 
 **输出约定**：成功时 **stdout 打印模型的文本回答**，stderr 打印完成摘要（model / task_id / 掩码 key）+ 任何软警告。失败时 stderr 打印原因，退出码非 0。
@@ -69,7 +69,7 @@ X_API_KEY='sk-xxx' python3 scripts/ask.py --model claude-opus-4-7 --file ./repor
 |---|---|
 | 0 | 成功，stdout 为模型文本 |
 | 1 | 提交/轮询/上传失败、任务 failed、或网络/超时（stderr 有原因 + task_id） |
-| 2 | 未找到 X_API_KEY，或未提供 --prompt 及任何媒体（缺必需输入） |
+| 2 | 未找到 AIHUB_API_KEY，或未提供 --prompt 及任何媒体（缺必需输入） |
 | 3 | 能力预校验失败（模型不可用或不支持所需媒体类型；stderr 列出可用/支持模型） |
 
 HTTP/任务语义：401 鉴权（key fallback）｜422 `no_available_model`/`model_not_support_capability`/`model_rule_violation`/`invalid_param`｜429 限流（不自动重试）｜5xx 服务/上游异常｜任务 `failed` 回传 `error`。思考模型的 `reasoning_content` 不累积进结果，content 可能为空串（会如实说明）。

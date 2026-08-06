@@ -7,10 +7,10 @@ import sys
 import urllib.error
 
 from client import call_with_key_fallback, encode_multipart, http_request
-from config import mask_key, resolve_api_keys
+from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates
 
 
-BASE_URL = "https://api.foxapi.cc"
+BASE_URL = "https://api.aihubmax.com"
 CONFIG_DIR = os.path.expanduser("~/.config/memoji-sticker-pack")
 
 
@@ -133,13 +133,17 @@ def parse_args(argv):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    keys = resolve_api_keys(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
-    if not keys:
+    candidates = resolve_api_key_candidates(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
+    if not candidates:
         print(
-            "未找到 X_API_KEY（检查进程 env / $PWD/.env.local / $PWD/.env / --use-local-key）",
+            "未找到 %s（检查进程 env / $PWD/.env.local / $PWD/.env / --use-local-key）" % KEY_NAME,
             file=sys.stderr,
         )
         return 2
+    notice = legacy_key_notice(candidates)
+    if notice:
+        print(notice, file=sys.stderr)
+    keys = [c.value for c in candidates]
 
     auto_cleanup = not args.no_auto_cleanup
     if args.file is not None:

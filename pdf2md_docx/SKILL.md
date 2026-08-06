@@ -38,14 +38,14 @@ description: Use when the user wants to convert a PDF into Markdown / LaTeX / DO
 
 **读取优先级（从高到低）**，按值去重，逐个尝试：
 
-1. 进程 env `X_API_KEY`（本轮显式注入 `X_API_KEY=... python3 ...`）
-2. `$PWD/.env.local` 中的 `X_API_KEY=...`（**自动读取**，不向上递归）
-3. `$PWD/.env` 中的 `X_API_KEY=...`（**自动读取**，不向上递归）
+1. 进程 env `AIHUB_API_KEY`（本轮显式注入 `AIHUB_API_KEY=... python3 ...`）
+2. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，不向上递归）
+3. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，不向上递归）
 4. `~/.config/pdf2md_docx/.env`（**仅 `--use-local-key`** 时读）
 
 **401 自动 fallback**：某层 key 调用返回 HTTP 401（`authentication_error`）时自动尝试下一层。401 不消耗积分，安全。其他错误码（402/422/429/5xx）和网络错误**不**触发 fallback，立即返回交用户决定。
 
-`.env` / `.env.local` 解析极简、非 shell：支持 `KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首注释、空行；同名取最后一次；**不支持** `${X}` / `$(...)` / 续行符。只识别 `X_API_KEY`。key 日志一律 `head4****tail4` 掩码。
+`.env` / `.env.local` 解析极简、非 shell：支持 `KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首注释、空行；同名取最后一次；**不支持** `${X}` / `$(...)` / 续行符。只识别 `AIHUB_API_KEY`（旧名 `X_API_KEY` 仍兼容）。key 日志一律 `head4****tail4` 掩码。
 
 首次配置（可选）：`./scripts/set_key.sh`（或 `echo 'sk-xxx' | ./scripts/set_key.sh --stdin`）。
 
@@ -78,23 +78,23 @@ description: Use when the user wants to convert a PDF into Markdown / LaTeX / DO
 
 ```bash
 # 本地 PDF → Markdown（默认），自动统计页数 + 上传 + 解压到 {时间戳}-{标签}/
-X_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./report.pdf
+AIHUB_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./report.pdf
 
 # 本地 PDF → DOCX，合并跨页表格
-X_API_KEY='sk-xxx' python3 scripts/convert.py \
+AIHUB_API_KEY='sk-xxx' python3 scripts/convert.py \
   --pdf ./report.pdf --convert-mode docx --merge-cross-page-forms
 
 # 已有公开 URL（远程无法自动统计页数，必须传 --page-count）
-X_API_KEY='sk-xxx' python3 scripts/convert.py \
+AIHUB_API_KEY='sk-xxx' python3 scripts/convert.py \
   --pdf-url 'https://example.com/a.pdf' --page-count 12 --convert-mode md
 
 # 指定输出根目录 + 文件夹标签 + 保留 ZIP
-X_API_KEY='sk-xxx' python3 scripts/convert.py \
+AIHUB_API_KEY='sk-xxx' python3 scripts/convert.py \
   --pdf ./paper.pdf --convert-mode tex --formula-mode dollar \
   --output-dir ~/Documents/converted --label 论文 --keep-zip
 
 # 只下载 ZIP，不解压
-X_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./a.pdf --no-extract
+AIHUB_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./a.pdf --no-extract
 ```
 
 **输出约定**：成功时 **stdout 只打印一行结果路径**（解压文件夹，或 `--no-extract` 时的 ZIP 路径），便于其他脚本解析；所有日志（含掩码 key、轮询进度、文件清单、过期提醒）走 stderr。
@@ -105,7 +105,7 @@ X_API_KEY='sk-xxx' python3 scripts/convert.py --pdf ./a.pdf --no-extract
 |---|---|
 | 0 | 成功，stdout 为输出路径 |
 | 1 | 上传 / 创建 / 下载 / 解压失败、本地 PDF 不可读、网络错误（stderr 有原因） |
-| 2 | 未找到 X_API_KEY；或任务 `failed`；或缺 `--page-count`（远程 URL） |
+| 2 | 未找到 AIHUB_API_KEY；或任务 `failed`；或缺 `--page-count`（远程 URL） |
 | 3 | 轮询超时（任务可能仍在运行，stderr 给出 task_id 供手动查询） |
 
 HTTP 语义：401 鉴权失败（触发 key fallback）｜402 余额不足｜422 参数校验失败｜429 限流（**不自动重试**）｜5xx 服务异常。

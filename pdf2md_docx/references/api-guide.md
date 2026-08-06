@@ -6,7 +6,7 @@
 
 - **创建任务**：`POST https://api.aihubmax.com/v1/run/generations`
 - **查询任务**：`GET https://api.aihubmax.com/v1/tasks/{task_id}?sync_upstream=true`
-- **鉴权**：`Authorization: Bearer <X_API_KEY>`
+- **鉴权**：`Authorization: Bearer <AIHUB_API_KEY>`
 
 异步模型：创建返回 `id`（task_id），随后轮询查询接口直到 `status` 为 `completed` 或 `failed`。
 

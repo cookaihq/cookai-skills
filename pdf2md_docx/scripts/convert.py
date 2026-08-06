@@ -5,8 +5,9 @@ Pipeline: local PDF -> (count pages) -> (upload for a public URL) ->
 POST /v1/run/generations -> poll /v1/tasks/{id} -> download result ZIP ->
 extract into a date-time-prefixed folder.
 
-Key resolution chain (high -> low), value-deduped, 401 -> fall back to next:
-  1. env X_API_KEY
+Key resolution chain (high -> low), value-deduped, 401 -> fall back to next.
+Each source accepts AIHUB_API_KEY first, then the deprecated X_API_KEY:
+  1. env AIHUB_API_KEY
   2. $PWD/.env.local         (auto, no flag)
   3. $PWD/.env               (auto, no flag)
   4. ~/.config/pdf2md_docx/.env  (only with --use-local-key)
@@ -27,7 +28,7 @@ import urllib.request
 import zipfile
 
 from client import call_with_key_fallback, http_request
-from config import mask_key, resolve_api_keys
+from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates
 from upload_helper import UploadHelperError, upload_local_file
 
 MODEL = "doc2x-v3"
@@ -214,11 +215,15 @@ def main(argv=None) -> int:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
 
     # --- keys ---
-    keys = resolve_api_keys(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
-    if not keys:
-        log("Error: 未找到 X_API_KEY（env / $PWD/.env.local / $PWD/.env"
+    candidates = resolve_api_key_candidates(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
+    if not candidates:
+        log("Error: 未找到 %s（env / $PWD/.env.local / $PWD/.env" % KEY_NAME
             + ("" if args.use_local_key else " ；如需读取 ~/.config 请加 --use-local-key") + "）")
         return 2
+    notice = legacy_key_notice(candidates)
+    if notice:
+        log(notice)
+    keys = [c.value for c in candidates]
 
     # --- resolve page_count and pdf_url ---
     label_source = args.label

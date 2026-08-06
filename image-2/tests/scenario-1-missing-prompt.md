@@ -6,7 +6,7 @@
 
 > 帮我用 image-2 出一张 1920x1080 的封面图，先帮我创建任务吧。
 
-（已通过 env 设置 `X_API_KEY`，但 prompt 完全没给。）
+（已通过 env 设置 `AIHUB_API_KEY`，但 prompt 完全没给。）
 
 ## Expected (with skill)
 

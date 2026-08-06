@@ -3,10 +3,10 @@
 #
 # 本脚本循环调用已安装的 image-2 (gpt-image-2) 的 create_task.sh（生成，复用它的
 # key 链、轮询、下载、401 兜底），并调用同目录内置的 upload.py（把本地图/URL/base64
-# 上传到 foxapi 文件接口换成 72h 公网 URL，同一把 X_API_KEY）。
+# 上传到 aihubmax 文件接口换成 72h 公网 URL，同一把 AIHUB_API_KEY）。
 #
 # 参考图统一走「上传取 URL」，不再内联 base64 data URI：所有 image_urls 都是
-# foxapi CDN 链接。这样上游收到的是真实 URL，也不受命令行 ARG_MAX 限制。
+# aihubmax CDN 链接。这样上游收到的是真实 URL，也不受命令行 ARG_MAX 限制。
 #
 # 流程：
 #   1. 预处理输入照片（缩到 ≤768px）→ 上传得 URL。
@@ -38,9 +38,12 @@ STAGGER=0.6            # 并行提交每张之间的间隔秒，避免 429 限�
 PER_CALL_POLL=6        # 传给 create_task.sh 的轮询间隔
 PER_CALL_MAXATT=75     # 传给 create_task.sh 的最大轮询次数（6s×75≈450s 单张上限）
 
-# foxapi 网关 base URL：上传接口与生成接口共用同一 host（可用 FOXAPI_BASE_URL 覆盖，
-# 与 create_task.sh 同一约定）。
-FOXAPI_BASE="${FOXAPI_BASE_URL:-https://api.foxapi.cc}"
+# aihubmax 网关 base URL：上传接口与生成接口共用同一 host（可用 AIHUBMAX_BASE_URL
+# 覆盖，与 create_task.sh 同一约定；已废弃的 FOXAPI_BASE_URL 仍作兜底）。
+AIHUBMAX_BASE="${AIHUBMAX_BASE_URL:-${FOXAPI_BASE_URL:-https://api.aihubmax.com}}"
+if [[ -z "${AIHUBMAX_BASE_URL:-}" && -n "${FOXAPI_BASE_URL:-}" ]]; then
+  echo "⚠️ FOXAPI_BASE_URL 已废弃，请改用 AIHUBMAX_BASE_URL（本次仍按 FOXAPI_BASE_URL 读取）" >&2
+fi
 
 # 输入预处理尺寸
 PHOTO_MAXPX=768        # 原始照片缩放上限
@@ -196,7 +199,7 @@ if [[ $PLAN_ONLY -eq 1 ]]; then
   fi
   echo "- image-2 生成调用总数（无重试）: $TOTAL_CALLS 次"
   [[ $RETRY -gt 0 ]] && echo "- 最大生成调用数（每次失败生成最多重试 1 次）: $MAX_CALLS 次"
-  echo "- 文件上传调用: $UPLOAD_CALLS 次（转存到 foxapi 文件接口；非生成调用）"
+  echo "- 文件上传调用: $UPLOAD_CALLS 次（转存到 aihubmax 文件接口；非生成调用）"
   if [[ $NEEDS_IMAGE2 -eq 0 ]]; then
     echo "- image-2: 本次不需要"
   elif CREATE_SH="$(find_image2)"; then
@@ -209,8 +212,8 @@ if [[ $PLAN_ONLY -eq 1 ]]; then
   else
     echo "- 内置上传脚本: $UPLOAD_PY"
   fi
-  echo "- 上传目标 host: $FOXAPI_BASE"
-  echo "- ⚠️ 实际运行会消耗 foxapi 积分。"
+  echo "- 上传目标 host: $AIHUBMAX_BASE"
+  echo "- ⚠️ 实际运行会消耗 aihubmax 积分。"
   exit 0
 fi
 
@@ -248,9 +251,9 @@ downscale_to_tmp() {
   if [[ -f "$out" ]]; then printf '%s' "$out"; else printf '%s' "$src"; fi
 }
 
-# 把 --image（本地路径 / 公网 URL / data URI）统一上传到 foxapi 文件接口换 URL，
+# 把 --image（本地路径 / 公网 URL / data URI）统一上传到 aihubmax 文件接口换 URL，
 # echo 得到的公网 URL（stdout 只输出 URL，供命令替换捕获；诊断进 .log-upload.txt）。
-# 一律转存：连公网 URL 也重新托管，使所有 image_urls 都是 foxapi CDN 链接。
+# 一律转存：连公网 URL 也重新托管，使所有 image_urls 都是 aihubmax CDN 链接。
 # 上传失败返回非 0，绝不回退内联 base64。 $1=输入 $2=最大边（本地文件缩图用）$3=fmt
 upload_image() {
   local in="$1" maxpx="$2" fmt="$3"
@@ -265,7 +268,7 @@ upload_image() {
       src_flag="--file"; src_val="$tmp"
       ;;
   esac
-  local args=("$src_flag" "$src_val" --base-url "$FOXAPI_BASE")
+  local args=("$src_flag" "$src_val" --base-url "$AIHUBMAX_BASE")
   [[ $USE_LOCAL_KEY -eq 1 ]] && args+=(--use-local-key)
   url="$(python3 "$UPLOAD_PY" "${args[@]}" 2>>"$ulog")"
   rc=$?
@@ -384,7 +387,7 @@ fi
 # 用基准图（缩小版）作为所有表情的参考，保证同一张脸。
 # 单张 gpt-image-2 图生图很慢（分钟级），故并发提交、墙钟≈单张耗时。
 # 基准图上传一次得 URL，全套表情复用同一 URL（不再每张内联 base64）。
-echo "[上传] 基准图 → foxapi URL（供所有表情复用）…"
+echo "[上传] 基准图 → aihubmax URL（供所有表情复用）…"
 BASE_REF="$(upload_image "$BASE_FILE" "$REF_MAXPX" png)" || {
   echo "错误：基准图上传失败，无法生成表情。日志：$OUTDIR/.log-upload.txt" >&2
   exit 2

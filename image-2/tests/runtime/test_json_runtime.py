@@ -88,7 +88,7 @@ class JsonRuntimeTests(unittest.TestCase):
                 download_transport=download,
                 resolver=lambda host, port: ["8.8.8.8"],
                 sleeper=sleeps.append,
-                environ={"X_API_KEY": "test-runtime-primary-key"},
+                environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
                 cwd=Path(project),
                 home=Path(project) / "home",
                 stdout=stdout,
@@ -140,7 +140,7 @@ class JsonRuntimeTests(unittest.TestCase):
                 resolver=lambda host, port: ["8.8.8.8"],
                 sleeper=lambda seconds: None,
                 clock=lambda: datetime(2026, 7, 22, tzinfo=timezone.utc),
-                environ={"X_API_KEY": key},
+                environ={"AIHUB_API_KEY": key},
                 cwd=Path(project),
                 home=Path(project) / "home",
                 stdout=stdout,
@@ -300,7 +300,7 @@ class JsonRuntimeTests(unittest.TestCase):
                 resolver=lambda host, port: ["8.8.8.8"],
                 sleeper=lambda seconds: None,
                 clock=lambda: (_ for _ in ()).throw(OSError("local secret detail")),
-                environ={"X_API_KEY": "test-runtime-primary-key"},
+                environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
                 cwd=Path(project),
                 home=Path(project) / "home",
                 stdout=stdout,
@@ -402,7 +402,7 @@ class JsonRuntimeTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as project:
                     project_path = Path(project)
                     (project_path / ".env.local").write_text(
-                        f"X_API_KEY={fallback}\n",
+                        f"AIHUB_API_KEY={fallback}\n",
                         encoding="utf-8",
                     )
                     stdout = io.StringIO()
@@ -413,7 +413,7 @@ class JsonRuntimeTests(unittest.TestCase):
                         download_transport=download,
                         resolver=lambda host, port: ["8.8.8.8"],
                         sleeper=lambda seconds: None,
-                        environ={"X_API_KEY": primary},
+                        environ={"AIHUB_API_KEY": primary},
                         cwd=project_path,
                         home=project_path / "home",
                         stdout=stdout,
@@ -454,7 +454,7 @@ class JsonRuntimeTests(unittest.TestCase):
                 resolver=lambda host, port: ["8.8.8.8"],
                 sleeper=lambda seconds: None,
                 environ={
-                    "X_API_KEY": "abc",
+                    "AIHUB_API_KEY": "abc",
                     "AIHUBMAX_BASE_URL": "https://custom-api.example.test/base",
                 },
                 cwd=Path(project),
@@ -501,7 +501,7 @@ class JsonRuntimeTests(unittest.TestCase):
                 download_transport=FakeDownloadTransport(),
                 resolver=lambda host, port: ["8.8.8.8"],
                 sleeper=lambda seconds: None,
-                environ={"X_API_KEY": "test-runtime-primary-key"},
+                environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
                 cwd=Path(project),
                 home=Path(project) / "home",
                 stdout=io.StringIO(),
@@ -531,7 +531,7 @@ class JsonRuntimeTests(unittest.TestCase):
             home_key = "home-active-key-7f4c"
             config_dir = Path(home) / ".config" / "image-2"
             config_dir.mkdir(parents=True)
-            (config_dir / ".env").write_text(f"X_API_KEY={home_key}\n", encoding="utf-8")
+            (config_dir / ".env").write_text(f"AIHUB_API_KEY={home_key}\n", encoding="utf-8")
 
             stdout = io.StringIO()
             exit_code = runtime.main(
@@ -578,7 +578,7 @@ class JsonRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             (root_path / ".env.local").write_text(
-                "X_API_KEY=parent-key-must-not-load\n",
+                "AIHUB_API_KEY=parent-key-must-not-load\n",
                 encoding="utf-8",
             )
             project = root_path / "child-project"
@@ -606,7 +606,7 @@ class JsonRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             project = Path(root) / key / "project"
             project.mkdir(parents=True)
-            (project / ".env.local").write_text(f"X_API_KEY={key}\n", encoding="utf-8")
+            (project / ".env.local").write_text(f"AIHUB_API_KEY={key}\n", encoding="utf-8")
             api = FakeApiTransport(
                 [
                     runtime.HttpResponse(200, (), b'{"id":"task-path-redaction"}'),
@@ -630,6 +630,35 @@ class JsonRuntimeTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertNotIn(key, stdout.getvalue())
         self.assertNotIn(key, stderr.getvalue())
+
+    def test_legacy_x_api_key_still_resolves_and_warns(self):
+        with tempfile.TemporaryDirectory() as root:
+            project = Path(root) / "project"
+            project.mkdir(parents=True)
+            (project / ".env.local").write_text("X_API_KEY=sk-legacy-only\n", encoding="utf-8")
+            keys = runtime.collect_keys({}, project, Path(root) / "home", False)
+        self.assertEqual([k.value for k in keys], ["sk-legacy-only"])
+        self.assertTrue(keys[0].legacy)
+        self.assertIn("X_API_KEY", keys[0].source)
+        self.assertIn("deprecated", keys[0].source)
+
+    def test_canonical_key_wins_over_legacy_within_one_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            project = Path(root) / "project"
+            project.mkdir(parents=True)
+            (project / ".env.local").write_text(
+                "X_API_KEY=sk-legacy\nAIHUB_API_KEY=sk-canonical\n", encoding="utf-8"
+            )
+            keys = runtime.collect_keys(
+                {"X_API_KEY": "sk-legacy-env", "AIHUB_API_KEY": "sk-canonical-env"},
+                project,
+                Path(root) / "home",
+                False,
+            )
+        # Source order is preserved (env before .env.local); inside each source the
+        # canonical name wins, so neither legacy value appears.
+        self.assertEqual([k.value for k in keys], ["sk-canonical-env", "sk-canonical"])
+        self.assertFalse(any(k.legacy for k in keys))
 
     def test_same_and_cross_host_redirects_are_manual_and_keep_original_url(self):
         cases = [
@@ -823,7 +852,7 @@ class JsonRuntimeTests(unittest.TestCase):
                         resolver=lambda host, port, result=addresses: result,
                         sleeper=lambda seconds: None,
                         environ={
-                            "X_API_KEY": "test-runtime-primary-key",
+                            "AIHUB_API_KEY": "test-runtime-primary-key",
                             "HTTPS_PROXY": "http://127.0.0.1:9999",
                             "https_proxy": "http://127.0.0.1:9999",
                         },
@@ -886,7 +915,7 @@ class DownloadPublicationTests(unittest.TestCase):
             resolver=lambda host, port: ["8.8.8.8"],
             sleeper=lambda seconds: None,
             publisher=publisher,
-            environ={"X_API_KEY": "test-runtime-primary-key"},
+            environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
             cwd=output.parent,
             home=output.parent / "home",
             stdout=stdout,
@@ -1015,7 +1044,7 @@ class DownloadPublicationTests(unittest.TestCase):
                 download_transport=download,
                 resolver=lambda host, port: ["8.8.8.8"],
                 sleeper=lambda seconds: None,
-                environ={"X_API_KEY": "test-runtime-primary-key"},
+                environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
                 cwd=Path(project),
                 home=Path(project) / "home",
                 stdout=stdout,

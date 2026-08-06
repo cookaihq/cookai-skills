@@ -1,6 +1,6 @@
 # upload-for-url — API 参考
 
-Server: `https://api.foxapi.cc` ｜ Auth: `Authorization: Bearer <X_API_KEY>`（`sk-...`）
+Server: `https://api.aihubmax.com` ｜ Auth: `Authorization: Bearer <AIHUB_API_KEY>`（`sk-...`）
 
 3 个上传端点，**统一返回一个 72 小时后过期的公网 URL**；存储空间不足时默认自动淘汰最早上传的文件（`auto_cleanup=true`），设 `false` 则空间不足直接 403。
 
@@ -32,4 +32,4 @@ Server: `https://api.foxapi.cc` ｜ Auth: `Authorization: Bearer <X_API_KEY>`（
 | 429 | `rate_limit_error` | 限流，不自动重试 |
 | 500 | — | 服务器内部错误 |
 
-> 字段与路由来源：`openapi/zh/upload-stream.json` / `upload-base64.json` / `upload-url.json`（本地 Mintlify 仓）。运行网关 `api.foxapi.cc` 的三个端点已验证可达。
+> 字段与路由来源：`openapi/zh/upload-stream.json` / `upload-base64.json` / `upload-url.json`（本地 Mintlify 仓）。运行网关 `api.aihubmax.com` 的三个端点已验证可达。

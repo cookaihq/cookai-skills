@@ -6,7 +6,7 @@ import urllib.request
 from collections import namedtuple
 
 
-DEFAULT_BOUNDARY = "----foxapiUploadBoundaryXyZ"
+DEFAULT_BOUNDARY = "----aihubmaxUploadBoundaryXyZ"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -77,7 +77,7 @@ def http_request(
 def call_with_key_fallback(keys: list, attempt) -> tuple[Resp, str]:
     """Advance through API keys only when the provider returns HTTP 401."""
     if not keys:
-        raise ValueError("no API key available (X_API_KEY not found)")
+        raise ValueError("no API key available (AIHUB_API_KEY not found)")
     last = None
     for key in keys:
         last = attempt(key)

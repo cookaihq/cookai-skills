@@ -43,13 +43,15 @@ description: Use when the user asks to generate or edit an image with Nano Banan
 
 **读取优先级（从高到低）**：
 
-1. 本轮对话显式提供的 key（通过 `X_API_KEY=...` 注入给脚本）
-2. 环境变量 `X_API_KEY`
-3. `$PWD/.env.local` 中的 `X_API_KEY=...`（**自动读取**，无需 flag）
-4. `$PWD/.env` 中的 `X_API_KEY=...`（**自动读取**，无需 flag）
+1. 本轮对话显式提供的 key（通过 `AIHUB_API_KEY=...` 注入给脚本）
+2. 环境变量 `AIHUB_API_KEY`
+3. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+4. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
 5. `~/.config/banana-2/.env`（仅 `--use-local-key` 时读）
 
-环境变量名 `X_API_KEY` 与 image-2 一致（都是 aihubmax.com 的 key，可共用同一个）；值通过 `Authorization: Bearer <key>` 提交给 aihubmax.com。
+环境变量名 `AIHUB_API_KEY` 与 image-2 一致（都是 aihubmax.com 的 key，可共用同一个）；值通过 `Authorization: Bearer <key>` 提交给 aihubmax.com。
+
+**旧变量名 `X_API_KEY` 仍然可用**：上面每一层都先找 `AIHUB_API_KEY`，找不到再找 `X_API_KEY`；命中旧名时会打一行废弃提示。已有配置无需立即改动，新配置请一律用 `AIHUB_API_KEY`。
 
 **401 自动 fallback**：
 
@@ -74,22 +76,22 @@ echo 'sk-xxx' | ./scripts/set_key.sh --stdin
 **会话级使用（推荐）**：
 
 ```bash
-export X_API_KEY='sk-xxx'
+export AIHUB_API_KEY='sk-xxx'
 ```
 
 **项目级使用**：在项目根目录建 `.env` 或 `.env.local`：
 
 ```ini
 # .env.local（不入版本控制）
-X_API_KEY=sk-xxx
+AIHUB_API_KEY=sk-xxx
 ```
 
 `.env` / `.env.local` 解析规则（极简，不等同于 shell）：
 
 - 支持：`KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首的注释行、空行
-- 文件中 `X_API_KEY` 出现多次时取**最后一次**
+- 文件中 `AIHUB_API_KEY` 出现多次时取**最后一次**
 - **不支持** shell 展开（`${OTHER}` / `$OTHER`）、命令替换（`$(...)` / 反引号）、续行符 `\` ——这些都会被当作字面字符串
-- 只识别变量名 `X_API_KEY`，不识别 `OPENAI_API_KEY` / `FOXAPI_KEY` 等其他命名
+- 只识别变量名 `AIHUB_API_KEY`，不识别 `OPENAI_API_KEY` / `AIHUBMAX_API_KEY` 等其他命名（旧名 `X_API_KEY` 仍兼容）
 
 ## Required & Optional Parameters
 
@@ -167,37 +169,37 @@ X_API_KEY=sk-xxx
 
 ```bash
 # 文生图（默认 1:1 / 1K）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "A futuristic city skyline at dusk, cyberpunk style" \
   --aspect-ratio 16:9 --resolution 1K
 
 # 图像编辑（传参考图 + match_input_image + 图像搜索辅助）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "Replace the background with a tropical beach" \
   --image-url 'https://example.com/photo.jpg' \
   --aspect-ratio match_input_image --resolution 2K \
   --image-search
 
 # 多张参考图（重复 --image-url）
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "把这两张图融合成一张极简海报" \
   --image-url 'https://example.com/a.png' \
   --image-url 'https://example.com/b.png' \
   --aspect-ratio 4:5 --resolution 2K
 
 # 联网搜索辅助 + 指定输出格式
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "今天的科技新闻头条做成信息图" \
   --aspect-ratio 3:4 --resolution 2K \
   --google-search --output-format webp
 
 # 保存到指定目录 + 指定文件名
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "Logo 设计" --aspect-ratio 1:1 --resolution 1K \
   --output-dir ~/Desktop --filename brand-logo
 
 # 只要 URL，不下载
-X_API_KEY='sk-xxx' ./scripts/create_task.sh \
+AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "..." --aspect-ratio 1:1 --resolution 1K --no-save
 ```
 

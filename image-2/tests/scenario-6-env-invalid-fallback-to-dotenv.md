@@ -1,6 +1,6 @@
 # Scenario 6 — env key invalid, `.env.local` provides a working key
 
-**测试目标**：环境变量 `X_API_KEY` 已设但是过期/失效的 key，项目根目录 `.env.local` 中存有有效 key。脚本必须在 create 调用收到 HTTP 401 后自动 fallback 到 `.env.local`，不要求用户介入，不重复扣费。
+**测试目标**：环境变量 `AIHUB_API_KEY` 已设但是过期/失效的 key，项目根目录 `.env.local` 中存有有效 key。脚本必须在 create 调用收到 HTTP 401 后自动 fallback 到 `.env.local`，不要求用户介入，不重复扣费。
 
 ## Setup
 
@@ -8,14 +8,14 @@
 
 ```
 my-project/
-├── .env.local       # X_API_KEY=sk-valid-yyy   (有效)
+├── .env.local       # AIHUB_API_KEY=sk-valid-yyy   (有效)
 └── ...
 ```
 
 shell 中已 export：
 
 ```bash
-export X_API_KEY="sk-expired-xxx"   # 失效
+export AIHUB_API_KEY="sk-expired-xxx"   # 失效
 ```
 
 ## User Turn
@@ -28,11 +28,11 @@ export X_API_KEY="sk-expired-xxx"   # 失效
 
 ```
 - key chain (high → low):
-    1. env X_API_KEY  (sk-e****d-xxx)
+    1. env AIHUB_API_KEY  (sk-e****d-xxx)
     2. $PWD/.env.local  (sk-v****d-yyy)
-[auth] Trying key from: env X_API_KEY  (sk-e****d-xxx)
+[auth] Trying key from: env AIHUB_API_KEY  (sk-e****d-xxx)
 [auth] HTTP 401
-[auth] 401 from env X_API_KEY; 401 does not consume credits. Falling back to next key in chain.
+[auth] 401 from env AIHUB_API_KEY; 401 does not consume credits. Falling back to next key in chain.
 [auth] Trying key from: $PWD/.env.local  (sk-v****d-yyy)
 [auth] HTTP 200
 [auth] Using key from: $PWD/.env.local
