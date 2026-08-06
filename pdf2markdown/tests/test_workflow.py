@@ -1,6 +1,7 @@
 import fcntl
 import json
 import os
+import shutil
 import stat
 import sys
 from datetime import datetime, timezone
@@ -1393,6 +1394,101 @@ def test_inspect_rejects_impossible_ticket_one_authoritative_state(tmp_path, cap
         assert result["outcome"] == "error"
         assert result["errors"][0]["code"] == "invalid_bundle"
         assert "invalid_bundle" in stderr
+
+
+# The values a tampered manifest / private.json can hold that the schema does
+# not admit. The five unhashable ones are the ones that used to escape: `x not
+# in frozenset` RAISES TypeError for an unhashable x rather than answering
+# False. The hashable ones are here so the sweep also covers the ordinary
+# rejections and cannot pass by rejecting everything for the wrong reason.
+RETYPED_STATE_VALUES = (
+    {"tampered": 1},
+    {},
+    [1],
+    [],
+    {"a": [{"b": 1}]},
+    None,
+    0,
+    True,
+    "x",
+    1.5,
+)
+
+
+def _retyping_targets(document):
+    """Every slot in an authoritative JSON document a tamperer can retype."""
+    for key in sorted(document):
+        yield (key,)
+        if isinstance(document[key], dict):
+            for nested in sorted(document[key]):
+                yield (key, nested)
+
+
+def test_inspect_answers_a_retyped_state_value_with_a_bundle_verdict(
+    tmp_path, capsys
+):
+    """A schema predicate that RAISES is still stating a schema rejection.
+
+    _inspect_open_bundle's two predicates read values straight off disk, so a
+    shape the schema does not admit can raise instead of answering False --
+    `manifest.get("conversion_state") not in SUPPORTED_CONVERSION_STATES`
+    raises TypeError the moment that value is a dict or a list. That raise had
+    no handler between the predicate and workflow.main's last-resort one, so
+    retyping ONE manifest scalar as `{}` answered rc 1 / internal_error with
+    every diagnostic field null -- on precisely the externally damaged bundles
+    this branch exists to diagnose.
+
+    The property this pins is the class, not the two known terms: whatever a
+    tamperer retypes, inspect answers with a bundle verdict it computed, never
+    with an internal error. A term added to either predicate later, or a
+    sub-validator that grows an unguarded lookup, turns this red.
+    """
+    source = tmp_path / "source.pdf"
+    source.write_bytes(PDF_BYTES)
+    _rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+    )
+    bundle = Path(started["work_bundle"])
+    pristine = tmp_path / "pristine"
+    shutil.copytree(bundle, pristine, symlinks=True)
+
+    for relative in (Path("manifest.json"), Path(".state") / "private.json"):
+        document = json.loads((pristine / relative).read_text())
+        for target in _retyping_targets(document):
+            for value in RETYPED_STATE_VALUES:
+                shutil.rmtree(bundle)
+                shutil.copytree(pristine, bundle, symlinks=True)
+                tampered = json.loads((bundle / relative).read_text())
+                node = tampered
+                for part in target[:-1]:
+                    node = node[part]
+                node[target[-1]] = value
+                (bundle / relative).write_text(json.dumps(tampered))
+
+                rc, result, _stderr = invoke(
+                    capsys,
+                    ["inspect", "--work-bundle", str(bundle)],
+                    cwd=tmp_path,
+                )
+
+                where = f"{relative}:{'.'.join(target)}={value!r}"
+                codes = [error["code"] for error in result.get("errors", [])]
+                assert rc != 1, where
+                assert "internal_error" not in codes, where
+                assert rc in (0, 4), where
+                # A retyped closed-vocabulary state is not merely "not an
+                # internal error": it is the rejection the branch below the
+                # predicate names, with that branch's own action.
+                if target in (("conversion_state",), ("publication_state",)):
+                    assert rc == 4, where
+                    assert codes == ["invalid_bundle"], where
+                    assert (
+                        result["action_required"]
+                        == "repair_or_restore_work_bundle"
+                    ), where
+                    assert result["work_bundle"] == str(bundle), where
 
 
 def test_inspect_rejects_duplicate_keys_in_every_authoritative_json_stream(

@@ -55,6 +55,22 @@ SUPPORTED_CONVERSION_STATES = frozenset(
 )
 SUPPORTED_PUBLICATION_STATES = frozenset({"not_requested", "blocked"})
 
+# The shape errors an untrusted-JSON schema predicate produces when the value it
+# reached is not the kind of thing the schema admits. _inspect_open_bundle's two
+# predicates evaluate under this tuple: for them a raise from these five is the
+# "this bundle is not schema-valid" verdict itself, so it must reach the caller
+# as that verdict (rc 4, with diagnostics) rather than as rc 1 / internal_error.
+# It deliberately does NOT include the module error types -- a sub-validator that
+# raises its own error type is making a judgement, not tripping over a shape, and
+# its callers already translate those individually.
+_UNTRUSTED_STATE_SHAPE_ERRORS = (
+    AttributeError,
+    IndexError,
+    KeyError,
+    TypeError,
+    ValueError,
+)
+
 # design.md Decision 5 -- the error-path action vocabulary. It is disjoint from
 # the closed conversion action vocabulary. The two are separated by PRODUCTION
 # MECHANISM, not by return code: values here are produced by constructing a
@@ -1144,76 +1160,103 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
     }
     source = manifest.get("source")
     origin = source.get("origin") if isinstance(source, dict) else None
-    if (
-        type(manifest.get("schema_version")) is not int
-        or manifest["schema_version"] != SCHEMA_VERSION
-        or set(manifest)
-        not in {
-            frozenset(required),
-            frozenset({*required, "preflight"}),
-            frozenset({*required, "preflight", "source_staging"}),
-            frozenset(
-                {
-                    *required,
-                    "preflight",
-                    "source_staging",
-                    "raw_conversion",
-                    "raw_conversions",
-                }
-            ),
-            frozenset(
-                {
-                    *required,
-                    "preflight",
-                    "source_staging",
-                    "raw_conversion",
-                    "raw_conversions",
-                    "review",
-                }
-            ),
-            frozenset(
-                {
-                    *required,
-                    "preflight",
-                    "source_staging",
-                    "raw_conversion",
-                    "raw_conversions",
-                    "review",
-                    "corrections",
-                }
-            ),
-        }
-        or type(manifest.get("generation")) is not int
-        or manifest["generation"] < 1
-        or manifest.get("conversion_state") not in SUPPORTED_CONVERSION_STATES
-        or (
-            manifest.get("conversion_state") in {"review_pending", "local_complete"}
-            and "review" not in manifest
+    # Every term below reads a value that came straight off disk, so a shape the
+    # schema does not admit can RAISE instead of answering False. `x not in
+    # frozenset` raises TypeError for an unhashable x -- that is the two
+    # `SUPPORTED_*` terms directly, and review.valid_manifest's `status` lookup
+    # one call deeper -- and a nested non-dict can raise AttributeError /
+    # IndexError / KeyError / ValueError inside any sub-validator this predicate
+    # delegates to. Such a raise IS the rejection verdict, not an internal
+    # error: it says the manifest holds a shape the schema does not admit,
+    # which is exactly what the branch below reports. Without this guard the
+    # exception has no handler between here and workflow.main's last-resort
+    # one, so retyping ONE manifest scalar as {} turned rc 4 / invalid_bundle
+    # plus the full diagnostic context into rc 1 / internal_error with every
+    # field null -- on precisely the externally damaged bundles this branch
+    # exists to diagnose. conversion_attempt.at_pending_conversion_boundary and
+    # raw_conversion.resolve_history_state fail closed the same way, for the
+    # same reason.
+    #
+    # The guard wraps the WHOLE predicate rather than pinning the terms known
+    # to raise, so it closes the class instead of the instances: a term added
+    # later, or a sub-validator that grows an unguarded lookup, cannot reopen
+    # it. That is also why the verdict is assigned rather than raised in place
+    # -- the WorkflowError below stays outside the handler, one raise, with the
+    # code, return code, action and context it always had.
+    try:
+        manifest_schema_rejected = (
+            type(manifest.get("schema_version")) is not int
+            or manifest["schema_version"] != SCHEMA_VERSION
+            or set(manifest)
+            not in {
+                frozenset(required),
+                frozenset({*required, "preflight"}),
+                frozenset({*required, "preflight", "source_staging"}),
+                frozenset(
+                    {
+                        *required,
+                        "preflight",
+                        "source_staging",
+                        "raw_conversion",
+                        "raw_conversions",
+                    }
+                ),
+                frozenset(
+                    {
+                        *required,
+                        "preflight",
+                        "source_staging",
+                        "raw_conversion",
+                        "raw_conversions",
+                        "review",
+                    }
+                ),
+                frozenset(
+                    {
+                        *required,
+                        "preflight",
+                        "source_staging",
+                        "raw_conversion",
+                        "raw_conversions",
+                        "review",
+                        "corrections",
+                    }
+                ),
+            }
+            or type(manifest.get("generation")) is not int
+            or manifest["generation"] < 1
+            or manifest.get("conversion_state") not in SUPPORTED_CONVERSION_STATES
+            or (
+                manifest.get("conversion_state") in {"review_pending", "local_complete"}
+                and "review" not in manifest
+            )
+            or manifest.get("publication_state") not in SUPPORTED_PUBLICATION_STATES
+            or not isinstance(source, dict)
+            or set(source)
+            != {"original_name", "origin", "physical_path", "sha256", "size_bytes"}
+            or not isinstance(source.get("original_name"), str)
+            or not source["original_name"]
+            or not pdf_source.valid_origin(origin)
+            or source.get("physical_path") != "01-source/source.pdf"
+            or not isinstance(source.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
+            or type(source.get("size_bytes")) is not int
+            or source["size_bytes"] < 0
+            or not isinstance(manifest.get("conversion_attempts"), list)
+            or (
+                "review" not in manifest
+                and manifest.get("final_markdown") is not None
+            )
+            or (
+                "review" in manifest
+                and not review_module.valid_manifest(manifest)
+            )
+            or not isinstance(manifest.get("artifacts"), dict)
+            or manifest["artifacts"].get("source_pdf") != "01-source/source.pdf"
         )
-        or manifest.get("publication_state") not in SUPPORTED_PUBLICATION_STATES
-        or not isinstance(source, dict)
-        or set(source)
-        != {"original_name", "origin", "physical_path", "sha256", "size_bytes"}
-        or not isinstance(source.get("original_name"), str)
-        or not source["original_name"]
-        or not pdf_source.valid_origin(origin)
-        or source.get("physical_path") != "01-source/source.pdf"
-        or not isinstance(source.get("sha256"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
-        or type(source.get("size_bytes")) is not int
-        or source["size_bytes"] < 0
-        or not isinstance(manifest.get("conversion_attempts"), list)
-        or (
-            "review" not in manifest
-            and manifest.get("final_markdown") is not None
-        )
-        or (
-            "review" in manifest
-            and not review_module.valid_manifest(manifest)
-        )
-        or not isinstance(manifest.get("artifacts"), dict)
-        or manifest["artifacts"].get("source_pdf") != "01-source/source.pdf"
-    ):
+    except _UNTRUSTED_STATE_SHAPE_ERRORS:
+        manifest_schema_rejected = True
+    if manifest_schema_rejected:
         raise WorkflowError(
             "invalid_bundle",
             "Work bundle state uses an unknown or incomplete schema.",
@@ -1300,42 +1343,53 @@ def _inspect_open_bundle(bundle: Path, descriptors: dict) -> dict:
             resolve_history=_conversion_history_resolver(manifest),
         )
     )
-    if (
-        type(private_state.get("schema_version")) is not int
-        or private_state["schema_version"] != SCHEMA_VERSION
-        or set(private_state)
-        != {"schema_version", "generation", "source_uploads", "result_urls"}
-        or type(private_state.get("generation")) is not int
-        or private_state["generation"] != manifest["generation"]
-        or (
-            not has_conversion_attempt
-            and private_state.get("result_urls") != []
-        )
-        or (
-            not has_source_staging
-            and private_state.get("source_uploads") != []
-        )
-        or (
-            has_raw_conversion
-            and not raw_conversion_module.valid_private_state(
-                private_state, manifest
+    # Guarded for the reason the manifest predicate above states, and reaching
+    # the same conclusion: private.json is read off the same damaged bundle,
+    # this predicate delegates to four more valid_private_state implementations
+    # that walk it, and a shape none of them admits is this branch's verdict --
+    # not an internal error. The action stays computed from
+    # pending_conversion_boundary, which is resolved above and independently
+    # fail-closed, so a guarded rejection names the same action a plain one does.
+    try:
+        private_state_rejected = (
+            type(private_state.get("schema_version")) is not int
+            or private_state["schema_version"] != SCHEMA_VERSION
+            or set(private_state)
+            != {"schema_version", "generation", "source_uploads", "result_urls"}
+            or type(private_state.get("generation")) is not int
+            or private_state["generation"] != manifest["generation"]
+            or (
+                not has_conversion_attempt
+                and private_state.get("result_urls") != []
+            )
+            or (
+                not has_source_staging
+                and private_state.get("source_uploads") != []
+            )
+            or (
+                has_raw_conversion
+                and not raw_conversion_module.valid_private_state(
+                    private_state, manifest
+                )
+            )
+            or (
+                has_conversion_attempt
+                and not has_raw_conversion
+                and not conversion_attempt_module.valid_private_state(
+                    private_state, manifest
+                )
+            )
+            or (
+                has_source_staging
+                and not has_conversion_attempt
+                and not source_staging_module.valid_private_state(
+                    private_state, manifest
+                )
             )
         )
-        or (
-            has_conversion_attempt
-            and not has_raw_conversion
-            and not conversion_attempt_module.valid_private_state(
-                private_state, manifest
-            )
-        )
-        or (
-            has_source_staging
-            and not has_conversion_attempt
-            and not source_staging_module.valid_private_state(
-                private_state, manifest
-            )
-        )
-    ):
+    except _UNTRUSTED_STATE_SHAPE_ERRORS:
+        private_state_rejected = True
+    if private_state_rejected:
         raise WorkflowError(
             PENDING_BOUNDARY_HISTORY_CHECK_ERROR_CODE,
             "Private work bundle state uses an unknown or inconsistent schema.",
