@@ -36,7 +36,7 @@ description: Use when the user names a specific model and wants it to generate t
 
 ## Auth & Key Handling
 
-与 `upload-for-url` 一致：`AIHUB_API_KEY` 分层读取（进程 env → `$PWD/.env.local` → `$PWD/.env` → `~/.config/multimodal-ask/.env` 仅 `--use-local-key`）；401 触发 key 链 fallback；key 一律掩码。每一层都先找 `AIHUB_API_KEY`，找不到再找旧名 `X_API_KEY`（仍兼容，命中会打废弃提示）。首次配置：`./scripts/set_key.sh`。
+`AIHUB_API_KEY` 分层读取（进程 env → `$PWD/.env.local` → `$PWD/.env` → `~/.config/multimodal-ask/.env` 仅 `--use-local-key`）；401 触发 key 链 fallback；key 一律掩码。每一层都先找 `AIHUB_API_KEY`，找不到再找旧名 `X_API_KEY`（仍兼容，命中会打废弃提示）。首次配置：`./scripts/set_key.sh`。
 
 ## Usage
 

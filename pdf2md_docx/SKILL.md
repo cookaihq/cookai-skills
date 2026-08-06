@@ -22,7 +22,6 @@ description: Use when the user wants to convert a PDF into Markdown / LaTeX / DO
 - 只想读取某页纯文本 / 问 PDF 内容 → 直接读，不必转换
 - 图片生成 / 图生图 → `image-2` / `banana-2`
 - 照片 OCR、视频 / 音频处理
-- 只是想把本地文件换成 URL → `upload-for-url`
 
 ## CRITICAL
 

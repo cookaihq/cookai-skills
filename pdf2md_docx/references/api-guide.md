@@ -89,4 +89,4 @@
 
 `pdf_url` 必须是公网可下载地址。本地 PDF 由 `upload_helper.upload_local_file` 经
 `POST /v1/files/upload/stream`（multipart，字段 `file` + `auto_cleanup=true`）上传，返回
-`{ "url": "..." }`。该上传 URL **72 小时**有效，足够本次转换任务下载。详见 `upload-for-url` skill。
+`{ "url": "..." }`。该上传 URL **72 小时**有效，足够本次转换任务下载。

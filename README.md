@@ -13,11 +13,9 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [multimodal-ask](multimodal-ask/) | 指定模型做多模态理解与文本生成：分析 / 转写音视频、让指定模型读取本地或远程图片 / PDF、对混合媒体一次性推理（异步） | [README](multimodal-ask/README.md) · [SKILL.md](multimodal-ask/SKILL.md) |
 | [pdf2md_docx](pdf2md_docx/) | PDF 转 Markdown / LaTeX / DOCX：公式识别、跨页表格合并，返回 ZIP 自动解压到带时间戳的目录 | [README](pdf2md_docx/README.md) · [SKILL.md](pdf2md_docx/SKILL.md) |
 | [pdf2markdown](pdf2markdown/) | 把一个 PDF（本地文件或公开 HTTPS 链接）转成可复核的 Markdown 工作目录：preflight 门禁、一次一个 Doc2X 转换任务（创建 + 轮询 + 原子采纳结果 ZIP 为不可变原始产物）、逐处证据绑定的人工复核与修正、原始产物全程保留，中断后可从任意阶段续跑；付费重试必须显式确认 | [README](pdf2markdown/README.md) · [SKILL.md](pdf2markdown/SKILL.md) |
-| [upload-for-url](upload-for-url/) | 通过 aihubmax 文件接口把本地文件（图 / 音 / 视频 / 文档）上传成 72 小时有效的公开 URL 供 AI API 消费，也可把远程 URL 转成短链 | [README](upload-for-url/README.md) · [SKILL.md](upload-for-url/SKILL.md) |
 | [s3-upload](s3-upload/) | 把本地文件持久写入用户自己的 S3 兼容 bucket（AWS S3 / Cloudflare R2 / custom，OSS / COS experimental）：严格 JSON Object Reference + public/presigned URL、`--collision reject` 原子 no-overwrite 与同内容采纳、17 键闭合 result 合同与 `--result-out` 跨进程 handoff、checkpoint 只读对账恢复 | [README](s3-upload/README.md) · [SKILL.md](s3-upload/SKILL.md) |
 | [preview-share](preview-share/) | 把本地 HTML 页面（或任意本地文件）传到线上预览并拿到可分享 URL，自动识别并一并上传相对路径引用的图片 / CSS / JS | [README](preview-share/README.md) · [SKILL.md](preview-share/SKILL.md) |
 | [template-preview](template-preview/) | 把「一批图片 + 文案」的文件夹渲染成模仿知名 App UI 的展示页（v1 内置小红书个人主页模板），产出自包含的 `index.html` + assets，可交给 preview-share 上传 | [README](template-preview/README.md) · [SKILL.md](template-preview/SKILL.md) |
-| [xhs-downloader](xhs-downloader/) | 从小红书作品链接下载图片 / 视频 / Livephoto 到本地，支持多链接；登录失效时弹二维码登录获取 Cookie | [SKILL.md](xhs-downloader/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
 | [frpc-launch](frpc-launch/) | 本地一键启动/管理 frpc 内网穿透：双模式（自部署 FRPS / 宝塔 frps 用官方 frpc，樱花FRP 用其定制客户端）、无配置时引导配置、二进制自动下载校验、后台常驻 + status/stop/logs、凭证全程掩码 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
 

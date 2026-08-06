@@ -6,7 +6,7 @@
 AIHUB_API_KEY='sk-xxx' python3 scripts/ask.py --model gemini-3.5-flash --video ./clip.mp4 --prompt "这段视频讲了什么"
 ```
 
-- 本地媒体自动经 aihubmax 上传换 72h URL（vendored `upload_helper`，与 `upload-for-url` 同源）
+- 本地媒体自动经 aihubmax 上传换 72h URL（内置 `upload_helper`，无外部 skill 依赖）
 - 提交前能力预校验（模型是否可用 / 是否支持该媒体类型，不消耗积分）
 - 异步：提交 → 轮询到终态 → 取 `choices[0].message.content`
-- 鉴权 / key 分层与 `upload-for-url` 一致；详见 [SKILL.md](SKILL.md) 与 [references/api-guide.md](references/api-guide.md)
+- 鉴权 / key 分层详见 [SKILL.md](SKILL.md) 与 [references/api-guide.md](references/api-guide.md)
