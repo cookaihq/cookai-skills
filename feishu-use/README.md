@@ -19,7 +19,7 @@
 使用 Skills CLI：
 
 ```bash
-npx skills add cookaihq/awesome-skills --skill feishu-use -g -y
+npx skills add cookaihq/cookai-skills --skill feishu-use -g -y
 ```
 
 本 Skill 调用官方 `lark-cli`。若尚未安装，它会先询问用户，再使用官方入口：

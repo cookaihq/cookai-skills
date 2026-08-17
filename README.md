@@ -26,7 +26,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 让 Agent 自己装（推荐，最省事 —— 把下面这段提示词丢给 Claude Code 或 Codex）：
 
 ```text
-请把 https://github.com/cookaihq/awesome-skills 仓库里的 image-2 skill 安装给你自己用：
+请把 https://github.com/cookaihq/cookai-skills 仓库里的 image-2 skill 安装给你自己用：
 1. 克隆仓库到本地（已克隆则更新）
 2. 把其中的 image-2 目录链接或复制到你当前平台的 skills 目录
    （Claude Code 用 ~/.claude/skills/image-2，其他平台用各自约定的位置）
@@ -38,21 +38,21 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 项目级 symlink（只在当前项目生效）：
 
 ```bash
-git clone https://github.com/cookaihq/awesome-skills.git
+git clone https://github.com/cookaihq/cookai-skills.git
 mkdir -p ./.claude/skills
-ln -s "$(pwd)/awesome-skills/image-2" ./.claude/skills/image-2
+ln -s "$(pwd)/cookai-skills/image-2" ./.claude/skills/image-2
 ```
 
 用户级 symlink（所有项目可触发）：
 
 ```bash
-ln -s "$(pwd)/awesome-skills/image-2" ~/.claude/skills/image-2
+ln -s "$(pwd)/cookai-skills/image-2" ~/.claude/skills/image-2
 ```
 
 skills CLI：
 
 ```bash
-npx skills add cookaihq/awesome-skills --skill image-2 -a claude-code
+npx skills add cookaihq/cookai-skills --skill image-2 -a claude-code
 ```
 
 > Codex / Gemini 用户把 `-a claude-code` 换成对应平台标识。

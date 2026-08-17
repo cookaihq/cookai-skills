@@ -38,9 +38,9 @@
 把 skill 链到当前项目，只在这个项目生效：
 
 ```bash
-git clone https://github.com/cookaihq/awesome-skills.git
+git clone https://github.com/cookaihq/cookai-skills.git
 mkdir -p ./.claude/skills
-ln -s "$(pwd)/awesome-skills/banana-2" ./.claude/skills/banana-2
+ln -s "$(pwd)/cookai-skills/banana-2" ./.claude/skills/banana-2
 ```
 
 ### 方式 2：用户级 symlink
@@ -48,13 +48,13 @@ ln -s "$(pwd)/awesome-skills/banana-2" ./.claude/skills/banana-2
 装到 `~/.claude/skills/`，所有项目都可触发：
 
 ```bash
-ln -s "$(pwd)/awesome-skills/banana-2" ~/.claude/skills/banana-2
+ln -s "$(pwd)/cookai-skills/banana-2" ~/.claude/skills/banana-2
 ```
 
 ### 方式 3：vercel-labs/skills CLI
 
 ```bash
-npx skills add cookaihq/awesome-skills --skill banana-2 -a claude-code
+npx skills add cookaihq/cookai-skills --skill banana-2 -a claude-code
 ```
 
 > Codex / Gemini 用户请把 `-a claude-code` 换成对应平台标识。
