@@ -1,6 +1,7 @@
 ---
 name: banana-2
-description: Use when the user asks to generate or edit an image with Nano Banana 2 / Banana 2 / nano banana / 香蕉 / gemini flash image / gemini-3.1-flash-image-preview, or when they size an image by ASPECT RATIO (16:9, 9:16, 21:9, match_input_image) or by QUALITY TIER (512 / 0.5K / 1K / 2K / 4K), or want web-grounded ("联网搜索") / image-search-assisted generation. For generic "生成图片" with pixel resolutions like 1024x1024 use the image-2 skill instead. Do NOT use for video generation, OCR, or non-generative editing (crop, compress, watermark).
+version: 1.0.0
+description: v1.0.0｜Use when the user asks to generate or edit an image with Nano Banana 2 / Banana 2 / nano banana / 香蕉 / gemini flash image / gemini-3.1-flash-image-preview, or when they size an image by ASPECT RATIO (16:9, 9:16, 21:9, match_input_image) or by QUALITY TIER (512 / 0.5K / 1K / 2K / 4K), or want web-grounded ("联网搜索") / image-search-assisted generation. For generic "生成图片" with pixel resolutions like 1024x1024 use the image-2 skill instead. Do NOT use for video generation, OCR, or non-generative editing (crop, compress, watermark).
 ---
 
 # banana-2

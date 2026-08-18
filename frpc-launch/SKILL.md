@@ -1,6 +1,7 @@
 ---
 name: frpc-launch
-description: Use when the user wants to 本地启动 frpc / 做内网穿透 / 打通 frp 隧道 / 把本地端口暴露到公网 / 连接自部署 FRPS 或宝塔面板的 frps / 使用樱花FRP（natfrp）隧道 —— phrases like "启动 frpc"、"起个内网穿透"、"frp 隧道连一下"、"把本地 8080 暴露出去"、"frps 连不上帮我看看"、"用樱花FRP 启动隧道"。检测不到配置时先引导用户配置（作用域选择 + 三来源帮助），frpc 二进制自动下载，后台常驻并提供 status/stop/logs。Do NOT use for 部署/管理 frps 服务端、注册系统服务（launchd/systemd 开机自启）、Windows 平台（v1 未实现）。
+version: 1.0.0
+description: v1.0.0｜Use when the user wants to 本地启动 frpc / 做内网穿透 / 打通 frp 隧道 / 把本地端口暴露到公网 / 连接自部署 FRPS 或宝塔面板的 frps / 使用樱花FRP（natfrp）隧道 —— phrases like "启动 frpc"、"起个内网穿透"、"frp 隧道连一下"、"把本地 8080 暴露出去"、"frps 连不上帮我看看"、"用樱花FRP 启动隧道"。检测不到配置时先引导用户配置（作用域选择 + 三来源帮助），frpc 二进制自动下载，后台常驻并提供 status/stop/logs。Do NOT use for 部署/管理 frps 服务端、注册系统服务（launchd/systemd 开机自启）、Windows 平台（v1 未实现）。
 ---
 
 # frpc-launch

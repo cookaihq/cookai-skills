@@ -1,6 +1,7 @@
 ---
 name: template-preview
-description: Use when the user wants to turn a folder of images + copy into a styled showcase page that mimics a known app's UI — phrases like "把这个文件夹做成小红书预览"、"做成小红书个人主页"、"生成小红书风格展示页"、"把这些图做成 XX 风格的页面". v1 ships the xiaohongshu (小红书) personal-homepage template. Generates a self-contained output folder (index.html + assets/) that opens locally and can be uploaded by the preview-share skill. Do NOT use for real deploys, or for uploading/publishing (that's preview-share's job).
+version: 1.0.0
+description: v1.0.0｜Use when the user wants to turn a folder of images + copy into a styled showcase page that mimics a known app's UI — phrases like "把这个文件夹做成小红书预览"、"做成小红书个人主页"、"生成小红书风格展示页"、"把这些图做成 XX 风格的页面". v1 ships the xiaohongshu (小红书) personal-homepage template. Generates a self-contained output folder (index.html + assets/) that opens locally and can be uploaded by the preview-share skill. Do NOT use for real deploys, or for uploading/publishing (that's preview-share's job).
 ---
 
 # template-preview

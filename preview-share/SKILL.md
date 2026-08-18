@@ -1,6 +1,7 @@
 ---
 name: preview-share
-description: Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
+version: 1.0.0
+description: v1.0.0｜Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
 ---
 
 # preview-share

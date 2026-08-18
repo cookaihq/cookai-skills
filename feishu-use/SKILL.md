@@ -1,7 +1,8 @@
 ---
 name: feishu-use
+version: 1.0.0
 description: >-
-  Use when the user wants an agent to operate Feishu/Lark through the official
+  v1.0.0｜Use when the user wants an agent to operate Feishu/Lark through the official
   lark-cli, or asks to install, update, configure, log in, re-authorize,
   verify, or switch the Feishu account used by lark-cli. This is the shared
   gateway before lark-base, lark-doc, lark-calendar, lark-im, and other domain

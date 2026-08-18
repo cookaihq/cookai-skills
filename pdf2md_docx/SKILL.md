@@ -1,6 +1,7 @@
 ---
 name: pdf2md_docx
-description: Use when the user wants to convert a PDF into Markdown / LaTeX / DOCX — phrases like "把这个 PDF 转成 markdown"、"PDF 转 md/docx"、"提取 PDF 里的公式和表格"、"PDF 转可编辑文档"、"pdf2md"、"doc2x". Wraps aihubmax.com Doc2X V3; handles formula recognition and cross-page table merging, returns a ZIP that is auto-extracted into a date-time-prefixed folder. Do NOT use for plain text extraction of a single short page (read it directly), image generation, OCR of photos, or non-PDF documents.
+version: 1.0.0
+description: v1.0.0｜Use when the user wants to convert a PDF into Markdown / LaTeX / DOCX — phrases like "把这个 PDF 转成 markdown"、"PDF 转 md/docx"、"提取 PDF 里的公式和表格"、"PDF 转可编辑文档"、"pdf2md"、"doc2x". Wraps aihubmax.com Doc2X V3; handles formula recognition and cross-page table merging, returns a ZIP that is auto-extracted into a date-time-prefixed folder. Do NOT use for plain text extraction of a single short page (read it directly), image generation, OCR of photos, or non-PDF documents.
 ---
 
 # pdf2md_docx

@@ -1,6 +1,7 @@
 ---
 name: image-2
-description: Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
+version: 1.0.0
+description: v1.0.0｜Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
 ---
 
 # image-2

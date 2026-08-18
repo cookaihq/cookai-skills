@@ -1,6 +1,7 @@
 ---
 name: exit-ip
-description: Use when the user wants to know the outbound / exit / public IP of the environment that runs this agent and the Claude Agent SDK — phrases like "我的出口IP是什么"、"当前出口IP"、"Claude SDK 用的是哪个IP出网"、"我的公网IP / 外网IP / 外网出口"、"看看我现在的IP归属地 / 运营商"、"whats my ip"、"check my public / egress ip"、"ipinfo". The skill fetches https://ipinfo.io/json directly from the running environment and shows the raw result (ip / city / region / country / org). Do NOT use to geolocate an IP the user pastes in, to inspect a private/LAN address, or to debug a remote host's networking — this only reports THIS environment's own egress.
+version: 1.0.0
+description: v1.0.0｜Use when the user wants to know the outbound / exit / public IP of the environment that runs this agent and the Claude Agent SDK — phrases like "我的出口IP是什么"、"当前出口IP"、"Claude SDK 用的是哪个IP出网"、"我的公网IP / 外网IP / 外网出口"、"看看我现在的IP归属地 / 运营商"、"whats my ip"、"check my public / egress ip"、"ipinfo". The skill fetches https://ipinfo.io/json directly from the running environment and shows the raw result (ip / city / region / country / org). Do NOT use to geolocate an IP the user pastes in, to inspect a private/LAN address, or to debug a remote host's networking — this only reports THIS environment's own egress.
 ---
 
 # exit-ip

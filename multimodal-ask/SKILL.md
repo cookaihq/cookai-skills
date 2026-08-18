@@ -1,6 +1,7 @@
 ---
 name: multimodal-ask
-description: Use when the user names a specific model and wants it to generate text or understand media — analyze/transcribe/summarize an AUDIO or VIDEO (modalities the agent can't process itself), have a NAMED model describe an image, read a PDF/document, or reason over MIXED media at once. Phrases like "用 gemini-3.5-flash 看这段视频"、"让 claude-opus-4-7 读这个 PDF"、"转写这段音频"、"用 X 模型分析这些图+视频". Drives aihubmax.com llm-custom (async). Do NOT use for IMAGE GENERATION (use image-2 / banana-2), OCR-only, or plain text the agent can answer itself without a named model.
+version: 1.0.0
+description: v1.0.0｜Use when the user names a specific model and wants it to generate text or understand media — analyze/transcribe/summarize an AUDIO or VIDEO (modalities the agent can't process itself), have a NAMED model describe an image, read a PDF/document, or reason over MIXED media at once. Phrases like "用 gemini-3.5-flash 看这段视频"、"让 claude-opus-4-7 读这个 PDF"、"转写这段音频"、"用 X 模型分析这些图+视频". Drives aihubmax.com llm-custom (async). Do NOT use for IMAGE GENERATION (use image-2 / banana-2), OCR-only, or plain text the agent can answer itself without a named model.
 ---
 
 # multimodal-ask
