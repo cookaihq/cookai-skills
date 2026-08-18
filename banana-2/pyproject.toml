@@ -1,0 +1,18 @@
+# banana-2 运行时环境（ADR 0007 §1.1/§1.2）。
+# 本 skill 没有 .py 入口：scripts/create_task.sh 用 heredoc 调 Python 做 JSON /
+# 文件名解析，全部只用标准库。这里的作用是**钉死解释器版本**——脚本一律以
+# `uv run --project <本目录> python - <<PY` 起 Python，requires-python 决定它落在
+# 哪个解释器上，避免系统 python3 版本漂移改变 json/re 行为。
+# 重建环境：uv sync --project <本目录>（venv 落 <本目录>/.venv，ADR 0007 §1.3）。
+# requires-python 下限 3.9：heredoc 内只用 3.9 兼容语法（f-string、json、re），
+# 无 walrus、无 match、无 3.10+ 类型语法。
+[project]
+name = "banana-2"
+version = "1.1.0"
+description = "Nano Banana 2 生图 skill 的运行时解释器锁定（零第三方依赖）"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+# 本 skill 只借 uv 选解释器，不作为可安装包构建。
+package = false

@@ -61,11 +61,15 @@ npx @larksuite/cli@latest install
 Skill 内置一个无第三方 Python 依赖的只读检查器：
 
 ```bash
-python3 scripts/preflight.py \
+uv run --project feishu-use feishu-use/scripts/preflight.py \
   --identity user \
   --expected-name "Alice" \
   --scope "wiki:node:retrieve base:record:read"
 ```
+
+解释器由 `feishu-use/pyproject.toml` + `uv.lock` 钉死，venv 落在 `feishu-use/.venv`（首次运行自动创建，需要 `uv` ≥ 0.8）。不要用裸 `python3` 起——真起错了脚本内的 bootstrap 也会把进程 exec 回该 venv。
+
+五个只读探测命令统一带超时（默认 20s，`--timeout` 可调），瞬时网络故障自动重试至多 3 次（退避 1s、2s），确定性失败（鉴权、参数）不重试。
 
 它输出结构化 JSON，但不会安装、更新、登录、切换 Profile 或修改凭证。所有写操作仍由 Agent 向用户确认后执行。
 
@@ -78,7 +82,9 @@ Open ID 是强匹配；显示名可能重复，只能作为弱匹配并要求人
 ## 测试
 
 ```bash
-python3 -m pytest -q feishu-use/tests/test_preflight.py
+uv run --project feishu-use --with pytest python -m pytest -q feishu-use/tests/test_preflight.py
 ```
+
+（`--with pytest` 只把测试框架临时挂进本次运行，不写进 skill 的运行时依赖。）
 
 测试全部使用伪造 CLI 响应，不访问飞书、不读取真实凭证，也不修改本机 `lark-cli` 配置。

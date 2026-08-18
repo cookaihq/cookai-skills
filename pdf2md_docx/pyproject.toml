@@ -1,0 +1,27 @@
+# pdf2md_docx 运行时环境（ADR 0007 §1.1/§1.2）。
+# 本 skill 的必需依赖为零（全部走标准库 urllib/zipfile），但仍按 §1.2「纯 stdlib
+# 不例外」自带 pyproject + uv.lock + `.python-version`：uv 据此钉死解释器版本。
+# 重建环境：uv sync --project <本目录> --no-dev（venv 落 <本目录>/.venv，ADR 0007 §1.3）。
+# 解释器版本由同目录 `.python-version`（3.13）钉死，uv 原生读取并据此选定 /
+# 下载解释器（ADR 0007 §1.2 + 沿革 1）。下面的 requires-python 只是**下限**，
+# 单靠它 uv 会在不同机器选中不同解释器——本机 3.13、只有系统 3.9 的机器则 3.9，
+# 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
+[project]
+name = "pdf2md-docx"
+version = "1.1.0"
+description = "aihubmax Doc2X V3 PDF 转 md/tex/docx 的 skill 运行时环境锁定"
+requires-python = ">=3.9"
+dependencies = []
+
+# pypdf / PyMuPDF 只用于 `--pdf` 时自动统计页数（scripts/convert.py 的
+# count_pdf_pages）。两者都没装时有明确降级路径——用户传 `--page-count <N>` 照样
+# 能完成转换，所以它们不进必需依赖，按需装：
+#   uv sync --project <本目录> --extra page-count
+[project.optional-dependencies]
+page-count = [
+    "pypdf>=4.0",
+]
+
+[tool.uv]
+# 脚本直接运行，不作为可安装包构建。
+package = false

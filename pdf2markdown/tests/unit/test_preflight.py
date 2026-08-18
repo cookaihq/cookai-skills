@@ -2490,6 +2490,140 @@ def test_advance_recovers_an_intent_saved_before_the_first_render_write(
     assert transport.calls == 0
 
 
+def test_dependency_identity_drops_diagnostic_detail_only():
+    """`detail` 是诊断文本，不是能力事实：投影必须只去掉它，别的一个不动。"""
+    modern = [
+        {"name": "pymupdf", "available": True, "version": "1.24.0",
+         "reason": None, "detail": None, "purpose": "x"},
+        {"name": "pandoc", "available": False, "version": None,
+         "reason": "not_installed", "detail": "OSError: dlopen failed",
+         "purpose": "y"},
+    ]
+    legacy = [  # v1.0.0 落盘形状：根本没有 detail 键
+        {"name": "pymupdf", "available": True, "version": "1.24.0",
+         "reason": None, "purpose": "x"},
+        {"name": "pandoc", "available": False, "version": None,
+         "reason": "not_installed", "purpose": "y"},
+    ]
+
+    assert preflight.dependency_identity(modern) == preflight.dependency_identity(legacy)
+    # 能力事实变了仍然要判为不同，投影不能把漂移一起吞掉。
+    drifted = json.loads(json.dumps(modern))
+    drifted[0]["version"] = "1.25.0"
+    assert preflight.dependency_identity(drifted) != preflight.dependency_identity(modern)
+    # 非列表 / 非字典元素原样返回，由各自的校验分支判定合法性。
+    assert preflight.dependency_identity(None) is None
+    assert preflight.dependency_identity(["x"]) == ["x"]
+
+
+def test_every_dependency_record_carries_the_same_key_shape(tmp_path, monkeypatch):
+    """四条依赖记录形状一致：读记录的人不必逐条记住谁带 detail 谁不带。"""
+    dependencies = install_preflight_dependencies(tmp_path, monkeypatch)
+    status = preflight.check_dependencies(
+        environ=dependencies, visual_capability="available"
+    )
+    names = [record["name"] for record in status["dependencies"]]
+    assert names == ["pymupdf", "pandoc", "beautifulsoup4", "host_visual"]
+    for record in status["dependencies"]:
+        assert "detail" in record, record["name"]
+        assert {"name", "available", "version", "reason", "detail", "purpose"} <= set(
+            record
+        ), record["name"]
+
+
+def test_a_legacy_baseline_intent_without_detail_resumes_without_dependency_drift(
+    tmp_path, capsys, monkeypatch
+):
+    """v1.0.0 时代落盘的 baseline intent 在新版必须照常 resume。
+
+    `detail` 是后加的纯诊断键。历史上的等值比较是整条记录直接比，于是旧 bundle 一
+    resume 就必然不等，被误判成 `dependency_drift`（workflow 侧）/
+    `integrity_violation`（preflight 侧）——环境明明一点没变，用户却被要求去
+    "restore preflight dependencies"，且这个 bundle 再也推进不了。
+    """
+    source = tmp_path / "legacy-intent.pdf"
+    make_structured_pdf(source)
+    dependencies = install_preflight_dependencies(tmp_path, monkeypatch)
+    transport = NeverNetwork()
+    start_rc, started, _stderr = invoke(
+        capsys,
+        ["start", "--source", str(source)],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=transport,
+    )
+    assert start_rc == 0
+
+    original_write = preflight._write_private_file
+    failed = False
+
+    def fail_first_write(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("simulated render output crash")
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(preflight, "_write_private_file", fail_first_write)
+    crash_rc, _crashed, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            started["work_bundle"],
+            "--expected-generation",
+            "1",
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=transport,
+    )
+    assert crash_rc == 1
+    monkeypatch.setattr(preflight, "_write_private_file", original_write)
+
+    # 把落盘的 intent 改回 v1.0.0 形状：每条依赖记录都没有 detail 键。
+    history_path = Path(started["work_bundle"]) / ".state" / "history.ndjson"
+    lines = history_path.read_text().splitlines()
+    intent = json.loads(lines[-1])
+    assert intent["event"] == "preflight_baseline_intent"
+    assert any("detail" in record for record in intent["dependencies"])
+    intent["dependencies"] = [
+        {key: value for key, value in record.items() if key != "detail"}
+        for record in intent["dependencies"]
+    ]
+    # 用与 bundle.canonical_json_bytes 一致的落盘编码重写，避免额外的形态差异。
+    lines[-1] = json.dumps(
+        intent, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    history_path.write_text("\n".join(lines) + "\n")
+
+    recover_rc, recovered, _stderr = invoke(
+        capsys,
+        [
+            "advance",
+            "--work-bundle",
+            started["work_bundle"],
+            "--expected-generation",
+            "1",
+            "--visual-capability",
+            "available",
+        ],
+        cwd=tmp_path,
+        environ=dependencies,
+        transport=transport,
+    )
+
+    assert recover_rc == 0
+    assert recovered.get("code") != "dependency_drift"
+    assert recovered.get("code") != "integrity_violation"
+    assert recovered["generation"] == 2
+    assert recovered["action_id"] == intent["action_id"]
+    assert recovered["conversion_state"] == "preflight_pending"
+    assert transport.calls == 0
+
+
 def test_history_append_failure_preserves_the_previous_complete_history(
     tmp_path, capsys, monkeypatch
 ):

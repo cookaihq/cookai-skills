@@ -166,7 +166,7 @@ The client must treat `status=completed AND results is empty/null` as **non-term
 | 401 | `authentication_error` | Invalid / missing API key |
 | 402 | `insufficient_quota` | Not enough credits |
 | 422 | `validation_error` | Parameter validation failed |
-| 429 | `rate_limit_error` | Rate limited — do NOT auto-retry |
+| 429 | `rate_limit_error` | Rate limited — request was rejected, no task created, no credits consumed; the script retries it (Retry-After, else 1s/2s backoff, 3 attempts total) |
 | 500 | `server_error` | Internal server error |
 | 503 | `service_unavailable` | Service temporarily unavailable |
 

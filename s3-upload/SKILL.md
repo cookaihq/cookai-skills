@@ -1,7 +1,7 @@
 ---
 name: s3-upload
-version: 1.0.0
-description: v1.0.0｜Use when the user explicitly wants to persist one local file in their own AWS SigV4-compatible object store and receive an Object Reference plus a public or presigned current-key URL. Do not use for hosted temporary URLs, remote/base64 input, bucket administration, or an upload inferred only from a caller mapping.
+version: 1.1.0
+description: v1.1.0｜Use when the user explicitly wants to persist one local file in their own AWS SigV4-compatible object store and receive an Object Reference plus a public or presigned current-key URL. Do not use for hosted temporary URLs, remote/base64 input, bucket administration, or an upload inferred only from a caller mapping.
 ---
 
 # s3-upload
@@ -39,19 +39,30 @@ description: v1.0.0｜Use when the user explicitly wants to persist one local fi
 3. 若 capability 为 `experimental`，向用户说明尚未完成 provider live 验证；用户已授权该写入后执行 upload。返回 URL，需要持久引用时使用 `--reference-out`，需要把 result JSON 交给另一个进程消费时使用 `--result-out`。
 4. 对 durable partial/ambiguous 结果按 checkpoint 恢复，不重新发起整个生成或上传流程。
 
+下面 `<skill>` 指 s3-upload 目录的路径（相对或绝对均可）。**必须写
+`uv run --project <skill>`，禁止裸 `python3`**（ADR 0007 §1.4）：裸 `python3` 按
+PATH 解析到系统解释器，跑的不是本 skill 钉死的解释器版本；`--project` 省了 uv 会
+从当前目录向上找 `pyproject.toml`，可能静默用上别的环境。写错了也有兜底——三个
+入口（`scripts/upload.py`、`scripts/setup.py`、`scripts/run_oss_live_matrix.py`）
+启动时都会把进程 exec 回 `<skill>/.venv`，环境缺失按 `uv.lock` 自动重建（stderr
+打一行 `[bootstrap]`），只有 uv 本体缺失或版本低于 0.8 才报错停下。
+
+注意 `$PWD` 语义不变：项目配置 `.s3-upload/`、`.env.local` 仍按**当前工作目录**
+解析，与 `--project` 指向的 skill 目录无关。
+
 ```bash
-python3 scripts/upload.py upload \
+uv run --project <skill> <skill>/scripts/upload.py upload \
   --file /absolute/path/report.pdf \
   --target project:documents \
   --dry-run --json
 
-python3 scripts/upload.py upload \
+uv run --project <skill> <skill>/scripts/upload.py upload \
   --file /absolute/path/report.pdf \
   --target project:documents \
   --reference-out ./report.object-reference.json \
   --json
 
-python3 scripts/upload.py url \
+uv run --project <skill> <skill>/scripts/upload.py url \
   --reference-file ./report.object-reference.json \
   --json
 ```
@@ -59,7 +70,7 @@ python3 scripts/upload.py url \
 Calling Skill 使用稳定 caller id。映射只选目的地，不触发上传：
 
 ```bash
-python3 /path/to/s3-upload/scripts/upload.py upload \
+uv run --project /path/to/s3-upload /path/to/s3-upload/scripts/upload.py upload \
   --file /absolute/output/cover.png \
   --caller-skill image-2 \
   --json
@@ -68,6 +79,14 @@ python3 /path/to/s3-upload/scripts/upload.py upload \
 ## Capability-Gated Commands
 
 CLI 保留 `delete`、`resume`、`reconcile` 和 `abort` 的稳定 parser surface。conditional write（`ConditionalPutObject`）已在 aws-s3 / cloudflare-r2 baseline 启用（`custom` 与 OSS/COS 仍不启用）；`reconcile` 对 `put_unknown` checkpoint 的只读全文对账在 normal baseline 可用。所有 normal baseline（包括 OSS/COS experimental preset）仍没有启用 Delete 或 multipart 的远端合同，对应命令路径在 checkpoint/网络之前即被 blocked。dry-run 会返回完整 blocked plan；不得把“命令可解析”描述为“provider 已支持”。
+
+## Network Jitter Handling（ADR 0006）
+
+- **读语义调用**（reconcile 的 HEAD、multipart 的 HEAD / ListParts）遇瞬时失败自动重试：总尝试 3 次，退避 1s、2s。瞬时的判据有两条——抛出来的传输故障（超时、连接重置、DNS 失败），以及**正常返回的 5xx / 429 状态码**（429 带 `Retry-After` 时按该值等待，上限钳到 60 秒）。确定性 4xx（403 / 404 等）不重试，立即按状态码定论。重试穷尽后：传输故障返回原来的「本次观测没有答案」落 `ambiguous`，5xx / 429 返回最后那个应答交由既有分支判定，判定语义均不变。
+- **写操作**（PutObject、DeleteObject、multipart 的创建 / 上传分片 / 完成 / 中止）**不重试**，传输异常一律置 `*_unknown` 检查点 + `ambiguous`，由 `reconcile` 判定实际落地情况。请不要用「再跑一次」代替 reconcile。
+- 「连接建立阶段失败（请求未发出）」没有从 ambiguous 里拆出来单独重试：这条链路的异常形态读不出失败发生在哪个阶段（transport 可注入、`TransportError` 只保留字符串、且 urllib 对建连超时与读应答超时抛的都是 `socket.timeout`）。偏离理由写在 `scripts/s3.py` 的 `read_request_with_retry` 上方。
+- `retry.part_max_attempts` / `retry.collision_max_attempts` 是**跨 CLI 调用的业务级尝试上限**，与这里的单次调用级重试是两套东西，对照表见 [references/configuration.md](references/configuration.md#retry-是跨-cli-调用的尝试上限不是网络重试参数)。
+- live evidence 采集（`scripts/live_adapter.py`、`scripts/evidence.py`）按用户裁决豁免重试：`request_count` 是「provider 对一次逻辑操作实际应答了几次物理请求」的精确证据，重试会破坏该口径。
 
 ## Configuration
 

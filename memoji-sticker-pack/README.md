@@ -17,7 +17,7 @@
 1. **预处理 + 上传**：本地照片用 `sips`（缺失回退 `ffmpeg`）缩到 ≤768px，再经内置上传器上传到 aihubmax 换成公网 URL（不再内联 base64）。
 2. **基准 Memoji**：`gpt-image-2` 图生图 → `base.png`，锁定人物长相与风格。
 3. **基准图上传**：`base.png` 缩到 ≤640px 上传换 URL（上传 1 次，全套表情复用该 URL）。
-4. **逐表情（并发）**：以基准图 URL 为参考、只改表情/动作，**并发提交** N 张（墙钟≈单张耗时，而非 N×）。每张失败自动重试一次再跳过。
+4. **逐表情（并发）**：以基准图 URL 为参考、只改表情/动作，**并发提交** N 张（墙钟≈单张耗时，而非 N×）。失败的按错误码分类：只有「上游生成失败」这类重跑安全的才自动重试一次，结果不明（任务可能已创建并计费）与确定性失败直接跳过并说明原因（ADR 0006）。
 5. **抠图**：`gpt-image-2` 渠道不支持透明背景（见下方「实现说明」），故让模型出**纯绿幕底**，再用 `cutout.py`（PIL + numpy）按到角落色的距离键控成真透明，并去绿边。
 6. **画廊**：`build_gallery.py` 生成 `manifest.json` + `index.html`（棋盘格背景显示透明区域）。
 
@@ -26,7 +26,8 @@
 - 需要生成图片时，安装 [`image-2`](../image-2/) skill（脚本按 `~/.claude/skills/image-2*/scripts/create_task.sh` 定位）。
 - 上传实现已内置，无需安装额外上传 Skill。只有 `--base-url ... --mode single` 完全不需要 image-2。
 - aihubmax.com 的 key（生成与上传共用 `AIHUB_API_KEY`；`--use-local-key` 时 image-2 读 `~/.config/image-2/.env`，内置上传器读 `~/.config/memoji-sticker-pack/.env`，最省事是放进程 env 或 `$PWD/.env`）。
-- Python3 + `Pillow` + `numpy`（用于抠图）；macOS `sips`（或 `ffmpeg`）用于缩图。
+- [uv](https://docs.astral.sh/uv/) >= 0.8。Python 运行时（抠图用的 `Pillow` + `numpy`）由 uv 按 `pyproject.toml` + `uv.lock` 钉死，venv 落 `<skill>/.venv`，首次运行自动创建（ADR 0007）；`gen_pack.sh` 内部所有 Python 调用都走 `uv run --project <skill> python`，不用系统 `python3`。手工重建：`rm -rf <skill>/.venv && uv sync --project <skill>`。
+- macOS `sips`（或 `ffmpeg`）用于缩图。
 
 ## 用法
 
@@ -66,6 +67,8 @@ bash scripts/gen_pack.sh --image "./me.jpg" \
 不复用基准图时，一套 pack 无重试 = **1（基准）+ N（表情）** 次 `gpt-image-2` 调用（默认 17 次）；默认每次失败生成最多重试一次，因此最大 `2 + 2N`。`single` 无重试 1 次、最大 2 次。另有**文件上传调用**（转存参考图，非生成调用）：pack 2 次、single 1 次。
 
 使用 `--base-url` 复用基准图时，pack 无重试 = N 次生成、最大 2N 次、上传 1 次；single 不生成也不上传。运行前请务必用 `--plan` 获取本次准确计数并向用户确认——**会消耗 aihubmax 积分**。
+
+实际次数常低于上面的最大值：整任务重跑只对「重跑安全」的失败生效（上游生成失败、或没有结构化错误码）；结果不明（任务可能已创建并计费）、轮询超时、确定性 4xx 一律不重跑，只在 stderr 说明原因。
 
 ## 输出结构
 

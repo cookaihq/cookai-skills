@@ -380,3 +380,115 @@ def test_scope_check_lost_token_routes_back_to_login():
     )
 
     assert report["stage"] == "login_required"
+
+
+# --- 网络抖动处理（ADR 0006）：瞬时分类与重试 ---
+
+
+def test_timeout_is_transient():
+    result = {
+        "returncode": preflight.TIMEOUT_RETURNCODE,
+        "stdout": "",
+        "stderr": "command timed out",
+    }
+    assert preflight.is_transient_failure(result) is True
+
+
+def test_exec_failure_is_not_transient():
+    result = {
+        "returncode": preflight.EXEC_FAILURE_RETURNCODE,
+        "stdout": "",
+        "stderr": "[Errno 2] No such file or directory: 'lark-cli'",
+    }
+    assert preflight.is_transient_failure(result) is False
+
+
+def test_structured_network_error_is_transient():
+    result = command_result({"error": {"type": "network", "message": "reset"}}, returncode=1)
+    assert preflight.is_transient_failure(result) is True
+
+
+def test_structured_auth_error_is_not_transient():
+    result = command_result(
+        {"error": {"type": "authentication", "code": 401, "message": "token expired"}},
+        returncode=1,
+    )
+    assert preflight.is_transient_failure(result) is False
+
+
+def test_structured_server_error_is_transient():
+    result = command_result({"error": {"type": "server", "code": 503}}, returncode=1)
+    assert preflight.is_transient_failure(result) is True
+
+
+def test_unstructured_network_message_is_transient():
+    result = {
+        "returncode": 1,
+        "stdout": "",
+        "stderr": "request failed: getaddrinfo ENOTFOUND open.feishu.cn",
+    }
+    assert preflight.is_transient_failure(result) is True
+
+
+def test_unstructured_permission_message_is_not_transient():
+    result = {"returncode": 1, "stdout": "", "stderr": "permission denied: missing scope"}
+    assert preflight.is_transient_failure(result) is False
+
+
+def test_execute_command_retries_transient_then_succeeds(monkeypatch):
+    calls = []
+    sequence = [
+        {"returncode": preflight.TIMEOUT_RETURNCODE, "stdout": "", "stderr": "command timed out"},
+        {"returncode": 1, "stdout": "", "stderr": "socket hang up"},
+        {"returncode": 0, "stdout": "ok", "stderr": ""},
+    ]
+
+    def fake_run_once(argv, timeout):
+        calls.append(tuple(argv))
+        return sequence[len(calls) - 1]
+
+    slept = []
+    monkeypatch.setattr(preflight, "run_command_once", fake_run_once)
+    monkeypatch.setattr(preflight.time, "sleep", lambda seconds: slept.append(seconds))
+
+    result = preflight.execute_command([CLI_PATH, "auth", "status", "--json"], 20.0)
+
+    assert result["returncode"] == 0
+    assert len(calls) == 3
+    assert slept == [1, 2]  # 指数退避 1s、2s（ADR 0006 §3）
+
+
+def test_execute_command_stops_at_max_attempts(monkeypatch):
+    calls = []
+
+    def fake_run_once(argv, timeout):
+        calls.append(tuple(argv))
+        return {
+            "returncode": preflight.TIMEOUT_RETURNCODE,
+            "stdout": "",
+            "stderr": "command timed out",
+        }
+
+    monkeypatch.setattr(preflight, "run_command_once", fake_run_once)
+    monkeypatch.setattr(preflight.time, "sleep", lambda seconds: None)
+
+    result = preflight.execute_command([CLI_PATH, "--version"], 20.0)
+
+    assert result["returncode"] == preflight.TIMEOUT_RETURNCODE
+    assert len(calls) == preflight.NETWORK_MAX_ATTEMPTS
+
+
+def test_execute_command_does_not_retry_deterministic_failure(monkeypatch):
+    calls = []
+
+    def fake_run_once(argv, timeout):
+        calls.append(tuple(argv))
+        return command_result({"error": {"type": "authentication", "code": 401}}, returncode=1)
+
+    monkeypatch.setattr(preflight, "run_command_once", fake_run_once)
+    monkeypatch.setattr(preflight.time, "sleep", lambda seconds: None)
+
+    result = preflight.execute_command([CLI_PATH, "auth", "status", "--json"], 20.0)
+
+    assert result["returncode"] == 1
+    assert len(calls) == 1

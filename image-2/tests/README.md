@@ -25,5 +25,5 @@
 - [ ] 是否对 key 做了 `head4****tail4` 掩码（log/echo 中不应出现完整 token）
 - [ ] 是否调用了正确的 endpoint：`POST /v1/images/generations` + `GET /v1/tasks/{id}?sync_upstream=true`
 - [ ] 是否轮询到终态 (`completed` / `failed`) 才停止
-- [ ] 失败/限流时是否避免了自动重试
+- [ ] 失败/限流时 Agent 是否避免了自行重跑（脚本内部对创建接口 429/请求确定未发出的自动重试不算；结果不明的 `create_transport_error`——含 5xx——必须停下问用户）
 - [ ] 是否提示了图片 URL 24 小时过期

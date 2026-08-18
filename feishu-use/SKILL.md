@@ -1,8 +1,8 @@
 ---
 name: feishu-use
-version: 1.0.0
+version: 1.1.0
 description: >-
-  v1.0.0｜Use when the user wants an agent to operate Feishu/Lark through the official
+  v1.1.0｜Use when the user wants an agent to operate Feishu/Lark through the official
   lark-cli, or asks to install, update, configure, log in, re-authorize,
   verify, or switch the Feishu account used by lark-cli. This is the shared
   gateway before lark-base, lark-doc, lark-calendar, lark-im, and other domain
@@ -43,7 +43,7 @@ description: >-
 先定位本 Skill 目录，再运行：
 
 ```bash
-python3 "$SKILL_DIR/scripts/preflight.py" \
+uv run --project "$SKILL_DIR" "$SKILL_DIR/scripts/preflight.py" \
   --identity user \
   --expected-open-id "ou_xxx" \
   --scope "wiki:node:retrieve base:record:read"
@@ -51,7 +51,11 @@ python3 "$SKILL_DIR/scripts/preflight.py" \
 
 按实际情况省略 `--expected-open-id`、`--expected-name`、`--profile` 和 `--scope`。脚本只执行只读探测，不安装、不更新、不登录、不写配置，并输出稳定 JSON。
 
-若环境没有 `python3`，不要为此静默安装新运行时；直接按本节状态机依次运行 `command -v lark-cli`、`lark-cli --version`、`lark-cli update --check --json` 和对应认证命令。
+**必须用 `uv run --project` 起，禁止裸 `python3`**：解释器由本 Skill 的 `pyproject.toml` + `uv.lock` 钉死，venv 落在 `$SKILL_DIR/.venv`，首次运行会自动创建。万一被裸 `python3` 起了，脚本自带的 bootstrap 也会把进程 exec 回该 venv。
+
+若环境没有 `uv`，脚本会报错并给出安装命令（`curl -LsSf https://astral.sh/uv/install.sh | sh`）——不要静默替用户安装；也可以跳过脚本，直接按本节状态机依次运行 `command -v lark-cli`、`lark-cli --version`、`lark-cli update --check --json` 和对应认证命令。
+
+**网络抖动**：脚本内部对五个只读探测命令统一做瞬时失败重试（超时、连接重置、DNS 失败、CLI 报的 5xx/429 → 至多 3 次尝试，退避 1s、2s，重试过程打到 stderr）；鉴权失败、参数非法等确定性错误不重试，直接落到对应终态 stage。Agent 拿到终态后不要再自己包一层重试。
 
 用户明确选择跳过更新后，重新运行时加：
 

@@ -12,14 +12,43 @@ set -euo pipefail
 #   4. ~/.config/banana-2/.env     (only with --use-local-key)
 #
 # On HTTP 401 (authentication_error) the script falls back to the next key in
-# the chain. 401 does not consume credits. Other errors (402/422/429/5xx,
-# network errors) stop the chain immediately.
+# the chain. 401 does not consume credits.
+#
+# 网络抖动处理（ADR 0006）：
+# - 每个 curl 都带 --connect-timeout / --max-time（create 60s、轮询 30s、下载 300s）。
+# - 轮询与下载是幂等 GET：瞬时失败（网络错误 / 5xx / 429 / 408）重试 3 次、退避
+#   1s+2s；轮询的瞬时失败只消耗一次轮询预算，不会杀死脚本。
+# - 轮询除 MAX_ATTEMPTS 次数预算外还压一条墙钟预算（MAX_ATTEMPTS × POLL_INTERVAL，
+#   默认 90 × 8s = 720s）：次数制不管每轮实际耗时，内层重试与慢响应会把总时长拖到
+#   远超预期，墙钟预算到期即按终态收场并给出 task_id。
+# - create 是计费写操作、无幂等键：429（服务端明确拒绝、未创建、不扣费）按
+#   Retry-After 或退避安全重试；5xx 仅在响应体能确认「未创建」时重试；连接中断 /
+#   超时属结果不明（ambiguous），不重试，直接报出并给查询指引。
+# - 确定性 4xx（402/422/404 等）立即报错，不重试。
 
 KEY_NAME="AIHUB_API_KEY"
 LEGACY_KEY_NAME="X_API_KEY"
 BASE_URL="${AIHUBMAX_BASE_URL:-https://api.aihubmax.com}"
 CREATE_ENDPOINT="/v1/images/generations"
 QUERY_ENDPOINT_PREFIX="/v1/tasks"
+
+# skill 根目录（scripts/ 的上一层）。本脚本内所有 Python heredoc 都以
+# `uv run --project "${SKILL_DIR}" python` 启动，把「用哪个解释器」钉死在
+# <skill>/pyproject.toml + uv.lock 上，而不是 PATH 上碰到的那个 python3
+# （ADR 0007 §1.4）。venv 缺失时 uv run 会按 uv.lock 自动创建。
+SCRIPTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(dirname -- "${SCRIPTS_DIR}")"
+
+# --- 网络超时与重试参数（ADR 0006 §1/§3）---
+# 超时按操作类型分档；重试总尝试 3 次（首次 + 2 次重试），退避 1s、2s。
+CREATE_CONNECT_TIMEOUT=15
+CREATE_MAX_TIME=60
+POLL_CONNECT_TIMEOUT=10
+POLL_MAX_TIME=30
+DOWNLOAD_CONNECT_TIMEOUT=20
+DOWNLOAD_MAX_TIME=300
+NET_MAX_ATTEMPTS=3
+RETRY_AFTER_CAP=60   # 服务端 Retry-After 的采信上限，避免被要求睡到超时预算之外
 
 MODEL="gemini-3.1-flash-image-preview"
 PROMPT=""
@@ -100,12 +129,90 @@ EOF
 
 is_positive_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 
+# --- Python 运行时钉死（ADR 0007 §1.4）---
+# uv 是系统级依赖：缺失或版本过低只报错并给出可直接执行的命令，不擅自安装
+# （ADR 0007 §4.2）。检查只做一次。
+UV_CHECKED=0
+require_uv() {
+  if [[ ${UV_CHECKED} -eq 1 ]]; then
+    return 0
+  fi
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "Error: 未安装 uv（本脚本的 Python 由 uv 钉死到 ${SKILL_DIR}/.venv）。" >&2
+    echo "请执行：curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 1
+  fi
+  local ver major minor
+  ver="$(uv --version 2>&1 | awk '{print $2}')"
+  major="${ver%%.*}"
+  minor="${ver#*.}"
+  minor="${minor%%.*}"
+  if [[ ! "${major}" =~ ^[0-9]+$ ]] || [[ ! "${minor}" =~ ^[0-9]+$ ]]; then
+    echo "Error: 无法解析 uv 版本（uv --version 输出: ${ver}）。请执行：uv self update" >&2
+    exit 1
+  fi
+  if [[ ${major} -eq 0 ]] && [[ ${minor} -lt 8 ]]; then
+    echo "Error: uv 版本过低（需 >= 0.8，当前 ${ver}）。请执行：uv self update" >&2
+    exit 1
+  fi
+  UV_CHECKED=1
+}
+
+# 本脚本内所有 Python heredoc 的唯一入口。venv 缺失时 uv run 会按 uv.lock 自动
+# 创建（ADR 0007 §4.1），因此调用方不需要先手工建环境。
+# --no-dev：uv run 的这次自动同步默认连 dev 依赖组（pytest 等）一起装，那些只服务
+# 本仓测试，不该进终端用户的 <skill>/.venv。
+py() {
+  require_uv
+  uv run --project "${SKILL_DIR}" --no-dev python "$@"
+}
+
+# --- 网络重试工具（ADR 0006 §2/§3）---
+# 退避：第 1 次重试前等 1s，第 2 次等 2s。
+backoff_seconds() {
+  local retry_index="$1"   # 1 表示第 1 次重试
+  local s=1 i=1
+  while [[ ${i} -lt ${retry_index} ]]; do
+    s=$((s * 2))
+    i=$((i + 1))
+  done
+  printf '%s' "${s}"
+}
+
+# HTTP 状态码是否属瞬时（ADR 0006 §2：5xx / 429 / 408 可重试；确定性 4xx 不重试）
+is_transient_http_code() {
+  local code="$1"
+  case "${code}" in
+    5*|429|408) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 从 curl 落盘的响应头里取 Retry-After（秒）。取不到或非法时打印空串。
+# 只认整数秒形式；HTTP-date 形式与非法值回落到指数退避（打印空串）。
+# 超过 RETRY_AFTER_CAP 时**钳到上限**，而不是丢弃后回落到 1s 起的指数退避——
+# 上游明确要求等更久，回落成更短的等待只会立刻再撞一次限流。
+retry_after_seconds() {
+  local header_file="$1"
+  local v
+  [[ -f "${header_file}" ]] || return 0
+  v="$(grep -i '^retry-after:' "${header_file}" 2>/dev/null | tail -n 1 \
+       | sed -E 's/^[Rr]etry-[Aa]fter:[[:space:]]*//; s/[[:space:]]*$//' || true)"
+  [[ "${v}" =~ ^[0-9]+$ ]] || return 0
+  # 位数先兜一道：20 位数字直接进 [[ -gt ]] 会撞 bash 的整数溢出，判出错误结果。
+  if [[ ${#v} -gt 9 ]] || [[ "${v}" -gt ${RETRY_AFTER_CAP} ]]; then
+    printf '%s' "${RETRY_AFTER_CAP}"
+  else
+    printf '%s' "${v}"
+  fi
+}
+
 # Sanitize a label for use in a filename. Keeps Unicode (including CJK), strips
 # filesystem-unsafe characters, trims whitespace, takes the first 10 code
 # points. Empty string is allowed.
 sanitize_label() {
   local raw="$1"
-  python3 - "$raw" <<'PY'
+  py - "$raw" <<'PY'
 import sys, re
 s = sys.argv[1]
 # Drop chars unsafe in filenames; keep CJK and most Unicode letters
@@ -143,6 +250,43 @@ unique_target_path() {
     i=$((i + 1))
   done
   printf '%s\n' "$candidate"
+}
+
+# 下载一张结果图。GET 幂等，重试安全（ADR 0006 §4）：瞬时失败（curl 网络错误 /
+# 超时 / 5xx / 429 / 408）按 §3 重试至多 NET_MAX_ATTEMPTS 次并打重试日志；确定性
+# 4xx（403 签名过期、404 已失效等）立即放弃，不做无谓重试。
+download_with_retry() {
+  local url="$1" target="$2"
+  local attempt=1 http_code reason wait_s
+  while [[ ${attempt} -le ${NET_MAX_ATTEMPTS} ]]; do
+    reason=""
+    if http_code="$(curl --silent --show-error --location \
+        --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT}" \
+        --max-time "${DOWNLOAD_MAX_TIME}" \
+        --write-out '%{http_code}' --output "${target}" "${url}")"; then
+      if [[ "${http_code}" == 2* ]]; then
+        return 0
+      fi
+      if ! is_transient_http_code "${http_code}"; then
+        echo "[save] Error: download failed for ${url} (HTTP ${http_code}，确定性错误，不重试)" >&2
+        rm -f "${target}"
+        return 1
+      fi
+      reason="HTTP ${http_code}"
+    else
+      reason="curl 网络错误或超时"
+    fi
+    rm -f "${target}"
+    if [[ ${attempt} -ge ${NET_MAX_ATTEMPTS} ]]; then
+      break
+    fi
+    wait_s="$(backoff_seconds "${attempt}")"
+    echo "[retry] 下载第 ${attempt}/${NET_MAX_ATTEMPTS} 次尝试失败（${reason}），${wait_s}s 后重试: ${url}" >&2
+    sleep "${wait_s}"
+    attempt=$((attempt + 1))
+  done
+  echo "[save] Error: download failed for ${url}（已尝试 ${NET_MAX_ATTEMPTS} 次，最后原因: ${reason}）" >&2
+  return 1
 }
 
 # Parse results[] from the completed query response and download each image
@@ -184,7 +328,7 @@ download_results() {
 
   # Extract results[] as TSV of "url<TAB>content_type"
   local pairs
-  pairs="$(python3 - "$query_response" <<'PY'
+  pairs="$(py - "$query_response" <<'PY'
 import json, sys
 try:
     data = json.loads(sys.argv[1])
@@ -240,8 +384,7 @@ PY
     target="$(unique_target_path "$OUTPUT_DIR" "$file_stem" "$ext")"
 
     echo "[save] Downloading result $idx/$count → $target"
-    if ! curl --silent --show-error --location --output "$target" "$url"; then
-      echo "[save] Error: download failed for $url" >&2
+    if ! download_with_retry "$url" "$target"; then
       continue
     fi
     saved_paths+=("$target")
@@ -462,13 +605,13 @@ else
   fi
 fi
 
-IMAGE_URLS_JSON="$(python3 - <<'PY' ${IMAGE_URLS[@]+"${IMAGE_URLS[@]}"}
+IMAGE_URLS_JSON="$(py - <<'PY' ${IMAGE_URLS[@]+"${IMAGE_URLS[@]}"}
 import json, sys
 print(json.dumps(sys.argv[1:], ensure_ascii=False))
 PY
 )"
 
-PAYLOAD="$(python3 - <<'PY' "$MODEL" "$PROMPT" "$ASPECT_RATIO" "$RESOLUTION" "$OUTPUT_FORMAT" "$GOOGLE_SEARCH" "$IMAGE_SEARCH" "$IMAGE_URLS_JSON"
+PAYLOAD="$(py - <<'PY' "$MODEL" "$PROMPT" "$ASPECT_RATIO" "$RESOLUTION" "$OUTPUT_FORMAT" "$GOOGLE_SEARCH" "$IMAGE_SEARCH" "$IMAGE_URLS_JSON"
 import json, sys
 
 model, prompt, aspect_ratio, resolution, output_format, google_search, image_search, image_urls_json = sys.argv[1:]
@@ -500,6 +643,73 @@ USED_SOURCE=""
 CREATE_RESPONSE=""
 HTTP_CODE=""
 
+# 单次 create 调用的结果（create 是计费写操作，无幂等键，故按 ADR 0006 §4 严格
+# 区分「服务端明确拒绝、未创建」与「结果不明」两类失败）。
+CREATE_HTTP_CODE=""
+CREATE_BODY=""
+CREATE_RETRY_AFTER=""
+CREATE_CURL_FAILED=0
+
+create_once() {
+  local key="$1"
+  local header_file raw
+  CREATE_HTTP_CODE=""
+  CREATE_BODY=""
+  CREATE_RETRY_AFTER=""
+  CREATE_CURL_FAILED=0
+  # 显式给模板路径：`mktemp -t 前缀` 在 macOS 可用，GNU coreutils 会因模板缺少
+  # XXXXXX 直接报错，这里两边都能跑。
+  header_file="$(mktemp "${TMPDIR:-/tmp}/banana2-create-headers.XXXXXX")"
+  if raw="$(curl --silent --show-error --location \
+      --connect-timeout "${CREATE_CONNECT_TIMEOUT}" \
+      --max-time "${CREATE_MAX_TIME}" \
+      --dump-header "${header_file}" \
+      --write-out $'\n%{http_code}' \
+      "${BASE_URL}${CREATE_ENDPOINT}" \
+      --header 'Content-Type: application/json' \
+      --header "Authorization: Bearer ${key}" \
+      --data "${PAYLOAD}")"; then
+    CREATE_HTTP_CODE="${raw##*$'\n'}"
+    CREATE_BODY="${raw%$'\n'$CREATE_HTTP_CODE}"
+    CREATE_RETRY_AFTER="$(retry_after_seconds "${header_file}")"
+  else
+    CREATE_CURL_FAILED=1
+  fi
+  rm -f "${header_file}"
+}
+
+# 5xx 时判断能否确认「任务未创建」：响应体必须能解析成 JSON、带 error 且不带任务
+# id，才算服务端明确拒绝，可安全重试；否则按结果不明处理，不盲重试。
+create_body_confirms_rejected() {
+  local body="$1" verdict
+  verdict="$(py - "$body" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    print("0"); raise SystemExit(0)
+if isinstance(data, dict) and data.get("error") and not data.get("id"):
+    print("1")
+else:
+    print("0")
+PY
+)"
+  [[ "${verdict}" == "1" ]]
+}
+
+# 结果不明（ambiguous）：请求已发出但没拿到可判定的响应，任务可能已创建并计费。
+# 按 ADR 0006 §4 不盲重试，把状态明确报给调用方并给出查询指引。
+fail_create_ambiguous() {
+  local reason="$1"
+  echo "Error: create 接口${reason}，本次调用结果不明（ambiguous）。" >&2
+  echo "任务可能已在服务端创建并已计费，脚本不会自动重试以免重复扣费。" >&2
+  echo "请先确认是否已产生任务，再决定是否重新提交：" >&2
+  echo "  1) 打开 https://aihubmax.com 查看任务/用量记录，拿到 task_id；" >&2
+  echo "  2) 用 task_id 查询终态：" >&2
+  echo "     curl --location '${BASE_URL}${QUERY_ENDPOINT_PREFIX}/<task_id>?sync_upstream=true' --header 'Authorization: Bearer <YOUR_API_KEY>'" >&2
+  exit 1
+}
+
 for idx in "${!KEY_VALUES[@]}"; do
   k="${KEY_VALUES[$idx]}"
   src="${KEY_SOURCES[$idx]}"
@@ -507,20 +717,53 @@ for idx in "${!KEY_VALUES[@]}"; do
 
   echo "[auth] Trying key from: ${src}  (${masked})"
 
-  RAW="$(curl --silent --show-error --location \
-      --write-out $'\n%{http_code}' \
-      "${BASE_URL}${CREATE_ENDPOINT}" \
-      --header 'Content-Type: application/json' \
-      --header "Authorization: Bearer ${k}" \
-      --data "$PAYLOAD")" || {
-    echo "Error: network/curl failure while calling create endpoint with key from $src" >&2
-    exit 1
-  }
+  attempt=1
+  while :; do
+    create_once "$k"
 
-  HTTP_CODE="${RAW##*$'\n'}"
-  CREATE_RESPONSE="${RAW%$'\n'$HTTP_CODE}"
+    if [[ ${CREATE_CURL_FAILED} -eq 1 ]]; then
+      fail_create_ambiguous "连接中断或超时（未收到响应，key 来源 ${src}）"
+    fi
 
-  echo "[auth] HTTP ${HTTP_CODE}"
+    HTTP_CODE="${CREATE_HTTP_CODE}"
+    CREATE_RESPONSE="${CREATE_BODY}"
+    echo "[auth] HTTP ${HTTP_CODE}"
+
+    # 429：服务端明确拒绝、任务未创建、不消耗积分 → 安全重试（有 Retry-After 时
+    # 遵循它，否则指数退避）。ADR 0006 §2/§3。
+    if [[ "${HTTP_CODE}" == "429" ]] && [[ ${attempt} -lt ${NET_MAX_ATTEMPTS} ]]; then
+      if [[ -n "${CREATE_RETRY_AFTER}" ]]; then
+        wait_s="${CREATE_RETRY_AFTER}"
+        why="HTTP 429，遵循 Retry-After"
+      else
+        wait_s="$(backoff_seconds "${attempt}")"
+        why="HTTP 429，指数退避"
+      fi
+      echo "[retry] create 第 ${attempt}/${NET_MAX_ATTEMPTS} 次尝试被限流（${why}），${wait_s}s 后重试（429 未创建任务、不扣费）" >&2
+      sleep "${wait_s}"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    # 5xx：只有响应体能确认「服务端拒绝、未创建」才重试；否则结果不明，停下。
+    if [[ "${HTTP_CODE}" == 5* ]]; then
+      if create_body_confirms_rejected "${CREATE_RESPONSE}"; then
+        if [[ ${attempt} -lt ${NET_MAX_ATTEMPTS} ]]; then
+          wait_s="$(backoff_seconds "${attempt}")"
+          echo "[retry] create 第 ${attempt}/${NET_MAX_ATTEMPTS} 次尝试失败（HTTP ${HTTP_CODE}，响应体确认未创建任务），${wait_s}s 后重试" >&2
+          sleep "${wait_s}"
+          attempt=$((attempt + 1))
+          continue
+        fi
+      else
+        echo "Last response body:" >&2
+        echo "${CREATE_RESPONSE}" >&2
+        fail_create_ambiguous "返回 HTTP ${HTTP_CODE} 且响应体无法确认任务是否已创建"
+      fi
+    fi
+
+    break
+  done
 
   if [[ "$HTTP_CODE" == "401" ]]; then
     echo "[auth] 401 from ${src}; 401 does not consume credits. Falling back to next key in chain."
@@ -549,7 +792,7 @@ if [[ "$HTTP_CODE" != 2* ]]; then
   exit 1
 fi
 
-TASK_ID="$(python3 - <<'PY' "$CREATE_RESPONSE"
+TASK_ID="$(py - <<'PY' "$CREATE_RESPONSE"
 import json, sys
 raw = sys.argv[1]
 try:
@@ -571,13 +814,104 @@ echo "Task ID: $TASK_ID"
 echo "Start querying until terminal status..."
 
 # --- polling with the successful key ---
+# 单次轮询查询：GET 幂等，重试安全（ADR 0006 §4）。瞬时失败在这一层内重试至多
+# NET_MAX_ATTEMPTS 次，全部失败也只让本轮拿不到状态，不会杀死脚本、不会击穿
+# MAX_ATTEMPTS 总预算（ADR 0006 §5）。确定性 4xx 立即报错退出（ADR 0006 §2）。
+# 返回：0 = 拿到 2xx 响应；1 = 本轮瞬时失败已耗尽重试；2 = 确定性失败。
+# rc=0/2 时 stdout 为「HTTP 状态码 + 换行 + 响应体 + 换行 + 哨兵」（本函数在命令替换
+# 的子 shell 里执行，赋值全局变量传不回来，所以结果一律走 stdout）。
+#
+# 尾哨兵是必需的，不是装饰：`$( )` 会剥掉命令替换结果末尾的所有换行。响应体为空
+# 时（上游 502 只给状态码、连接被中途截断等），"200\n" 会被剥成 "200"，读取侧再按
+# 换行拆就拆不出两段——状态码会被当成响应体喂给 json.loads，得到 int 200，随后
+# data.get(...) 抛 AttributeError，整个脚本连同已创建的 task_id 一起崩掉。
+# 末尾固定跟一个哨兵后，需要保留的那个换行不再位于字符串末尾，剥不掉；读取侧
+# 去掉哨兵即可还原出准确的空响应体。
+POLL_OUTPUT_SENTINEL="__BANANA2_POLL_EOF__"
+
+poll_once() {
+  local url="$1"
+  local net_attempt=1 raw code body reason wait_s
+  while [[ ${net_attempt} -le ${NET_MAX_ATTEMPTS} ]]; do
+    reason=""
+    if raw="$(curl --silent --show-error --location \
+        --connect-timeout "${POLL_CONNECT_TIMEOUT}" \
+        --max-time "${POLL_MAX_TIME}" \
+        --write-out $'\n%{http_code}' \
+        "${url}" \
+        --header "Authorization: Bearer ${USED_KEY}")"; then
+      code="${raw##*$'\n'}"
+      body="${raw%$'\n'$code}"
+      if [[ "${code}" == 2* ]]; then
+        printf '%s\n%s\n%s' "${code}" "${body}" "${POLL_OUTPUT_SENTINEL}"
+        return 0
+      fi
+      if ! is_transient_http_code "${code}"; then
+        printf '%s\n%s\n%s' "${code}" "${body}" "${POLL_OUTPUT_SENTINEL}"
+        return 2
+      fi
+      reason="HTTP ${code}"
+    else
+      reason="curl 网络错误或超时"
+    fi
+    if [[ ${net_attempt} -ge ${NET_MAX_ATTEMPTS} ]]; then
+      break
+    fi
+    wait_s="$(backoff_seconds "${net_attempt}")"
+    echo "[retry] 查询第 ${net_attempt}/${NET_MAX_ATTEMPTS} 次尝试失败（${reason}），${wait_s}s 后重试" >&2
+    sleep "${wait_s}"
+    net_attempt=$((net_attempt + 1))
+  done
+  echo "[retry] 本轮查询 ${NET_MAX_ATTEMPTS} 次尝试均失败（最后原因: ${reason}），按未拿到状态继续下一轮轮询" >&2
+  return 1
+}
+
+# 轮询墙钟预算（ADR 0006 §5）。MAX_ATTEMPTS 只数轮次、不管每轮实际耗时：每轮内层
+# 最多 3 次尝试、退避 1s+2s，加上单次查询 30s 上限，90 轮理论上能拖到远超预期的
+# 时长。因此在次数制之外再压一条真墙钟上限 = MAX_ATTEMPTS × POLL_INTERVAL
+# （默认 90 × 8s = 720s），随两个参数一起缩放；内层重试也不得突破它。
+POLL_BUDGET_SECONDS=$((MAX_ATTEMPTS * POLL_INTERVAL))
+POLL_START_SECONDS=${SECONDS}
+POLL_BUDGET_EXCEEDED=0
+
 attempt=1
 while [[ $attempt -le $MAX_ATTEMPTS ]]; do
+  if [[ $((SECONDS - POLL_START_SECONDS)) -ge ${POLL_BUDGET_SECONDS} ]]; then
+    POLL_BUDGET_EXCEEDED=1
+    break
+  fi
   QUERY_URL="${BASE_URL}${QUERY_ENDPOINT_PREFIX}/${TASK_ID}?sync_upstream=true"
-  QUERY_RESPONSE="$(curl --silent --show-error --location "$QUERY_URL" \
-    --header "Authorization: Bearer ${USED_KEY}")"
+  POLL_RC=0
+  POLL_OUT="$(poll_once "$QUERY_URL")" || POLL_RC=$?
+  # 先摘掉尾哨兵，再拆「状态码 + 响应体」；响应体为空时这一步保住了那个分隔换行。
+  POLL_OUT="${POLL_OUT%$'\n'"${POLL_OUTPUT_SENTINEL}"}"
+  POLL_CODE="${POLL_OUT%%$'\n'*}"
+  QUERY_RESPONSE="${POLL_OUT#*$'\n'}"
+  if [[ "${QUERY_RESPONSE}" == "${POLL_CODE}" ]] && [[ "${POLL_OUT}" != *$'\n'* ]]; then
+    # 没有换行可拆 = 只有状态码没有响应体，响应体按空串处理，绝不把状态码当 JSON。
+    QUERY_RESPONSE=""
+  fi
 
-  STATUS_INFO="$(python3 - <<'PY' "$QUERY_RESPONSE"
+  if [[ ${POLL_RC} -eq 2 ]]; then
+    echo "Error: 查询接口返回 HTTP ${POLL_CODE}（确定性错误，重试无意义）。" >&2
+    echo "Last response body:" >&2
+    echo "${QUERY_RESPONSE}" >&2
+    echo "任务已创建，Task ID: ${TASK_ID}；修好原因（如 key 权限）后可手工查询：" >&2
+    echo "  curl --location '${QUERY_URL}' --header 'Authorization: Bearer <YOUR_API_KEY>'" >&2
+    exit 1
+  fi
+
+  if [[ ${POLL_RC} -ne 0 ]]; then
+    # 本轮瞬时失败已耗尽重试：消耗一次轮询预算后继续，不放弃整个轮询。
+    echo "[Attempt ${attempt}/${MAX_ATTEMPTS}] status=unreachable results=0"
+    if [[ $attempt -lt $MAX_ATTEMPTS ]]; then
+      sleep "$POLL_INTERVAL"
+    fi
+    attempt=$((attempt + 1))
+    continue
+  fi
+
+  STATUS_INFO="$(py - <<'PY' "$QUERY_RESPONSE"
 import json, sys
 raw = sys.argv[1]
 try:
@@ -620,7 +954,11 @@ PY
   attempt=$((attempt + 1))
 done
 
-echo "Polling timed out after ${MAX_ATTEMPTS} attempts."
+if [[ ${POLL_BUDGET_EXCEEDED} -eq 1 ]]; then
+  echo "Polling stopped after the ${POLL_BUDGET_SECONDS}s wall-clock budget was spent (attempt ${attempt}/${MAX_ATTEMPTS})."
+else
+  echo "Polling timed out after ${MAX_ATTEMPTS} attempts."
+fi
 echo "Task may still be running. Query manually with task id: $TASK_ID"
 echo "curl --location '${BASE_URL}${QUERY_ENDPOINT_PREFIX}/${TASK_ID}?sync_upstream=true' --header 'Authorization: Bearer <YOUR_API_KEY>'"
 exit 3

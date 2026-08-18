@@ -1968,6 +1968,8 @@ def test_error_path_actions_are_a_closed_vocabulary():
         "correct_preflight_record",
         "correct_review_record",
         "restore_review_dependencies",
+        # ADR 0006 整改：来源下载重试穷尽后的动作，与「换一个来源」区分开。
+        "retry_after_network_recovery",
         "retry_after_writer_finishes",
         "retry_settings_write",
     }

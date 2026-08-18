@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 
-from client import call_with_key_fallback, encode_multipart, http_request
+from client import call_with_key_fallback, encode_multipart, request_with_retry
 
 _HINTS = {
     400: "请求格式错误", 401: "鉴权失败", 403: "存储空间不足",
-    413: "文件过大，请压缩或更换更小的文件", 429: "请求频率超限（不自动重试）", 500: "服务器内部错误",
+    413: "文件过大，请压缩或更换更小的文件",
+    429: "请求频率超限（已按 ADR 0006 自动重试 3 次仍被限流，请稍后再试）",
+    500: "服务器内部错误",
 }
 
 
@@ -18,11 +20,14 @@ class UploadHelperError(Exception):
 
 
 def upload_local_file(path: str, keys: list, *, base_url: str = "https://api.aihubmax.com",
-                      transport=None) -> str:
+                      transport=None, sleep=None) -> str:
     """Upload a local file via the aihubmax stream endpoint; return the hosted URL.
-    Raises UploadHelperError on HTTP failure; lets urllib URLError propagate."""
-    if transport is None:
-        transport = http_request
+    Raises UploadHelperError on HTTP failure.
+
+    上传是写操作（在上游存储里落一份文件），按 ADR 0006 规则 4 走
+    `idempotent=False`：只重试 429（服务端限流拒绝，文件没落盘）与连接阶段失败；
+    请求发出之后的超时抛 `client.AmbiguousWrite`，由调用方报给用户，不盲重试。
+    """
     with open(path, "rb") as fh:
         file_bytes = fh.read()
     ctype, body = encode_multipart({"auto_cleanup": "true"}, "file", os.path.basename(path), file_bytes)
@@ -30,7 +35,9 @@ def upload_local_file(path: str, keys: list, *, base_url: str = "https://api.aih
 
     def attempt(key):
         headers = {"Content-Type": ctype, "Authorization": "Bearer " + key}
-        return transport("POST", url, headers, body)
+        return request_with_retry("POST", url, headers, body, idempotent=False,
+                                  op="上传 PDF 到 aihubmax",
+                                  transport=transport, sleep=sleep)
 
     resp, _ = call_with_key_fallback(keys, attempt)
     if resp.status == 200 and isinstance(resp.json, dict) and resp.json.get("url"):

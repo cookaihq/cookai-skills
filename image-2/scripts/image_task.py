@@ -3,10 +3,23 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
+# 运行时环境 bootstrap（ADR 0007 §1.4 脚本侧兜底）：直接执行本文件时，若解释器
+# 不在 <skill>/.venv 内就 execv 拉回去（venv 缺失按 uv.lock 自动重建）。放在
+# `__main__` 守卫里，好让 tests 的 exec_module 导入本模块时不触发 execv。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if __name__ == "__main__":
+    import _runtime_bootstrap
+
+    _runtime_bootstrap.ensure()
+
 import argparse
 import http.client
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -35,6 +48,29 @@ MAX_API_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_REDIRECTS = 5
 DOWNLOAD_TIMEOUT_SECONDS = 60
 SAFE_INTEGER_MAX = 2**53 - 1
+
+# --- 网络抖动处理（ADR 0006）------------------------------------------------
+# 总尝试 3 次（首次 + 2 次重试），指数退避 1s、2s；429 带 Retry-After 时按该值等。
+MAX_TRANSPORT_ATTEMPTS = 3
+RETRY_BACKOFF_BASE_SECONDS = 1
+MAX_RETRY_AFTER_SECONDS = 120  # 上游给出的超长 Retry-After 不照单全收，避免挂死
+
+# 轮询墙钟预算（ADR 0006 规则 5）。`--max-attempts` 只数轮次、不管每轮实际耗时：
+# 每轮内层最多 3 次尝试、退避 1s+2s，加上 60s 的单次 API 超时，90 轮理论上能拖到
+# 数小时。因此在次数制之外再压一条真墙钟上限 = max_attempts × poll_interval
+# （默认 90 × 8s = 720s），随两个参数一起缩放；内层重试不得突破它。
+DEFAULT_POLL_WALL_CLOCK_BUDGET_SECONDS = 720  # = 默认 90 次 × 8s
+
+# 网络失败的阶段分类。urllib 的结构性事实（CPython
+# Lib/urllib/request.py AbstractHTTPHandler.do_open）：连接建立与请求发送阶段的
+# OSError 被包成 urllib.error.URLError；等待/读取响应阶段的超时与连接中断原样抛出
+# socket.timeout / TimeoutError / ConnectionResetError。据此：
+#   SEND_FAILED   请求没能发出去 → 服务端不可能受理 → 计费的 create 也可安全重试
+#   RESPONSE_LOST 请求已发出但没拿到响应 → 结果不明 → create 禁止盲重试（重复扣费）
+#   DETERMINISTIC 与网络抖动无关的确定性失败（响应超本地上限、代理隧道被禁）→ 不重试
+TRANSPORT_SEND_FAILED = "send_failed"
+TRANSPORT_RESPONSE_LOST = "response_lost"
+TRANSPORT_DETERMINISTIC = "deterministic"
 
 ALLOWED_MODELS = {"gpt-image-2", "gpt-image-2-limit"}
 ALLOWED_QUALITY = {"low", "medium", "high"}
@@ -69,7 +105,13 @@ ERROR_MESSAGES = {
     "invalid_arguments": "Invalid command arguments.",
     "configuration_error": "Image API configuration is unavailable.",
     "invalid_task_id": "Image task identifier is invalid.",
-    "create_transport_error": "Image task creation request failed.",
+    # 结果不明（ambiguous）语义：请求可能已经到达上游、任务可能已创建并计费，也
+    # 可能根本没发出去。本地无法区分，因此绝不自动重发（ADR 0006 规则 4）；
+    # stderr 的 [net] 日志会写清本次到底是「请求未发出」还是「响应丢失」。
+    "create_transport_error": (
+        "Image task creation request failed; the task may or may not have been created upstream. "
+        "Check the console before retrying."
+    ),
     "create_http_error": "Image task creation was rejected.",
     "create_response_invalid": "Image task creation response was invalid.",
     "query_transport_error": "Image task query request failed.",
@@ -94,7 +136,12 @@ class ResponseProblem(ValueError):
 
 
 class TransportFailure(OSError):
-    pass
+    """Transport-level failure carrying the stage it happened in (see the
+    TRANSPORT_* constants). `stage` decides whether a retry is safe."""
+
+    def __init__(self, message: str, stage: str = TRANSPORT_RESPONSE_LOST) -> None:
+        super().__init__(message)
+        self.stage = stage
 
 
 class DownloadFailure(OSError):
@@ -154,7 +201,10 @@ class StandardApiTransport:
     def _read_limited(response: Any) -> bytes:
         body = response.read(MAX_API_RESPONSE_BYTES + 1)
         if len(body) > MAX_API_RESPONSE_BYTES:
-            raise TransportFailure("API response exceeds local safety limit")
+            # 确定性拒收，不是抖动：重试同样会超限。
+            raise TransportFailure(
+                "API response exceeds local safety limit", TRANSPORT_DETERMINISTIC
+            )
         return body
 
     def request(
@@ -182,8 +232,19 @@ class StandardApiTransport:
                 tuple((str(key), str(value)) for key, value in response.headers.items()),
                 response_body,
             )
-        except (URLError, OSError, http.client.HTTPException) as exc:
-            raise TransportFailure("API request transport failed") from exc
+        except TransportFailure:
+            # _read_limited 已经定好 stage（确定性），原样上抛。
+            raise
+        except URLError as exc:
+            # 连接建立 / 请求发送阶段失败：请求没能发出去。
+            raise TransportFailure(
+                "API request transport failed", TRANSPORT_SEND_FAILED
+            ) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # 等待 / 读取响应阶段失败：请求已经发出去了，服务端可能已受理。
+            raise TransportFailure(
+                "API request transport failed", TRANSPORT_RESPONSE_LOST
+            ) from exc
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -193,7 +254,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         if self._tunnel_host is not None:
-            raise TransportFailure("proxy tunnels are disabled")
+            raise TransportFailure("proxy tunnels are disabled", TRANSPORT_DETERMINISTIC)
         raw_socket = socket.create_connection(
             (self._pinned_address, self.port),
             self.timeout,
@@ -239,12 +300,20 @@ class StandardDownloadTransport:
                             break
                         sink.write(chunk)
                     if response.length not in (None, 0):
-                        raise TransportFailure("download body ended before Content-Length")
+                        # 响应体被截断：属于连接层抖动，幂等 GET 可安全重试。
+                        raise TransportFailure(
+                            "download body ended before Content-Length",
+                            TRANSPORT_RESPONSE_LOST,
+                        )
                 return result
             finally:
                 response.close()
+        except TransportFailure:
+            raise
         except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
-            raise TransportFailure("download transport failed") from exc
+            raise TransportFailure(
+                "download transport failed", TRANSPORT_RESPONSE_LOST
+            ) from exc
         finally:
             connection.close()
 
@@ -742,6 +811,168 @@ def publish_no_replace(temporary_path: Path, final_path: Path) -> None:
         pass
 
 
+def _transport_stage(exc: BaseException) -> str:
+    """Stage of a transport failure; anything unlabeled is treated as the unsafe
+    case (response lost), so an unknown error never gets a write replayed."""
+    return getattr(exc, "stage", TRANSPORT_RESPONSE_LOST)
+
+
+def _is_transient_status(status: int) -> bool:
+    """ADR 0006 规则 2：429 与全部 5xx 算瞬时；确定性 4xx 不算。"""
+    return status == 429 or 500 <= status <= 599
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """指数退避：第 1 次重试前等 1s，第 2 次等 2s。"""
+    return float(RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)))
+
+
+def _retry_after_seconds(headers: Sequence[tuple[str, str]]) -> Optional[float]:
+    """429 的 Retry-After（只认秒数形式；HTTP-date 与非法值回落到退避公式）。
+
+    `float()` 接受 "nan" / "inf"，而 `min(nan, 120)` 返回 nan、`sleep(nan)` 直接
+    抛异常把脚本打断，所以先用 math.isfinite 挡掉再钳制。
+    """
+    for key, value in headers:
+        if key.lower() != "retry-after":
+            continue
+        try:
+            seconds = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(seconds) or seconds < 0:
+            return None
+        return min(seconds, MAX_RETRY_AFTER_SECONDS)
+    return None
+
+
+def _api_request_with_retry(
+    api_transport: Any,
+    method: str,
+    url: str,
+    headers: Sequence[tuple[str, str]],
+    body: Optional[bytes],
+    *,
+    operation: str,
+    retry_response_lost: bool,
+    sleeper: Callable[[float], None],
+    logger: Logger,
+    attempts: int = MAX_TRANSPORT_ATTEMPTS,
+) -> HttpResponse:
+    """One API call with ADR 0006 jitter handling.
+
+    `retry_response_lost=False` is the billing-write setting used by task creation.
+    Anything that leaves the outcome unknown is reported instead of replayed:
+
+    - transport failures after the request went out (`TRANSPORT_RESPONSE_LOST`);
+    - HTTP 5xx. The server received the request; whether it created (and billed)
+      a task before failing to answer cannot be told apart from a clean rejection,
+      so a 5xx is NOT retried here — same verdict as a lost response.
+
+    Only HTTP 429 stays retryable for a billing write: it is the one status where
+    the server states it declined the request, so no task exists and nothing was
+    billed. Send-stage failures (the request never left the client) are retried in
+    both settings; idempotent reads additionally retry every transient status.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            response = api_transport.request(method, url, headers, body)
+        except Exception as exc:  # noqa: BLE001 - stage decides what is safe
+            stage = _transport_stage(exc)
+            if stage == TRANSPORT_RESPONSE_LOST and not retry_response_lost:
+                logger.error(
+                    f"[net] {operation}: the request went out but no response came back; "
+                    "the result is unknown and was NOT retried"
+                )
+                raise
+            if stage == TRANSPORT_DETERMINISTIC or attempt >= attempts:
+                raise
+            wait = _backoff_seconds(attempt)
+            logger.info(
+                f"[net] {operation} attempt {attempt}/{attempts} failed ({stage}); "
+                f"retrying in {wait}s"
+            )
+            sleeper(wait)
+            continue
+        if not isinstance(response, HttpResponse):
+            raise TransportFailure(
+                "API transport returned an invalid response", TRANSPORT_DETERMINISTIC
+            )
+        if retry_response_lost:
+            status_retryable = _is_transient_status(response.status)
+        else:
+            # 计费写：只有 429 能确认「服务端拒绝、未受理、未扣费」。5xx 与响应
+            # 丢失同口径——服务端已收到请求，是否已建任务无法确认，不重试。
+            status_retryable = response.status == 429
+            if 500 <= response.status <= 599:
+                logger.error(
+                    f"[net] {operation}: the server answered HTTP {response.status}; "
+                    "whether it accepted the request is unknown and it was NOT retried"
+                )
+        if attempt >= attempts or not status_retryable:
+            return response
+        wait = _retry_after_seconds(response.headers)
+        source = "Retry-After"
+        if wait is None:
+            wait = _backoff_seconds(attempt)
+            source = "backoff"
+        logger.info(
+            f"[net] {operation} attempt {attempt}/{attempts} returned HTTP {response.status}; "
+            f"retrying in {wait}s ({source})"
+        )
+        sleeper(wait)
+    raise TransportFailure("API request retries exhausted", TRANSPORT_RESPONSE_LOST)
+
+
+def _fetch_hop_with_retry(
+    transport: Any,
+    request: DownloadRequest,
+    sink: BinaryIO,
+    *,
+    operation: str,
+    sleeper: Callable[[float], None],
+    logger: Logger,
+    attempts: int = MAX_TRANSPORT_ATTEMPTS,
+) -> Any:
+    """Fetch one download hop, retrying transient failures (ADR 0006).
+
+    Downloads are idempotent GETs, so both transport failures and transient
+    statuses are safe to replay; the sink is rewound before every attempt so a
+    partial body from a failed attempt cannot be published.
+    """
+    for attempt in range(1, attempts + 1):
+        sink.seek(0)
+        sink.truncate(0)
+        try:
+            response = transport.fetch(request, sink)
+        except Exception as exc:  # noqa: BLE001 - stage decides what is safe
+            stage = _transport_stage(exc)
+            if stage == TRANSPORT_DETERMINISTIC or attempt >= attempts:
+                raise
+            wait = _backoff_seconds(attempt)
+            logger.info(
+                f"[net] {operation} attempt {attempt}/{attempts} failed ({stage}); "
+                f"retrying in {wait}s"
+            )
+            sleeper(wait)
+            continue
+        if not isinstance(response, OneHopResponse):
+            return response
+        if attempt >= attempts or not _is_transient_status(response.status):
+            return response
+        wait = _retry_after_seconds(response.headers)
+        source = "Retry-After"
+        if wait is None:
+            wait = _backoff_seconds(attempt)
+            source = "backoff"
+        logger.info(
+            f"[net] {operation} attempt {attempt}/{attempts} returned HTTP {response.status}; "
+            f"retrying in {wait}s ({source})"
+        )
+        sleeper(wait)
+    raise DownloadFailure("download retries exhausted")
+
+
 def download_one(
     output: UpstreamOutput,
     target: Path,
@@ -749,6 +980,8 @@ def download_one(
     transport: Any,
     resolver: Callable[[str, int], Sequence[str]],
     publisher: Callable[[Path, Path], None],
+    sleeper: Callable[[float], None],
+    logger: Logger,
 ) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".image-2-download-",
@@ -764,9 +997,15 @@ def download_one(
             while True:
                 validate_upstream_url(current_url, active_keys)
                 request = _download_request(current_url, resolver)
-                sink.seek(0)
-                sink.truncate(0)
-                response = transport.fetch(request, sink)
+                # 单跳内自带瞬时重试（sink 每次尝试前被清空，见 _fetch_hop_with_retry）
+                response = _fetch_hop_with_retry(
+                    transport,
+                    request,
+                    sink,
+                    operation=f"download result {output.index}",
+                    sleeper=sleeper,
+                    logger=logger,
+                )
                 if not isinstance(response, OneHopResponse):
                     raise DownloadFailure("download transport returned an invalid response")
                 if 200 <= response.status < 300:
@@ -808,6 +1047,7 @@ def download_outputs(
     transport: Any,
     resolver: Callable[[str, int], Sequence[str]],
     publisher: Callable[[Path, Path], None],
+    sleeper: Callable[[float], None],
     logger: Logger,
 ) -> list[dict[str, Any]]:
     try:
@@ -831,7 +1071,9 @@ def download_outputs(
         file_stem = f"{stem}-{output.index:02d}" if multiple else stem
         target = unique_target_path(output_dir, file_stem, extension_for(output))
         try:
-            download_one(output, target, active_keys, transport, resolver, publisher)
+            download_one(
+                output, target, active_keys, transport, resolver, publisher, sleeper, logger
+            )
         except Exception:
             logger.error(f"[save] result {output.index} download failed")
             local_path: Optional[str] = None
@@ -963,6 +1205,7 @@ def run_task(
     output_dir: Path,
     timestamp: str,
     logger: Logger,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     payload = build_payload(namespace)
     create_url = f"{namespace.base_url}{CREATE_ENDPOINT}"
@@ -971,15 +1214,21 @@ def run_task(
     for key in keys:
         logger.info(f"[auth] Trying key from: {key.source} ({mask_key(key.value)})")
         try:
-            response = api_transport.request(
+            # 计费写操作（ADR 0006 规则 4）：只重试「确认未受理」的失败——请求没
+            # 发出去（send_failed），或服务端明确以 429/5xx 应答（没有任务返回）。
+            # 请求发出后响应丢失时不重试，按结果不明报出，避免重复扣费。
+            response = _api_request_with_retry(
+                api_transport,
                 "POST",
                 create_url,
                 (("Content-Type", "application/json"), ("Authorization", f"Bearer {key.value}")),
                 payload,
+                operation="create task",
+                retry_response_lost=False,
+                sleeper=sleeper,
+                logger=logger,
             )
         except Exception:
-            return _failure("create_transport_error")
-        if not isinstance(response, HttpResponse):
             return _failure("create_transport_error")
         logger.info(f"[auth] HTTP {response.status}")
         if response.status == 401:
@@ -989,6 +1238,10 @@ def run_task(
         break
     if selected_key is None or create_response is None:
         return _failure("create_http_error")
+    if 500 <= create_response.status <= 599:
+        # 5xx 不能报「已拒绝」：服务端收到了请求，任务可能已创建并计费，只是应答
+        # 失败。与「响应丢失」同一终态码，让用户先去控制台确认再决定是否重发。
+        return _failure("create_transport_error")
     if not 200 <= create_response.status < 300:
         return _failure("create_http_error")
     try:
@@ -1006,17 +1259,32 @@ def run_task(
     logger.info(f"[auth] Using key from: {selected_key.source}")
     logger.info(f"Task ID: {task_id}")
     query_url = f"{namespace.base_url}{QUERY_ENDPOINT_PREFIX}/{task_id}?sync_upstream=true"
+    # 次数制预算之外再压一条真墙钟上限（见 DEFAULT_POLL_WALL_CLOCK_BUDGET_SECONDS）。
+    poll_budget_seconds = namespace.max_attempts * namespace.poll_interval
+    poll_deadline = monotonic() + poll_budget_seconds
     for attempt in range(1, namespace.max_attempts + 1):
+        if monotonic() >= poll_deadline:
+            logger.info(
+                f"[poll] wall-clock budget of {poll_budget_seconds}s is spent after "
+                f"{attempt - 1} attempts; giving up on polling"
+            )
+            break
         try:
-            response = api_transport.request(
+            # 幂等 GET：单次瞬时失败（429/5xx/网络异常）先消耗内层重试（3 次 +
+            # 指数退避 + 日志），**不再让一次抖动击穿整个轮询预算**（ADR 0006
+            # 规则 5）。内层重试穷尽才落到 query_transport_error 终态。
+            response = _api_request_with_retry(
+                api_transport,
                 "GET",
                 query_url,
                 (("Authorization", f"Bearer {selected_key.value}"),),
                 None,
+                operation=f"poll task attempt {attempt}",
+                retry_response_lost=True,
+                sleeper=sleeper,
+                logger=logger,
             )
         except Exception:
-            return _failure("query_transport_error", task_id)
-        if not isinstance(response, HttpResponse):
             return _failure("query_transport_error", task_id)
         if not 200 <= response.status < 300:
             return _failure("query_http_error", task_id)
@@ -1065,6 +1333,7 @@ def run_task(
                         download_transport,
                         resolver,
                         publisher,
+                        sleeper,
                         logger,
                     )
                 return _success(task_id, outputs)
@@ -1082,6 +1351,7 @@ def main(
     sleeper: Callable[[float], None] = time.sleep,
     publisher: Callable[[Path, Path], None] = publish_no_replace,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    monotonic: Callable[[], float] = time.monotonic,
     environ: Optional[Mapping[str, str]] = None,
     cwd: Optional[Path] = None,
     home: Optional[Path] = None,
@@ -1139,6 +1409,7 @@ def main(
             output_dir,
             timestamp,
             logger,
+            monotonic,
         )
     except ConfigurationProblem:
         document = _failure("configuration_error")

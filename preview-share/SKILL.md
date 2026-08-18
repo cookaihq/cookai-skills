@@ -1,7 +1,7 @@
 ---
 name: preview-share
-version: 1.0.0
-description: v1.0.0｜Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
+version: 1.1.0
+description: v1.1.0｜Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
 ---
 
 # preview-share
@@ -43,7 +43,7 @@ description: v1.0.0｜Use when the user wants to put a local HTML page (or any l
 
 读取 `PREVIEW_SHARE_FTP`、`PREVIEW_SHARE_BASEURL`，每个变量独立按以下顺序取「首个非空来源」（详见仓库 `CLAUDE.md` 通用约定）：
 
-1. 进程环境变量（本轮显式注入 `PREVIEW_SHARE_FTP=... python3 ...` 或已 `export`）
+1. 进程环境变量（本轮显式注入 `PREVIEW_SHARE_FTP=... uv run --project <skill> ...` 或已 `export`）
 2. `$PWD/.env.local`（自动读，**不向上递归**）
 3. `$PWD/.env`（自动读，**不向上递归**）
 4. `~/.config/preview-share/.env`（**仅 `--use-local-key` 时读**，避免静默使用持久化凭证）
@@ -87,35 +87,49 @@ description: v1.0.0｜Use when the user wants to put a local HTML page (or any l
 
 ## Examples
 
+下面 `<skill>` 指 preview-share 目录的路径（相对或绝对均可）。**必须写
+`uv run --project <skill>`，禁止裸 `python3`**（ADR 0007 §1.4）：裸 `python3` 按
+PATH 解析到系统解释器，跑的不是本 skill 钉死的解释器版本。`--project` 不能省——
+省了 uv 会从当前目录向上找 `pyproject.toml`，可能静默用上别的环境。写错了也有
+兜底：`scripts/upload.py` 启动时会把进程 exec 回 `<skill>/.venv`，环境缺失时按
+`uv.lock` 自动重建（stderr 打一行 `[bootstrap]`）；只有 uv 本体缺失或版本低于
+0.8 才报错停下，此时按报错给出的命令安装 uv 后重试。
+
+注意：配置读取的 `$PWD/.env.local` / `$PWD/.env` 按**当前工作目录**解析，与
+`--project` 指向的 skill 目录无关。
+
 ```bash
 # 标准用法：上传 HTML 预览（自动带上引用的图片/CSS/JS）
-python3 scripts/upload.py /path/to/preview.html --label iot-power
+uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label iot-power
 
 # 先看清单和 URL，不上传
-python3 scripts/upload.py /path/to/preview.html --label demo --dry-run
+uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label demo --dry-run
 
 # 依赖扫描漏了某个目录（如字体/额外资源），手动补
-python3 scripts/upload.py /path/to/index.html --label site --include assets/fonts
+uv run --project <skill> <skill>/scripts/upload.py /path/to/index.html --label site --include assets/fonts
 
 # 单个独立文件（一张图），不需要扫描
-python3 scripts/upload.py /path/to/poster.png --label poster --no-scan
+uv run --project <skill> <skill>/scripts/upload.py /path/to/poster.png --label poster --no-scan
 
 # 用持久化凭证（~/.config/preview-share/.env）
-python3 scripts/upload.py /path/to/preview.html --label demo --use-local-key
+uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label demo --use-local-key
 
 # 会话级注入凭证（最高优先级）。
 # 末尾的 /preview 是「可选的命名空间子目录」——把预览统一收在 web 根的一个子目录下；
 # 名字可任意取，但 FTP 远程路径与 BASEURL 必须用同一个（也可都省略，直接用 web 根）。
 PREVIEW_SHARE_FTP='ftp://u:p@host:21/preview' \
 PREVIEW_SHARE_BASEURL='https://example.com/preview' \
-python3 scripts/upload.py /path/to/preview.html --label demo
+uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label demo
 ```
 
 ## Error Handling
 
 - 缺 `PREVIEW_SHARE_FTP` / `PREVIEW_SHARE_BASEURL`：按优先级提示用户在哪一层配置；不要臆造凭证。
 - 入口文件不存在：提示用户核对路径。
-- FTP 登录失败（认证/权限）：检查凭证是否正确、账号是否有写权限。
+- FTP 登录失败（认证/权限）：检查凭证是否正确、账号是否有写权限。这类是确定性错误，脚本**不重试**，直接报错。
+- 网络瞬时故障（连接超时、connection reset、broken pipe、DNS 解析失败、421/425/450 临时否定应答）：脚本按 ADR 0006 自动重试 3 次（退避 1s、2s），stderr 会打 `[retry]` 行说明第几次、等多久、什么原因；穷尽后才报错。
+- `[error] 读取本地文件失败 …`（退出码 2）：待上传的**本地**文件不存在、没有读权限或是个目录。这与 FTP 服务器无关，脚本一次就报错、不重试也不去问服务器状态；请直接核对本地路径。
+- `[ambiguous] 上传 … 无法查询远端状态`：某个文件传到一半中断，且服务器不支持 `SIZE` 命令（或控制连接已断且重连失败），无法确认远端是否已写完——脚本按 ADR 0006 规则 4 **不盲重试**，需人工确认服务器状态后重跑。
 - 上传超时：增大 `--timeout`；若仍失败，确认网络与服务器被动模式数据端口是否可达。
 - `[warn] 引用未找到`：相对引用在本地缺文件，线上会裂图——补齐文件或用 `--include`，或与用户确认忽略。
 - scheme 非 `ftp`（如 `sftp://` / `ftps://`）：当前脚本只支持普通 FTP，需扩展。
@@ -134,5 +148,6 @@ python3 scripts/upload.py /path/to/preview.html --label demo
 
 - `SKILL.md`
 - `README.md`（人类向文档：用法 + 服务器端配置 + 故障排查）
+- `pyproject.toml` / `uv.lock`（ADR 0007 运行时环境钉死；零第三方依赖，只钉解释器版本）
 - `scripts/upload.py`
 - `assets/image1.png`、`assets/image2.png`（README 用的面板配置截图）

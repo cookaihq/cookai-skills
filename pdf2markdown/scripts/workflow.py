@@ -16,6 +16,18 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# 同目录模块入 sys.path：直接执行本文件时 Python 会自动加入 scripts/，被当模块
+# import（如 tests/）时靠 conftest 注入；这里显式加一次，两种入口都成立。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+if __name__ == "__main__":
+    # 运行时 bootstrap（ADR 0007 §1.4）：不在 <skill>/.venv 就 exec 拉回去，
+    # venv 缺失按 uv.lock 自动重建。必须先于下面的业务模块 import——那些模块会
+    # 触发 PyMuPDF / BeautifulSoup 的加载，用错解释器就等于用错整套依赖。
+    import _runtime_bootstrap
+
+    _runtime_bootstrap.ensure()
+
 import aihub_upload
 import bundle as bundle_module
 import config as config_module
@@ -105,6 +117,10 @@ ERROR_PATH_ACTIONS = frozenset(
         "correct_preflight_record",
         "correct_review_record",
         "restore_review_dependencies",
+        # 来源下载已按 ADR 0006 重试 3 次仍遇瞬时网络故障：来源本身可能没问题，
+        # 正确动作是等网络恢复后重跑，而不是像 provide_public_https_pdf 那样让
+        # 用户换来源。
+        "retry_after_network_recovery",
         "retry_after_writer_finishes",
         "retry_settings_write",
     }
@@ -684,11 +700,20 @@ def _start(
                     transport=transport,
                 )
             except pdf_source.PdfSourceError as exc:
+                # 网络瞬时故障与「来源不合格」分开报（ADR 0006 规则 2）：前者已按
+                # 3 次尝试 + 指数退避重试过仍失败，来源本身可能完全没问题，让用户
+                # 换 URL 是错误指引；后者才是要用户换来源。退出码同样分开，便于
+                # 调用方脚本区分「稍后重试」与「输入无效」。
+                transient = exc.code in pdf_source.TRANSIENT_SOURCE_ERROR_CODES
                 raise WorkflowError(
                     exc.code,
                     exc.message,
-                    return_code=3,
-                    action_required="provide_public_https_pdf",
+                    return_code=7 if transient else 3,
+                    action_required=(
+                        "retry_after_network_recovery"
+                        if transient
+                        else "provide_public_https_pdf"
+                    ),
                 ) from None
             source_hash = downloaded.sha256
             source_size = downloaded.size_bytes
@@ -1935,8 +1960,12 @@ def _advance(
                             file=sys.stderr,
                         )
                         return result
-                    if dependency_status["dependencies"] != pending_baseline.get(
-                        "dependencies"
+                    # 只比能力事实，不比诊断文本：`detail` 这类纯诊断键的增删不算
+                    # 依赖漂移，见 preflight.dependency_identity。
+                    if preflight_module.dependency_identity(
+                        dependency_status["dependencies"]
+                    ) != preflight_module.dependency_identity(
+                        pending_baseline.get("dependencies")
                     ):
                         raise WorkflowError(
                             "dependency_drift",
@@ -2876,8 +2905,12 @@ def _advance(
                     recorded = manifest["preflight"]
                     if (
                         recorded.get("missing") != dependency_status["missing"]
-                        or recorded.get("dependencies")
-                        != dependency_status["dependencies"]
+                        or preflight_module.dependency_identity(
+                            recorded.get("dependencies")
+                        )
+                        != preflight_module.dependency_identity(
+                            dependency_status["dependencies"]
+                        )
                         or recorded.get("render_dpi") != args.render_dpi
                     ):
                         private_state = _read_json(

@@ -91,12 +91,25 @@ printf 'fake-image' > "$out"
 """,
         encoding="utf-8",
     )
-    python3 = bin_dir / "python3"
-    python3.write_text(
+    # gen_pack.sh 现在一律经 `uv run --project <skill> python <script>` 调用
+    # （ADR 0007 §1.4），所以桩要打在 uv 上，而不是 python3 上。
+    uv = bin_dir / "uv"
+    uv.write_text(
         """#!/bin/sh
-case "$1" in
+# 形如： uv run --project <SKILL_DIR> python <script> [args...]
+[ "$1" = "run" ] || exit 1
+shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project) shift 2 ;;
+    python|python3) shift; break ;;
+    *) shift ;;
+  esac
+done
+script="$1"
+[ "$#" -gt 0 ] && shift
+case "$script" in
   *cutout.py)
-    shift
     src=''; out=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -108,11 +121,12 @@ case "$1" in
     cp "$src" "$out"
     ;;
 esac
+exit 0
 """,
         encoding="utf-8",
     )
     curl.chmod(0o755)
-    python3.chmod(0o755)
+    uv.chmod(0o755)
 
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)

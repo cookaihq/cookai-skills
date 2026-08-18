@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import NamedTuple
+
+# 运行时环境 bootstrap（ADR 0007 §1.4 脚本侧兜底）。本文件是被 import 的模块，
+# 正常路径下解释器已由入口拉进 <skill>/.venv；这里的守卫只对「直接执行本文件」
+# 生效，保证任何执行方式都落在同一个 venv 里。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if __name__ == "__main__":
+    import _runtime_bootstrap
+
+    _runtime_bootstrap.ensure()
 
 # Canonical key variable name. `X_API_KEY` is the historical name and is still
 # accepted everywhere the canonical one is, one release-notice grace period.

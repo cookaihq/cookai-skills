@@ -6,6 +6,20 @@ import os
 import select
 import sys
 
+# 同目录模块入 sys.path：直接执行本文件时 Python 会自动加入 scripts/，被当模块
+# import（如 tests/）时靠 conftest 注入；这里显式加一次，两种入口都成立。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+if __name__ == "__main__":
+    # 运行时 bootstrap（ADR 0007 §1.4）：不在 <skill>/.venv 就 exec 拉回去，
+    # venv 缺失按 uv.lock 自动重建。必须先于下面的业务模块 import。
+    # 提示：本文件与 setuptools 的 setup.py 无关——scripts/ 是普通脚本目录、不是
+    # 包，pyproject 里没有 [build-system] 且 [tool.uv] package = false，uv/pip
+    # 不会把它当构建脚本执行。
+    import _runtime_bootstrap
+
+    _runtime_bootstrap.ensure()
+
 from setup_adapters import (
     FixtureAdapter, GENERIC_FIXTURE_EXTENSION,
 )

@@ -28,5 +28,5 @@
 - [ ] 是否用了正确的模型 `gemini-3.1-flash-image-preview`（没误用 gpt-image-2）
 - [ ] 是否用 `aspect_ratio` + `resolution`（画质档）两字段，而非像素 resolution
 - [ ] 是否轮询到终态 (`completed` / `failed`) 才停止
-- [ ] 失败/限流时是否避免了自动重试
+- [ ] Agent 是否避免了自行重新提交 create（脚本内部对 429 / 可确认未创建的 5xx 自动重试属正常；结果不明的超时会停下并提示查询，此时不应直接重提）
 - [ ] 是否提示了图片 URL 24 小时过期

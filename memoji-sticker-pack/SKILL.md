@@ -1,7 +1,7 @@
 ---
 name: memoji-sticker-pack
-version: 1.0.0
-description: v1.0.0｜从一张人物照片生成一套 Apple Memoji 风格（拟我表情）的表情贴纸包。当用户想"把这张照片/自拍做成 Memoji 表情包 / 拟我表情包 / 表情贴纸 / nimoji / Q 版头像表情"，或给一张人脸照片并想要一组不同表情（微笑/大笑/哭/惊讶/比心/点赞等）的卡通贴纸时，使用本技能——即使用户没明确说"Memoji"这个词，只要意图是"照片→一套人物表情贴纸"，也应触发。也支持只生成单张 Memoji 风格头像。不用于：视频/动态表情、OCR、给已有图做裁剪压缩水印等非生成式编辑。
+version: 1.1.0
+description: v1.1.0｜从一张人物照片生成一套 Apple Memoji 风格（拟我表情）的表情贴纸包。当用户想"把这张照片/自拍做成 Memoji 表情包 / 拟我表情包 / 表情贴纸 / nimoji / Q 版头像表情"，或给一张人脸照片并想要一组不同表情（微笑/大笑/哭/惊讶/比心/点赞等）的卡通贴纸时，使用本技能——即使用户没明确说"Memoji"这个词，只要意图是"照片→一套人物表情贴纸"，也应触发。也支持只生成单张 Memoji 风格头像。不用于：视频/动态表情、OCR、给已有图做裁剪压缩水印等非生成式编辑。
 ---
 
 # memoji-sticker-pack
@@ -32,6 +32,7 @@ description: v1.0.0｜从一张人物照片生成一套 Apple Memoji 风格（�
 - 配好 **aihubmax.com 的 key**（生成与上传共用，环境变量 `AIHUB_API_KEY`，或工作目录下 `.env` / `.env.local`；旧名 `X_API_KEY` 仍兼容）。
   - ⚠️ 用 `--use-local-key` 时，image-2 读 `~/.config/image-2/.env`，本技能内置上传器读 `~/.config/memoji-sticker-pack/.env`（本仓约定每个 skill 各自持久化配置）。若只在其中一个配了 key，另一步会因缺 key 失败——**最省事是把 key 放进程 env 或 `$PWD/.env`，两步都能读到**。
 - macOS 自带 `sips`（用于缩图；缺失时回退 `ffmpeg`）。
+- **[uv](https://docs.astral.sh/uv/) >= 0.8**：本技能的 Python 运行时（`cutout.py` 用 numpy + Pillow）由 uv 按 `pyproject.toml` + `uv.lock` 钉死，venv 落 `$SKILL_DIR/.venv`，首次运行自动创建（ADR 0007）。`gen_pack.sh` 内部所有 Python 调用都走 `uv run --project "$SKILL_DIR" python`，**不要改回裸 `python3`**；单独跑某个 `.py` 时也用 `uv run --project "$SKILL_DIR" "$SKILL_DIR/scripts/<脚本>.py"`。环境损坏时手工重建：`rm -rf "$SKILL_DIR/.venv" && uv sync --project "$SKILL_DIR"`。
 
 ## ⚠️ 成本与确认（重要）
 
@@ -48,6 +49,7 @@ description: v1.0.0｜从一张人物照片生成一套 Apple Memoji 风格（�
 1. 先跑 `--plan` 拿到准确的调用次数。
 2. 把"将生成什么 + 预计调用次数 + 会消耗积分"摘要给用户，**等用户明确确认后**再真正运行。
 3. 失败重试默认开启（用户在设计时已授权）；若用户不希望重试，加 `--no-retry`。
+4. **重试只对「重跑安全」的失败生效**（ADR 0006 规则 2/4）：脚本读 `create_task.sh` 打出的 `Error [<code>]` 行分类——只有 `upstream_failed`（上游明确说这次生成失败）与「没有结构化错误码」的失败才整任务重跑；`create_transport_error`（结果不明，任务可能已创建并计费）、`poll_timeout`（任务可能仍在跑）、`query_*`（任务已创建、只是没查到终态）、`create_http_error`（401/402/422 确定性失败，429/5xx 已在 image-2 内部重试过）一律**不重跑**，在 stderr 说明原因交给用户决定。因此实际调用次数可能低于上面的「最大值」。
 
 ## 使用流程（Agent 按此执行）
 
@@ -124,5 +126,8 @@ memoji-<name>/
   - `403` + 响应体 `error code: 1010` = Cloudflare 拦截了非浏览器 UA；本技能的 `scripts/client.py` 已使用浏览器 UA，若仍出现请更新本技能并检查网关配置。
   - `401` = key 无效/缺失；确认 `AIHUB_API_KEY` 可被内置上传器读到（见「依赖」里 `--use-local-key` 的配置目录说明）。
   - `413` = 文件过大；脚本已缩到 ≤768px，正常不会触发。
+  - `429` = 限流；已按 `Retry-After` / 指数退避自动重试 3 次仍未通过，稍后再跑。
+  - `5xx` 或「上传结果不明」= 请求已发出但没拿到 URL，**文件可能已存入服务端**；脚本不会自动重传（避免产生重复对象），稍后重跑本次上传即可。
+- **运行时依赖报错**（`运行时依赖不可用：import numpy/PIL.Image 失败`）：按报错里给出的 `rm -rf <skill>/.venv && uv sync --project <skill>` 重建环境；报错正文会带底层异常原文，便于判断是环境半残还是系统缺 uv。
 - **基准生成就失败**：多半是 key/积分问题，看 `.log-base.txt`，按 image-2 的报错处理（401 key 无效 / 402 余额不足 / 429 限流）。
 - **个别表情总失败**：手势类（OK/点赞/比心）偶尔不稳，可改 `--expressions` 换个描述单独补跑。

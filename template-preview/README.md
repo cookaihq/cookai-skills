@@ -11,16 +11,20 @@
 ## 用法
 
 ```bash
+# 0) 本 skill 目录（下面所有命令都用它定位；uv run --project 需要它找 pyproject.toml）
+SKILL_DIR=/path/to/github-cookai-skills/template-preview
+
 # 1) 准备 content.json（通常由 Claude 按 SKILL.md 工作流生成）
 #    { "label": "iot", "notes": [
 #        { "title": "标题", "images": ["c1.jpg","c2.jpg"], "body": "正文", "likes": 1234 } ] }
 #    一条「封面+多图」笔记 = 一个 note，images 列出全部图（不要拆成多个 note）
 
 # 2) 先看计划（不写盘）。默认输出到当前目录 $PWD 下、以 --name 命名的文件夹
-python3 scripts/generate.py --template xiaohongshu --content content.json --name xiaohongshu-iot --dry-run
+#    统一用 uv run --project 钉死解释器（ADR 0007），SKILL_DIR = 本 skill 目录
+uv run --project "$SKILL_DIR" "$SKILL_DIR/scripts/generate.py" --template xiaohongshu --content content.json --name xiaohongshu-iot --dry-run
 
 # 3) 正式生成（--out-root 可换父目录；不传 --name 则按日期时间自动命名）
-python3 scripts/generate.py --template xiaohongshu --content content.json --name xiaohongshu-iot
+uv run --project "$SKILL_DIR" "$SKILL_DIR/scripts/generate.py" --template xiaohongshu --content content.json --name xiaohongshu-iot
 # stdout 打印全部页面绝对路径（每行一个，第一行 = index.html）
 ```
 
@@ -30,7 +34,7 @@ python3 scripts/generate.py --template xiaohongshu --content content.json --name
 
 ```bash
 TPL_XHS_NICKNAME='我的昵称' TPL_XHS_BIO='我的简介' \
-python3 scripts/generate.py --template xiaohongshu --content content.json --label demo
+uv run --project "$SKILL_DIR" "$SKILL_DIR/scripts/generate.py" --template xiaohongshu --content content.json --label demo
 ```
 
 ## 模板可插拔
@@ -48,7 +52,10 @@ python3 scripts/generate.py --template xiaohongshu --content content.json --labe
 ## 开发 / 测试
 
 ```bash
-python3 -m pytest tests/test_generate.py -q
+uv run --project . --with pytest python -m pytest tests/test_generate.py -q
 ```
 
-纯 Python 标准库，无运行时第三方依赖（测试用 pytest）。
+纯 Python 标准库，无运行时第三方依赖（测试用 pytest，经 `--with` 临时叠加，不进 `uv.lock`）。
+
+运行时环境由 uv 管理（ADR 0007）：`pyproject.toml` + `uv.lock` 钉死解释器版本，venv 落 `<skill>/.venv`。
+手工重建：`rm -rf <skill>/.venv && uv sync --project <skill> --no-dev`；`scripts/generate.py` 被裸 `python3` 直接执行时也会自动拉回该 venv。

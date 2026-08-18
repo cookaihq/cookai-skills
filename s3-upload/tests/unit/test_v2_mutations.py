@@ -410,6 +410,67 @@ def test_unknown_current_key_delete_reconciles_with_head_and_never_redeletes(
     assert [call[0] for call in calls] == ["DELETE", "HEAD"]
 
 
+def test_delete_reconcile_retries_a_5xx_head_through_the_injected_backoff_hook(
+    tmp_path, monkeypatch
+):
+    """reconcile 的 HEAD 观测遇 5xx 按 ADR 0006 重试，退避钩子从签名注入。
+
+    `sleep` 参数存在的意义就是这条：测试能从 `reconcile_delete` 自己的签名驱动
+    重试循环，不必去 patch `s3` 模块上的 `time.sleep` 全局（那会影响同进程内其它
+    测试，且看不出退避了几次、各等多久）。
+    """
+    configured = target()
+    configure(tmp_path, configured)
+    _path, reference = reference_file(tmp_path, configured, version_id=None)
+    enable(monkeypatch, "DeleteObjectCurrentKey", "ObserveDeleteCurrentKey")
+    resolved = resolve_target(
+        cwd=str(tmp_path),
+        config_home=str(tmp_path / "home"),
+        environ={},
+        cli_target="project:objects",
+        cli_caller=None,
+        use_local_key=False,
+        now=NOW,
+    )
+    dry_run = planning.build_delete_dry_run(
+        resolved=resolved,
+        reference=reference,
+        allow_insecure_http=False,
+        now=NOW,
+    )
+    first = operations.execute_delete(
+        resolved=resolved,
+        reference=reference,
+        plan=dry_run.plan,
+        transport=lambda *args: (_ for _ in ()).throw(OSError("response lost")),
+        project_root=str(tmp_path),
+        now=NOW,
+        checkpoint_notice=lambda _value: None,
+    )
+    checkpoint = first.store.load(first.checkpoint_id)
+    calls = []
+    waits = []
+
+    def throttled(method, url, headers, body):
+        calls.append((method, url, headers, body))
+        return Response(503)
+
+    outcome = operations.reconcile_delete(
+        resolved=resolved,
+        checkpoint=checkpoint,
+        store=first.store,
+        transport=throttled,
+        now=NOW,
+        sleep=waits.append,
+    )
+
+    assert [call[0] for call in calls] == ["HEAD"] * 3
+    assert waits == [1, 2]  # 指数退避 2^(n-1)，且一秒真实时间都没等
+    # 观测始终没给出确定答案，落回原有的 ambiguous 分支，判定语义不变。
+    assert outcome.result["status"] == "ambiguous"
+    assert first.store.load(first.checkpoint_id)["state"] == "delete_unknown"
+
+
 def test_delete_reconcile_rechecks_temporary_credential_before_head(
     tmp_path, monkeypatch
 ):

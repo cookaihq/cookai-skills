@@ -1,7 +1,7 @@
 ---
 name: template-preview
-version: 1.0.0
-description: v1.0.0｜Use when the user wants to turn a folder of images + copy into a styled showcase page that mimics a known app's UI — phrases like "把这个文件夹做成小红书预览"、"做成小红书个人主页"、"生成小红书风格展示页"、"把这些图做成 XX 风格的页面". v1 ships the xiaohongshu (小红书) personal-homepage template. Generates a self-contained output folder (index.html + assets/) that opens locally and can be uploaded by the preview-share skill. Do NOT use for real deploys, or for uploading/publishing (that's preview-share's job).
+version: 1.1.0
+description: v1.1.0｜Use when the user wants to turn a folder of images + copy into a styled showcase page that mimics a known app's UI — phrases like "把这个文件夹做成小红书预览"、"做成小红书个人主页"、"生成小红书风格展示页"、"把这些图做成 XX 风格的页面". v1 ships the xiaohongshu (小红书) personal-homepage template. Generates a self-contained output folder (index.html + assets/) that opens locally and can be uploaded by the preview-share skill. Do NOT use for real deploys, or for uploading/publishing (that's preview-share's job).
 ---
 
 # template-preview
@@ -32,7 +32,7 @@ description: v1.0.0｜Use when the user wants to turn a folder of images + copy 
 
 每个变量独立按以下顺序取「首个非空来源」（详见仓库 `CLAUDE.md` 通用约定，本 skill **不读 `~/.config`**）：
 
-1. 进程环境变量（本轮显式注入 `TPL_XHS_NICKNAME=... python3 ...` 或已 export）
+1. 进程环境变量（本轮显式注入 `TPL_XHS_NICKNAME=... uv run --project <skill目录> ...` 或已 export）
 2. `$PWD/.env.local`（自动读，不向上递归）
 3. `$PWD/.env`（自动读，不向上递归）
 4. 内置默认（模板级在 `templates/<t>/defaults.env` 与内置素材；skill 级写在 `generate.py`）
@@ -77,8 +77,8 @@ xiaohongshu 模板级（人设，前缀 `TPL_XHS_`，均有内置默认）：
    - **① 文件夹名**：默认/推荐项 = 自动命名 `{YYYYMMDD-HHMMSS}-{label}`（对齐 `preview-share` 的子目录规则，带时间戳、重跑不撞名，如 `20260530-213000-iot-power`）。也给用户「自定义干净名字」（如 `iot-power`）的选项。
    - **② 创建位置（根目录）**：默认/推荐项 = **当前项目根 `$PWD`**（Agent 运行所在目录）。允许用户填别的根目录。**默认绝不放到源图片文件夹的父目录或其它位置。**
    - 映射：自定义名 → `--name`；默认/自动命名 → **不传 `--name`**（让脚本按 `TPL_SUBDIR_PATTERN={date}-{time}-{label}` 生成，与 preview-share 同款）；自定义根 → `--out-root`。
-7. 跑（默认/自动命名，落在 `$PWD`）：
-   `python3 scripts/generate.py --template xiaohongshu --content content.json --label <label>`
+7. 跑（默认/自动命名，落在 `$PWD`）——**必须走 `uv run --project <skill目录>`，禁止裸 `python3`**（ADR 0007）：
+   `uv run --project <skill目录> <skill目录>/scripts/generate.py --template xiaohongshu --content content.json --label <label>`
    - 用户自定义了名字：加 `--name <文件夹名>`；自定义了根：加 `--out-root <根>`。
    - 先 `--dry-run` 看将生成的全部页面路径与素材清单，确认无误再正式生成。
 8. 把脚本打印的**全部页面路径**（主页 + 各笔记页，每行一个，第一行为 `index.html`）交给用户。

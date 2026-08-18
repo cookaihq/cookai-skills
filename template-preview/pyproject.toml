@@ -1,0 +1,18 @@
+# template-preview 运行时环境（ADR 0007 §1.1/§1.2）。
+# 本 skill 零第三方运行时依赖，但仍必须有 pyproject + uv.lock + `.python-version`：
+# uv 据此钉死解释器版本，根治「系统 python3 版本漂移」。
+# 重建环境：uv sync --project <本目录> --no-dev（venv 落 <本目录>/.venv，ADR 0007 §1.3）。
+# 解释器版本由同目录 `.python-version`（3.13）钉死，uv 原生读取并据此选定 /
+# 下载解释器（ADR 0007 §1.2 + 沿革 1）。下面的 requires-python 只是**下限**，
+# 单靠它 uv 会在不同机器选中不同解释器——本机 3.13、只有系统 3.9 的机器则 3.9，
+# 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
+[project]
+name = "template-preview"
+version = "1.1.0"
+description = "template-preview skill 的运行时环境锁定（纯标准库）"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+# 脚本按路径直接运行，不作为可安装包构建。
+package = false

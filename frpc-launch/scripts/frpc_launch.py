@@ -1,24 +1,142 @@
 #!/usr/bin/env python3
-"""frpc-launch: 本地一键启动/管理 frpc（official / sakura 双模式）。"""
+"""frpc-launch: 本地一键启动/管理 frpc（official / sakura 双模式）。
+
+调用一律用 `uv run --project <skill 目录> <skill 目录>/scripts/frpc_launch.py ...`，
+禁止用系统解释器直接起本文件。真起错了也有兜底：下面的 bootstrap（ADR 0007 §1.4）
+会把进程 exec 回 `<skill>/.venv` 的解释器，环境缺失时先按 `uv.lock` 自动重建。
+
+**bootstrap 段只用 Python 3.9 兼容语法、只用 stdlib**：它可能先被系统 python3
+（macOS 自带 3.9.6）执行，用了新语法会在 SyntaxError 阶段就死掉，兜底反成故障点。
+"""
 from __future__ import annotations
 
-import argparse
-import dataclasses
-import hashlib
-import json
 import os
-import platform
-import re
-import shutil
+import shlex
 import subprocess
 import sys
-import tarfile
-import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# 运行时 bootstrap（ADR 0007 §1.4）
+# ---------------------------------------------------------------------------
+# 一次性再入护栏：exec 之后仍不在目标 venv，说明 venv 目录本身坏了。没有这个标记
+# 会无限 execv 且零输出。标记值存的是**本轮的目标 venv realpath**，不是布尔——
+# 变量被外部环境 export 时值不匹配，就不算本轮的再入，仍照常自动重建。
+REEXEC_ENV = "FRPC_LAUNCH_BOOTSTRAP_REEXEC"
+
+UV_INSTALL_HINT = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
+
+# 重定位只认 uv 原生的 UV_PROJECT_ENVIRONMENT，且**基准必须是项目根**——uv 0.8 把
+# 相对值按项目根解析，按 CWD 解析会在用户自己的项目目录里设了相对值时把进程 exec
+# 进用户项目的 venv。绝对值不受影响：os.path.join 遇到绝对路径直接返回它。
+VENV_DIR = os.path.join(SKILL_DIR, os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
+VENV_PY = os.path.join(VENV_DIR, "bin", "python")
+
+
+def _bootstrap_fail(msg):
+    sys.stderr.write(msg + "\n")
+    raise SystemExit(1)
+
+
+def _manual_rebuild_hint():
+    # 必须 shell 引用：路径含空格时，未引用的 `rm -rf /tmp/sp ace/.venv` 被照抄
+    # 执行会删掉两个无关路径。
+    return "rm -rf %s && uv sync --project %s --no-dev" % (
+        shlex.quote(VENV_DIR), shlex.quote(SKILL_DIR)
+    )
+
+
+def _venv_is_valid():
+    """有效 venv = 解释器在 + pyvenv.cfg 在。
+
+    只判 bin/python 存在是不够的：sync 中断、手工建的同名目录、残留软链都会让解释
+    器存在而目录不是 venv，此时跳过修复直接 execv 会陷入无限重启。
+    """
+    return (os.path.exists(VENV_PY)
+            and os.path.exists(os.path.join(VENV_DIR, "pyvenv.cfg")))
+
+
+def _require_uv():
+    """uv 是系统级程序，缺失/版本过低只报错给命令，不擅自安装（ADR 0007 §4.2）。"""
+    try:
+        probe = subprocess.run(["uv", "--version"], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        _bootstrap_fail("uv 未安装。请执行：" + UV_INSTALL_HINT)
+    parts = probe.stdout.decode("utf-8", "replace").split()  # "uv 0.8.11 (...)"
+    found = parts[1] if len(parts) > 1 else "0"
+    try:
+        numeric = tuple(int(x) for x in (found.split(".") + ["0", "0"])[:2])
+    except ValueError:
+        # uv 出错时 stdout 是 "error: ..." 之类，硬 int() 会抛未捕获的 ValueError；
+        # 按「版本不可用」处理，仍走可复制命令的报错。
+        numeric = (0, 0)
+    if numeric < (0, 8):
+        _bootstrap_fail("uv 版本过低（需 >= 0.8，当前 %s）。请执行：uv self update"
+                        % found)
+
+
+def _sync_runtime():
+    """按 uv.lock 冻结重建 skill 自有环境（ADR 0007 §4.1：自动修复）。"""
+    sys.stderr.write("[bootstrap] 运行环境缺失，正在按 uv.lock 重建 %s ...\n" % VENV_DIR)
+    try:
+        # `--no-dev`：这里重建的是**运行时**环境。不加的话 uv 会把 dev 组
+        # （pytest 等）一并装进 .venv，让运行时环境带上只有跑测试才需要的包。
+        # 跑测试时显式用 `uv sync --project <dir> --group dev`。
+        sync = subprocess.run(["uv", "sync", "--project", SKILL_DIR, "--no-dev"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=600)  # 网络调用必设总预算（ADR 0006 §5）
+    except subprocess.TimeoutExpired:
+        _bootstrap_fail("uv sync 超过 600 秒未完成，疑似网络异常。请手工执行："
+                        + _manual_rebuild_hint())
+    if sync.returncode != 0 or not _venv_is_valid():
+        _bootstrap_fail("uv sync 失败，无法重建运行环境（请手工执行：%s）：\n%s"
+                        % (_manual_rebuild_hint(),
+                           sync.stdout.decode("utf-8", "replace")))
+
+
+def _ensure_runtime():
+    """确保当前进程运行在目标 venv 里；不是则 exec 拉回去，缺失则先重建。"""
+    target = os.path.realpath(VENV_DIR)
+    if os.path.realpath(sys.prefix) == target:
+        # 已在目标 venv：清掉本轮标记，避免派生的子进程继承后误判。
+        if os.environ.get(REEXEC_ENV) == target:
+            os.environ.pop(REEXEC_ENV, None)
+        return
+    if os.environ.get(REEXEC_ENV) == target:
+        # 只认「值等于本轮目标」才算再入：外部 export 了同名变量、或嵌套调用的是
+        # 另一个目标时，这里不成立，仍照常走下面的自动重建。
+        _bootstrap_fail("运行环境异常：已重启到 %s 但解释器仍不在该 venv 内，"
+                        "目录疑似损坏。\n请手工重建：%s"
+                        % (VENV_DIR, _manual_rebuild_hint()))
+    if not _venv_is_valid():
+        _require_uv()
+        _sync_runtime()
+    os.environ[REEXEC_ENV] = target  # putenv，execv 后的进程能读到
+    os.execv(VENV_PY, [VENV_PY] + sys.argv)  # 拉回目标解释器重启自身
+
+
+# 只在被当作入口执行时兜底；tests/ 会 import 本模块，import 时不该 exec 掉宿主进程。
+if __name__ == "__main__":
+    _ensure_runtime()  # 以下代码保证运行在目标 venv 里
+
+import argparse  # noqa: E402
+import dataclasses  # noqa: E402
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import platform  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import tarfile  # noqa: E402
+import tempfile  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.parse  # noqa: E402
+import urllib.request  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -151,15 +269,65 @@ def detect_platform():
     return os_name, os_subdir, arch_map[machine]
 
 
-def http_get(url: str, timeout: int = 30) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+# --- 网络抖动处理参数（ADR 0006 §3）---
+# 总尝试 3 次（首次 + 2 次重试），退避 1s、2s。本文件所有 HTTP 调用都是幂等 GET
+# （GitHub Releases 元数据、natfrp 客户端清单、二进制下载），重试安全（§4）。
+HTTP_MAX_ATTEMPTS = 3
+HTTP_RETRY_AFTER_CAP = 60  # 采信 Retry-After 的上限秒数，避免被要求睡很久
+
+
+def _retry_after_seconds(err: urllib.error.HTTPError) -> int:
+    """429 带 Retry-After 时遵循该值（ADR 0006 §3），只认秒数格式。"""
+    raw = ""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except (urllib.error.URLError, OSError) as e:
-        raise FrpcLaunchError(
-            "网络请求失败: %s (%s)。请检查网络或自行配置代理；"
-            "本工具不自动切换第三方镜像。" % (url, e))
+        raw = (err.headers.get("Retry-After") or "").strip()
+    except Exception:
+        raw = ""
+    if raw.isdigit():
+        return min(int(raw), HTTP_RETRY_AFTER_CAP)
+    return 0
+
+
+def http_get(url: str, timeout: int = 30) -> bytes:
+    """幂等 GET，带超时 + 瞬时失败重试（ADR 0006 §1/§2/§3）。
+
+    瞬时（可重试）：连接/读取超时、连接重置、DNS 解析失败等 URLError/OSError，
+    以及 HTTP 5xx、429、408。确定性（不重试）：其余 4xx（404 版本不存在、403
+    等），重试必然同样失败，立即报错并给可行动提示。
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    attempt = 1
+    while True:
+        wait_seconds = 2 ** (attempt - 1)  # 1s、2s
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            transient = e.code in (408, 429) or 500 <= e.code <= 599
+            if not transient:
+                raise FrpcLaunchError(
+                    "网络请求失败: %s (HTTP %s %s)。这是确定性错误，重试无用；"
+                    "请检查 URL / 版本号是否存在、是否需要凭证。" % (url, e.code, e.reason))
+            if attempt >= HTTP_MAX_ATTEMPTS:
+                raise FrpcLaunchError(
+                    "网络请求失败: %s (HTTP %s，已重试 %d 次)。请稍后重试或自行配置代理；"
+                    "本工具不自动切换第三方镜像。" % (url, e.code, HTTP_MAX_ATTEMPTS - 1))
+            if e.code == 429:
+                wait_seconds = _retry_after_seconds(e) or wait_seconds
+            reason = "HTTP %s" % e.code
+        except (urllib.error.URLError, OSError) as e:
+            if attempt >= HTTP_MAX_ATTEMPTS:
+                raise FrpcLaunchError(
+                    "网络请求失败: %s (%s，已重试 %d 次)。请检查网络或自行配置代理；"
+                    "本工具不自动切换第三方镜像。" % (url, e, HTTP_MAX_ATTEMPTS - 1))
+            reason = str(e)
+        # 这里的 URL 均来自公开清单（GitHub Releases / natfrp clients），不含凭证，
+        # 可原样打印；凭证只经环境变量传给 frpc，不出现在任何 URL 里。
+        print("[retry] 第 %d/%d 次请求失败（%s），%d 秒后重试: %s"
+              % (attempt, HTTP_MAX_ATTEMPTS, reason, wait_seconds, url),
+              file=sys.stderr)
+        time.sleep(wait_seconds)
+        attempt += 1
 
 
 def http_get_json(url: str, timeout: int = 30) -> dict:

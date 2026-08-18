@@ -8,6 +8,7 @@ import re
 import shutil
 import socket
 import ssl
+import sys
 import time
 from dataclasses import dataclass
 from email import policy
@@ -19,6 +20,24 @@ from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 MAX_REDIRECTS = 5
 CONNECT_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 30.0
+
+# ADR 0006 规则 3 默认参数：一次逻辑下载总尝试 3 次，第 n 次重试前等 2^(n-1) 秒。
+NET_MAX_ATTEMPTS = 3
+
+# 规则 2 的分类结果：下面这些 PdfSourceError 码是**瞬时网络故障**，同一个 URL
+# 稍后重试有希望成功。其余码（source_authentication_required、source_http_error、
+# invalid_pdf、source_size_limit_exceeded、source_peer_mismatch、
+# source_redirect_* 等）是「来源本身不合格」的确定性错误，重试必然同样失败，
+# 立即报错退出。
+TRANSIENT_SOURCE_ERROR_CODES = frozenset(
+    {
+        "source_dns_failed",
+        "source_connect_timeout",
+        "source_connect_failed",
+        "source_read_timeout",
+        "source_read_failed",
+    }
+)
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
 MAX_SOURCE_DISK_BYTES = 256 * 1024 * 1024
 STREAM_CHUNK_BYTES = 64 * 1024
@@ -474,11 +493,17 @@ def _validate_content_encoding(headers) -> None:
 
 
 def validate_pdf_identity(path: Path) -> None:
+    # ADR 0007 §1.5：依赖预检的捕获面必须宽于 ImportError。真实 import 会执行包的
+    # 顶层代码，半残环境（传递依赖缺失、二进制架构不符、动态库缺失）里那里抛出的
+    # 可能是 OSError / RuntimeError 等任意异常；只接 ImportError 会让它们穿过这层
+    # 映射、以未分类异常炸出去。统一映射为 pdf_parser_unavailable 并带上底层原文。
     try:
         import fitz
-    except ImportError as exc:
+    except Exception as exc:  # noqa: BLE001 - 见上方注释
         raise PdfSourceError(
-            "pdf_parser_unavailable", "PyMuPDF is required to validate the source PDF."
+            "pdf_parser_unavailable",
+            "PyMuPDF is required to validate the source PDF (%s: %s)."
+            % (type(exc).__name__, exc),
         ) from exc
     previous_errors = bool(fitz.TOOLS.mupdf_display_errors())
     previous_warnings = bool(fitz.TOOLS.mupdf_display_warnings())
@@ -716,6 +741,55 @@ def _stream_response(response, destination: Path, *, headers) -> tuple[str, int]
 
 
 def download_https_pdf(
+    source_url: str,
+    destination: Path,
+    *,
+    transport=None,
+    sleep=None,
+) -> DownloadedPdf:
+    """下载公开 HTTPS PDF 到 `destination`。
+
+    这是幂等 GET（同一 URL 反复取同一份内容，不产生远端副作用），所以按 ADR 0006
+    规则 2/3 对**瞬时网络故障**重试：总尝试 3 次、退避 1s/2s、每次向 stderr 打一行
+    重试日志。瞬时的判定见 `TRANSIENT_SOURCE_ERROR_CODES`——DNS 解析失败、连接
+    超时/失败、读超时/读失败；「来源本身不合格」（需要鉴权、非 200、非 PDF、超限、
+    对端不匹配、重定向异常）是确定性错误，立即抛出不重试。
+
+    重试前会清掉上一轮可能残留的半截文件：`_stream_response` 以 `O_EXCL` 创建
+    目标文件，残留会让下一次尝试直接以 `source_disk_write_failed` 失败。
+    """
+    wait = time.sleep if sleep is None else sleep
+    for attempt in range(1, NET_MAX_ATTEMPTS + 1):
+        try:
+            return _download_https_pdf_once(source_url, destination, transport=transport)
+        except PdfSourceError as exc:
+            if (
+                exc.code not in TRANSIENT_SOURCE_ERROR_CODES
+                or attempt == NET_MAX_ATTEMPTS
+            ):
+                raise
+            _discard_partial_download(destination)
+            delay = 2 ** (attempt - 1)
+            # 日志走 stderr（stdout 是 workflow 的结构化 JSON）；只打错误码，
+            # 不打 URL——query 按敏感数据处理，见 README「安全边界」。
+            sys.stderr.write(
+                "[pdf2markdown] source download retry %d/%d after %s; waiting %ds\n"
+                % (attempt, NET_MAX_ATTEMPTS, exc.code, delay)
+            )
+            wait(delay)
+    raise AssertionError("unreachable")
+
+
+def _discard_partial_download(destination: Path) -> None:
+    # `FileNotFoundError` 是 `OSError` 的子类，单列它是死代码——`OSError` 已经把
+    # 「文件不在」「权限不足」「目录只读」全部收下，重试前清残留失败不该终止重试。
+    try:
+        destination.unlink()
+    except OSError:
+        pass
+
+
+def _download_https_pdf_once(
     source_url: str,
     destination: Path,
     *,

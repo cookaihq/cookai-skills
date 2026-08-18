@@ -7,6 +7,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 import unicodedata
 import zipfile
@@ -30,6 +31,24 @@ MAX_TOTAL_PATH_COMPONENTS = zipfile.ZIP_FILECOUNT_LIMIT
 MAX_REDIRECTS = pdf_source.MAX_REDIRECTS
 CONNECT_TIMEOUT_SECONDS = pdf_source.CONNECT_TIMEOUT_SECONDS
 READ_TIMEOUT_SECONDS = pdf_source.READ_TIMEOUT_SECONDS
+
+# ADR 0006 规则 3 默认参数：一次逻辑下载总尝试 3 次，第 n 次重试前等 2^(n-1) 秒。
+NET_MAX_ATTEMPTS = pdf_source.NET_MAX_ATTEMPTS
+
+# 规则 2 的分类结果：这些码是**瞬时网络故障**，同一个结果 URL 稍后重试有希望
+# 成功。其余码（result_url_unavailable 的 401/403/404、unsafe_result_*、
+# result_peer_mismatch、archive_size_limit_exceeded、result_disk_write_failed、
+# invalid_result_* 等）是确定性错误或本地故障，重试必然同样失败。
+TRANSIENT_RESULT_ERROR_CODES = frozenset(
+    {
+        "result_dns_failed",
+        "result_connect_timeout",
+        "result_connect_failed",
+        "result_read_timeout",
+        "result_download_failed",
+        "result_download_transient",
+    }
+)
 STREAM_CHUNK_BYTES = pdf_source.STREAM_CHUNK_BYTES
 SUPPORTED_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 DRIVE_PREFIX = re.compile(r"[A-Za-z]:")
@@ -859,19 +878,60 @@ def extract_and_verify(
     )
 
 
+def _discard_partial_archive(attempt_fd: int, name: str) -> None:
+    """清掉上一轮留下的半截 result.zip。
+
+    `_stream_archive` 以 `O_EXCL` 创建目标文件且失败时不删除，残留会让下一次
+    尝试直接以 `result_disk_write_failed` 失败——重试前必须先删。
+    """
+    try:
+        os.unlink(name, dir_fd=attempt_fd)
+    except OSError:
+        pass
+
+
 def download_and_prepare(
     url: str,
     attempt_fd: int,
     *,
     request_filename: str,
     transport=None,
+    sleep=None,
 ) -> PreparedArchive:
-    downloaded_hash, downloaded_size = download_archive(
-        url,
-        "result.zip",
-        destination_fd=attempt_fd,
-        transport=transport,
-    )
+    """下载并校验 Doc2X 结果 ZIP。
+
+    下载是幂等 GET（同一结果 URL 反复取同一份内容，不产生远端副作用、不重复
+    计费），所以按 ADR 0006 规则 2/3 对瞬时网络故障重试：总尝试 3 次、退避
+    1s/2s、每次向 stderr 打一行重试日志；重试全部失败后才把错误交给调用方落成
+    `recoverable_error`，由用户拿新 generation 重跑同一条命令。
+    确定性错误（结果 URL 已失效、地址不安全、超出体积上限）立即抛出不重试。
+    """
+    wait = time.sleep if sleep is None else sleep
+    downloaded_hash = downloaded_size = None
+    for attempt in range(1, NET_MAX_ATTEMPTS + 1):
+        try:
+            downloaded_hash, downloaded_size = download_archive(
+                url,
+                "result.zip",
+                destination_fd=attempt_fd,
+                transport=transport,
+            )
+            break
+        except ResultArchiveError as exc:
+            if (
+                exc.code not in TRANSIENT_RESULT_ERROR_CODES
+                or attempt == NET_MAX_ATTEMPTS
+            ):
+                raise
+            _discard_partial_archive(attempt_fd, "result.zip")
+            delay = 2 ** (attempt - 1)
+            # 日志走 stderr（stdout 是 workflow 的结构化 JSON）；只打错误码，
+            # 结果 URL 是带签名的短期凭证，不进日志。
+            sys.stderr.write(
+                "[pdf2markdown] result download retry %d/%d after %s; waiting %ds\n"
+                % (attempt, NET_MAX_ATTEMPTS, exc.code, delay)
+            )
+            wait(delay)
     prepared = extract_and_verify(
         attempt_fd, request_filename=request_filename
     )

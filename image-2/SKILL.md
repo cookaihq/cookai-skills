@@ -1,7 +1,7 @@
 ---
 name: image-2
-version: 1.0.0
-description: v1.0.0｜Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
+version: 1.1.0
+description: v1.1.0｜Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
 ---
 
 # image-2
@@ -29,7 +29,7 @@ description: v1.0.0｜Use when the user asks to generate, render, or recreate an
 - 调用前必须完成参数校验，缺必填先补齐再调用 API
 - 不得回显完整 `Authorization` token，日志只允许 `head4****tail4` 掩码
 - **同参数任务在同一轮对话内禁止二次提交**（参数任意变化即视为新任务，可创建）
-- 禁止自动循环重试创建接口；重试需先告知会再次消耗积分并取得用户同意。**唯一例外**：HTTP 401 触发的 key 链 fallback——它换的是 key 不是同请求，且 401 不消耗积分，详见下方「401 自动 fallback」
+- 禁止 Agent 自行重跑创建接口；重跑需先告知会再次消耗积分并取得用户同意。脚本内部只在**确认未受理**的两种情况下自动重试同一个创建请求（都不会重复扣费，ADR 0006 规则 4）：HTTP 429（服务端明确限流、本次未受理，循 `Retry-After`）、连接阶段失败（DNS 解析失败 / 连接被拒，请求根本没发出去）。**HTTP 5xx 与「请求已发出但响应丢失」都不重试**：这两种情况下服务端都收到了请求，任务是否已创建并计费无法从本地判定，一律落 `create_transport_error` 并在 message 里写明「任务可能已创建也可能没有」，由用户到控制台确认后再决定。另一个不消耗积分的例外仍在：HTTP 401 触发的 key 链 fallback——它换的是 key 不是同请求，详见下方「401 自动 fallback」
 - 创建接口返回的是异步任务，必须接着轮询查询接口直到终态
 - 生成的图片 URL 24 小时后失效，需要长期保留请下载或转存
 - **默认会把图片下载到当前工作区根目录**，文件名 `{YYYYMMDD-HHMMSS}-{≤10字标签}.{ext}`；优先级：`--filename` > `--label` > 自动从 prompt 前 10 字提取。环境变量 `IMAGE_2_OUTPUT_DIR` 或 `--output-dir` 可改保存目录
@@ -52,7 +52,7 @@ description: v1.0.0｜Use when the user asks to generate, render, or recreate an
 **401 自动 fallback**：
 
 - 如果某一层的 key 调用 `POST /v1/images/generations` 返回 HTTP 401（`authentication_error`），脚本会自动尝试链条中的下一个 key。**401 不消耗积分**，所以这种 fallback 安全。
-- 其他错误码（402 余额不足 / 422 参数非法 / 429 限流 / 5xx 服务错误）以及网络错误**不触发 fallback**，立即返回让用户决定。
+- 其他错误码（402 余额不足 / 422 参数非法 / 429 限流 / 5xx 服务错误）以及网络错误**不触发 fallback**（换 key 解决不了这些问题）；创建接口上只有 429 与「请求确定未发出」这两类会先按 ADR 0006 用同一个 key 重试 3 次（指数退避 1s、2s，429 循 `Retry-After`），仍失败才返回让用户决定。轮询与下载是幂等 GET，5xx 在那里照常重试。
 - 同一个 key 值在多个来源重复出现时只会试一次（按值去重）。
 - 一旦某层 key 通过 create 调用成功，后续轮询查询接口都用同一个 key。
 
@@ -211,7 +211,8 @@ AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
   --prompt "产品封面" --resolution 1024x1024
 
 # 阶段二：仅在明确 Persistent Upload Request 后，由 Agent 对 saved output 调用
-python3 /absolute/s3-upload/scripts/upload.py upload \
+# （跨 skill 调用同样用 uv run --project 钉死对方 skill 的解释器，ADR 0007）
+uv run --project /absolute/s3-upload /absolute/s3-upload/scripts/upload.py upload \
   --file /absolute/output/cover.png \
   --caller-skill image-2 \
   --json
@@ -229,9 +230,14 @@ python3 /absolute/s3-upload/scripts/upload.py upload \
 - HTTP 401 `authentication_error`：key 无效/过期/权限不足，去 [aihubmax.com](https://aihubmax.com) 检查
 - HTTP 402 `insufficient_quota`：余额不足，请用户充值后再试
 - HTTP 422 `validation_error`：根据 `error.message` 调整参数
-- HTTP 429 `rate_limit_error`：限流，**禁止自动重试**，告知用户稍后再试
-- HTTP 5xx：服务异常，建议用户确认后由用户决定是否重试
+- HTTP 429 `rate_limit_error`：限流，脚本已按 `Retry-After` / 指数退避自动重试 3 次；仍报错说明限流持续，告知用户稍后再试，**Agent 不要立刻重跑**
+- HTTP 5xx：**创建接口上不重试**（服务端已收到请求，任务是否已创建无法确认），直接落 `create_transport_error`；轮询与下载上会自动重试 3 次，仍报错则由用户确认后决定是否重跑
+- `create_transport_error`：结果不明——请求可能已到达上游、任务可能已创建并计费。**禁止自动重发**；先让用户到 aihubmax 控制台确认任务列表，再决定是否重新生成。`[net]` 日志写明本次是「请求未发出」「响应丢失」还是「服务端以 5xx 作答」
 - 轮询超时：明确告知任务可能仍在运行，给出 `task_id` 让用户后续手动查询
+
+**网络抖动处理（ADR 0006）**：每次调用都有超时（API 60s、下载 60s）；瞬时错误自动重试 3 次 + 指数退避（1s、2s）并打 `[net]` 日志；确定性 4xx 立即报错不重试。可重试面按操作分：幂等 GET（轮询、下载）重试 429 / 5xx / 连接抖动；计费写（创建任务）只重试 429 与「请求确定未发出」。轮询除 `--max-attempts` 次数预算外还压一条墙钟预算（`--max-attempts` × `--poll-interval`，默认 720s），单次抖动只消耗**内层重试**，不击穿轮询总预算。
+
+**`[net]` 日志去向**：`--json` 模式下所有进度日志（含 `[net]`）走 **stderr**，stdout 只留一份纯 JSON；非 `--json` 模式下进度日志走 **stdout**，只有结果不明这类错误行始终走 stderr。
 
 ## Dedup Rule
 

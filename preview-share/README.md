@@ -31,15 +31,21 @@ PREVIEW_SHARE_FTP=ftp://用户名:密码@FTP主机:21/preview
 PREVIEW_SHARE_BASEURL=https://你的域名/preview
 ```
 
-然后：
+然后（`<skill>` = preview-share 目录路径，相对或绝对均可）：
 
 ```bash
 # 标准用法：上传 HTML 预览（自动带上它引用的图片/CSS/JS）
-python3 scripts/upload.py /path/to/preview.html --label my-demo
+uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label my-demo
 
 # 先看清单和 URL，不真正上传（推荐上传前先跑一次）
-python3 scripts/upload.py /path/to/preview.html --label my-demo --dry-run
+uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label my-demo --dry-run
 ```
+
+> **必须走 `uv run --project <skill>`，不要裸 `python3`**（工作区 ADR 0007）：本 skill
+> 自带 `pyproject.toml` + `uv.lock`，由 uv 钉死解释器版本；`uv run` 首次运行会自动
+> 在 `<skill>/.venv` 建好环境。忘了写也有兜底——`upload.py` 启动时会把进程 exec 回
+> 该 venv，缺失则按 `uv.lock` 自动重建，只有 uv 本体缺失（需 >= 0.8）才报错停下。
+> 注意 `.env` / `.env.local` 仍按**当前工作目录**读取，与 `--project` 无关。
 
 输出（stdout 只打印最终预览 URL，便于复制 / 管道）：
 
@@ -64,15 +70,15 @@ https://你的域名/preview/20260530-022804-my-demo/preview.html
 
 ```bash
 # 依赖扫描漏了某个目录（如字体/额外资源），手动补
-python3 scripts/upload.py /path/to/index.html --label site --include assets/fonts
+uv run --project <skill> <skill>/scripts/upload.py /path/to/index.html --label site --include assets/fonts
 
 # 单个独立文件（一张图），不需要扫描
-python3 scripts/upload.py /path/to/poster.png --label poster --no-scan
+uv run --project <skill> <skill>/scripts/upload.py /path/to/poster.png --label poster --no-scan
 
 # 会话级临时注入凭证（最高优先级，不写入 .env）
 PREVIEW_SHARE_FTP='ftp://u:p@host:21/preview' \
 PREVIEW_SHARE_BASEURL='https://example.com/preview' \
-python3 scripts/upload.py /path/to/preview.html --label demo
+uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label demo
 ```
 
 ### 依赖扫描覆盖范围
@@ -89,7 +95,7 @@ python3 scripts/upload.py /path/to/preview.html --label demo
 
 读取 `PREVIEW_SHARE_FTP`、`PREVIEW_SHARE_BASEURL`，每个变量**独立**按以下顺序取「首个非空来源」（与仓库根 [`CLAUDE.md`](../CLAUDE.md) 的「Skills 配置读取优先级」通用约定一致）：
 
-1. **进程环境变量**（本轮显式注入 `PREVIEW_SHARE_FTP=... python3 ...` 或已 `export`）
+1. **进程环境变量**（本轮显式注入 `PREVIEW_SHARE_FTP=... uv run --project <skill> ...` 或已 `export`）
 2. **`$PWD/.env.local`**（自动读，**不向上递归**）
 3. **`$PWD/.env`**（自动读，**不向上递归**）
 4. **`~/.config/preview-share/.env`**（**仅 `--use-local-key` 时读**，避免静默使用持久化凭证）
@@ -154,7 +160,8 @@ PREVIEW_SHARE_BASEURL=https://preview.你的域名.com/preview
 | 现象 | 原因 / 处理 |
 |------|------------|
 | 上传成功，但 URL 全部 **404** | ① FTP 目录 ≠ web 根目录：建站时 FTP 没选「创建」或账号根目录指错——确认 FTP 登录后能看到站点的 `index.html`。② `BASEURL` 与 FTP 远程路径不一致：见上面的一致性规则表。 |
-| 上传**超时**（大文件） | 调大 `--timeout`（默认 300s）；并确认服务器**被动模式（PASV）数据端口**对客户端可达。 |
+| 上传**超时**（大文件） | 调大 `--timeout`（默认 300s）；并确认服务器**被动模式（PASV）数据端口**对客户端可达。瞬时故障脚本会自动重试 3 次（退避 1s、2s），stderr 打 `[retry]` 行。 |
+| 报 `[ambiguous]` 无法查询远端状态 | 文件传到一半中断，且服务器不支持 `SIZE` 命令（或控制连接断开后重连失败），脚本无法确认远端是否已写完，按工作区 ADR 0006 规则 4 **不盲重试**。确认服务器状态后手工重跑。 |
 | 页面打开但**图裂 / 样式丢** | 依赖扫描有 `[warn] 引用未找到`：相对引用在本地缺文件，或脚本没识别到——用 `--include` 补齐，或检查引用路径。 |
 | 提示缺 `PREVIEW_SHARE_*` | 按 [配置读取优先级](#配置读取优先级) 在某一层设置；不要把凭证硬编码进脚本。 |
 | 报 scheme 非 `ftp`（如 `sftp://`） | 当前脚本只支持普通 FTP，需扩展。 |
@@ -172,6 +179,8 @@ PREVIEW_SHARE_BASEURL=https://preview.你的域名.com/preview
 preview-share/
 ├── README.md          # 本文件
 ├── SKILL.md           # skill 定义（触发条件、工作流、给 Agent 的指引）
+├── pyproject.toml     # uv 运行时环境（零第三方依赖，钉死 requires-python）
+├── uv.lock            # 解析结果锁文件
 ├── scripts/
 │   └── upload.py      # 上传脚本（依赖扫描 + 分层配置 + FTP 上传）
 └── assets/

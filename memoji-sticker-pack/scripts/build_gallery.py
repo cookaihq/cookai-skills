@@ -2,13 +2,23 @@
 """为 Memoji 表情包生成 manifest.json + index.html 画廊。
 
 由 gen_pack.sh 调用，也可单独运行：
-  build_gallery.py --outdir DIR --name NAME --base base.png [--items items.tsv]
+  uv run --project <skill目录> <skill目录>/scripts/build_gallery.py \
+      --outdir DIR --name NAME --base base.png [--items items.tsv]
 
 items.tsv 每行： slug<TAB>label<TAB>filename
 """
 import argparse
 import json
 import os
+import sys
+
+# 运行时环境 bootstrap（ADR 0007 §1.4 脚本侧兜底）：直接执行本文件时，若解释器
+# 不在 <skill>/.venv 内就 execv 拉回去（venv 缺失按 uv.lock 自动重建）。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if __name__ == "__main__":
+    import _runtime_bootstrap
+
+    _runtime_bootstrap.ensure()
 
 
 def load_items(path):

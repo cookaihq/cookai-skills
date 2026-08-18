@@ -1,0 +1,14 @@
+# multimodal-ask 运行时环境（ADR 0007 §1.1/§1.2）。
+# 本 skill 零第三方运行时依赖，但仍必须有 pyproject + uv.lock：uv 按
+# requires-python 钉死解释器版本，根治「系统 python3 版本漂移」。
+# 重建环境：uv sync --project <本目录>（venv 落 <本目录>/.venv，ADR 0007 §1.3）。
+[project]
+name = "multimodal-ask"
+version = "1.1.0"
+description = "multimodal-ask skill 的运行时环境锁定（纯标准库）"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+# 脚本按路径直接运行，不作为可安装包构建。
+package = false

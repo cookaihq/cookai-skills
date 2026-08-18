@@ -1,10 +1,14 @@
 ---
 name: pdf2markdown
-version: 1.0.0
-description: v1.0.0｜Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
+version: 1.1.0
+description: v1.1.0｜Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
 ---
 
 # PDF to Markdown
+
+## Run Commands With uv
+
+Every command below is written as `uv run --project <skill> <skill>/scripts/workflow.py ...`, where `<skill>` is this skill's directory (relative or absolute). **Never invoke a bare `python3`** (workspace ADR 0007): a bare `python3` resolves through PATH to the system interpreter, which does not have this skill's locked PyMuPDF and BeautifulSoup4. Do not drop `--project` either — without it uv walks up from the current directory looking for a `pyproject.toml` and can silently pick a different environment. There is a fallback if you get it wrong: `workflow.py` re-execs itself into `<skill>/.venv` on startup and rebuilds that environment from `uv.lock` when it is missing (one `[bootstrap]` line on stderr). Only a missing uv, or uv older than 0.8, stops the run — install uv with the command in that error and retry. Pandoc is a system executable and is never installed automatically.
 
 Establish a durable work bundle, complete its preflight gate, use the built-in AIHub source-staging upload, create and poll one Doc2X conversion attempt at a time, atomically adopt each validated ZIP as an immutable raw conversion, and review the entire result before selecting a local final Markdown. Apply only evidence-bound corrections, preserve the raw baseline, and use controlled HTML or lossless page crops only when simpler Markdown is insufficient. A new paid attempt requires an explicit bound decision whenever the preceding attempt has an uncertain submission, explicit failure, result-count error, or unusable result layout. Accept one local PDF or one unauthenticated public HTTPS PDF URL. Treat the bundled `source.pdf` and its SHA-256 identity as the source of truth.
 
@@ -13,12 +17,12 @@ Establish a durable work bundle, complete its preflight gate, use the built-in A
 Initialize, inspect, or update the non-secret persistent settings file:
 
 ```bash
-python3 scripts/workflow.py settings init
-python3 scripts/workflow.py settings status
-python3 scripts/workflow.py settings set-mode confirm
-python3 scripts/workflow.py settings set-mode auto
-python3 scripts/workflow.py settings set-publish-mode skip
-python3 scripts/workflow.py settings set-publish-mode upload
+uv run --project <skill> <skill>/scripts/workflow.py settings init
+uv run --project <skill> <skill>/scripts/workflow.py settings status
+uv run --project <skill> <skill>/scripts/workflow.py settings set-mode confirm
+uv run --project <skill> <skill>/scripts/workflow.py settings set-mode auto
+uv run --project <skill> <skill>/scripts/workflow.py settings set-publish-mode skip
+uv run --project <skill> <skill>/scripts/workflow.py settings set-publish-mode upload
 ```
 
 Use `--interaction-mode confirm|auto`, `--publish-mode skip|upload`, `--publish-with <skill:name|tool:name>`, and `--publish-target <opaque-name>` with `settings status` to inspect one-call overrides without persisting them. Add `--use-local-key` only when the current invocation may read `~/.config/pdf2markdown/.env`; this permission is never saved or inherited by a work bundle.
@@ -32,7 +36,7 @@ Do not put API keys, credentials, signed URLs, or bearer URLs in `settings.json`
 Run:
 
 ```bash
-python3 scripts/workflow.py start \
+uv run --project <skill> <skill>/scripts/workflow.py start \
   --source <local-pdf-or-public-https-url> \
   [--output-dir <directory>] \
   [--interaction-mode confirm|auto] \
@@ -63,7 +67,7 @@ Read the single JSON object from stdout. Preserve `work_bundle`, `generation`, a
 Before calling `advance`, confirm that the current Agent host can actually inspect local PNG images. Declare that capability explicitly; do not infer it from the PDF or send page images to another service:
 
 ```bash
-python3 scripts/workflow.py advance \
+uv run --project <skill> <skill>/scripts/workflow.py advance \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --visual-capability available \
@@ -79,7 +83,7 @@ A successful baseline creates `01-source/source-inventory.json` and one lossless
 Inspect every page reference image and use the source inventory for non-visual evidence such as link targets, form values, rotation, image occurrences, and annotations. Submit one conclusion for every page through the workflow; never edit authoritative JSON directly:
 
 ```bash
-python3 scripts/workflow.py record preflight \
+uv run --project <skill> <skill>/scripts/workflow.py record preflight \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --action-id <action-id> \
@@ -92,7 +96,7 @@ The workflow derives the overall result again from the page conclusions. All unq
 In `confirm` mode, a warning returns a new decision action. Apply it with:
 
 ```bash
-python3 scripts/workflow.py record decision \
+uv run --project <skill> <skill>/scripts/workflow.py record decision \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --action-id <action-id> \
@@ -110,13 +114,13 @@ Configure `AIHUB_API_KEY` for the staging invocation. Resolve exactly one non-em
 Run either command after preflight reaches `ready_to_submit`:
 
 ```bash
-python3 scripts/workflow.py advance \
+uv run --project <skill> <skill>/scripts/workflow.py advance \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --visual-capability available \
   [--use-local-key]
 
-python3 scripts/workflow.py resume \
+uv run --project <skill> <skill>/scripts/workflow.py resume \
   --work-bundle <directory> \
   --expected-generation <generation> \
   [--use-local-key]
@@ -131,7 +135,7 @@ HTTP 403 is `source_upload_rejected` for this fixed `auto_cleanup=false` request
 In confirm mode, resolve a returned staging action through the same workflow boundary:
 
 ```bash
-python3 scripts/workflow.py record source-staging \
+uv run --project <skill> <skill>/scripts/workflow.py record source-staging \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --action-id <action-id> \
@@ -147,7 +151,7 @@ Use `retry` only after accepting the disclosed possibility that an unknown attem
 After `source_upload_ready`, run `resume` with the latest generation and the exact `AIHUB_API_KEY` source used by staging:
 
 ```bash
-python3 scripts/workflow.py resume \
+uv run --project <skill> <skill>/scripts/workflow.py resume \
   --work-bundle <directory> \
   --expected-generation <generation> \
   [--use-local-key]
@@ -158,7 +162,7 @@ The create request is fixed to `doc2x-v3`, `convert_mode=md`, `formula_mode=doll
 Confirm mode returns `resolve_submission_unknown` after an unknown create result, or `resolve_task_failed` after an explicit upstream failure. Accept the possible duplicate conversion charge by applying the bound action:
 
 ```bash
-python3 scripts/workflow.py record conversion \
+uv run --project <skill> <skill>/scripts/workflow.py record conversion \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --action-id <action-id> \
@@ -198,7 +202,7 @@ Read [references/security-limits.md](references/security-limits.md) for the fixe
 After raw adoption reaches `converted`, open a review round with the latest generation and an explicit native visual capability:
 
 ```bash
-python3 scripts/workflow.py resume \
+uv run --project <skill> <skill>/scripts/workflow.py resume \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --visual-capability available
@@ -213,7 +217,7 @@ Review every source page, every listed Markdown block, and every required adjace
 Submit the review through the workflow boundary; never edit `review.json`, the report, or the manifest directly:
 
 ```bash
-python3 scripts/workflow.py record review \
+uv run --project <skill> <skill>/scripts/workflow.py record review \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --action-id <action-id> \
@@ -235,7 +239,7 @@ Do not mix difference and ambiguity findings in one record, downgrade a structur
 In `confirm` mode, `review_ambiguity` returns `action_required: resolve_review_ambiguity`. Obtain an actual user decision for every unresolved finding, then submit one bound decision per finding:
 
 ```bash
-python3 scripts/workflow.py record review-decision \
+uv run --project <skill> <skill>/scripts/workflow.py record review-decision \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --action-id <action-id> \
@@ -252,7 +256,7 @@ In `auto` mode, preserve `awaiting_user / review_ambiguity` without an action or
 When `action_required` is `record_correction`, submit exactly one correction item for every open difference:
 
 ```bash
-python3 scripts/workflow.py record correction \
+uv run --project <skill> <skill>/scripts/workflow.py record correction \
   --work-bundle <directory> \
   --expected-generation <generation> \
   --action-id <action-id> \
@@ -281,7 +285,7 @@ Only `conversion_state: local_complete` with `review_status: local_complete` and
 Run a read-only inspection when reporting status or checking a work bundle:
 
 ```bash
-python3 scripts/workflow.py inspect --work-bundle <directory>
+uv run --project <skill> <skill>/scripts/workflow.py inspect --work-bundle <directory>
 ```
 
 Use the returned `conversion_state`, `publication_state`, `outcome`, `artifacts`, `review_status`, `review_coverage`, `target_dialect`, `final_markdown`, and `errors`. Treat `artifacts.review_evidence` as the input evidence for the current review action and `final_markdown` as authoritative only when it is non-null. Do not edit `manifest.json`, `.state/private.json`, or `.state/history.ndjson` directly.
@@ -291,7 +295,7 @@ Use the returned `conversion_state`, `publication_state`, `outcome`, `artifacts`
 Pass the generation most recently returned by `start` or `inspect`:
 
 ```bash
-python3 scripts/workflow.py resume \
+uv run --project <skill> <skill>/scripts/workflow.py resume \
   --work-bundle <directory> \
   --expected-generation <generation> \
   [--interaction-mode confirm|auto] \
@@ -315,8 +319,17 @@ Handle `generation_conflict` by inspecting again before retrying. Handle `bundle
 - Exit `4`: stop and repair or restore the work bundle; do not bypass integrity or schema failures.
 - Exit `5`: resolve a stale generation or concurrent writer before retrying.
 - Exit `6`: repair invalid persistent settings or correct an invalid explicit override.
+- Exit `7`: a transient network failure kept the source download from completing after the built-in 3 attempts (`action_required: retry_after_network_recovery`). The source itself may be fine — wait for the network to recover and rerun the same command with the returned generation. **Do not** ask the user for a different URL; that is exit `3`'s remedy, not this one.
 
 Expect exactly one versioned JSON object on stdout for every supported command and structured entries in `errors` on failure. Never infer success from stderr text.
+
+## Network Jitter Handling
+
+Transient network failures are retried inside a single logical call — 3 attempts total, backing off 1s then 2s, one `[pdf2markdown] ... retry n/3 ...` line on stderr each time (workspace ADR 0006):
+
+- **Source PDF download** and **Doc2X result ZIP download** are idempotent GETs: DNS failure, connect timeout/failure, and read timeout/failure are retried. Deterministic failures (authentication required, non-200, not a PDF, size limit, peer mismatch, redirect problems, expired result URL) are raised immediately.
+- **Task polling** retries transient network failures inside one logical poll, so a single jitter does not burn a slot of the polling budget. HTTP 5xx and other non-200 responses still return `poll_transient` and are retried by the outer polling loop at its own interval.
+- **Creating a Doc2X task** and **AIHub source upload** are paid writes and are **never** retried automatically. An uncertain submission lands in the `uncertain` terminal state and needs an explicit `record conversion --decision retry --basis <reason>` to authorize a new paid attempt.
 
 ## Scope Boundary
 

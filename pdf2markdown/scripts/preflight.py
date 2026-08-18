@@ -407,14 +407,64 @@ def _png_dimensions(data: bytes) -> tuple[int, int]:
     return struct.unpack(">II", data[16:24])
 
 
+def _import_dependency(module_name: str):
+    """真实 import 一个依赖，返回 (module_or_None, detail_or_None)。
+
+    ADR 0007 §1.5：预检一律真实 import（不用 find_spec），且**捕获面须宽于
+    ImportError**——真实 import 会执行包的顶层代码，半残环境（传递依赖缺失、
+    二进制架构不符、动态库缺失）里那里抛出的可能是 OSError / RuntimeError 等
+    任意异常；只接 ImportError 会让它们穿过这层映射、以未分类异常炸出去。
+    这里统一收成「依赖不可用」，并把底层异常原文放进 detail 供定位——只报
+    「依赖缺失」而不给原文，用户无法区分「没装」和「装坏了」。
+    """
+    try:
+        return importlib.import_module(module_name), None
+    except Exception as exc:  # noqa: BLE001 - 见上方注释
+        return None, "%s: %s" % (type(exc).__name__, exc)
+
+
+# 依赖记录里纯诊断用、**不参与等值比较**的键。
+#
+# `detail` 装的是底层异常原文（`ImportError: No module named fitz`、动态库缺失的
+# dlopen 报错等）。它是给人定位用的措辞，不是能力事实：同一台机器上「装了什么、
+# 版本多少、能不能用」没变，异常措辞却会随 Python 小版本、libc、包内部实现而变。
+# 依赖是否漂移只由能力事实决定，所以所有跨记录的等值比较都先把它投影掉。
+#
+# 这同时根治一个跨版本缺陷：`detail` 是后加的键，v1.0.0 落盘的 baseline intent /
+# manifest 记录里根本没有它，与新版现算出的记录直接比会必然不等——存量 work bundle
+# 一 resume 就被误判成 `dependency_drift` / `integrity_violation`，而实际环境毫无
+# 变化。投影后，键的增删只要不动能力事实，就不会让旧 bundle 卡死。
+DEPENDENCY_DIAGNOSTIC_KEYS = ("detail",)
+
+
+def dependency_identity(dependencies):
+    """把依赖记录投影成参与等值比较的部分（去掉 `DEPENDENCY_DIAGNOSTIC_KEYS`）。
+
+    非列表 / 非字典元素原样返回：调用方拿到的可能是落盘数据里的任意 JSON 值，
+    这里只做投影，合法性由各自的校验分支判定。
+    """
+    if not isinstance(dependencies, list):
+        return dependencies
+    projected = []
+    for record in dependencies:
+        if isinstance(record, dict):
+            projected.append(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key not in DEPENDENCY_DIAGNOSTIC_KEYS
+                }
+            )
+        else:
+            projected.append(record)
+    return projected
+
+
 def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> dict:
     dependencies = []
     missing = []
 
-    try:
-        fitz = importlib.import_module("fitz")
-    except (ImportError, ModuleNotFoundError):
-        fitz = None
+    fitz, fitz_detail = _import_dependency("fitz")
     fitz_version = (
         None if fitz is None else _module_version(fitz, "VersionBind", "__version__")
     )
@@ -427,6 +477,7 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
                 "available": False,
                 "version": fitz_version,
                 "reason": "not_installed" if fitz is None else "incompatible_api",
+                "detail": fitz_detail,
                 "purpose": "PDF structure extraction and page rendering",
             }
         )
@@ -437,6 +488,7 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
                 "available": True,
                 "version": fitz_version,
                 "reason": None,
+                "detail": None,
                 "purpose": "PDF structure extraction and page rendering",
             }
         )
@@ -445,14 +497,18 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
     pandoc_version = None
     pandoc_identity = None
     pandoc_available = False
+    pandoc_detail = None
     pandoc_reason = "not_installed" if pandoc_path is None else "incompatible_api"
     if pandoc_path is not None:
         try:
             inspection = markdown_structure.inspect_pandoc(
                 pandoc_path, environ=environ
             )
-        except markdown_structure.MarkdownStructureError:
+        except markdown_structure.MarkdownStructureError as exc:
             pandoc_available = False
+            # 与 _import_dependency 同一口径：报「不可用」的同时留下底层原文，
+            # 否则用户无法区分「没装」和「装了但跑不起来」。
+            pandoc_detail = "%s: %s" % (type(exc).__name__, exc)
         else:
             pandoc_path = inspection["executable"]
             pandoc_version = inspection["version"]
@@ -469,14 +525,12 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
             "executable": pandoc_path,
             "executable_identity": pandoc_identity,
             "reason": pandoc_reason,
+            "detail": pandoc_detail,
             "purpose": "GFM parsing and normalization",
         }
     )
 
-    try:
-        bs4 = importlib.import_module("bs4")
-    except (ImportError, ModuleNotFoundError):
-        bs4 = None
+    bs4, bs4_detail = _import_dependency("bs4")
     bs4_available = bs4 is not None and _beautifulsoup_api_available(bs4)
     if not bs4_available:
         missing.append("beautifulsoup4")
@@ -492,6 +546,7 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
                 if bs4 is None
                 else "incompatible_api"
             ),
+            "detail": None if bs4_available else bs4_detail,
             "purpose": "Structured HTML parsing for the versioned allowlist",
         }
     )
@@ -505,6 +560,9 @@ def check_dependencies(*, environ: dict[str, str], visual_capability: str) -> di
             "available": visual_available,
             "version": None,
             "reason": None if visual_available else "not_declared_available",
+            # 宿主视觉能力是调用方声明的，不存在「底层异常原文」可留；键仍然带上，
+            # 四条依赖记录保持同一形状，读记录的人不必逐条记住谁有谁没有。
+            "detail": None,
             "purpose": "Agent inspection of every page reference image",
         }
     )
@@ -932,7 +990,8 @@ def build_baseline(
                 or intent.get("previous_manifest") != manifest
                 or intent.get("previous_private_hash") != object_hash(private_state)
                 or intent.get("render_dpi") != render_dpi
-                or intent.get("dependencies") != dependencies
+                or dependency_identity(intent.get("dependencies"))
+                != dependency_identity(dependencies)
                 or intent.get("resource_limits") != RESOURCE_LIMITS
             ):
                 raise PreflightError(
@@ -2728,7 +2787,8 @@ def _prepare_complete_baseline_intent(
         or inventory.get("render")
         != {"dpi": intent.get("render_dpi"), "format": "png", "lossless": True}
         or inventory.get("resource_limits") != intent.get("resource_limits")
-        or inventory.get("dependencies") != intent.get("dependencies")
+        or dependency_identity(inventory.get("dependencies"))
+        != dependency_identity(intent.get("dependencies"))
         or len(inventory_pages) != len(plans)
     ):
         raise PreflightError(

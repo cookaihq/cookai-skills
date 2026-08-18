@@ -24,7 +24,7 @@ from resolver import ResolvedTarget
 from results import build_result, validate_result
 from s3 import (
     Response, TransportError, build_signed_request, open_body_stream,
-    parse_provider_identifier, presign_get, public_url,
+    parse_provider_identifier, presign_get, public_url, read_request_with_retry,
 )
 from source_file import SourceError, VerifiedSource
 
@@ -330,6 +330,10 @@ def execute_single_put(*, resolved: ResolvedTarget, plan: Dict[str, Any],
                     extra_headers=tuple(request_headers[2:]),
                     now=request_moment,
                 )
+            # 写操作：传输异常一律置 put_unknown + ambiguous，**不重试**
+            # （ADR 0006 规则 4，本 skill 即该规则的先例）。为什么连「连接建立阶段
+            # 失败」也不拆出来重试，见 s3.py 顶部 read_request_with_retry 上方的
+            # 偏离说明。
             try:
                 response = transport(signed.method, signed.url, signed.headers, signed.body)
             except Exception:
@@ -584,6 +588,9 @@ def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
         query=query,
         now=request_moment,
     )
+    # 写操作：传输异常一律置 delete_unknown + ambiguous，**不重试**（ADR 0006
+    # 规则 4）。偏离说明（为什么不拆连接建立阶段）见 s3.py 的
+    # read_request_with_retry 上方注释。
     try:
         response = transport(signed.method, signed.url, signed.headers, signed.body)
     except Exception:
@@ -626,7 +633,10 @@ def execute_delete(*, resolved: ResolvedTarget, reference: Dict[str, Any],
 
 def reconcile_delete(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
                      store: CheckpointStore, transport: Callable[..., Response],
-                     now: ClockInput) -> OperationOutcome:
+                     now: ClockInput, sleep=None) -> OperationOutcome:
+    """`sleep` 是退避钩子（默认 `None` = `time.sleep`），透传给下方 HEAD 观测的
+    `read_request_with_retry`，让测试能从本函数签名驱动重试循环，而不必去 patch
+    `s3` 模块上的 `time.sleep` 全局。"""
     moment = _moment(now)
     checkpoint_id = checkpoint["checkpoint_id"]
     state = checkpoint["state"]
@@ -670,10 +680,12 @@ def reconcile_delete(*, resolved: ResolvedTarget, checkpoint: Dict[str, Any],
             query=query,
             now=request_moment,
         )
-        try:
-            response = transport(signed.method, signed.url, signed.headers, signed.body)
-        except Exception:
-            response = None
+        # 读语义（HEAD 观测对象是否还在），无远端副作用，瞬时失败按 ADR 0006
+        # 重试 3 次 + 退避 1s/2s；穷尽后返回 None，落回原有的 ambiguous 分支。
+        response = read_request_with_retry(
+            transport, signed.method, signed.url, signed.headers, signed.body,
+            sleep=sleep,
+        )
         if response is not None and response.status in {404, 410}:
             checkpoint = _set_state(checkpoint, "deleted", request_moment)
             store.replace(checkpoint)

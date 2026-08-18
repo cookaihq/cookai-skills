@@ -5,6 +5,8 @@
 .env.*.local
 .pytest_cache/
 __pycache__/
+# 各 skill 自带的 uv 环境（ADR 0007 §1.3：venv 落 <skill>/.venv，按 uv.lock 重建，不入库）
+.venv/
 CLAUDE.md
 s3-upload/tests/results/
 

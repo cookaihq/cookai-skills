@@ -1,3 +1,6 @@
+import socket
+import urllib.error
+
 import pytest
 
 import task
@@ -120,3 +123,72 @@ def test_poll_then_extract_failed_path():
     assert final["status"] == "failed"
     with pytest.raises(task.TaskFailed):
         task.extract_text(final)
+
+
+# --------------------------------------------------------------------------- #
+# poll_task：内层重试穷尽不终止轮询（M6）+ 墙钟预算（D2）
+# --------------------------------------------------------------------------- #
+
+def test_poll_task_survives_inner_retry_exhaustion():
+    """回归 M6：内层 3 次尝试全失败时作废本轮继续，不再 re-raise 杀死整个轮询。"""
+    calls = {"n": 0}
+    logs = []
+
+    def transport(method, url, headers, body=None, timeout=60):
+        calls["n"] += 1
+        if calls["n"] <= 3:            # 第 1 轮：内层 3 次尝试全部网络失败
+            raise socket.timeout("timed out")
+        return Resp(200, {"status": "completed", "results": [{"choices": [
+            {"message": {"content": "ok"}}]}]}, "")
+
+    final = task.poll_task("t", "k", base_url="https://api.x", transport=transport,
+                           interval=1, timeout=60, sleep=lambda s: None,
+                           log=logs.append)
+    assert final["status"] == "completed"
+    assert calls["n"] == 4, "第 1 轮消耗 3 次内层尝试，第 2 轮首次即成功"
+    assert any("重试耗尽" in line for line in logs)
+
+
+def test_poll_task_persistent_network_failure_ends_as_poll_timeout():
+    """一直失败也要以 PollTimeout 终态收场，而不是把底层网络异常抛给用户。"""
+    def transport(method, url, headers, body=None, timeout=60):
+        raise urllib.error.URLError(socket.gaierror(8, "nodename"))
+
+    with pytest.raises(task.PollTimeout):
+        task.poll_task("t", "k", base_url="https://api.x", transport=transport,
+                       interval=1, timeout=3, sleep=lambda s: None, log=lambda m: None)
+
+
+def test_poll_task_stops_when_wallclock_budget_is_spent():
+    """回归 D2：timeout 是真墙钟预算——内层退避拖慢后，轮次没跑完也要终态。"""
+    clock = {"t": 0.0}
+    calls = {"n": 0}
+
+    def monotonic():
+        return clock["t"]
+
+    def transport(method, url, headers, body=None, timeout=60):
+        calls["n"] += 1
+        clock["t"] += 40.0          # 每次查询「实际」耗时 40s
+        return Resp(200, {"status": "processing"}, "")
+
+    with pytest.raises(task.PollTimeout):
+        task.poll_task("t", "k", base_url="https://api.x", transport=transport,
+                       interval=1, timeout=100, sleep=lambda s: None,
+                       log=lambda m: None, monotonic=monotonic)
+    # 计数预算是 100/1 = 100 轮，但 100s 墙钟只够 3 轮。
+    assert calls["n"] == 3
+
+
+def test_poll_task_count_budget_is_not_off_by_one():
+    """回归 D2 的 off-by-one：max_polls 轮就是 max_polls 次查询。"""
+    calls = {"n": 0}
+
+    def transport(method, url, headers, body=None, timeout=60):
+        calls["n"] += 1
+        return Resp(200, {"status": "processing"}, "")
+
+    with pytest.raises(task.PollTimeout):
+        task.poll_task("t", "k", base_url="https://api.x", transport=transport,
+                       interval=5, timeout=20, sleep=lambda s: None, log=lambda m: None)
+    assert calls["n"] == 4, "20/5 = 4 轮，不是 5 轮"

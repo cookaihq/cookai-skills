@@ -234,7 +234,14 @@ class JsonRuntimeTests(unittest.TestCase):
                 "create_transport_error",
             ),
             (
+                # create 是计费写：5xx 表示服务端收到了请求但没能正常应答，任务
+                # 是否已创建并计费无法确认 —— 不重试，落结果不明的终态码。
                 [runtime.HttpResponse(503, (), b'raw create body')],
+                "create_transport_error",
+            ),
+            (
+                # 确定性 4xx 才是真正的「被拒绝」。
+                [runtime.HttpResponse(402, (), b'raw create body')],
                 "create_http_error",
             ),
             (
@@ -255,6 +262,9 @@ class JsonRuntimeTests(unittest.TestCase):
             (
                 [
                     runtime.HttpResponse(200, (), b'{"id":"task-query-http"}'),
+                    # 429 属瞬时：3 次尝试都被限流才落 query_http_error。
+                    runtime.HttpResponse(429, (), b'raw query body'),
+                    runtime.HttpResponse(429, (), b'raw query body'),
                     runtime.HttpResponse(429, (), b'raw query body'),
                 ],
                 "query_http_error",
@@ -1138,6 +1148,336 @@ class DownloadPublicationTests(unittest.TestCase):
             self.assertIn("Completed with failures: saved=1 failed=1", stderr)
             self.assertEqual((output / "cover-01.png").read_bytes(), b"first-complete")
             self.assertFalse((output / "cover-02.png").exists())
+
+
+class NetworkJitterTests(unittest.TestCase):
+    """ADR 0006：瞬时错误分类、重试、退避，以及计费写操作的 ambiguous 保护。
+
+    全部走注入的假 transport，不发任何真实网络请求。
+    """
+
+    def invoke(self, responses, *, download=None, max_attempts="1", extra=()):
+        api = FakeApiTransport(responses)
+        download = FakeDownloadTransport() if download is None else download
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        sleeps = []
+        with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as output:
+            exit_code = runtime.main(
+                [
+                    "--json",
+                    "--prompt",
+                    "cover",
+                    "--output-dir",
+                    output,
+                    "--poll-interval",
+                    "9",
+                    "--max-attempts",
+                    max_attempts,
+                    *extra,
+                ],
+                api_transport=api,
+                download_transport=download,
+                resolver=lambda host, port: ["8.8.8.8"],
+                sleeper=sleeps.append,
+                environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
+                cwd=Path(project),
+                home=Path(project) / "home",
+                stdout=stdout,
+                stderr=stderr,
+            )
+            document = json.loads(stdout.getvalue())
+        return exit_code, document, stderr.getvalue(), api, download, sleeps
+
+    @staticmethod
+    def _send_failed():
+        return runtime.TransportFailure("boom", runtime.TRANSPORT_SEND_FAILED)
+
+    @staticmethod
+    def _response_lost():
+        return runtime.TransportFailure("boom", runtime.TRANSPORT_RESPONSE_LOST)
+
+    def test_create_retries_when_the_request_never_left_the_client(self):
+        exit_code, document, _, api, _, sleeps = self.invoke(
+            [
+                self._send_failed(),
+                runtime.HttpResponse(200, (), b'{"id":"task-retry-send"}'),
+                runtime.HttpResponse(
+                    200,
+                    (),
+                    b'{"status":"completed","results":[{"url":"https://images.example.test/a.png?signature=x","content_type":"image/png"}]}',
+                ),
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["task_id"], "task-retry-send")
+        self.assertEqual(len(api.requests), 3)  # 失败的 create + 重试的 create + 1 次轮询
+        self.assertEqual(sleeps[0], 1.0)  # 第 1 次重试等 1s（指数退避起点）
+
+    def test_create_does_not_replay_when_the_response_was_lost(self):
+        exit_code, document, stderr, api, _, sleeps = self.invoke(
+            [self._response_lost(), runtime.HttpResponse(200, (), b'{"id":"never-reached"}')]
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(document["error"]["code"], "create_transport_error")
+        self.assertIn("may or may not have been created", document["error"]["message"])
+        self.assertEqual(len(api.requests), 1)  # 绝不重发，避免重复扣费
+        self.assertEqual(sleeps, [])
+        self.assertIn("the result is unknown and was NOT retried", stderr)
+
+    def test_create_honours_retry_after_on_429(self):
+        exit_code, document, _, api, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(429, (("Retry-After", "5"),), b'{"error":"slow down"}'),
+                runtime.HttpResponse(200, (), b'{"id":"task-429"}'),
+                runtime.HttpResponse(
+                    200,
+                    (),
+                    b'{"status":"completed","results":[{"url":"https://images.example.test/a.png?signature=x","content_type":"image/png"}]}',
+                ),
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["task_id"], "task-429")
+        self.assertEqual(sleeps[0], 5.0)  # 按 Retry-After，而不是退避公式
+
+    def test_poll_jitter_does_not_consume_the_polling_budget(self):
+        # max_attempts=1：轮询预算只有一轮。中间两次物理请求抖动只消耗内层重试，
+        # 第三次拿到 completed —— 旧实现会在第一次抖动就 query_transport_error。
+        exit_code, document, _, api, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(200, (), b'{"id":"task-poll-jitter"}'),
+                self._response_lost(),
+                self._response_lost(),
+                runtime.HttpResponse(
+                    200,
+                    (),
+                    b'{"status":"completed","results":[{"url":"https://images.example.test/a.png?signature=x","content_type":"image/png"}]}',
+                ),
+            ],
+            max_attempts="1",
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["status"], "ok")
+        self.assertEqual(sleeps, [1.0, 2.0])  # 内层退避 1s、2s；轮询间隔 9s 没被用到
+
+    def test_poll_fails_only_after_the_inner_retries_are_exhausted(self):
+        exit_code, document, _, api, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(200, (), b'{"id":"task-poll-dead"}'),
+                self._response_lost(),
+                self._response_lost(),
+                self._response_lost(),
+            ],
+            max_attempts="1",
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(document["error"]["code"], "query_transport_error")
+        self.assertEqual(len(api.requests), 4)  # 1 次 create + 3 次轮询尝试
+
+    def test_download_retries_a_transient_hop_and_publishes_the_complete_body(self):
+        url = "https://images.example.test/a.png?signature=x"
+        download = RoutedDownloadTransport(
+            {
+                url: [
+                    runtime.TransportFailure("hop reset", runtime.TRANSPORT_RESPONSE_LOST),
+                    (200, (), b"complete-image"),
+                ]
+            }
+        )
+        api = FakeApiTransport(
+            [
+                runtime.HttpResponse(200, (), b'{"id":"task-download-retry"}'),
+                runtime.HttpResponse(
+                    200,
+                    (),
+                    b'{"status":"completed","results":[{"url":"'
+                    + url.encode()
+                    + b'","content_type":"image/png"}]}',
+                ),
+            ]
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        sleeps = []
+        with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as output:
+            exit_code = runtime.main(
+                [
+                    "--json", "--prompt", "cover", "--output-dir", output,
+                    "--poll-interval", "9", "--max-attempts", "1",
+                ],
+                api_transport=api,
+                download_transport=download,
+                resolver=lambda host, port: ["8.8.8.8"],
+                sleeper=sleeps.append,
+                environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
+                cwd=Path(project),
+                home=Path(project) / "home",
+                stdout=stdout,
+                stderr=stderr,
+            )
+            document = json.loads(stdout.getvalue())
+            saved = Path(document["outputs"][0]["local_path"])
+            self.assertEqual(saved.read_bytes(), b"complete-image")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["outputs"][0]["status"], "saved")
+        self.assertEqual(len(download.requests), 2)
+        self.assertEqual(sleeps, [1.0])
+
+    def test_create_does_not_replay_a_5xx(self):
+        """回归 H1c：5xx 下上游可能已受理并计费，状态码路径也不许重发。"""
+        exit_code, document, stderr, api, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(503, (), b'raw create body'),
+                runtime.HttpResponse(200, (), b'{"id":"never-reached"}'),
+            ]
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(document["error"]["code"], "create_transport_error")
+        self.assertIn("may or may not have been created", document["error"]["message"])
+        self.assertEqual(len(api.requests), 1)  # 绝不重发
+        self.assertEqual(sleeps, [])
+        self.assertIn("whether it accepted the request is unknown", stderr)
+        self.assertNotIn("raw create body", json.dumps(document))
+
+    def test_create_still_retries_a_429(self):
+        """429 是唯一能确认「未受理、未扣费」的状态码，仍然可重试。"""
+        exit_code, document, _, api, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(429, (), b'{"error":"slow down"}'),
+                runtime.HttpResponse(200, (), b'{"id":"task-429-retry"}'),
+                runtime.HttpResponse(
+                    200,
+                    (),
+                    b'{"status":"completed","results":[{"url":"https://images.example.test/a.png?signature=x","content_type":"image/png"}]}',
+                ),
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["task_id"], "task-429-retry")
+        self.assertEqual(sleeps[0], 1.0)
+
+    def test_polling_still_retries_5xx_because_reads_are_idempotent(self):
+        exit_code, document, _, api, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(200, (), b'{"id":"task-poll-5xx"}'),
+                runtime.HttpResponse(503, (), b'{"error":"upstream"}'),
+                runtime.HttpResponse(
+                    200,
+                    (),
+                    b'{"status":"completed","results":[{"url":"https://images.example.test/a.png?signature=x","content_type":"image/png"}]}',
+                ),
+            ],
+            max_attempts="1",
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(document["status"], "ok")
+        self.assertEqual(len(api.requests), 3)
+        self.assertEqual(sleeps, [1.0])
+
+    def test_polling_stops_when_the_wall_clock_budget_is_spent(self):
+        """回归 D2：次数还没用完，但墙钟预算耗尽就落 timed_out 终态。"""
+        clock = {"t": 0.0}
+
+        def monotonic():
+            return clock["t"]
+
+        class SlowApi(FakeApiTransport):
+            def request(self, method, url, headers, body):  # noqa: ANN001
+                clock["t"] += 200.0  # 每轮「实际」耗时 200s
+                return super().request(method, url, headers, body)
+
+        api = SlowApi(
+            [runtime.HttpResponse(200, (), b'{"id":"task-wallclock"}')]
+            + [runtime.HttpResponse(200, (), b'{"status":"processing"}')] * 20
+        )
+        stdout, stderr, sleeps = io.StringIO(), io.StringIO(), []
+        with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as output:
+            exit_code = runtime.main(
+                [
+                    "--json", "--prompt", "cover", "--output-dir", output,
+                    "--poll-interval", "8", "--max-attempts", "20",
+                ],
+                api_transport=api,
+                download_transport=RoutedDownloadTransport({}),
+                resolver=lambda host, port: ["8.8.8.8"],
+                sleeper=sleeps.append,
+                monotonic=monotonic,
+                environ={"AIHUB_API_KEY": "test-runtime-primary-key"},
+                cwd=Path(project),
+                home=Path(project) / "home",
+                stdout=stdout,
+                stderr=stderr,
+            )
+            document = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 3)
+        self.assertEqual(document["status"], "timed_out")
+        self.assertEqual(document["error"]["code"], "poll_timeout")
+        # 计数预算 20 轮，但墙钟预算 20 × 8s = 160s 只够 1 轮（每轮「耗时」200s）：
+        # 1 次 create + 1 次轮询后 deadline 到期，剩下 19 轮不再发。
+        self.assertEqual(len(api.requests), 2)
+        self.assertIn("wall-clock budget of 160s is spent", stderr.getvalue())
+
+    def test_wall_clock_budget_matches_the_documented_default(self):
+        self.assertEqual(runtime.DEFAULT_POLL_WALL_CLOCK_BUDGET_SECONDS, 720)
+        parser_defaults = runtime.build_parser().parse_args(["--prompt", "x"])
+        self.assertEqual(
+            int(parser_defaults.max_attempts) * int(parser_defaults.poll_interval),
+            runtime.DEFAULT_POLL_WALL_CLOCK_BUDGET_SECONDS,
+        )
+
+    def test_retry_after_parsing_is_bounded_and_falls_back_to_backoff(self):
+        self.assertEqual(runtime._retry_after_seconds((("Retry-After", "3"),)), 3.0)
+        self.assertIsNone(runtime._retry_after_seconds((("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),)))
+        self.assertIsNone(runtime._retry_after_seconds(()))
+        self.assertEqual(
+            runtime._retry_after_seconds((("Retry-After", "99999"),)),
+            float(runtime.MAX_RETRY_AFTER_SECONDS),
+        )
+        # 回归 L1：float("nan") 不报错，但 min(nan, 120) 仍是 nan，sleep(nan) 会崩。
+        for raw in ("nan", "NaN", "inf", "-inf", "Infinity"):
+            self.assertIsNone(
+                runtime._retry_after_seconds(((("Retry-After"), raw),)), raw
+            )
+        self.assertIsNone(runtime._retry_after_seconds((("Retry-After", "-1"),)))
+
+    def test_nan_retry_after_falls_back_to_backoff_end_to_end(self):
+        """nan 必须在到达 sleeper 之前就被挡掉，等待时长回落到指数退避。"""
+        exit_code, document, _, _, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(429, (("Retry-After", "nan"),), b'{"error":"slow"}'),
+                runtime.HttpResponse(200, (), b'{"id":"task-nan"}'),
+                runtime.HttpResponse(
+                    200,
+                    (),
+                    b'{"status":"completed","results":[{"url":"https://images.example.test/a.png?signature=x","content_type":"image/png"}]}',
+                ),
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(sleeps[0], 1.0)
+        for wait in sleeps:
+            self.assertEqual(wait, wait, "等待时长不得为 nan")
+        self.assertEqual(runtime._backoff_seconds(1), 1.0)
+        self.assertEqual(runtime._backoff_seconds(2), 2.0)
+        self.assertTrue(runtime._is_transient_status(429))
+        self.assertTrue(runtime._is_transient_status(503))
+        self.assertFalse(runtime._is_transient_status(401))
+        self.assertFalse(runtime._is_transient_status(404))
+
+    def test_deterministic_transport_failures_are_never_retried(self):
+        exit_code, document, _, api, _, sleeps = self.invoke(
+            [
+                runtime.HttpResponse(200, (), b'{"id":"task-deterministic"}'),
+                runtime.TransportFailure("oversize", runtime.TRANSPORT_DETERMINISTIC),
+                runtime.HttpResponse(200, (), b'{"status":"completed"}'),
+            ],
+            max_attempts="1",
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(document["error"]["code"], "query_transport_error")
+        self.assertEqual(len(api.requests), 2)  # create + 1 次轮询，确定性失败不重试
+        self.assertEqual(sleeps, [])
 
 
 if __name__ == "__main__":

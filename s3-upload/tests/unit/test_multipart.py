@@ -14,7 +14,7 @@ from multipart import (
 )
 from planning import derive_contract_key
 from resolver import ResolvedTarget
-from s3 import Response, build_signed_request
+from s3 import NET_MAX_ATTEMPTS, Response, build_signed_request
 from source_file import VerifiedSource
 from v2_schema import parse_credential_map, parse_reference, parse_target
 
@@ -653,9 +653,13 @@ def test_abort_unknown_reconcile_distinguishes_absent_open_and_inconclusive_sess
         ),
         execution_mode="test-only",
         live_test_interlock=LiveTestInterlock(True, "project:images"),
+        sleep=lambda _s: None,
     )
 
-    assert [call[0] for call in observer_calls] == ["HEAD", "GET"]
+    # 503 是瞬时状态（ADR 0006 规则 2）：ListParts 这类读观测会重试到预算耗尽，
+    # 其余状态一次就定论。两者都只发读方法，写方法一个也不许出现。
+    expected_gets = NET_MAX_ATTEMPTS if list_response.status == 503 else 1
+    assert [call[0] for call in observer_calls] == ["HEAD"] + ["GET"] * expected_gets
     assert all(call[0] not in {"PUT", "POST", "DELETE"} for call in observer_calls)
     assert outcome.result["status"] == expected_status
     assert checkpoint_snapshot(tmp_path)["state"] == expected_state
@@ -697,9 +701,12 @@ def test_abort_unknown_stops_when_completion_head_is_inconclusive(tmp_path):
         ),
         execution_mode="test-only",
         live_test_interlock=LiveTestInterlock(True, "project:images"),
+        sleep=lambda _s: None,
     )
 
-    assert len(calls) == 1 and calls[0][0] == "HEAD"
+    # HEAD 是读观测，持续 503 会重试满预算后仍以最后那个 503 定论为 inconclusive。
+    assert len(calls) == NET_MAX_ATTEMPTS
+    assert all(call[0] == "HEAD" for call in calls)
     assert outcome.result["status"] == "ambiguous"
     assert checkpoint_snapshot(tmp_path)["state"] == "abort_unknown"
 

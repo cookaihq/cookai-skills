@@ -18,9 +18,18 @@
 # 成功判定：create_task.sh 退出码 0 且产物文件确实存在（双重判断）。
 set -uo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 UPLOAD_PY="$SCRIPT_DIR/upload.py"
+
+# 本 skill 的 Python 解释器由 uv 按 <skill>/pyproject.toml + uv.lock 钉死，venv
+# 落 <skill>/.venv（ADR 0007 §1.4 示例侧）。所有 python 调用一律经这个数组，
+# 禁止改回裸 python3——那会按 PATH 解析到系统解释器，cutout.py 的 numpy/Pillow
+# 就不在那里。各 .py 顶部还有 bootstrap 兜底，绕过本脚本直接跑也会被拉回同一 venv。
+# --no-dev：uv run 会先把项目环境同步到位，默认连 dev 依赖组（pytest 等）一起装。
+# 那些只服务本仓测试，不该进终端用户的 <skill>/.venv。
+PY=(uv run --project "$SKILL_DIR" --no-dev python)
 
 # ---------------- 默认参数 ----------------
 IMAGE=""
@@ -270,7 +279,7 @@ upload_image() {
   esac
   local args=("$src_flag" "$src_val" --base-url "$AIHUBMAX_BASE")
   [[ $USE_LOCAL_KEY -eq 1 ]] && args+=(--use-local-key)
-  url="$(python3 "$UPLOAD_PY" "${args[@]}" 2>>"$ulog")"
+  url="$("${PY[@]}" "$UPLOAD_PY" "${args[@]}" 2>>"$ulog")"
   rc=$?
   [[ -n "$tmp" && "$tmp" != "$in" ]] && rm -f "$tmp" 2>/dev/null || true
   if [[ $rc -ne 0 || -z "$url" ]]; then
@@ -307,12 +316,46 @@ run_one() {
   bash "$CREATE_SH" "${args[@]}" >"$log" 2>&1
 }
 
+# 从 create_task.sh 的日志里取结构化错误码。非 --json 模式下它把终态打成
+#   Error [<code>]: <message>
+# 这一行，是本层能拿到的全部结构化信息（不改用 --json，以免动 image-2 的调用契约
+# 和产物落盘方式）。取不到就返回空串，由调用方按「无错误码」处理。
+gen_error_code() {
+  local log="$1"
+  [[ -f "$log" ]] || { printf ''; return 0; }
+  sed -n 's/^Error \[\([a-z_]*\)\].*/\1/p' "$log" | tail -n 1
+}
+
+# 判断「整任务重跑」是否安全（ADR 0006 规则 2/4）。重跑 = 再发一次计费的生成
+# 请求，所以只在**明确没有留下已计费任务、且重跑有可能变好**时才做。
+#   可重跑：
+#     upstream_failed          上游明确说这次生成失败了；重跑是唯一出路（用户已授权 RETRY）
+#     ""（无错误码）           create_task.sh 没打结构化终态：进程崩溃、脚本没找到、
+#                              或 partial_success（图生成了但本地保存失败）。这些
+#                              都不是「已创建任务在跑」的歧义态，重跑安全。
+#   不可重跑：
+#     create_transport_error   结果不明（ambiguous）：任务可能已创建并计费
+#     poll_timeout             任务可能仍在运行且已计费；重跑等于再买一张
+#     query_*                  任务已创建并计费，只是本地没查到终态
+#     create_http_error        401/402/422 等确定性失败；429/5xx 已在 image-2 内部
+#                              按 ADR 0006 重试过 3 次，本层再跑一次仍是同样结果
+#     invalid_arguments / configuration_error / invalid_task_id / internal_error
+#                              确定性或本地问题，重跑无意义
+# 边界：本层只能看到退出码 + 上面那一行错误码，做不到比这更细的分类。
+gen_failure_is_retryable() {
+  local code="$1"
+  case "$code" in
+    upstream_failed|"") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 生成一张：成功把路径写入全局 PRODUCED 并返回 0。 $1=img $2=prompt $3=stem
 PRODUCED=""
 generate() {
   local img="$1" prompt="$2" stem="$3"
   local log="$OUTDIR/.log-${stem}.txt"
-  local attempt=0 max=$((1 + RETRY))
+  local attempt=0 max=$((1 + RETRY)) code=""
   PRODUCED=""
   # 删除可能存在的旧产物，避免误判成功
   rm -f "$OUTDIR/$stem".png "$OUTDIR/$stem".webp "$OUTDIR/$stem".jpg "$OUTDIR/$stem".jpeg 2>/dev/null || true
@@ -322,7 +365,12 @@ generate() {
       PRODUCED="$(produced_file "$stem")"
       return 0
     fi
-    echo "    ! ${stem} 第 ${attempt} 次失败（日志见 ${log}）" >&2
+    code="$(gen_error_code "$log")"
+    echo "    ! ${stem} 第 ${attempt} 次失败（错误码：${code:-无}，日志见 ${log}）" >&2
+    if ! gen_failure_is_retryable "${code}"; then
+      echo "    ! ${stem} 该失败不重跑：${code} 属确定性失败或结果不明（重跑会再次扣费），交由用户决定" >&2
+      return 1
+    fi
   done
   return 1
 }
@@ -334,7 +382,7 @@ cutout_file() {
   local stem="$1"
   local out="$OUTDIR/${stem}.png"
   local log="$OUTDIR/.log-${stem}.txt"
-  if python3 "$(dirname "$0")/cutout.py" --in "$PRODUCED" --out "$out" >>"$log" 2>&1; then
+  if "${PY[@]}" "$SCRIPT_DIR/cutout.py" --in "$PRODUCED" --out "$out" >>"$log" 2>&1; then
     [[ "$PRODUCED" != "$out" ]] && rm -f "$PRODUCED" 2>/dev/null || true
     FINAL_PNG="$out"
   else
@@ -355,7 +403,12 @@ BASE_PROMPT="Turn the person in the reference photo into a friendly Memoji-style
 
 if [[ -n "$BASE_URL_REUSE" ]]; then
   echo "    复用已有基准图 URL（不消耗积分）"
-  if ! curl -s -L -o "$OUTDIR/base_raw" "$BASE_URL_REUSE" || [[ ! -s "$OUTDIR/base_raw" ]]; then
+  # 幂等 GET（ADR 0006）：必设超时（连接 15s、整体 120s）；瞬时错误（超时、5xx、
+  # 429）交给 curl 自带的 --retry 重试 2 次，退避从 1s 起翻倍。
+  # 不能加 --retry-delay：显式给非 0 值会把等待固定成该值并**关闭**指数退避，
+  # 与上面这行注释的意图相反。省略该选项（等价于 0）才是 curl 的默认退避。
+  if ! curl -sS -L --connect-timeout 15 --max-time 120 --retry 2 \
+       -o "$OUTDIR/base_raw" "$BASE_URL_REUSE" || [[ ! -s "$OUTDIR/base_raw" ]]; then
     echo "错误：下载复用基准图失败：$BASE_URL_REUSE" >&2; exit 2
   fi
   PRODUCED="$OUTDIR/base_raw"
@@ -376,7 +429,7 @@ echo "    ✓ 基准头像：$BASE_FILE"
 
 # single 模式到此结束
 if [[ "$MODE" == "single" ]]; then
-  python3 "$(dirname "$0")/build_gallery.py" \
+  "${PY[@]}" "$SCRIPT_DIR/build_gallery.py" \
     --outdir "$OUTDIR" --name "$NAME" \
     --base "$(basename "$BASE_FILE")" || true
   echo "=== 完成（single 模式）：$OUTDIR ==="
@@ -424,6 +477,22 @@ collect_failures() {
   done
 }
 
+# 只挑「重跑安全」的失败项（判据与 gen_failure_is_retryable 同一套）。确定性失败
+# 与结果不明的项不再整任务重跑，避免无意义的重复扣费。
+collect_retryable_failures() {
+  RETRY_IDX=()
+  local i stem code
+  for i in "${FAIL_IDX[@]}"; do
+    stem="${STEMS[$i]}"
+    code="$(gen_error_code "$OUTDIR/.log-${stem}.txt")"
+    if gen_failure_is_retryable "${code}"; then
+      RETRY_IDX+=("$i")
+    else
+      echo "    ! ${stem} 不重跑：${code}（确定性失败或结果不明，重跑会再次扣费）" >&2
+    fi
+  done
+}
+
 # 第 1 轮：全部
 ALL_IDX=()
 for i in "${!STEMS[@]}"; do ALL_IDX+=("$i"); done
@@ -433,9 +502,13 @@ launch_round "${ALL_IDX[@]}"
 # 重试一轮失败项（用户已授权）
 collect_failures
 if [[ $RETRY -gt 0 && ${#FAIL_IDX[@]} -gt 0 ]]; then
-  echo "[并行] 重试 ${#FAIL_IDX[@]} 个失败表情…"
-  launch_round "${FAIL_IDX[@]}"
-  collect_failures
+  RETRY_IDX=()
+  collect_retryable_failures
+  if [[ ${#RETRY_IDX[@]} -gt 0 ]]; then
+    echo "[并行] 重试 ${#RETRY_IDX[@]} 个失败表情（已排除确定性失败与结果不明项）…"
+    launch_round "${RETRY_IDX[@]}"
+    collect_failures
+  fi
 fi
 
 # 抠图 + 汇总
@@ -463,7 +536,7 @@ if [[ ${#OK_ROWS[@]} -gt 0 ]]; then
   done
 fi
 
-python3 "$(dirname "$0")/build_gallery.py" \
+"${PY[@]}" "$SCRIPT_DIR/build_gallery.py" \
   --outdir "$OUTDIR" --name "$NAME" \
   --base "$(basename "$BASE_FILE")" \
   --items "$ITEMS_TSV" || true

@@ -1,7 +1,7 @@
 ---
 name: banana-2
-version: 1.0.0
-description: v1.0.0｜Use when the user asks to generate or edit an image with Nano Banana 2 / Banana 2 / nano banana / 香蕉 / gemini flash image / gemini-3.1-flash-image-preview, or when they size an image by ASPECT RATIO (16:9, 9:16, 21:9, match_input_image) or by QUALITY TIER (512 / 0.5K / 1K / 2K / 4K), or want web-grounded ("联网搜索") / image-search-assisted generation. For generic "生成图片" with pixel resolutions like 1024x1024 use the image-2 skill instead. Do NOT use for video generation, OCR, or non-generative editing (crop, compress, watermark).
+version: 1.1.0
+description: v1.1.0｜Use when the user asks to generate or edit an image with Nano Banana 2 / Banana 2 / nano banana / 香蕉 / gemini flash image / gemini-3.1-flash-image-preview, or when they size an image by ASPECT RATIO (16:9, 9:16, 21:9, match_input_image) or by QUALITY TIER (512 / 0.5K / 1K / 2K / 4K), or want web-grounded ("联网搜索") / image-search-assisted generation. For generic "生成图片" with pixel resolutions like 1024x1024 use the image-2 skill instead. Do NOT use for video generation, OCR, or non-generative editing (crop, compress, watermark).
 ---
 
 # banana-2
@@ -34,7 +34,7 @@ description: v1.0.0｜Use when the user asks to generate or edit an image with N
 - 调用前必须完成参数校验，缺必填先补齐再调用 API
 - 不得回显完整 `Authorization` token，日志只允许 `head4****tail4` 掩码
 - **同参数任务在同一轮对话内禁止二次提交**（参数任意变化即视为新任务，可创建）
-- 禁止自动循环重试创建接口；重试需先告知会再次消耗积分并取得用户同意。**唯一例外**：HTTP 401 触发的 key 链 fallback——它换的是 key 不是同请求，且 401 不消耗积分，详见下方「401 自动 fallback」
+- 禁止 Agent 自行循环重试创建接口；重试需先告知会再次消耗积分并取得用户同意。**两个例外**（都不会重复扣费，由脚本内部完成）：① HTTP 401 触发的 key 链 fallback——换的是 key 不是同请求，且 401 不消耗积分，详见下方「401 自动 fallback」；② 服务端明确拒绝、任务未创建的 429 / 可确认未创建的 5xx——脚本按 ADR 0006 自动重试至多 3 次，详见下方 [Network Resilience](#network-resilience)
 - 创建接口返回的是异步任务，必须接着轮询查询接口直到终态
 - 生成的图片 URL 24 小时后失效，需要长期保留请下载或转存
 - **默认会把图片下载到当前工作区根目录**，文件名 `{YYYYMMDD-HHMMSS}-{≤10字标签}.{ext}`；优先级：`--filename` > `--label` > 自动从 prompt 前 10 字提取。环境变量 `BANANA_2_OUTPUT_DIR` 或 `--output-dir` 可改保存目录
@@ -214,9 +214,27 @@ AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
 - HTTP 401 `authentication_error`：key 无效/过期/权限不足，去 [aihubmax.com](https://aihubmax.com) 检查
 - HTTP 402 `insufficient_quota`：余额不足，请用户充值后再试
 - HTTP 422 `validation_error`：根据 `error.message` 调整参数
-- HTTP 429 `rate_limit_error`：限流，**禁止自动重试**，告知用户稍后再试
-- HTTP 5xx：服务异常，建议用户确认后由用户决定是否重试
+- HTTP 429 `rate_limit_error`：限流。**429 表示服务端明确拒绝、任务未创建、不消耗积分**，脚本会按响应头 `Retry-After`（无则指数退避 1s→2s）自动重试，总尝试 3 次；3 次仍限流才报错，此时告知用户稍后再试
+- HTTP 5xx：仅当响应体能解析为 `{"error": ...}`（可确认任务未创建）时脚本自动重试 3 次；响应体无法确认时按**结果不明（ambiguous）**处理——不重试，脚本会提示任务可能已创建并给出查询指引，由用户确认后再决定是否重新提交
+- create 连接中断 / 超时：同样属**结果不明**，脚本不自动重试，按提示先到 [aihubmax.com](https://aihubmax.com) 确认是否已产生任务，再决定是否重提
 - 轮询超时：明确告知任务可能仍在运行，给出 `task_id` 让用户后续手动查询
+
+## Network Resilience
+
+脚本内部已按统一的网络抖动约定处理超时与重试，Agent 不需要自己再包一层重试：
+
+| 调用 | 超时 | 瞬时失败重试 | 说明 |
+|---|---|---|---|
+| create（`POST /v1/images/generations`） | 连接 15s / 总 60s | 仅 429 与「可确认未创建」的 5xx，最多 3 次尝试 | 计费写操作无幂等键，超时/连接中断按 ambiguous 停下，不盲重试 |
+| 轮询（`GET /v1/tasks/{id}`） | 连接 10s / 总 30s | 网络错误、5xx、429、408，最多 3 次尝试（退避 1s→2s） | 幂等 GET，重试安全；单轮重试耗尽只消耗一次轮询预算，不会中断整个轮询 |
+| 结果图下载 | 连接 20s / 总 300s | 同上 | 幂等 GET；确定性 4xx（403 签名过期 / 404 已失效）立即放弃 |
+
+轮询有两条并行预算，任一耗尽都以退出码 3 报终态错误并给出 `task_id`：
+
+- **次数预算** = `--max-attempts`（默认 90）轮；
+- **墙钟预算** = `--max-attempts` × `--poll-interval`（默认 90 × 8s = 720s）。次数制不管每轮实际耗时——每轮内层最多 3 次尝试、退避 1s+2s，加上单次查询 30s 上限，只数轮次会让总时长远超预期，所以另压这条真墙钟上限，内层重试也不得突破。
+
+`Retry-After` 超过 60s 时钳到 60s 采信（不丢弃、不回落成更短的 1s 退避）。
 
 ## Dedup Rule
 
@@ -238,5 +256,6 @@ AIHUB_API_KEY='sk-xxx' ./scripts/create_task.sh \
 
 - `SKILL.md`
 - `scripts/set_key.sh`、`scripts/create_task.sh`
+- `pyproject.toml`、`uv.lock`（脚本内 Python heredoc 的解释器锁定；`create_task.sh` 一律以 `uv run --project <skill 目录> python` 起 Python，venv 缺失时自动按 `uv.lock` 建在 `<skill>/.venv`）
 - `references/api-guide.md`
 - `tests/`（pressure 场景文档）

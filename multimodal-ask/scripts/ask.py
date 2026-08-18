@@ -3,13 +3,22 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import urllib.error
 
+# 运行时环境 bootstrap（ADR 0007 §1.4 脚本侧兜底）：直接执行本文件时，若解释器
+# 不在 <skill>/.venv 内就 execv 拉回去（venv 缺失按 uv.lock 自动重建）。放在
+# `__main__` 守卫里，好让 tests 把本模块 import 进来时不触发 execv。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if __name__ == "__main__":
+    import _runtime_bootstrap
+
+    _runtime_bootstrap.ensure()
+
+from client import AmbiguousRequest  # noqa: E402  (must come after the bootstrap)
 from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates
 from dedup import dedup_key  # noqa: F401  (exposed for callers/tests; same-round guard is Agent-side)
 from media import (CAPABILITY_BY_KIND, classify_source, normalize_youtube, size_warning)
 from messages import build_messages
-from models import check_capabilities, fetch_models
+from models import ModelsQueryError, check_capabilities, fetch_models
 from task import (LLMError, PollTimeout, TaskFailed, build_submit_body, extract_text,
                   poll_task, submit_llm)
 from upload_helper import UploadHelperError, upload_local_file
@@ -93,7 +102,11 @@ def main(argv=None) -> int:
             if suggestions:
                 print("可用/支持该能力的模型: %s" % ", ".join(suggestions), file=sys.stderr)
             return 3
-    except urllib.error.URLError as e:
+    except ModelsQueryError as e:
+        # 服务端故障 ≠ 「该 token 无可用模型」：预校验只是建议性的，跳过即可。
+        print("⚠ 能力预校验跳过（%s，已重试仍失败）；将直接提交，由 API 裁决" % e,
+              file=sys.stderr)
+    except OSError as e:  # URLError / socket.timeout 均为 OSError 子类
         print("⚠ 能力预校验跳过（网络错误: %s）；将直接提交，由 API 裁决" % e, file=sys.stderr)
 
     # Resolve each media source to a URL (upload locals; rewrite YouTube; pass through URLs).
@@ -109,8 +122,14 @@ def main(argv=None) -> int:
             except UploadHelperError as e:
                 print("上传失败（%s）: %s" % (src, e.message), file=sys.stderr)
                 return 1
-            except urllib.error.URLError as e:
-                print("上传网络错误（%s）: %s" % (src, e), file=sys.stderr)
+            except AmbiguousRequest as e:
+                print("上传结果不明（%s）：请求已发出但未收到响应（%s），"
+                      "文件可能已存入服务端也可能没有；未自动重试以免产生重复对象。"
+                      "请稍后重试本次调用。" % (src, e.cause), file=sys.stderr)
+                return 1
+            except OSError as e:  # URLError / socket.timeout 均为 OSError 子类
+                print("上传网络错误（%s）: %s（已按 ADR 0006 重试 3 次仍失败）"
+                      % (src, e), file=sys.stderr)
                 return 1
         elif cls == "youtube":
             url = normalize_youtube(src)
@@ -128,8 +147,17 @@ def main(argv=None) -> int:
     except LLMError as e:
         print(e.message, file=sys.stderr)
         return 1
-    except urllib.error.URLError as e:
-        print("提交网络错误: %s" % e, file=sys.stderr)
+    except AmbiguousRequest as e:
+        # 计费写操作的结果不明态（ADR 0006 规则 4）：请求已经发出去了，任务可能
+        # 已经创建并计费，也可能没有。禁止自动重发，把不确定性如实交给用户。
+        print("提交结果不明：请求已发出但未收到响应（%s）。"
+              "任务可能已创建并已计费，也可能没有；本次未自动重试以免重复扣费。"
+              "请先到 aihubmax 控制台确认任务列表，再决定是否重新提交。" % e.cause,
+              file=sys.stderr)
+        return 1
+    except OSError as e:  # URLError / socket.timeout 均为 OSError 子类
+        print("提交网络错误: %s（请求未发出，已重试 3 次仍失败；任务未创建）" % e,
+              file=sys.stderr)
         return 1
 
     task_id = submit_json.get("id", "")
@@ -139,8 +167,10 @@ def main(argv=None) -> int:
     except PollTimeout as e:
         print(str(e), file=sys.stderr)
         return 1
-    except urllib.error.URLError as e:
-        print("轮询网络错误: %s（task_id=%s）" % (e, task_id), file=sys.stderr)
+    except OSError as e:  # URLError / socket.timeout 均为 OSError 子类
+        print("轮询网络错误: %s（单次轮询已重试 3 次仍失败；task_id=%s，"
+              "任务可能仍在运行，可凭 task_id 稍后手动查询）" % (e, task_id),
+              file=sys.stderr)
         return 1
 
     try:

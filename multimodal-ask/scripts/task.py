@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import time
 
-from client import call_with_key_fallback, http_request
+from client import (BILLING_WRITE, METADATA_TIMEOUT, NETWORK_ERRORS,
+                    call_with_key_fallback, http_request, request_with_retry)
+from client import _default_log as _log_stderr
 
 
 def family_of(model: str) -> "str | None":
@@ -87,8 +89,20 @@ def _llm_error_message(resp) -> str:
     return " ".join(parts)
 
 
-def submit_llm(body: dict, keys: list, *, base_url: str, transport=None) -> tuple:
-    """POST the llm-custom task. Returns (submit_json, used_key). Raises LLMError on non-200."""
+# 提交是**计费写操作**，请求本身没有幂等键，因此重试面必须收窄（ADR 0006 规则 4）：
+#   - 429：服务端明确表示被限流、本次未受理，重试不会重复扣费 → 可安全重试，
+#          带 Retry-After 时按该值等待。
+#   - 连接阶段失败（DNS 解析失败 / 连接被拒）：请求确定没发出去 → 可安全重试。
+#   - 其余网络失败（含全部超时、发送 body 途中断开）：任务可能已创建并已计费 →
+#          抛 client.AmbiguousRequest，由 ask.py 如实告知用户，绝不盲重试。
+#   - 5xx：无法排除「任务已创建、只是响应失败」，同样不重试，直接按 LLMError 报错。
+SUBMIT_RETRYABLE_STATUSES = frozenset([429])
+
+
+def submit_llm(body: dict, keys: list, *, base_url: str, transport=None,
+               sleep=None, log=None) -> tuple:
+    """POST the llm-custom task. Returns (submit_json, used_key). Raises LLMError on non-200,
+    or client.AmbiguousRequest when the request went out but no response came back."""
     if transport is None:
         transport = http_request
     url = base_url + "/v1/llm/generations"
@@ -96,7 +110,10 @@ def submit_llm(body: dict, keys: list, *, base_url: str, transport=None) -> tupl
 
     def attempt(key):
         headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key}
-        return transport("POST", url, headers, payload)
+        return request_with_retry(
+            lambda: transport("POST", url, headers, payload, timeout=METADATA_TIMEOUT),
+            op="submit_llm", write_safety=BILLING_WRITE,
+            retryable_statuses=SUBMIT_RETRYABLE_STATUSES, sleep=sleep, log=log)
 
     resp, used = call_with_key_fallback(keys, attempt)
     if resp.status == 200 and isinstance(resp.json, dict) and resp.json.get("id"):
@@ -105,21 +122,48 @@ def submit_llm(body: dict, keys: list, *, base_url: str, transport=None) -> tupl
 
 
 def poll_task(task_id: str, key: str, *, base_url: str, transport=None,
-              interval: int = 5, timeout: int = 300, sleep=None) -> dict:
+              interval: int = 5, timeout: int = 300, sleep=None, log=None,
+              monotonic=None) -> dict:
     """Poll GET /v1/tasks/{id}?sync_upstream=true until status is completed/failed.
     Returns the terminal task json. Raises PollTimeout if it never reaches terminal.
     On a `failed` terminal this still returns the task dict; callers pass it to
-    `extract_text`, which raises `TaskFailed`."""
+    `extract_text`, which raises `TaskFailed`.
+
+    轮询是幂等 GET：单次瞬时失败（429/5xx/网络异常）先消耗内层重试（3 次 + 指数
+    退避 + 日志）。**内层重试穷尽也不终止整个轮询**：本轮作废、消耗一格预算、
+    继续下一轮（ADR 0006 规则 5，与 pdf2md_docx 同口径）。
+
+    `timeout` 是**真墙钟预算**，不是「次数 × 间隔」的估算值：进入每一轮前先查
+    deadline，超了立即抛 PollTimeout。内层重试的退避、上游变慢的响应时间都算在
+    这份预算里，所以实际轮询轮数可能少于 timeout//interval。计数预算同时保留，
+    两者任一耗尽即终态。`monotonic` 仅供测试注入。"""
     if transport is None:
         transport = http_request
     if sleep is None:
         sleep = time.sleep
+    if monotonic is None:
+        monotonic = time.monotonic
+    if log is None:
+        log = _log_stderr
     url = base_url + "/v1/tasks/" + task_id + "?sync_upstream=true"
     headers = {"Authorization": "Bearer " + key}
     max_polls = max(1, timeout // interval)
-    for i in range(max_polls + 1):
-        resp = transport("GET", url, headers, None)
-        if isinstance(resp.json, dict) and resp.json.get("status") in ("completed", "failed"):
+    deadline = monotonic() + timeout
+    for i in range(1, max_polls + 1):
+        if monotonic() >= deadline:
+            break
+        try:
+            resp = request_with_retry(
+                lambda: transport("GET", url, headers, None, timeout=METADATA_TIMEOUT),
+                op="poll_task(%s)" % task_id, sleep=sleep, log=log)
+        except NETWORK_ERRORS as exc:
+            # 内层 3 次尝试全失败：作废本轮（等同「本轮没拿到状态」），继续下一轮，
+            # 不让一次抖动击穿整个轮询。
+            log("[poll] 第 %d/%d 轮查询重试耗尽（%s），本轮按未拿到状态处理，继续轮询"
+                % (i, max_polls, exc))
+            resp = None
+        if resp is not None and isinstance(resp.json, dict) \
+                and resp.json.get("status") in ("completed", "failed"):
             return resp.json
         if i < max_polls:
             sleep(interval)

@@ -667,6 +667,17 @@ def _publish(*, resolved, store: PlanStore, token: str, gate: TransportGate,
         def checkpoint_created(checkpoint_id: str) -> None:
             handoff["checkpoint_id"] = checkpoint_id
 
+        # Retry behaviour here is inherited, not decided: the transport handed
+        # to `execute_single_put` is `gate`, which counts calls so the handoff
+        # bookkeeping below can tell "zero transport calls, definitively not
+        # applied" from "something left the process, result unknown". The Put
+        # itself is a paid write and follows ADR 0006 rule 4 in
+        # `operations.py` — a transport failure becomes `put_unknown` /
+        # `ambiguous` and is never retried in place; only read-semantics calls
+        # retry (see `read_request_with_retry` in s3.py, which also records why
+        # the "connection stage failed" subset is not split out). Adding a
+        # retry at this layer would additionally break `gate.calls == 0` as a
+        # safe-retry proof.
         try:
             outcome = execute_single_put(
                 resolved=resolved,

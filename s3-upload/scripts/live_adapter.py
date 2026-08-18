@@ -68,6 +68,28 @@ class S3EvidenceAdapter:
         body: bytes = b"",
         headers: Sequence[Tuple[str, str]] = (),
     ) -> Tuple[Response, RequestObservation]:
+        """Send exactly one physical request and return it with its observation.
+
+        **Deliberate deviation from ADR 0006 rules 2/3 (recorded per rule 6.)**
+        Nothing in this adapter retries a transient network failure, and it must
+        not start: this is the live evidence harness, and its output is a claim
+        about what the provider actually did. `evidence.py` records
+        `request_count` per logical operation and validates it strictly —
+        `EvidenceObservation` rejects a report whose `request_count` disagrees
+        with the number of recorded requests, and a GET-family operation whose
+        `request_count != 1` is failed outright with `get_request_count_mismatch`.
+        A retry would turn one logical call into two or three physical requests
+        and silently invalidate that evidence: the report would claim a provider
+        answered a single request when it in fact answered several, and a
+        transient failure that the harness is supposed to *report* would be
+        papered over instead.
+
+        The exemption was reviewed and granted on 2026-08-18 (see
+        `.scratch/_workspace/skill-conventions-compliance-sweep/audit-2026-08-18.md`,
+        user decision 4④). It applies only to this adapter and to `evidence.py`;
+        the ordinary operation paths (`operations.py`, `multipart.py`) do retry
+        their read-semantics calls.
+        """
         request = build_candidate_request(
             self.candidate,
             self.connection,

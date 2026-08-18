@@ -25,7 +25,8 @@
 
 依赖：
 
-- macOS / Linux shell（`bash`、`python3`、`curl`、`grep`、`sed`）
+- macOS / Linux shell（`bash`、`curl`、`grep`、`sed`）
+- [uv](https://docs.astral.sh/uv/) >= 0.8（管理本 skill 的 Python 运行时；缺失时入口会报错并给出安装命令）。Python 解释器由 uv 按 `pyproject.toml` + `uv.lock` 钉死，venv 落 `<skill>/.venv`，首次运行自动创建（ADR 0007）
 - 互联网，可访问 `api.aihubmax.com` 与阿里云 OSS（图片 URL host）
 
 ## Installation
@@ -85,7 +86,7 @@ Agent 自动识别意图 → 调用脚本 → 轮询任务 → 下载到 `./2026
 | 3 | `$PWD/.env` 中的 `AIHUB_API_KEY=...` | 自动 |
 | 4 | `~/.config/image-2/.env` | 加 `--use-local-key` 启用 |
 
-**HTTP 401 自动 fallback**：如果上一层 key 调用 API 返回 401（认证失败），会自动尝试下一层；其他错误（402/422/429/5xx）立即停止。
+**HTTP 401 自动 fallback**：如果上一层 key 调用 API 返回 401（认证失败），会自动尝试下一层；其他错误（402/422/429/5xx）不换 key。创建任务是计费写操作，只有 429 与「请求确定未发出」（DNS 解析失败 / 连接被拒）会用同一个 key 重试 3 次（指数退避 1s、2s，429 循 `Retry-After`）；**HTTP 5xx 与「请求已发出但响应丢失」都不重试**，按「任务可能已创建」的结果不明状态报出（ADR 0006）。轮询与下载是幂等 GET，5xx 在那里照常重试。
 
 持久化全局 key（可选）：
 
@@ -154,7 +155,8 @@ AIHUB_API_KEY=sk-xxx ./scripts/create_task.sh \
   --prompt "产品封面" --resolution 1024x1024
 
 # 阶段二：保持原项目 cwd，对每个 saved local_path 单独执行
-python3 /absolute/s3-upload/scripts/upload.py upload \
+# （跨 skill 调用同样用 uv run --project 钉死对方 skill 的解释器，ADR 0007）
+uv run --project /absolute/s3-upload /absolute/s3-upload/scripts/upload.py upload \
   --file /absolute/output/cover.png \
   --caller-skill image-2 \
   --json

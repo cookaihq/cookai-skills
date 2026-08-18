@@ -27,7 +27,12 @@ from planning import derive_contract_key, registry_for_target
 from resolver import ResolvedTarget
 from response_parser import VERSION_HEADERS, parse_operation_response
 from results import build_result, validate_result
-from s3 import Response, build_signed_request, parse_provider_identifier
+from s3 import (
+    Response,
+    build_signed_request,
+    parse_provider_identifier,
+    read_request_with_retry,
+)
 from source_file import (
     SourceError,
     SourcePart,
@@ -177,7 +182,32 @@ def _request(
     now: ClockInput,
     transport: Callable[..., Response],
     request_builder: Callable[..., Any],
+    read_only: bool = False,
+    sleep=None,
 ) -> Optional[Response]:
+    """Send one signed multipart request; return None when it did not answer.
+
+    `read_only=True` marks a call whose semantics are a pure observation
+    (HEAD / GET / ListParts). Those have no remote side effect, so a transient
+    transport failure is retried in place — 3 attempts, backing off 1s then 2s
+    (workspace ADR 0006 rules 2 and 3). Exhausting the retries still returns
+    None, which is exactly what the call sites already treat as "this
+    observation produced no answer", so the retry is purely additive.
+
+    Every other call here is a write (CreateMultipartUpload, UploadPart,
+    CompleteMultipartUpload, AbortMultipartUpload). Those keep the existing
+    behaviour: any transport exception yields None, which the caller turns into
+    an `*_unknown` checkpoint and an `ambiguous` result for reconcile to
+    settle. That is ADR 0006 rule 4's own precedent and is not weakened here;
+    the reason the "connection stage failed, request never sent" subset is not
+    split out for safe retry is documented above `read_request_with_retry` in
+    s3.py.
+
+    `sleep` is the backoff hook, forwarded to `read_request_with_retry` on the
+    read-only path (default `None` = `time.sleep`). It exists so a test can
+    drive the retry loop through this function's own signature instead of
+    patching `time.sleep` on the `s3` module as a global side effect.
+    """
     moment = _validated_request_moment(resolved, now)
     signed = request_builder(
         connection_for(resolved),
@@ -188,6 +218,11 @@ def _request(
         headers=headers,
         now=moment,
     )
+    if read_only:
+        return read_request_with_retry(
+            transport, signed.method, signed.url, signed.headers, signed.body,
+            sleep=sleep,
+        )
     try:
         return transport(signed.method, signed.url, signed.headers, signed.body)
     except Exception:
@@ -732,7 +767,11 @@ def reconcile_multipart(
     live_test_interlock: Optional[LiveTestInterlock] = None,
     allow_insecure_http: bool = False,
     request_builder: Callable[..., Any] = build_signed_request,
+    sleep=None,
 ) -> MultipartOutcome:
+    """`sleep` 是退避钩子（默认 `None` = `time.sleep`），透传给本函数发出的读语义
+    观测（HEAD / ListParts）的重试循环，让 reconcile 层的测试能从签名注入，而不必
+    patch `s3` 模块上的 `time.sleep` 全局。"""
     _validate_recovery_checkpoint(resolved, checkpoint)
     if resolved.target.endpoint.startswith("http://") and not allow_insecure_http:
         raise MultipartError("HTTP Target requires explicit insecure transport opt-in")
@@ -821,6 +860,8 @@ def reconcile_multipart(
             now=now,
             transport=transport,
             request_builder=request_builder,
+            read_only=True,  # 读语义观测：瞬时失败按 ADR 0006 重试
+            sleep=sleep,
         )
         observation, reference = _head_completion_observation(
             response, checkpoint, resolved
@@ -867,6 +908,8 @@ def reconcile_multipart(
             now=now,
             transport=transport,
             request_builder=request_builder,
+            read_only=True,  # 读语义观测：瞬时失败按 ADR 0006 重试
+            sleep=sleep,
         )
         observation, reference = _head_completion_observation(
             head, checkpoint, resolved
@@ -917,6 +960,8 @@ def reconcile_multipart(
             now=now,
             transport=transport,
             request_builder=request_builder,
+            read_only=True,  # 读语义观测：瞬时失败按 ADR 0006 重试
+            sleep=sleep,
         )
         parsed = _response(
             observed, operation="ListParts", resolved=resolved

@@ -197,6 +197,20 @@ class EvidenceObservation:
         if len(self.requests) != self.request_count:
             raise EvidenceError("observation request_count does not match requests")
 
+    # Why nothing on the evidence path retries a transient network failure
+    # (deliberate deviation from ADR 0006 rules 2/3, recorded per rule 6):
+    # `request_count` is an exact claim about how many physical requests the
+    # provider answered for one logical operation. The check just above pins it
+    # to the recorded requests, and `_operation_status` below fails a GET-family
+    # operation outright when `request_count != 1`
+    # (`get_request_count_mismatch`). Retrying inside a logical call would make
+    # one logical operation issue two or three physical requests, so the
+    # evidence report would misstate what the provider did, and a transient
+    # failure the harness exists to *report* would be hidden instead.
+    # Exemption granted 2026-08-18, see
+    # `.scratch/_workspace/skill-conventions-compliance-sweep/audit-2026-08-18.md`
+    # (user decision 4④). Scope: this module and `live_adapter.py` only.
+
 
 @dataclass(frozen=True)
 class CleanupObservation:

@@ -16,14 +16,16 @@
 
 macOS（主线，已真实验证）或 Linux（同一 POSIX 路径，尽力支持）；Python ≥ 3.9，仅标准库，无第三方依赖。Windows 暂不支持（目录已预留）。
 
+运行需要 [`uv`](https://docs.astral.sh/uv/) ≥ 0.8：解释器由本目录的 `pyproject.toml` + `uv.lock` 钉死，venv 落 `frpc-launch/.venv`，首次 `uv run` 自动创建。命令一律写 `uv run --project <skill 目录> scripts/frpc_launch.py ...`，不要裸 `python3`；真起错了脚本内的 bootstrap 也会把进程 exec 回该 venv，venv 缺失时按 `uv.lock` 自动重建。
+
 ## 快速开始
 
 ```bash
 # 首次（无配置）会返回退出码 4，按 SKILL.md 引导流程配置；配置好后：
-python3 scripts/frpc_launch.py start          # 后台启动（自动下载 frpc）
-python3 scripts/frpc_launch.py status         # 查看状态
-python3 scripts/frpc_launch.py logs -n 50     # 查看日志（已掩码）
-python3 scripts/frpc_launch.py stop           # 停止
+uv run --project . scripts/frpc_launch.py start          # 后台启动（自动下载 frpc）
+uv run --project . scripts/frpc_launch.py status         # 查看状态
+uv run --project . scripts/frpc_launch.py logs -n 50     # 查看日志（已掩码）
+uv run --project . scripts/frpc_launch.py stop           # 停止
 ```
 
 ## 配置分层

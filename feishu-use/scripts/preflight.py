@@ -1,15 +1,134 @@
 #!/usr/bin/env python3
-"""Read-only lark-cli readiness, version, identity, account, and scope checks."""
+"""Read-only lark-cli readiness, version, identity, account, and scope checks.
+
+调用一律用 `uv run --project <skill 目录> <skill 目录>/scripts/preflight.py ...`，
+禁止用系统解释器直接起本文件。真起错了也有兜底：下面的 bootstrap（ADR 0007 §1.4）
+会把进程 exec 回 `<skill>/.venv` 的解释器，环境缺失时先按 `uv.lock` 自动重建。
+
+**bootstrap 段只用 Python 3.9 兼容语法、只用 stdlib**：它可能先被系统 python3
+（macOS 自带 3.9.6）执行，用了新语法会在 SyntaxError 阶段就死掉，兜底反成故障点。
+"""
 
 from __future__ import annotations
 
-import argparse
-import json
-import re
-import shutil
+import os
+import shlex
 import subprocess
 import sys
-from typing import Any, Callable, Dict, List, Optional, Sequence
+
+# --------------------------------------------------------------------------
+# 运行时 bootstrap（ADR 0007 §1.4）
+# --------------------------------------------------------------------------
+# 一次性再入护栏：exec 之后仍不在目标 venv，说明 venv 目录本身坏了。没有这个标记
+# 会无限 execv 且零输出。标记值存的是**本轮的目标 venv realpath**，不是布尔——
+# 变量被外部环境 export 时值不匹配，就不算本轮的再入，仍照常自动重建。
+REEXEC_ENV = "FEISHU_USE_BOOTSTRAP_REEXEC"
+
+UV_INSTALL_HINT = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
+
+# 重定位只认 uv 原生的 UV_PROJECT_ENVIRONMENT，且**基准必须是项目根**——uv 0.8 把
+# 相对值按项目根解析，按 CWD 解析会在用户自己的项目目录里设了相对值时把进程 exec
+# 进用户项目的 venv。绝对值不受影响：os.path.join 遇到绝对路径直接返回它。
+VENV_DIR = os.path.join(SKILL_DIR, os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
+VENV_PY = os.path.join(VENV_DIR, "bin", "python")
+
+
+def _bootstrap_fail(msg):
+    sys.stderr.write(msg + "\n")
+    raise SystemExit(1)
+
+
+def _manual_rebuild_hint():
+    # 必须 shell 引用：路径含空格时，未引用的 `rm -rf /tmp/sp ace/.venv` 被照抄
+    # 执行会删掉两个无关路径。
+    return "rm -rf %s && uv sync --project %s --no-dev" % (
+        shlex.quote(VENV_DIR), shlex.quote(SKILL_DIR)
+    )
+
+
+def _venv_is_valid():
+    """有效 venv = 解释器在 + pyvenv.cfg 在。
+
+    只判 bin/python 存在是不够的：sync 中断、手工建的同名目录、残留软链都会让解释
+    器存在而目录不是 venv，此时跳过修复直接 execv 会陷入无限重启。
+    """
+    return (os.path.exists(VENV_PY)
+            and os.path.exists(os.path.join(VENV_DIR, "pyvenv.cfg")))
+
+
+def _require_uv():
+    """uv 是系统级程序，缺失/版本过低只报错给命令，不擅自安装（ADR 0007 §4.2）。"""
+    try:
+        probe = subprocess.run(["uv", "--version"], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        _bootstrap_fail("uv 未安装。请执行：" + UV_INSTALL_HINT)
+    parts = probe.stdout.decode("utf-8", "replace").split()  # "uv 0.8.11 (...)"
+    found = parts[1] if len(parts) > 1 else "0"
+    try:
+        numeric = tuple(int(x) for x in (found.split(".") + ["0", "0"])[:2])
+    except ValueError:
+        # uv 出错时 stdout 是 "error: ..." 之类，硬 int() 会抛未捕获的 ValueError；
+        # 按「版本不可用」处理，仍走可复制命令的报错。
+        numeric = (0, 0)
+    if numeric < (0, 8):
+        _bootstrap_fail("uv 版本过低（需 >= 0.8，当前 %s）。请执行：uv self update"
+                        % found)
+
+
+def _sync_runtime():
+    """按 uv.lock 冻结重建 skill 自有环境（ADR 0007 §4.1：自动修复）。"""
+    sys.stderr.write("[bootstrap] 运行环境缺失，正在按 uv.lock 重建 %s ...\n" % VENV_DIR)
+    try:
+        # `--no-dev`：这里重建的是**运行时**环境。不加的话 uv 会把 dev 组
+        # （pytest 等）一并装进 .venv，让运行时环境带上只有跑测试才需要的包。
+        # 跑测试时显式用 `uv sync --project <dir> --group dev`。
+        sync = subprocess.run(["uv", "sync", "--project", SKILL_DIR, "--no-dev"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=600)  # 网络调用必设总预算（ADR 0006 §5）
+    except subprocess.TimeoutExpired:
+        _bootstrap_fail("uv sync 超过 600 秒未完成，疑似网络异常。请手工执行："
+                        + _manual_rebuild_hint())
+    if sync.returncode != 0 or not _venv_is_valid():
+        _bootstrap_fail("uv sync 失败，无法重建运行环境（请手工执行：%s）：\n%s"
+                        % (_manual_rebuild_hint(),
+                           sync.stdout.decode("utf-8", "replace")))
+
+
+def _ensure_runtime():
+    """确保当前进程运行在目标 venv 里；不是则 exec 拉回去，缺失则先重建。"""
+    target = os.path.realpath(VENV_DIR)
+    if os.path.realpath(sys.prefix) == target:
+        # 已在目标 venv：清掉本轮标记，避免派生的子进程继承后误判。
+        if os.environ.get(REEXEC_ENV) == target:
+            os.environ.pop(REEXEC_ENV, None)
+        return
+    if os.environ.get(REEXEC_ENV) == target:
+        # 只认「值等于本轮目标」才算再入：外部 export 了同名变量、或嵌套调用的是
+        # 另一个目标时，这里不成立，仍照常走下面的自动重建。
+        _bootstrap_fail("运行环境异常：已重启到 %s 但解释器仍不在该 venv 内，"
+                        "目录疑似损坏。\n请手工重建：%s"
+                        % (VENV_DIR, _manual_rebuild_hint()))
+    if not _venv_is_valid():
+        _require_uv()
+        _sync_runtime()
+    os.environ[REEXEC_ENV] = target  # putenv，execv 后的进程能读到
+    os.execv(VENV_PY, [VENV_PY] + sys.argv)  # 拉回目标解释器重启自身
+
+
+# 只在被当作入口执行时兜底；tests/ 会 import 本模块，import 时不该 exec 掉宿主进程。
+if __name__ == "__main__":
+    _ensure_runtime()  # 以下代码保证运行在目标 venv 里
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import time  # noqa: E402
+from typing import Any, Callable, Dict, List, Optional, Sequence  # noqa: E402
 
 
 SCHEMA_VERSION = 1
@@ -33,12 +152,47 @@ EXIT_CODES = {
     "profile_required": 32,
 }
 
+# --- 网络抖动处理参数（ADR 0006 §3）---
+# 总尝试 3 次（首次 + 2 次重试），退避 1s、2s。
+NETWORK_MAX_ATTEMPTS = 3
+TIMEOUT_RETURNCODE = 124        # subprocess.TimeoutExpired 的投影
+EXEC_FAILURE_RETURNCODE = 127   # OSError：CLI 起不来（确定性失败）
+# 无结构化错误信息时的兜底关键词（ADR 0006 §2：先结构化，退到关键词）。
+TRANSIENT_HINTS = (
+    "timed out",
+    "timeout",
+    "etimedout",
+    "econnreset",
+    "econnrefused",
+    "econnaborted",
+    "enotfound",
+    "eai_again",
+    "epipe",
+    "connection reset",
+    "connection refused",
+    "connection closed",
+    "socket hang up",
+    "network error",
+    "network is unreachable",
+    "getaddrinfo",
+    "dns",
+    "tls handshake",
+    "handshake failed",
+    "fetch failed",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "too many requests",
+)
+
 CommandResult = Dict[str, Any]
 Executor = Callable[[Sequence[str], float], CommandResult]
 CliLocator = Callable[[str], Optional[str]]
 
 
-def execute_command(argv: Sequence[str], timeout: float) -> CommandResult:
+def run_command_once(argv: Sequence[str], timeout: float) -> CommandResult:
+    """跑一次 lark-cli，把三种结局统一成 CommandResult（不做重试）。"""
     try:
         completed = subprocess.run(
             list(argv),
@@ -48,19 +202,88 @@ def execute_command(argv: Sequence[str], timeout: float) -> CommandResult:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or "command timed out"
         return {
-            "returncode": 124,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "command timed out",
+            "returncode": TIMEOUT_RETURNCODE,
+            "stdout": stdout.decode("utf-8", "replace") if isinstance(stdout, bytes) else stdout,
+            "stderr": stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr,
         }
     except OSError as exc:
-        return {"returncode": 127, "stdout": "", "stderr": str(exc)}
+        return {"returncode": EXEC_FAILURE_RETURNCODE, "stdout": "", "stderr": str(exc)}
 
     return {
         "returncode": completed.returncode,
         "stdout": completed.stdout,
         "stderr": completed.stderr,
     }
+
+
+def is_transient_failure(result: CommandResult) -> bool:
+    """判定一次 lark-cli 调用是否属瞬时网络故障（ADR 0006 §2）。
+
+    判定优先用结构化信息：subprocess 超时、CLI JSON 信封里的 ``error.type``
+    与 HTTP 状态码；没有结构化信息才退到错误消息关键词匹配。鉴权失败、参数
+    非法、CLI 起不来这类确定性失败一律判 False，重试它们必然同样失败。
+    """
+    returncode = result.get("returncode")
+    if returncode == 0:
+        return False
+    if returncode == EXEC_FAILURE_RETURNCODE:
+        # OSError：可执行文件不存在 / 没有执行权限，属确定性失败。
+        return False
+    if returncode == TIMEOUT_RETURNCODE:
+        return True
+
+    payload = parse_json_result(result)
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            error_type = str(error.get("type") or "").lower()
+            if error_type in {"network", "timeout"}:
+                return True
+            try:
+                status = int(error.get("code") or error.get("status") or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if status == 429 or 500 <= status <= 599:
+                return True
+            # 结构化信息明确说了不是网络类 → 确定性失败，不再看关键词。
+            return False
+
+    text = "%s\n%s" % (result.get("stdout", ""), result.get("stderr", ""))
+    lowered = text.lower()
+    return any(hint in lowered for hint in TRANSIENT_HINTS)
+
+
+def execute_command(argv: Sequence[str], timeout: float) -> CommandResult:
+    """所有 lark-cli 调用的唯一出口：单次超时 + 瞬时失败重试（ADR 0006）。
+
+    预检的五个调用点（``--version``、``update --check``、``auth status``、
+    ``auth list``、``auth check``）全是只读查询，天然幂等，重试安全
+    （ADR 0006 §4）；确定性失败保持原有的终态 stage，不重试。
+    """
+    attempt = 1
+    while True:
+        result = run_command_once(argv, timeout)
+        if result.get("returncode") == 0:
+            return result
+        if attempt >= NETWORK_MAX_ATTEMPTS or not is_transient_failure(result):
+            return result
+        wait_seconds = 2 ** (attempt - 1)  # 1s、2s（ADR 0006 §3）
+        sys.stderr.write(
+            "[retry] lark-cli %s 第 %d/%d 次尝试遇到瞬时网络故障"
+            "（returncode=%s），%d 秒后重试\n"
+            % (
+                " ".join(str(item) for item in list(argv)[1:]),
+                attempt,
+                NETWORK_MAX_ATTEMPTS,
+                result.get("returncode"),
+                wait_seconds,
+            )
+        )
+        time.sleep(wait_seconds)
+        attempt += 1
 
 
 def parse_json_result(result: CommandResult) -> Optional[Any]:

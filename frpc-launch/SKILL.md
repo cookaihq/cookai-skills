@@ -1,7 +1,7 @@
 ---
 name: frpc-launch
-version: 1.0.0
-description: v1.0.0｜Use when the user wants to 本地启动 frpc / 做内网穿透 / 打通 frp 隧道 / 把本地端口暴露到公网 / 连接自部署 FRPS 或宝塔面板的 frps / 使用樱花FRP（natfrp）隧道 —— phrases like "启动 frpc"、"起个内网穿透"、"frp 隧道连一下"、"把本地 8080 暴露出去"、"frps 连不上帮我看看"、"用樱花FRP 启动隧道"。检测不到配置时先引导用户配置（作用域选择 + 三来源帮助），frpc 二进制自动下载，后台常驻并提供 status/stop/logs。Do NOT use for 部署/管理 frps 服务端、注册系统服务（launchd/systemd 开机自启）、Windows 平台（v1 未实现）。
+version: 1.1.0
+description: v1.1.0｜Use when the user wants to 本地启动 frpc / 做内网穿透 / 打通 frp 隧道 / 把本地端口暴露到公网 / 连接自部署 FRPS 或宝塔面板的 frps / 使用樱花FRP（natfrp）隧道 —— phrases like "启动 frpc"、"起个内网穿透"、"frp 隧道连一下"、"把本地 8080 暴露出去"、"frps 连不上帮我看看"、"用樱花FRP 启动隧道"。检测不到配置时先引导用户配置（作用域选择 + 三来源帮助），frpc 二进制自动下载，后台常驻并提供 status/stop/logs。Do NOT use for 部署/管理 frps 服务端、注册系统服务（launchd/systemd 开机自启）、Windows 平台（v1 未实现）。
 ---
 
 # frpc-launch
@@ -28,7 +28,11 @@ run/                 # {official,sakura}.pid / .log
 
 ## 子命令速查
 
-统一入口 `python3 <skill>/scripts/frpc_launch.py [--home DIR] [--json] <子命令>`；Agent 一律加 `--json` 解析结果。
+统一入口 `uv run --project <skill> <skill>/scripts/frpc_launch.py [--home DIR] [--json] <子命令>`；Agent 一律加 `--json` 解析结果。
+
+**必须用 `uv run --project` 起，禁止裸 `python3`**：解释器由 `<skill>/pyproject.toml` + `uv.lock` 钉死，venv 落 `<skill>/.venv`（首次运行自动创建，需要 `uv` ≥ 0.8；缺 uv 时脚本报错并给安装命令）。被裸 `python3` 起时脚本自带的 bootstrap 会把进程 exec 回该 venv。
+
+**网络抖动**：所有出网请求（GitHub Releases 元数据、natfrp 客户端清单、二进制下载）都是幂等 GET，统一带 30s 超时并对瞬时失败（连接/读取超时、连接重置、DNS 失败、HTTP 5xx/429/408）重试至多 3 次（退避 1s、2s；429 遵循 `Retry-After`，上限 60s），重试过程打到 stderr；确定性 4xx（404 版本不存在等）立即报错不重试。Agent 不需要自己再包一层重试。
 
 | 子命令 | 说明 | 常用参数 |
 |---|---|---|
@@ -59,13 +63,13 @@ run/                 # {official,sakura}.pid / .log
 
    ```bash
    # official（frps/baota）：
-   FRPC_LAUNCH_INIT_TOKEN=<token> python3 <skill>/scripts/frpc_launch.py --json \
+   FRPC_LAUNCH_INIT_TOKEN=<token> uv run --project <skill> <skill>/scripts/frpc_launch.py --json \
      guide-init --scope project --source frps \
      --server-addr <host> --server-port <port> \
      --proxy "name=web;type=http;localPort=8080;customDomains=a.example.com"
    # sakura：
    FRPC_LAUNCH_SAKURA_KEY=<密钥> FRPC_LAUNCH_SAKURA_TUNNELS=<id,id> \
-     python3 <skill>/scripts/frpc_launch.py --json guide-init --scope project --source sakura
+     uv run --project <skill> <skill>/scripts/frpc_launch.py --json guide-init --scope project --source sakura
    ```
 
    （只有用户明确要求全局时才把 `--scope project` 换成 `--scope global`）

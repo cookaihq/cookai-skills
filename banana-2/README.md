@@ -28,7 +28,8 @@
 
 依赖：
 
-- macOS / Linux shell（`bash`、`python3`、`curl`、`grep`、`sed`）
+- macOS / Linux shell（`bash`、`curl`、`grep`、`sed`）
+- [`uv`](https://docs.astral.sh/uv/) ≥ 0.8：脚本内的 Python 片段一律经 `uv run --project <skill 目录> python` 执行，解释器由本目录的 `pyproject.toml` + `uv.lock` 钉死（首次运行会自动在 `<skill>/.venv` 建环境）。未安装时脚本会报错并给出安装命令 `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - 互联网，可访问 `api.aihubmax.com` 与图片 URL host
 
 ## Installation

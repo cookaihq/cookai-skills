@@ -2,6 +2,7 @@ import builtins
 import errno
 import hashlib
 import http.client
+import itertools
 import json
 import socket
 import stat
@@ -132,6 +133,20 @@ class ScriptedSession:
 
     def close(self):
         self.closed = True
+
+
+def transient_hops(make_response, *, host):
+    """Build one hop per download attempt for a transient-failure case.
+
+    ADR 0006 retries a transient source download `pdf_source.NET_MAX_ATTEMPTS`
+    times, and `ScriptedTransport` indexes its hop list by connect count, so a
+    single-hop script would IndexError on the second attempt. Each attempt also
+    gets its own response object, matching a real reconnect.
+    """
+    return [
+        {"host": host, "response": make_response()}
+        for _ in range(pdf_source.NET_MAX_ATTEMPTS)
+    ]
 
 
 def invoke(capsys, argv, *, cwd, transport):
@@ -913,17 +928,27 @@ def test_start_enforces_declared_and_streamed_response_bounds(
 
 def test_start_reports_dns_failure_without_leaking_transport_details(tmp_path, capsys):
     class DnsFailure:
+        def __init__(self):
+            self.calls = 0
+
         def resolve(self, *_args, **_kwargs):
+            self.calls += 1
             raise OSError("dns-secret")
+
+    transport = DnsFailure()
 
     dns_rc, dns_error, dns_stdout, dns_stderr = invoke(
         capsys,
         ["start", "--source", "https://dns.example/report.pdf?dns-secret"],
         cwd=tmp_path,
-        transport=DnsFailure(),
+        transport=transport,
     )
-    assert dns_rc == 3
+    assert transport.calls == pdf_source.NET_MAX_ATTEMPTS
+    # ADR 0006: a DNS failure is transient, so it is retried and then reported
+    # as a network-class exit (7), not as "this source is unusable" (3).
+    assert dns_rc == 7
     assert dns_error["errors"][0]["code"] == "source_dns_failed"
+    assert dns_error["action_required"] == "retry_after_network_recovery"
     assert "dns-secret" not in dns_stdout
     assert "dns-secret" not in dns_stderr
 
@@ -932,37 +957,49 @@ def test_start_enforces_the_connect_timeout_without_leaking_transport_details(
     tmp_path, capsys
 ):
     class ConnectTimeout:
+        def __init__(self):
+            self.calls = 0
+
         def resolve(self, _host, port):
             return [make_endpoint(PUBLIC_ADDRESS, port=port)]
 
         def connect_https(self, *_args, **_kwargs):
+            self.calls += 1
             raise TimeoutError("connect-secret")
 
+    connect_transport = ConnectTimeout()
     connect_rc, connect_error, connect_stdout, connect_stderr = invoke(
         capsys,
         ["start", "--source", "https://connect.example/report.pdf?connect-secret"],
         cwd=tmp_path,
-        transport=ConnectTimeout(),
+        transport=connect_transport,
     )
-    assert connect_rc == 3
+    # ADR 0006: a connect timeout is transient — retried, then reported as the
+    # network-class exit (7) rather than "provide a different source" (3).
+    assert connect_transport.calls == pdf_source.NET_MAX_ATTEMPTS
+    assert connect_rc == 7
     assert connect_error["errors"][0]["code"] == "source_connect_timeout"
+    assert connect_error["action_required"] == "retry_after_network_recovery"
     assert "connect-secret" not in connect_stdout
     assert "connect-secret" not in connect_stderr
 
 
 def test_start_cleans_a_partial_source_after_an_idle_read_timeout(tmp_path, capsys):
-    read_response = FailingReadResponse(first_chunk=b"%PDF-")
-    read_transport = ScriptedTransport(
-        {"host": "read.example", "response": read_response}
+    # ADR 0006 retries a read timeout, so the script needs one hop per attempt.
+    hops = transient_hops(
+        lambda: FailingReadResponse(first_chunk=b"%PDF-"), host="read.example"
     )
+    read_transport = ScriptedTransport(*hops)
     read_rc, read_error, read_stdout, read_stderr = invoke(
         capsys,
         ["start", "--source", "https://read.example/report.pdf?read-secret"],
         cwd=tmp_path,
         transport=read_transport,
     )
-    assert read_rc == 3
+    assert len(read_transport.connect_calls) == pdf_source.NET_MAX_ATTEMPTS
+    assert read_rc == 7
     assert read_error["errors"][0]["code"] == "source_read_timeout"
+    assert read_error["action_required"] == "retry_after_network_recovery"
     assert "read-secret" not in read_stdout
     assert "read-secret" not in read_stderr
 
@@ -970,13 +1007,15 @@ def test_start_cleans_a_partial_source_after_an_idle_read_timeout(tmp_path, caps
 def test_start_maps_an_incomplete_http_body_to_a_structured_read_failure(
     tmp_path, capsys
 ):
-    response = FailingReadResponse(
-        first_chunk=b"%PDF-",
-        failure=http.client.IncompleteRead(b"partial-secret", 100),
+    # ADR 0006 retries an incomplete body, so the script needs one hop per attempt.
+    hops = transient_hops(
+        lambda: FailingReadResponse(
+            first_chunk=b"%PDF-",
+            failure=http.client.IncompleteRead(b"partial-secret", 100),
+        ),
+        host="truncated.example",
     )
-    transport = ScriptedTransport(
-        {"host": "truncated.example", "response": response}
-    )
+    transport = ScriptedTransport(*hops)
 
     rc, result, stdout, stderr = invoke(
         capsys,
@@ -985,7 +1024,9 @@ def test_start_maps_an_incomplete_http_body_to_a_structured_read_failure(
         transport=transport,
     )
 
-    assert rc == 3
+    assert len(transport.connect_calls) == pdf_source.NET_MAX_ATTEMPTS
+    assert rc == 7
+    assert result["action_required"] == "retry_after_network_recovery"
     assert result["errors"] == [
         {
             "code": "source_read_failed",
@@ -994,21 +1035,25 @@ def test_start_maps_an_incomplete_http_body_to_a_structured_read_failure(
     ]
     assert "partial-secret" not in stdout
     assert "partial-secret" not in stderr
-    assert response.closed and transport.sessions[0].closed
+    # Every attempt closes both its response and its session.
+    assert all(hop["response"].closed for hop in hops)
+    assert all(session.closed for session in transport.sessions)
     assert_no_committed_bundle(tmp_path / "pdf2markdown-output")
 
 
 def test_start_enforces_a_total_body_read_deadline(tmp_path, capsys, monkeypatch):
-    moments = iter([0.0, 31.0])
+    # Two monotonic readings per attempt (deadline, then remaining), and ADR
+    # 0006 makes the transient timeout run NET_MAX_ATTEMPTS attempts.
+    moments = itertools.cycle([0.0, 31.0])
     monkeypatch.setattr(pdf_source.time, "monotonic", lambda: next(moments))
     total_transport = ScriptedTransport(
-        {
-            "host": "slow.example",
-            "response": ScriptedResponse(
+        *transient_hops(
+            lambda: ScriptedResponse(
                 body=PDF_BYTES,
                 headers=[("Content-Type", "application/pdf")],
             ),
-        }
+            host="slow.example",
+        )
     )
     total_rc, total_error, _stdout, _stderr = invoke(
         capsys,
@@ -1016,7 +1061,8 @@ def test_start_enforces_a_total_body_read_deadline(tmp_path, capsys, monkeypatch
         cwd=tmp_path,
         transport=total_transport,
     )
-    assert total_rc == 3
+    assert len(total_transport.connect_calls) == pdf_source.NET_MAX_ATTEMPTS
+    assert total_rc == 7
     assert total_error["errors"][0]["code"] == "source_read_timeout"
     assert_no_committed_bundle(tmp_path / "pdf2markdown-output")
 

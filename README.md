@@ -57,6 +57,10 @@ npx skills add cookaihq/cookai-skills --skill image-2 -a claude-code
 
 > Codex / Gemini 用户把 `-a claude-code` 换成对应平台标识。
 
+## 运行环境
+
+含 Python 脚本的 skill 统一用 [uv](https://docs.astral.sh/uv/)（>= 0.8）管理运行时：每个 skill 自带 `pyproject.toml` + `uv.lock`，调用示例一律 `uv run --project <skill目录> ...`，首次运行会自动在 `<skill>/.venv` 建好环境；入口脚本内置兜底，即使误用系统 `python3` 直跑也会自动切回正确环境。未安装 uv 时按报错提示执行 `curl -LsSf https://astral.sh/uv/install.sh | sh` 即可。
+
 各 skill 的详细用法、配置与排错见其目录下的 README。
 
 ## License

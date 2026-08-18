@@ -476,11 +476,16 @@ def build_lossless_crop(
             "The page reference dimensions do not match its manifest.",
         )
 
+    # ADR 0007 §1.5：捕获面须宽于 ImportError——真实 import 会执行包顶层代码，
+    # 半残环境里那里抛的可能是 OSError / RuntimeError 等任意异常，只接 ImportError
+    # 会让它们绕过这层映射。统一映射为 dependency_missing 并带上底层原文。
     try:
         fitz = importlib.import_module("fitz")
-    except ImportError as exc:
+    except Exception as exc:  # noqa: BLE001 - 见上方注释
         raise PageCropError(
-            "dependency_missing", "PyMuPDF is required for lossless page cropping."
+            "dependency_missing",
+            "PyMuPDF is required for lossless page cropping (%s: %s)."
+            % (type(exc).__name__, exc),
         ) from exc
     try:
         source = fitz.Pixmap(source_png)

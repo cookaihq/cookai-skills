@@ -3,6 +3,8 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import sys
+import time
 from dataclasses import dataclass
 from urllib.parse import quote
 from urllib.parse import urlsplit
@@ -16,6 +18,11 @@ CREATE_PATH = "/v1/run/generations"
 MAX_RESPONSE_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 60
 TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+
+# ADR 0006 规则 3 默认参数：单次逻辑调用总尝试 3 次，第 n 次重试前等 2^(n-1) 秒。
+# 只用于幂等 GET（轮询）；创建任务是计费写，结果不明时按规则 4 走 ambiguous，
+# 不在这里重试。
+NET_MAX_ATTEMPTS = 3
 
 
 class Doc2xError(ValueError):
@@ -223,7 +230,41 @@ def _classify_poll(response) -> PollResult:
     )
 
 
-def poll_task(*, task_id: str, api_key: str, transport=None) -> PollResult:
+def is_transient_network_error(exc) -> bool:
+    """物理请求层的瞬时网络故障判定（ADR 0006 规则 2）。
+
+    这条传输链用的是 `http.client`，真正的网络故障只会以两种形态出现：
+    `OSError` 家族（连接超时、connection reset、broken pipe、DNS 解析失败
+    `socket.gaierror`、TLS 握手失败 `ssl.SSLError` 都是它的子类）和
+    `http.client.HTTPException`（RemoteDisconnected、BadStatusLine、
+    IncompleteRead 等协议层中断）。
+    其余异常（如响应体超限的 `Doc2xError`、调用方注入的桩异常）不算瞬时，
+    不重试——重试它们只会同样失败，还会掩盖真实缺陷。
+    """
+    return isinstance(exc, (OSError, http.client.HTTPException))
+
+
+def _log_poll_retry(task_id: str, attempt: int, delay: int, exc) -> None:
+    # 日志走 stderr：stdout 是 workflow 的结构化 JSON 结果，不能被污染。
+    # 只打异常类型与消息，URL 里的 task_id 不含凭证，Authorization 头不入日志。
+    sys.stderr.write(
+        "[pdf2markdown] poll retry %d/%d for task %s after %s: %s; waiting %ds\n"
+        % (attempt, NET_MAX_ATTEMPTS, task_id, type(exc).__name__, exc, delay)
+    )
+
+
+def poll_task(*, task_id: str, api_key: str, transport=None, sleep=None) -> PollResult:
+    """轮询一次任务状态。
+
+    这是幂等 GET，所以**单次逻辑轮询内部**先按 ADR 0006 规则 2/3 重试瞬时网络
+    故障（3 次尝试、退避 1s/2s、每次打 stderr 日志），全部失败才返回
+    `poll_transient` 消耗调用方的一格轮询预算。这样一次网络抖动不会白耗预算
+    （规则 5「瞬时错误消耗的重试不应击穿总预算语义」）。
+
+    HTTP 层的瞬时结果（5xx、非 200、响应体不可解析）仍照旧返回 `poll_transient`
+    交由外层轮询循环按其轮询间隔重试——外层循环本身就是这一层的重试机制，
+    在物理层再叠一轮只会让每次抖动多打三倍请求。
+    """
     url = _poll_url(task_id)
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -232,8 +273,23 @@ def poll_task(*, task_id: str, api_key: str, transport=None) -> PollResult:
         "User-Agent": "pdf2markdown/1",
     }
     send = http_poll_request if transport is None else transport
+    wait = time.sleep if sleep is None else sleep
+    response = None
+    for attempt in range(1, NET_MAX_ATTEMPTS + 1):
+        try:
+            response = send("GET", url, headers, b"")
+        except Exception as exc:
+            if not is_transient_network_error(exc) or attempt == NET_MAX_ATTEMPTS:
+                return PollResult(
+                    "poll_transient", None, "poll_transient", None, None
+                )
+            delay = 2 ** (attempt - 1)
+            _log_poll_retry(task_id, attempt, delay, exc)
+            wait(delay)
+            continue
+        break
     try:
-        return _classify_poll(send("GET", url, headers, b""))
+        return _classify_poll(response)
     except Exception:
         return PollResult(
             "poll_transient", None, "poll_transient", None, None

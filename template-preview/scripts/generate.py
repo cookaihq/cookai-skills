@@ -21,6 +21,15 @@ import re
 import shutil
 import sys
 
+# 运行时环境 bootstrap（ADR 0007 §1.4 脚本侧兜底）：直接执行本文件时，若解释器
+# 不在 <skill>/.venv 内就 execv 拉回去（venv 缺失按 uv.lock 自动重建）。放在
+# `__main__` 守卫里，好让 tests 的 exec_module 导入本模块时不触发 execv。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if __name__ == "__main__":
+    import _runtime_bootstrap
+
+    _runtime_bootstrap.ensure()
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 TEMPLATES_DIR = os.path.join(os.path.dirname(HERE), "templates")
 

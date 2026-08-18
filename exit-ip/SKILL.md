@@ -1,7 +1,7 @@
 ---
 name: exit-ip
-version: 1.0.0
-description: v1.0.0｜Use when the user wants to know the outbound / exit / public IP of the environment that runs this agent and the Claude Agent SDK — phrases like "我的出口IP是什么"、"当前出口IP"、"Claude SDK 用的是哪个IP出网"、"我的公网IP / 外网IP / 外网出口"、"看看我现在的IP归属地 / 运营商"、"whats my ip"、"check my public / egress ip"、"ipinfo". The skill fetches https://ipinfo.io/json directly from the running environment and shows the raw result (ip / city / region / country / org). Do NOT use to geolocate an IP the user pastes in, to inspect a private/LAN address, or to debug a remote host's networking — this only reports THIS environment's own egress.
+version: 1.0.1
+description: v1.0.1｜Use when the user wants to know the outbound / exit / public IP of the environment that runs this agent and the Claude Agent SDK — phrases like "我的出口IP是什么"、"当前出口IP"、"Claude SDK 用的是哪个IP出网"、"我的公网IP / 外网IP / 外网出口"、"看看我现在的IP归属地 / 运营商"、"whats my ip"、"check my public / egress ip"、"ipinfo". The skill fetches https://ipinfo.io/json directly from the running environment and shows the raw result (ip / city / region / country / org). Do NOT use to geolocate an IP the user pastes in, to inspect a private/LAN address, or to debug a remote host's networking — this only reports THIS environment's own egress.
 ---
 
 # exit-ip
@@ -31,11 +31,12 @@ description: v1.0.0｜Use when the user wants to know the outbound / exit / publ
 **直接从本环境请求 ipinfo.io，拿未经改写的原始 JSON**（最能真实反映出口，避免经过第三方渲染 / 摘要的中转）：
 
 ```bash
-curl -fsS https://ipinfo.io/json
+curl -fsS --max-time 10 https://ipinfo.io/json
 ```
 
 - `-f`：HTTP 错误码时返回非 0，便于判断失败；`-sS`：静默但仍显示错误。
-- 若 `curl` 不可用，可退而用 `wget -qO- https://ipinfo.io/json`。
+- `--max-time 10`：**必须带**，给这次请求设总时长上限，避免网络异常时命令挂死（元数据查询类，10 秒足够）。
+- 若 `curl` 不可用，可退而用 `wget -qO- --timeout=10 https://ipinfo.io/json`（同样必须带超时）。
 - **不要**用会经模型改写的网页抓取工具去"总结"结果——出口 IP 必须来自本环境的真实出网请求，且要**原样**呈现。
 
 ## Output
@@ -65,5 +66,9 @@ curl -fsS https://ipinfo.io/json
 
 ## Failure Handling
 
-- 请求失败（超时 / 非 2xx / 无网络）：**如实告知**本环境当前无法访问 ipinfo.io，不要编造 IP 值。
+**先分类，再决定是否重试**（这是一次幂等 GET，重试安全）：
+
+- **瞬时失败可重试，至多 3 次尝试**（首次 + 2 次重试）：超时（curl 退出码 28）、连接失败 / 连接重置 / DNS 解析失败（curl 退出码 6/7/35/56 等）、HTTP 5xx、HTTP 429。两次重试前分别等 **2 秒、4 秒**（区间稍宽于通用默认的 1s/2s：ipinfo.io 对匿名调用有限流，退得太快容易连撞）。每次重试都要向用户说明第几次、等了多久、什么原因。
+- **确定性失败不重试，直接如实告知**：HTTP 4xx（403 被限、404 等）——重试必然同样失败。
+- 3 次尝试后仍失败：**如实告知**本环境当前无法访问 ipinfo.io，附最后一次的错误原因，**不要编造 IP 值**，也不要改用会经模型改写的网页抓取工具去"猜"。
 - 返回体里带 `"bogon": true`（内网 / 保留地址）：说明本环境对外并非公网出口（可能在受限网络 / 未直连公网），据实说明而非硬报一个地址。

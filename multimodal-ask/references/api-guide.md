@@ -60,7 +60,7 @@ Server: `https://api.aihubmax.com` ｜ Auth: `Authorization: Bearer <AIHUB_API_K
 | 422 | `model_not_support_capability` | 模型不支持本次类型组合（如 text+video） |
 | 422 | `model_rule_violation` | 违反模型规则（含 `gemini_video_size_exceeded`、单视频模型收到多个等） |
 | 422 | `invalid_param` | 参数非法（含 max_tokens 家族约束违反） |
-| 429 | `rate_limit_error` | 限流，不自动重试 |
-| 500 / 503 | `internal_error` / `service_unavailable` / `all_platforms_exhausted` | 服务 / 上游异常 |
+| 429 | `rate_limit_error` | 限流；明确表示本次未受理，脚本按 `Retry-After` / 指数退避自动重试 3 次 |
+| 500 / 503 | `internal_error` / `service_unavailable` / `all_platforms_exhausted` | 服务 / 上游异常；幂等读路径自动重试 3 次，提交/上传等写路径不重试（结果不明） |
 
 > 来源：`openapi/zh/llm-custom.json`、`configs-llm-generations-models.json`、`get-task-detail.json`、`llm-video.json`（本地 Mintlify 仓）。

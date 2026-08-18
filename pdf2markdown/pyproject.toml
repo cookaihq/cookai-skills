@@ -1,0 +1,37 @@
+# pdf2markdown 运行时环境（ADR 0007 §1.1/§1.2）。
+# 这里是 Python 依赖的唯一清单，精确解析结果落在同目录 uv.lock。
+# 重建环境：uv sync --project <本目录> --no-dev（venv 落 <本目录>/.venv，ADR 0007 §1.3）。
+#
+# 必需依赖的判定依据是 scripts/preflight.py 的 check_dependencies：pymupdf 与
+# beautifulsoup4 任一不可用，advance 就以 recoverable_error / dependency_missing
+# 停下，工作流走不下去，所以两者都是必需依赖。
+# Pandoc 是系统级可执行文件（同一处预检，真实执行 `pandoc --version` 判定），
+# 不由 uv 管理——缺失按 ADR 0007 §4.2 只报错给安装命令（macOS: brew install pandoc）。
+# pytest 只在跑本仓测试时需要，放 dev 依赖组，不进运行时。
+# 解释器版本由同目录 `.python-version`（3.13）钉死，uv 原生读取并据此选定 /
+# 下载解释器（ADR 0007 §1.2 + 沿革 1）。下面的 requires-python 只是**下限**，
+# 单靠它 uv 会在不同机器选中不同解释器——本机 3.13、只有系统 3.9 的机器则 3.9，
+# 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
+[project]
+name = "pdf2markdown"
+version = "1.1.0"
+description = "可复核 PDF→Markdown 工作目录 skill 的运行时依赖锁定"
+requires-python = ">=3.9"
+dependencies = [
+    "PyMuPDF>=1.24",
+    "beautifulsoup4>=4.12",
+]
+
+[dependency-groups]
+# 只在跑本仓测试时需要，不进运行时环境：bootstrap 的自动重建走 `--no-dev`，
+# 跑测试时显式 `uv sync --project <本目录> --group dev`。
+dev = [
+    "pytest>=7.4",
+]
+
+[tool.uv]
+# 本 skill 的脚本靠 sys.path 注入直接运行，不作为可安装包构建。
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

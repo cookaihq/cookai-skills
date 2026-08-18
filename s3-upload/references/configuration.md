@@ -66,6 +66,20 @@ v2 把三件事分开：selector 选择哪个 Upload Target；Target 保存完�
 }
 ```
 
+### `retry` 是跨 CLI 调用的尝试上限，不是网络重试参数
+
+`retry.part_max_attempts` 与 `retry.collision_max_attempts`（各 1–5）计的是**业务级尝试次数**，与工作区 ADR 0006 的「单次网络调用级重试」是两套东西，不要混用：
+
+| | `retry.*`（本文件） | ADR 0006 单次调用级重试 |
+|---|---|---|
+| 计什么 | 一个 part 被重传了几轮、unique 策略撞名换了几次 key | 一次逻辑请求内部发了几次物理请求 |
+| 跨不跨进程 | 跨。计数落在 checkpoint 里，下一次 CLI 调用继续累加 | 不跨。全在一次函数调用内完成 |
+| 触发条件 | 上一轮的结果**已判定**（part 失败、key 已被占用） | 传输层瞬时故障（超时、连接重置、DNS 失败），或应答状态码为 5xx / 429 |
+| 可配置 | 是，写在 target 配置里 | 否，`NET_MAX_ATTEMPTS = 3` 是脚本内具名常量 |
+| 适用范围 | multipart part 重传、unique 撞名换名 | 只有**读语义**调用（HEAD / GET / ListParts）；写操作不重试，结果不明一律 `ambiguous` |
+
+也就是说：把 `part_max_attempts` 调大不会让一次超时的 HEAD 多试几次，把 ADR 0006 的重试关掉也不会影响 part 重传上限。写操作为什么不做单次调用级重试（含「连接建立阶段失败」为什么没被拆出来），见 `scripts/s3.py` 里 `read_request_with_retry` 上方的偏离说明。
+
 项目 Secret 只放 `.env.local` 的一个命名 map；文件必须是 owned regular `0600`、未被 Git 跟踪且实际被忽略：
 
 ```dotenv
@@ -165,7 +179,7 @@ Permanent credential 使用空 Session Token 与 null expiry。Temporary credent
 保持 cwd 为项目根，即使生成文件在别处：
 
 ```bash
-python3 /absolute/s3-upload/scripts/upload.py upload \
+uv run --project /absolute/s3-upload /absolute/s3-upload/scripts/upload.py upload \
   --file /other/output/cover.png \
   --caller-skill image-2 \
   --json
