@@ -1,8 +1,8 @@
 ---
 name: feishu-use
-version: 1.1.0
+version: 1.2.0
 description: >-
-  v1.1.0｜Use when the user wants an agent to operate Feishu/Lark through the official
+  v1.2.0｜Use when the user wants an agent to operate Feishu/Lark through the official
   lark-cli, or asks to install, update, configure, log in, re-authorize,
   verify, or switch the Feishu account used by lark-cli. This is the shared
   gateway before lark-base, lark-doc, lark-calendar, lark-im, and other domain
@@ -25,6 +25,22 @@ description: >-
 - 用户身份和应用身份必须显式选定为 `user` 或 `bot`，不要依赖 `auto` 猜测。
 - 只申请本次操作需要的最小 scopes；不要默认申请 `all`。
 - 同一任务中门禁通过后无需重复执行，除非 Profile、目标账户、身份或 CLI 状态发生变化。
+
+## 0. 检查更新（每次运行都做）
+
+在门禁流程开始之前，先运行本 Skill 目录下的：
+
+```bash
+scripts/check_update.sh
+```
+
+- 退出码 `0`：直接进入下一步，**不要**向用户复述脚本输出。
+- 退出码 `10`：把脚本打印的报告**原样转述给用户**，并询问是否现在拉取。
+  - 用户同意 → 运行 `scripts/check_update.sh --pull`，成功后按新版本继续；失败时把脚本给出的拒绝原因转述给用户，然后**按当前版本继续本次任务**，不要卡在更新上。
+  - 用户拒绝或不理会 → 按当前版本继续，本次任务内不再提更新。
+- 用户说「关掉自动检查更新」→ 往 `~/.config/feishu-use/.env` 写 `AUTO_UPDATE_CHECK=0`（该文件已存在则只改 / 追加这一行，不动其他行）。
+
+**更新检查永远不是任务的阻塞项**：检查失败、拉取失败、用户不理会，一律落到「按当前版本继续干活」。
 
 ## 1. 收集门禁输入
 

@@ -26,18 +26,18 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
 |---|---|---|
-| banana-2 | 1.1.0 | [banana-2/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/banana-2%2Fv1.1.0) |
-| exit-ip | 1.0.1 | [exit-ip/v1.0.1](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.0.1) |
-| feishu-use | 1.1.0 | [feishu-use/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.1.0) |
-| frpc-launch | 1.1.0 | [frpc-launch/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.1.0) |
-| image-2 | 1.1.0 | [image-2/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.1.0) |
-| memoji-sticker-pack | 1.1.0 | [memoji-sticker-pack/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.1.0) |
-| multimodal-ask | 1.1.0 | [multimodal-ask/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.1.0) |
-| pdf2markdown | 1.1.0 | [pdf2markdown/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv1.1.0) |
-| pdf2md_docx | 1.1.0 | [pdf2md_docx/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2md_docx%2Fv1.1.0) |
-| preview-share | 1.1.0 | [preview-share/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.1.0) |
-| s3-upload | 1.1.1 | [s3-upload/v1.1.1](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.1.1) |
-| template-preview | 1.1.0 | [template-preview/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.1.0) |
+| banana-2 | 1.2.0 | [banana-2/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/banana-2%2Fv1.2.0) |
+| exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
+| feishu-use | 1.2.0 | [feishu-use/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.2.0) |
+| frpc-launch | 1.2.0 | [frpc-launch/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.2.0) |
+| image-2 | 1.2.0 | [image-2/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.2.0) |
+| memoji-sticker-pack | 1.2.0 | [memoji-sticker-pack/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.2.0) |
+| multimodal-ask | 1.2.0 | [multimodal-ask/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.2.0) |
+| pdf2markdown | 1.2.0 | [pdf2markdown/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv1.2.0) |
+| pdf2md_docx | 1.2.0 | [pdf2md_docx/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2md_docx%2Fv1.2.0) |
+| preview-share | 1.2.0 | [preview-share/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.2.0) |
+| s3-upload | 1.2.0 | [s3-upload/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.2.0) |
+| template-preview | 1.2.0 | [template-preview/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.2.0) |
 <!-- release-table:end -->
 
 ## 安装
@@ -83,6 +83,14 @@ npx skills add cookaihq/cookai-skills --skill image-2 -a claude-code
 含 Python 脚本的 skill 统一用 [uv](https://docs.astral.sh/uv/)（>= 0.8）管理运行时：每个 skill 自带 `pyproject.toml` + `uv.lock`，调用示例一律 `uv run --project <skill目录> ...`，首次运行会自动在 `<skill>/.venv` 建好环境；入口脚本内置兜底，即使误用系统 `python3` 直跑也会自动切回正确环境。未安装 uv 时按报错提示执行 `curl -LsSf https://astral.sh/uv/install.sh | sh` 即可。
 
 各 skill 的详细用法、配置与排错见其目录下的 README。
+
+## 自动检查更新
+
+本仓全部 12 个 skill 都自带 `scripts/check_update.sh`，SKILL.md 的第 0 步会在每次运行时调用它：脚本按 skill 所在的 git 检出比对 `origin/main`，落后就把版本变化和提交摘要打印出来，由 Agent 转述给你并询问是否拉取；只有你同意后才会执行 `check_update.sh --pull`（仅当分支为 `main`、跟踪文件无未提交改动、且可 fast-forward 时执行 `git merge --ff-only`，脚本从不 commit / push / reset / checkout）。
+
+它只做检查和提醒，不会自动改你本机的文件。检查每 6 小时最多一次，`git fetch` 单次尝试、5 秒超时，网络失败、非 git 检出（如手工拷贝安装）一律静默跳过——更新检查任何情况下都不会挡住 skill 干正事。
+
+关掉某个 skill 的检查：在 `~/.config/<skill 目录名>/.env` 里写一行 `AUTO_UPDATE_CHECK=0`（值要裸写，行尾不要跟注释）。重新开启：改成 `AUTO_UPDATE_CHECK=1` 或删掉这一行。这个开关只从该文件读，按 skill 各自隔离。
 
 ## License
 

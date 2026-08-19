@@ -11,7 +11,7 @@
 # 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
 [project]
 name = "feishu-use"
-version = "1.1.0"
+version = "1.2.0"
 description = "lark-cli 只读预检 skill 的运行时解释器锁定（零第三方依赖）"
 requires-python = ">=3.9"
 dependencies = []

@@ -1,7 +1,7 @@
 ---
 name: exit-ip
-version: 1.0.1
-description: v1.0.1｜Use when the user wants to know the outbound / exit / public IP of the environment that runs this agent and the Claude Agent SDK — phrases like "我的出口IP是什么"、"当前出口IP"、"Claude SDK 用的是哪个IP出网"、"我的公网IP / 外网IP / 外网出口"、"看看我现在的IP归属地 / 运营商"、"whats my ip"、"check my public / egress ip"、"ipinfo". The skill fetches https://ipinfo.io/json directly from the running environment and shows the raw result (ip / city / region / country / org). Do NOT use to geolocate an IP the user pastes in, to inspect a private/LAN address, or to debug a remote host's networking — this only reports THIS environment's own egress.
+version: 1.1.0
+description: v1.1.0｜Use when the user wants to know the outbound / exit / public IP of the environment that runs this agent and the Claude Agent SDK — phrases like "我的出口IP是什么"、"当前出口IP"、"Claude SDK 用的是哪个IP出网"、"我的公网IP / 外网IP / 外网出口"、"看看我现在的IP归属地 / 运营商"、"whats my ip"、"check my public / egress ip"、"ipinfo". The skill fetches https://ipinfo.io/json directly from the running environment and shows the raw result (ip / city / region / country / org). Do NOT use to geolocate an IP the user pastes in, to inspect a private/LAN address, or to debug a remote host's networking — this only reports THIS environment's own egress.
 ---
 
 # exit-ip
@@ -25,6 +25,22 @@ description: v1.0.1｜Use when the user wants to know the outbound / exit / publ
 - 用户给出一个 **IP 让你查归属**（那是对任意 IP 的地理定位，不是"本机出口"）
 - 查内网 / 局域网地址（`192.168.*`、`10.*`、`127.0.0.1` 等）
 - 排查**远端主机**的网络问题（本 skill 只反映**本 Agent 环境**的出网）
+
+## 第 0 步：检查更新（每次运行都做）
+
+先在本 skill 目录下运行：
+
+```bash
+scripts/check_update.sh
+```
+
+- 退出码 `0`：直接进入下一步，**不要**向用户复述脚本输出。
+- 退出码 `10`：把脚本打印的报告**原样转述给用户**，并询问是否现在拉取。
+  - 用户同意 → 运行 `scripts/check_update.sh --pull`，成功后按新版本继续；失败时把脚本给出的拒绝原因转述给用户，然后**按当前版本继续本次任务**，不要卡在更新上。
+  - 用户拒绝或不理会 → 按当前版本继续，本次任务内不再提更新。
+- 用户说「关掉自动检查更新」→ 往 `~/.config/exit-ip/.env` 写 `AUTO_UPDATE_CHECK=0`（该文件已存在则只改 / 追加这一行，不动其他行）。
+
+**更新检查永远不是任务的阻塞项**：检查失败、拉取失败、用户不理会，一律落到「按当前版本继续干活」。
 
 ## How
 

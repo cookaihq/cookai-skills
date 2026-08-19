@@ -1,10 +1,26 @@
 ---
 name: pdf2markdown
-version: 1.1.0
-description: v1.1.0｜Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
+version: 1.2.0
+description: v1.2.0｜Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
 ---
 
 # PDF to Markdown
+
+## Step 0: Check For Updates (Every Run)
+
+Before anything else, run this from the skill directory:
+
+```bash
+scripts/check_update.sh
+```
+
+- Exit code `0`: go straight to the next step; do **not** relay the script's output to the user.
+- Exit code `10`: relay the printed report to the user **verbatim** and ask whether to pull now.
+  - User agrees -> run `scripts/check_update.sh --pull`; on success continue on the new version. On failure, relay the refusal reason the script printed, then **continue this task on the current version** - never stall on the update.
+  - User declines or ignores it -> continue on the current version and do not raise updates again during this task.
+- User asks to turn the automatic update check off -> write `AUTO_UPDATE_CHECK=0` into `~/.config/pdf2markdown/.env` (if the file already exists, only change/append that one line and leave the rest untouched).
+
+**The update check is never a blocker.** A failed check, a failed pull, or a user who ignores it all resolve to "carry on with the current version".
 
 ## Run Commands With uv
 

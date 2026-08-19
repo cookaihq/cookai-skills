@@ -3869,7 +3869,7 @@ def result_from_manifest(
         # tiers (1/3/4c/4d) answer "what should the caller do next", not
         # "which prior decision does this respond to", and carry
         # evidence_hash=None; blanket-copying that None would discard the
-        # `sha256:<source sha256>` fallback SKILL.md:58 promises callers.
+        # `sha256:<source sha256>` fallback SKILL.md:79 promises callers.
         if projected["evidence_hash"] is not None:
             result["evidence_hash"] = projected["evidence_hash"]
     return result

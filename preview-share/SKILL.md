@@ -1,7 +1,7 @@
 ---
 name: preview-share
-version: 1.1.0
-description: v1.1.0｜Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
+version: 1.2.0
+description: v1.2.0｜Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
 ---
 
 # preview-share
@@ -53,6 +53,22 @@ description: v1.1.0｜Use when the user wants to put a local HTML page (or any l
 ## Label（标签）建议
 
 子目录命名为 `{YYYYMMDD-HHMMSS}-{标签}`。调用脚本前，**先分析要预览的内容，给用户推荐几个简短标签（英文短横线命名或数字编号），并允许用户自定义**。例如内容是「IoT 功耗自动化测试」可推荐 `iot-power`；若目录/任务自带编号（如 `2772`）也可直接用。用户确认后用 `--label` 传入。
+
+## 第 0 步：检查更新（每次运行都做）
+
+先在本 skill 目录下运行：
+
+```bash
+scripts/check_update.sh
+```
+
+- 退出码 `0`：直接进入下一步，**不要**向用户复述脚本输出。
+- 退出码 `10`：把脚本打印的报告**原样转述给用户**，并询问是否现在拉取。
+  - 用户同意 → 运行 `scripts/check_update.sh --pull`，成功后按新版本继续；失败时把脚本给出的拒绝原因转述给用户，然后**按当前版本继续本次任务**，不要卡在更新上。
+  - 用户拒绝或不理会 → 按当前版本继续，本次任务内不再提更新。
+- 用户说「关掉自动检查更新」→ 往 `~/.config/preview-share/.env` 写 `AUTO_UPDATE_CHECK=0`（该文件已存在则只改 / 追加这一行，不动其他行）。
+
+**更新检查永远不是任务的阻塞项**：检查失败、拉取失败、用户不理会，一律落到「按当前版本继续干活」。
 
 ## Workflow
 

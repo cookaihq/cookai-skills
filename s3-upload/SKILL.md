@@ -1,7 +1,7 @@
 ---
 name: s3-upload
-version: 1.1.1
-description: v1.1.1｜Use when the user explicitly wants to persist one local file in their own AWS SigV4-compatible object store and receive an Object Reference plus a public or presigned current-key URL. Do not use for hosted temporary URLs, remote/base64 input, bucket administration, or an upload inferred only from a caller mapping.
+version: 1.2.0
+description: v1.2.0｜Use when the user explicitly wants to persist one local file in their own AWS SigV4-compatible object store and receive an Object Reference plus a public or presigned current-key URL. Do not use for hosted temporary URLs, remote/base64 input, bucket administration, or an upload inferred only from a caller mapping.
 ---
 
 # s3-upload
@@ -31,6 +31,22 @@ description: v1.1.1｜Use when the user explicitly wants to persist one local fi
 - stdout 在非 JSON 的成功 upload/url/resume 中只输出一个 URL；Secret、Authorization 和签名 URL 不进入 stderr、checkpoint 或 Object Reference。
 - `aliyun-oss`、`tencent-cos` 的 required capability 在 dry-run 中显示为 `experimental`，不是 `enabled` 或 live-verified。必须先检查 exact endpoint、bucket、payload profile 和 capability state；不要改成 `custom` 绕过 provider contract。
 - OSS/COS assisted setup 仍不可用；experimental 数据面 preset 不授权建桶、身份、公开策略、生命周期或 CORS 变更。
+
+## 第 0 步：检查更新（每次运行都做）
+
+先在本 skill 目录下运行：
+
+```bash
+scripts/check_update.sh
+```
+
+- 退出码 `0`：直接进入下一步，**不要**向用户复述脚本输出。
+- 退出码 `10`：把脚本打印的报告**原样转述给用户**，并询问是否现在拉取。
+  - 用户同意 → 运行 `scripts/check_update.sh --pull`，成功后按新版本继续；失败时把脚本给出的拒绝原因转述给用户，然后**按当前版本继续本次任务**，不要卡在更新上。
+  - 用户拒绝或不理会 → 按当前版本继续，本次任务内不再提更新。
+- 用户说「关掉自动检查更新」→ 往 `~/.config/s3-upload/.env` 写 `AUTO_UPDATE_CHECK=0`（该文件已存在则只改 / 追加这一行，不动其他行）。
+
+**更新检查永远不是任务的阻塞项**：检查失败、拉取失败、用户不理会，一律落到「按当前版本继续干活」。
 
 ## Workflow
 

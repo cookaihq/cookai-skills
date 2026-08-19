@@ -8,7 +8,7 @@
 # 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
 [project]
 name = "pdf2md-docx"
-version = "1.1.0"
+version = "1.2.0"
 description = "aihubmax Doc2X V3 PDF 转 md/tex/docx 的 skill 运行时环境锁定"
 requires-python = ">=3.9"
 dependencies = []

@@ -7985,7 +7985,7 @@ def test_evidence_hash_preserves_the_preflight_fallback_when_the_projection_carr
     bottom-of-the-chain fallback (`sha256:<source sha256>`,
     preflight.py:3759-3763) that every wrapper above it is supposed to leave
     alone absent a real pending_action -- an unauthorized narrowing of what
-    SKILL.md:58 promises callers (evidence_hash stays populated whenever no
+    SKILL.md:79 promises callers (evidence_hash stays populated whenever no
     pending_action is bound).
 
     Locks both shapes the old chain got wrong: `processing` (no action at

@@ -1,7 +1,7 @@
 ---
 name: image-2
-version: 1.1.0
-description: v1.1.0｜Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
+version: 1.2.0
+description: v1.2.0｜Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
 ---
 
 # image-2
@@ -110,6 +110,22 @@ AIHUB_API_KEY=sk-xxx
 **精简版预设**（3 种）：`1024x1024` `1024x1536` `1536x1024`
 
 **完整版自定义**（仅完整版）：`{"width": W, "height": H}`，W/H 均为 16 的倍数，256≤W,H≤3840，长短边比 ≤ 3:1，总像素 655,360..8,294,400。
+
+## 第 0 步：检查更新（每次运行都做）
+
+先在本 skill 目录下运行：
+
+```bash
+scripts/check_update.sh
+```
+
+- 退出码 `0`：直接进入下一步，**不要**向用户复述脚本输出。
+- 退出码 `10`：把脚本打印的报告**原样转述给用户**，并询问是否现在拉取。
+  - 用户同意 → 运行 `scripts/check_update.sh --pull`，成功后按新版本继续；失败时把脚本给出的拒绝原因转述给用户，然后**按当前版本继续本次任务**，不要卡在更新上。
+  - 用户拒绝或不理会 → 按当前版本继续，本次任务内不再提更新。
+- 用户说「关掉自动检查更新」→ 往 `~/.config/image-2/.env` 写 `AUTO_UPDATE_CHECK=0`（该文件已存在则只改 / 追加这一行，不动其他行）。
+
+**更新检查永远不是任务的阻塞项**：检查失败、拉取失败、用户不理会，一律落到「按当前版本继续干活」。
 
 ## Workflow
 
