@@ -13,7 +13,7 @@
 # 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
 [project]
 name = "s3-upload"
-version = "1.1.0"
+version = "1.1.1"
 description = "S3/OSS SigV4 上传与投递 skill 的运行时环境锁定"
 requires-python = ">=3.9"
 dependencies = []

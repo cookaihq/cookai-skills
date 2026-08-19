@@ -1,7 +1,7 @@
 ---
 name: s3-upload
-version: 1.1.0
-description: v1.1.0｜Use when the user explicitly wants to persist one local file in their own AWS SigV4-compatible object store and receive an Object Reference plus a public or presigned current-key URL. Do not use for hosted temporary URLs, remote/base64 input, bucket administration, or an upload inferred only from a caller mapping.
+version: 1.1.1
+description: v1.1.1｜Use when the user explicitly wants to persist one local file in their own AWS SigV4-compatible object store and receive an Object Reference plus a public or presigned current-key URL. Do not use for hosted temporary URLs, remote/base64 input, bucket administration, or an upload inferred only from a caller mapping.
 ---
 
 # s3-upload
@@ -24,7 +24,7 @@ description: v1.1.0｜Use when the user explicitly wants to persist one local fi
 
 - 先 `upload --dry-run --json`；默认 `collision=replace`，同 Object Key 会覆盖当前对象。aws-s3 / cloudflare-r2 baseline 另支持 `--collision reject`：条件 Put 携带 `If-None-Match: *` 实现原子 no-overwrite，撞 412 后经一次 presigned GET 全文比对，size+SHA-256 双等返回 `adopted`（`object_written=false`、退出码 0、不发第二次 Put），不等以 collision 退出码 4 结束。
 - `ambiguous` 或 `partial_success` 的写入不得自动重放。保留并报告 `checkpoint_id`，只使用对应恢复命令；`put_unknown` 的 `reconcile` 是只读全文对账（零写请求），双等收敛为成功但 `object_written` 保持 `null`。
-- `--json` 输出 17 键闭合 result（v1 13 键原地扩展 + `remote`/`checkpoint`/`next_action`/`retry_safety`），不适用的值为显式 `null`，不省字段；`--result-out <path>` 把同一 result JSON 原子写入 caller 指定文件（与 stdout 逐字节一致，preflight 与 `--reference-out` 同级、失败时零远端请求）。只读该文件的验证方可以直接采信 `not_started`：第一次远端请求发出后，任何没有产出终态 result 的退出都会把该文件改写成 `ambiguous`（带 checkpoint、`retry_safety=unsafe`），只有确定性 4xx 才保留 `not_started`。
+- `--json` 输出 17 键闭合 result（v1 13 键原地扩展 + `remote`/`checkpoint`/`next_action`/`retry_safety`），不适用的值为显式 `null`，不省字段；`--result-out <path>` 把同一 result JSON 原子写入 caller 指定文件（与 stdout 逐字节一致，preflight 与 `--reference-out` 同级、失败时零远端请求）。只读该文件的验证方在文件可写的前提下可以直接采信 `not_started`：第一次远端请求发出后，任何没有产出终态 result 的退出都会把该文件改写成 `ambiguous`（带 checkpoint、`retry_safety=unsafe`）；保留 `not_started` 只有两种例外——确定性 4xx（证明对象未写入），以及终态写入被安全复检拒绝（目标文件/父目录被换掉、磁盘满、权限被改：stderr 打 `[s3-upload] result_error:`、退出码 ≥1，此时文件改不动，只能以 stderr 与退出码为准）。
 - Public Base URL 是用户声明，不做 GET/HEAD 探测；Skill 不发送 public ACL，也不修改 bucket policy/lifecycle/CORS。
 - Object Reference 中的 version id 只用于 exact-version delete 选择；所有 URL 都指向 current key。
 - Global Target 的间接选择必须显式 `--use-local-key`。Object Reference/checkpoint 本身不授权读取 home 配置。
@@ -43,7 +43,8 @@ description: v1.1.0｜Use when the user explicitly wants to persist one local fi
 `uv run --project <skill>`，禁止裸 `python3`**（ADR 0007 §1.4）：裸 `python3` 按
 PATH 解析到系统解释器，跑的不是本 skill 钉死的解释器版本；`--project` 省了 uv 会
 从当前目录向上找 `pyproject.toml`，可能静默用上别的环境。写错了也有兜底——三个
-入口（`scripts/upload.py`、`scripts/setup.py`、`scripts/run_oss_live_matrix.py`）
+入口（`scripts/upload.py`，以及 maintainer/test surface 的 `scripts/setup.py`、
+`scripts/run_oss_live_matrix.py`；普通使用只需要 `scripts/upload.py`）
 启动时都会把进程 exec 回 `<skill>/.venv`，环境缺失按 `uv.lock` 自动重建（stderr
 打一行 `[bootstrap]`），只有 uv 本体缺失或版本低于 0.8 才报错停下。
 

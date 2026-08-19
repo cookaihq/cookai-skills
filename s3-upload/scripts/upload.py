@@ -763,6 +763,24 @@ def _v2_main(argv, *, environ, cwd, config_home, transport, now) -> int:
             and resolved.target.provider in EXPERIMENTAL_PROVIDERS
         ):
             raise PlanError("candidate execution requires the authorized evidence harness")
+        # The dry-run plan already carries the capability states this run will
+        # rely on, so the last instant before the first remote write is where
+        # an experimental preset can be announced without recomputing anything
+        # or issuing an extra request. Operation names only: no endpoint, no
+        # credential, no signed URL.
+        experimental = [
+            entry["operation"]
+            for entry in dry_run.plan["capabilities"]
+            if entry["state"] == "experimental"
+        ]
+        if experimental:
+            print(
+                "[s3-upload] experimental provider={0} capabilities={1}".format(
+                    dry_run.plan["provider"], ",".join(experimental)
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
         if dry_run.plan["upload_mode"] == "multipart":
             outcome = execute_multipart(
                 resolved=resolved,
