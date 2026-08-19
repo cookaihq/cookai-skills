@@ -19,6 +19,27 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
 | [frpc-launch](frpc-launch/) | 本地一键启动/管理 frpc 内网穿透：双模式（自部署 FRPS / 宝塔 frps 用官方 frpc，樱花FRP 用其定制客户端）、无配置时引导配置、二进制自动下载校验、后台常驻 + status/stop/logs、凭证全程掩码 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
 
+## 版本与 Release
+
+各目标的当前版本与对应 Release（本节由 `harness/repo-harness/release-on-push.sh --table` 生成，升版本的提交须同步更新，约定见外层仓 `docs/adr/0009`）：
+
+<!-- release-table:begin -->
+| 目标 | 版本 | Release |
+|---|---|---|
+| banana-2 | 1.1.0 | [banana-2/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/banana-2%2Fv1.1.0) |
+| exit-ip | 1.0.1 | [exit-ip/v1.0.1](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.0.1) |
+| feishu-use | 1.1.0 | [feishu-use/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.1.0) |
+| frpc-launch | 1.1.0 | [frpc-launch/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.1.0) |
+| image-2 | 1.1.0 | [image-2/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.1.0) |
+| memoji-sticker-pack | 1.1.0 | [memoji-sticker-pack/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.1.0) |
+| multimodal-ask | 1.1.0 | [multimodal-ask/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.1.0) |
+| pdf2markdown | 1.1.0 | [pdf2markdown/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv1.1.0) |
+| pdf2md_docx | 1.1.0 | [pdf2md_docx/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2md_docx%2Fv1.1.0) |
+| preview-share | 1.1.0 | [preview-share/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.1.0) |
+| s3-upload | 1.1.1 | [s3-upload/v1.1.1](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.1.1) |
+| template-preview | 1.1.0 | [template-preview/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.1.0) |
+<!-- release-table:end -->
+
 ## 安装
 
 以 `image-2` 为例，四种方式任选其一（其他 skill 如 `banana-2` 把命令里的 `image-2` 换成对应目录名即可）。
