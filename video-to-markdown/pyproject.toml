@@ -1,0 +1,17 @@
+[project]
+name = "video-to-markdown"
+version = "1.0.0"
+description = "Deterministic media preparation and validation for the video-to-markdown Agent Skill"
+requires-python = ">=3.11"
+dependencies = [
+  "Pillow>=11.3.0,<12",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.1,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

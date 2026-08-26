@@ -1,0 +1,6 @@
+interface:
+  display_name: "Video to Markdown"
+  short_description: "把视频语音与关键画面整理成可复核 Markdown"
+  default_prompt: "Use $video-to-markdown to turn this video into a source-faithful Markdown document with timestamped screenshots and motion GIFs where needed."
+policy:
+  allow_implicit_invocation: true
