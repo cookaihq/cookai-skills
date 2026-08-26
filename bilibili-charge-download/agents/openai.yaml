@@ -1,0 +1,7 @@
+interface:
+  display_name: "B站充电视频下载"
+  short_description: "使用本人已登录账号下载并校验已获得观看权限的 B站充电视频"
+  default_prompt: "Use $bilibili-charge-download to download this Bilibili charge-only video with my logged-in browser session."
+
+policy:
+  allow_implicit_invocation: true

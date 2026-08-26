@@ -6,6 +6,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 
 | Skill | 功能 | 文档 |
 |---|---|---|
+| [bilibili-charge-download](bilibili-charge-download/) | 使用用户已登录且有完整播放及保存权限的 B 站账号下载充电专属视频，将 DASH 音视频封装并完整性验证为 MP4；不读取 Cookie，不绕过付费或访问限制 | [README](bilibili-charge-download/README.md) · [SKILL.md](bilibili-charge-download/SKILL.md) |
 | [feishu-use](feishu-use/) | 安全调用飞书官方 `lark-cli` 的通用入口：检查安装与最新版、确认更新选择、核对用户/应用身份和目标账户、引导链接 + 二维码登录、增量授权后再执行 Base / 文档 / 日历等操作 | [README](feishu-use/README.md) · [SKILL.md](feishu-use/SKILL.md) |
 | [image-2](image-2/) | `gpt-image-2` 生成图片：文生图 / 图生图、11 种预设比例 + 自定义分辨率（最高 4K）、任务完成自动下载到工作区 | [README](image-2/README.md) · [SKILL.md](image-2/SKILL.md) |
 | [banana-2](banana-2/) | Nano Banana 2（`gemini-3.1-flash-image-preview`）生成 / 编辑图片：文生图 / 图生图 / 图像编辑、15 种宽高比 + `512`~`4K` 画质档、可选联网搜索 / 图片搜索增强、任务完成自动下载到工作区 | [README](banana-2/README.md) · [SKILL.md](banana-2/SKILL.md) |
@@ -27,6 +28,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | 目标 | 版本 | Release |
 |---|---|---|
 | banana-2 | 1.2.0 | [banana-2/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/banana-2%2Fv1.2.0) |
+| bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | feishu-use | 1.2.0 | [feishu-use/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.2.0) |
 | frpc-launch | 1.2.0 | [frpc-launch/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.2.0) |
@@ -86,7 +88,7 @@ npx skills add cookaihq/cookai-skills --skill image-2 -a claude-code
 
 ## 自动检查更新
 
-本仓全部 12 个 skill 都自带 `scripts/check_update.sh`，SKILL.md 的第 0 步会在每次运行时调用它：脚本按 skill 所在的 git 检出比对 `origin/main`，落后就把版本变化和提交摘要打印出来，由 Agent 转述给你并询问是否拉取；只有你同意后才会执行 `check_update.sh --pull`（仅当分支为 `main`、跟踪文件无未提交改动、且可 fast-forward 时执行 `git merge --ff-only`，脚本从不 commit / push / reset / checkout）。
+本仓全部 13 个 skill 都自带 `scripts/check_update.sh`，SKILL.md 的第 0 步会在每次运行时调用它：脚本按 skill 所在的 git 检出比对 `origin/main`，落后就把版本变化和提交摘要打印出来，由 Agent 转述给你并询问是否拉取；只有你同意后才会执行 `check_update.sh --pull`（仅当分支为 `main`、跟踪文件无未提交改动、且可 fast-forward 时执行 `git merge --ff-only`，脚本从不 commit / push / reset / checkout）。
 
 它只做检查和提醒，不会自动改你本机的文件。检查每 6 小时最多一次，`git fetch` 单次尝试、5 秒超时，网络失败、非 git 检出（如手工拷贝安装）一律静默跳过——更新检查任何情况下都不会挡住 skill 干正事。
 

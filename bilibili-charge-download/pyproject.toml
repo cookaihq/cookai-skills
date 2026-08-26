@@ -1,0 +1,12 @@
+# bilibili-charge-download runtime environment (ADR 0007).
+# The downloader uses only the Python standard library. uv still owns the
+# interpreter and reproducible per-skill environment.
+[project]
+name = "bilibili-charge-download"
+version = "1.0.0"
+description = "Runtime environment for the bilibili-charge-download skill"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+package = false
