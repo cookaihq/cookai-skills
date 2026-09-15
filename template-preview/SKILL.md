@@ -1,7 +1,7 @@
 ---
 name: template-preview
-version: 1.2.0
-description: v1.2.0｜Use when the user wants to turn a folder of images + copy into a styled showcase page that mimics a known app's UI — phrases like "把这个文件夹做成小红书预览"、"做成小红书个人主页"、"生成小红书风格展示页"、"把这些图做成 XX 风格的页面". v1 ships the xiaohongshu (小红书) personal-homepage template. Generates a self-contained output folder (index.html + assets/) that opens locally and can be uploaded by the preview-share skill. Do NOT use for real deploys, or for uploading/publishing (that's preview-share's job).
+version: 1.3.0
+description: v1.3.0｜Use when the user wants to turn a folder of images + copy into a styled showcase page that mimics a known app's UI — phrases like "把这个文件夹做成小红书预览"、"做成小红书个人主页"、"生成小红书风格展示页"、"把这些图做成 XX 风格的页面". v1 ships the xiaohongshu (小红书) personal-homepage template. Generates a self-contained output folder (index.html + assets/) that opens locally and can be uploaded by the preview-share skill. Do NOT use for real deploys, or for uploading/publishing (that's preview-share's job).
 ---
 
 # template-preview
@@ -33,9 +33,10 @@ description: v1.2.0｜Use when the user wants to turn a folder of images + copy 
 每个变量独立按以下顺序取「首个非空来源」（详见仓库 `CLAUDE.md` 通用约定，本 skill **不读 `~/.config`**）：
 
 1. 进程环境变量（本轮显式注入 `TPL_XHS_NICKNAME=... uv run --project <skill目录> ...` 或已 export）
-2. `$PWD/.env.local`（自动读，不向上递归）
-3. `$PWD/.env`（自动读，不向上递归）
-4. 内置默认（模板级在 `templates/<t>/defaults.env` 与内置素材；skill 级写在 `generate.py`）
+2. `$PWD/.env.template-preview`（自动读，不向上递归）
+3. `$PWD/.env.local`（自动读，不向上递归）
+4. `$PWD/.env`（自动读，不向上递归）
+5. 内置默认（模板级在 `templates/<t>/defaults.env` 与内置素材；skill 级写在 `generate.py`）
 
 `.env` 解析与 `preview-share` 一致：极简、非 shell。
 

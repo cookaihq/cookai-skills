@@ -144,6 +144,7 @@ DEFAULT_HOME = Path.home() / ".config" / "frpc-launch"
 VAR_NAMES = [
     "FRPC_LAUNCH_MODE", "FRPC_LAUNCH_CONFIG", "FRPC_LAUNCH_FRPC",
     "FRPC_LAUNCH_SAKURA_KEY", "FRPC_LAUNCH_SAKURA_TUNNELS", "FRPC_LAUNCH_SAKURA_FRPC",
+    "FRPC_LAUNCH_INIT_TOKEN",
 ]
 
 
@@ -202,6 +203,7 @@ def parse_env_file(path: Path) -> dict:
 def resolve_layered(environ: dict, cwd: Path, home: Path) -> dict:
     layers = [
         ("env", {k: environ.get(k, "") for k in VAR_NAMES}),
+        (".env.frpc-launch", parse_env_file(cwd / ".env.frpc-launch")),
         (".env.local", parse_env_file(cwd / ".env.local")),
         (".env", parse_env_file(cwd / ".env")),
         ("global", parse_env_file(home / ".env")),
@@ -825,10 +827,11 @@ def _git_secret_check(cwd: Path, target: Path, allow_tracked: bool):
 def cmd_guide_init(args) -> int:
     home = args.home
     cwd = Path.cwd()
+    layered = resolve_layered(dict(os.environ), cwd, home)
     written = []
     token_masked = ""
     if args.source in ("frps", "baota"):
-        token = os.environ.get("FRPC_LAUNCH_INIT_TOKEN", "")
+        token = layered.get("FRPC_LAUNCH_INIT_TOKEN", ("", ""))[0]
         token_masked = mask_secret(token)
         if not args.server_addr or not args.server_port:
             raise FrpcLaunchError("official 引导必须提供 --server-addr 与 --server-port")
@@ -860,12 +863,12 @@ def cmd_guide_init(args) -> int:
             update_env_file(env_target, {"FRPC_LAUNCH_CONFIG": str(target.resolve())})
             written.append(str(env_target))
     else:
-        key = os.environ.get("FRPC_LAUNCH_SAKURA_KEY", "")
-        tunnels = os.environ.get("FRPC_LAUNCH_SAKURA_TUNNELS", "")
+        key = layered.get("FRPC_LAUNCH_SAKURA_KEY", ("", ""))[0]
+        tunnels = layered.get("FRPC_LAUNCH_SAKURA_TUNNELS", ("", ""))[0]
         token_masked = mask_secret(key)
         if not key or not tunnels:
             raise FrpcLaunchError(
-                "sakura 引导必须经环境变量提供 FRPC_LAUNCH_SAKURA_KEY 与 "
+                "sakura 引导必须通过分层配置提供 FRPC_LAUNCH_SAKURA_KEY 与 "
                 "FRPC_LAUNCH_SAKURA_TUNNELS（不接受命令行参数，防泄露）")
         updates = {"FRPC_LAUNCH_SAKURA_KEY": key, "FRPC_LAUNCH_SAKURA_TUNNELS": tunnels}
         if args.scope == "global":

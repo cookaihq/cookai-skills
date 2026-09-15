@@ -1,7 +1,7 @@
 ---
 name: pdf2markdown
-version: 1.2.0
-description: v1.2.0｜Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
+version: 1.3.0
+description: v1.3.0｜Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
 ---
 
 # PDF to Markdown
@@ -43,7 +43,7 @@ uv run --project <skill> <skill>/scripts/workflow.py settings set-publish-mode u
 
 Use `--interaction-mode confirm|auto`, `--publish-mode skip|upload`, `--publish-with <skill:name|tool:name>`, and `--publish-target <opaque-name>` with `settings status` to inspect one-call overrides without persisting them. Add `--use-local-key` only when the current invocation may read `~/.config/pdf2markdown/.env`; this permission is never saved or inherited by a work bundle.
 
-Resolve each non-secret value independently in this order: command option, process environment, `$PWD/.env.local`, `$PWD/.env`, explicitly authorized home `.env`, `settings.json`, built-in default. Use `PDF2MARKDOWN_INTERACTION_MODE`, `PDF2MARKDOWN_PUBLISH_MODE`, `PDF2MARKDOWN_UPLOADER`, and `PDF2MARKDOWN_UPLOAD_TARGET` in environment or dotenv layers. Treat empty values as absent. Defaults are `interaction_mode=confirm` and `publishing.mode=skip`.
+Resolve each non-secret value independently in this order: command option, process environment, `$PWD/.env.pdf2markdown`, `$PWD/.env.local`, `$PWD/.env`, explicitly authorized home `.env`, `settings.json`, built-in default. Use `PDF2MARKDOWN_INTERACTION_MODE`, `PDF2MARKDOWN_PUBLISH_MODE`, `PDF2MARKDOWN_UPLOADER`, and `PDF2MARKDOWN_UPLOAD_TARGET` in environment or dotenv layers. Treat empty values as absent. Defaults are `interaction_mode=confirm` and `publishing.mode=skip`.
 
 Do not put API keys, credentials, signed URLs, or bearer URLs in `settings.json`. Treat `publishing.mode=upload` without a complete publisher binding as blocked; the current implementation never plans or performs publication.
 
@@ -125,7 +125,7 @@ In `auto` mode, a warning records `interaction_mode_auto` acceptance and advance
 
 ## Stage The Frozen Source
 
-Configure `AIHUB_API_KEY` for the staging invocation. Resolve exactly one non-empty value in this order: process environment, `$PWD/.env.local`, `$PWD/.env`, then `~/.config/pdf2markdown/.env` only with `--use-local-key`. Dotenv values are literal and are never shell-expanded. The selected attempt records a stable non-secret source locator and key fingerprint; it never records the key and never falls back to a lower source after 401.
+Configure `AIHUB_API_KEY` for the staging invocation. Resolve exactly one non-empty value in this order: process environment, `$PWD/.env.pdf2markdown`, `$PWD/.env.local`, `$PWD/.env`, then `~/.config/pdf2markdown/.env` only with `--use-local-key`. Dotenv values are literal and are never shell-expanded. The selected attempt records a stable non-secret source locator and key fingerprint; it never records the key and never falls back to a lower source after 401.
 
 Run either command after preflight reaches `ready_to_submit`:
 

@@ -28,20 +28,20 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
 |---|---|---|
-| banana-2 | 1.2.0 | [banana-2/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/banana-2%2Fv1.2.0) |
+| banana-2 | 1.3.0 | [banana-2/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/banana-2%2Fv1.3.0) |
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | feishu-use | 1.2.0 | [feishu-use/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.2.0) |
-| frpc-launch | 1.2.0 | [frpc-launch/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.2.0) |
-| image-2 | 1.2.0 | [image-2/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.2.0) |
-| memoji-sticker-pack | 1.2.0 | [memoji-sticker-pack/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.2.0) |
-| multimodal-ask | 1.2.0 | [multimodal-ask/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.2.0) |
-| pdf2markdown | 1.2.0 | [pdf2markdown/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv1.2.0) |
-| pdf2md_docx | 1.2.0 | [pdf2md_docx/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2md_docx%2Fv1.2.0) |
-| preview-share | 1.2.0 | [preview-share/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.2.0) |
-| s3-upload | 1.2.0 | [s3-upload/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.2.0) |
-| template-preview | 1.2.0 | [template-preview/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.2.0) |
-| video-to-markdown | 1.0.0 | [video-to-markdown/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv1.0.0) |
+| frpc-launch | 1.3.0 | [frpc-launch/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.3.0) |
+| image-2 | 1.3.0 | [image-2/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.3.0) |
+| memoji-sticker-pack | 1.3.0 | [memoji-sticker-pack/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.3.0) |
+| multimodal-ask | 1.3.0 | [multimodal-ask/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.3.0) |
+| pdf2markdown | 1.3.0 | [pdf2markdown/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv1.3.0) |
+| pdf2md_docx | 1.3.0 | [pdf2md_docx/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2md_docx%2Fv1.3.0) |
+| preview-share | 1.3.0 | [preview-share/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.3.0) |
+| s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
+| template-preview | 1.3.0 | [template-preview/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.3.0) |
+| video-to-markdown | 1.1.0 | [video-to-markdown/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv1.1.0) |
 <!-- release-table:end -->
 
 ## 安装

@@ -518,11 +518,10 @@ def parse_response_object(body: bytes) -> dict[str, Any]:
     return value
 
 
-def _parse_dotenv_key(path: Path) -> tuple[str, str]:
-    """Return (value, var_name) for the first key name present in the file,
-    canonical name before the legacy one; ("", "") when neither is set."""
+def _parse_dotenv(path: Path) -> dict[str, str]:
+    """Read literal key/value pairs without executing or expanding shell syntax."""
     if not path.exists():
-        return "", ""
+        return {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
@@ -531,17 +530,36 @@ def _parse_dotenv_key(path: Path) -> tuple[str, str]:
     for line in lines:
         if re.match(r"^[ \t]*#", line) or not line.strip():
             continue
-        match = re.match(r"^[ \t]*(AIHUB_API_KEY|X_API_KEY)[ \t]*=[ \t]*(.*)$", line)
+        match = re.match(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(.*)$", line)
         if match is None:
             continue
         value = match.group(2).rstrip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
         selected[match.group(1)] = value
+    return selected
+
+
+def _parse_dotenv_key(path: Path) -> tuple[str, str]:
+    selected = _parse_dotenv(path)
     for name in KEY_NAMES:
         if selected.get(name):
             return selected[name], name
     return "", ""
+
+
+def resolve_variable(name: str, environ: Mapping[str, str], cwd: Path, home: Path, use_local_key: bool) -> str:
+    value = environ.get(name, "")
+    if value:
+        return value
+    paths = [cwd / filename for filename in (".env.image-2", ".env.local", ".env")]
+    if use_local_key:
+        paths.append(home / ".config" / "image-2" / ".env")
+    for path in paths:
+        value = _parse_dotenv(path).get(name, "")
+        if value:
+            return value
+    return ""
 
 
 def collect_keys(
@@ -569,6 +587,7 @@ def collect_keys(
         if env_value:
             add(env_value, f"env {name}" if name == KEY_NAME else "env", name)
             break
+    add_from_file(cwd / ".env.image-2", f"{cwd}/.env.image-2")
     add_from_file(cwd / ".env.local", f"{cwd}/.env.local")
     add_from_file(cwd / ".env", f"{cwd}/.env")
     if use_local_key:
@@ -1373,10 +1392,10 @@ def main(
             parser.print_help(file=output)
             return 0
         if namespace.base_url is None:
-            namespace.base_url = environment.get("AIHUBMAX_BASE_URL", DEFAULT_BASE_URL)
+            namespace.base_url = resolve_variable("AIHUBMAX_BASE_URL", environment, project_cwd, user_home, namespace.use_local_key) or DEFAULT_BASE_URL
         namespace = validate_arguments(namespace)
-    except ArgumentProblem as exc:
-        document = _failure("invalid_arguments")
+    except (ArgumentProblem, ConfigurationProblem) as exc:
+        document = _failure("configuration_error" if isinstance(exc, ConfigurationProblem) else "invalid_arguments")
         if json_hint:
             _emit_json(document, output)
         else:
@@ -1391,7 +1410,7 @@ def main(
         logger.set_secrets(key.value for key in keys)
         output_setting = (
             namespace.output_dir
-            or environment.get("IMAGE_2_OUTPUT_DIR", "")
+            or resolve_variable("IMAGE_2_OUTPUT_DIR", environment, project_cwd, user_home, namespace.use_local_key)
             or str(project_cwd)
         )
         output_dir = _normalized_absolute_path(output_setting, project_cwd)

@@ -45,7 +45,7 @@ uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label
 > 自带 `pyproject.toml` + `uv.lock`，由 uv 钉死解释器版本；`uv run` 首次运行会自动
 > 在 `<skill>/.venv` 建好环境。忘了写也有兜底——`upload.py` 启动时会把进程 exec 回
 > 该 venv，缺失则按 `uv.lock` 自动重建，只有 uv 本体缺失（需 >= 0.8）才报错停下。
-> 注意 `.env` / `.env.local` 仍按**当前工作目录**读取，与 `--project` 无关。
+> 注意 `.env.preview-share` / `.env.local` / `.env` 仍按**当前工作目录**读取，与 `--project` 无关。
 
 输出（stdout 只打印最终预览 URL，便于复制 / 管道）：
 
@@ -96,9 +96,10 @@ uv run --project <skill> <skill>/scripts/upload.py /path/to/preview.html --label
 读取 `PREVIEW_SHARE_FTP`、`PREVIEW_SHARE_BASEURL`，每个变量**独立**按以下顺序取「首个非空来源」（与仓库根 [`CLAUDE.md`](../CLAUDE.md) 的「Skills 配置读取优先级」通用约定一致）：
 
 1. **进程环境变量**（本轮显式注入 `PREVIEW_SHARE_FTP=... uv run --project <skill> ...` 或已 `export`）
-2. **`$PWD/.env.local`**（自动读，**不向上递归**）
-3. **`$PWD/.env`**（自动读，**不向上递归**）
-4. **`~/.config/preview-share/.env`**（**仅 `--use-local-key` 时读**，避免静默使用持久化凭证）
+2. **`$PWD/.env.preview-share`**（自动读，**不向上递归**）
+3. **`$PWD/.env.local`**（自动读，**不向上递归**）
+4. **`$PWD/.env`**（自动读，**不向上递归**）
+5. **`~/.config/preview-share/.env`**（**仅 `--use-local-key` 时读**，避免静默使用持久化凭证）
 
 `.env` 解析为极简格式（非 shell）：`KEY=value` / `KEY="value"` / `KEY='value'`、`#` 注释行、空行；同名取最后一次；不支持 shell 展开 / 命令替换 / 续行。
 

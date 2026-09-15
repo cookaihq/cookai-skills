@@ -188,7 +188,7 @@ def load(path: Path) -> tuple[dict | None, str | None]:
 
 
 def parse_dotenv(text: str) -> dict[str, str]:
-    recognized = set(ENVIRONMENT_FIELDS.values())
+    recognized = set(ENVIRONMENT_FIELDS.values()) | {"PDF2MARKDOWN_OUTPUT_DIR"}
     values = {}
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
@@ -234,6 +234,20 @@ def _persistent_value(document: dict | None, field: str):
     return document["publishing"].get(name)
 
 
+def resolve_variable(name: str, *, environ: dict[str, str], cwd: Path, config_home: Path, use_local_key: bool) -> str | None:
+    value = _nonempty(environ.get(name))
+    if value is not None:
+        return value
+    paths = [cwd / filename for filename in (".env.pdf2markdown", ".env.local", ".env")]
+    if use_local_key:
+        paths.append(config_home / ".env")
+    for path in paths:
+        value = _nonempty(_read_dotenv(path).get(name))
+        if value is not None:
+            return value
+    return None
+
+
 def resolve(
     document: dict | None,
     *,
@@ -243,6 +257,7 @@ def resolve(
     config_home: Path,
     use_local_key: bool,
 ) -> dict:
+    dotenv_skill = _read_dotenv(cwd / ".env.pdf2markdown")
     dotenv_local = _read_dotenv(cwd / ".env.local")
     dotenv = _read_dotenv(cwd / ".env")
     home_dotenv = _read_dotenv(config_home / ".env") if use_local_key else {}
@@ -258,6 +273,7 @@ def resolve(
         candidates = (
             (cli.get(field), "command_line"),
             (environ.get(environment_name), "process_environment"),
+            (dotenv_skill.get(environment_name), "cwd_dotenv_skill"),
             (dotenv_local.get(environment_name), "cwd_dotenv_local"),
             (dotenv.get(environment_name), "cwd_dotenv"),
             (home_dotenv.get(environment_name), "home_dotenv"),
@@ -412,6 +428,7 @@ def validate_snapshot(value) -> None:
     allowed_sources = {
         "command_line",
         "process_environment",
+        "cwd_dotenv_skill",
         "cwd_dotenv_local",
         "cwd_dotenv",
         "home_dotenv",

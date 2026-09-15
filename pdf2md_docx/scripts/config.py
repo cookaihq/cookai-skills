@@ -64,7 +64,7 @@ def resolve_api_key_candidates(
     environ: dict, cwd: str, use_local_key: bool, config_dir: str
 ) -> "list[KeyCandidate]":
     """Ordered candidates (first = highest priority), value-deduped.
-    Sources: process env -> $cwd/.env.local -> $cwd/.env -> $config_dir/.env (only
+    Sources: process env -> $cwd/.env.pdf2md_docx -> $cwd/.env.local -> $cwd/.env -> $config_dir/.env (only
     when use_local_key). $cwd files are read non-recursively (current dir only).
     Within one source the canonical name wins over the legacy one."""
     candidates: "list[KeyCandidate]" = []
@@ -73,7 +73,7 @@ def resolve_api_key_candidates(
         if env_key:
             candidates.append(KeyCandidate(env_key, "env %s" % name, name))
             break
-    paths = [os.path.join(cwd, fname) for fname in (".env.local", ".env")]
+    paths = [os.path.join(cwd, fname) for fname in (".env.pdf2md_docx", ".env.local", ".env")]
     if use_local_key:
         paths.append(os.path.join(config_dir, ".env"))
     for path in paths:
@@ -111,3 +111,22 @@ def mask_key(key: str) -> str:
     if len(key) <= 8:
         return "****"
     return key[:4] + "****" + key[-4:]
+
+
+def resolve_variable(name: str, environ: dict, cwd: str, use_local_key: bool, config_dir: str) -> str:
+    """Resolve a declared non-secret scalar without changing process environment."""
+    value = (environ.get(name) or "").strip()
+    if value:
+        return value
+    paths = [os.path.join(cwd, filename) for filename in (".env.pdf2md_docx", ".env.local", ".env")]
+    if use_local_key:
+        paths.append(os.path.join(config_dir, ".env"))
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = parse_dotenv(handle.read()).get(name, "")
+        except OSError:
+            continue
+        if value:
+            return value
+    return ""

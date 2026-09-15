@@ -117,6 +117,7 @@ def resolve_api_key(
     config_home: Path,
     use_local_key: bool,
 ) -> Credential:
+    dotenv_skill = _lexical_absolute_path(cwd / ".env.pdf2markdown")
     dotenv_local = _lexical_absolute_path(cwd / ".env.local")
     dotenv = _lexical_absolute_path(cwd / ".env")
     home_dotenv = _lexical_absolute_path(config_home / ".env")
@@ -125,6 +126,11 @@ def resolve_api_key(
             lambda: environ.get(KEY_NAME),
             f"process_environment:{KEY_NAME}",
             {"kind": "process_environment", "name": KEY_NAME},
+        ),
+        (
+            lambda: _read_bounded_dotenv(dotenv_skill).get(KEY_NAME),
+            f"dotenv:{dotenv_skill}:{KEY_NAME}",
+            {"kind": "dotenv", "path": str(dotenv_skill), "name": KEY_NAME},
         ),
         (
             lambda: _read_bounded_dotenv(dotenv_local).get(KEY_NAME),

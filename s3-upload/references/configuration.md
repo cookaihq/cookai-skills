@@ -143,12 +143,15 @@ Target selector 按以下顺序取首个非空值：
 
 1. CLI `--target`
 2. process `S3_UPLOAD_TARGET`
-3. `$PWD/.env.local` 的 `S3_UPLOAD_TARGET`
-4. `$PWD/.env` 的 `S3_UPLOAD_TARGET`
-5. 项目 `skill_targets` 中显式 caller id 的映射
-6. 项目 `default_target`
+3. `$PWD/.env.s3-upload` 的 `S3_UPLOAD_TARGET`
+4. `$PWD/.env.local` 的 `S3_UPLOAD_TARGET`
+5. `$PWD/.env` 的 `S3_UPLOAD_TARGET`
+6. 项目 `skill_targets` 中显式 caller id 的映射
+7. 项目 `default_target`
 
 Caller id 只来自 `--caller-skill` 或 process `S3_UPLOAD_CALLER_SKILL`，不从 dotenv、路径或 Skill 目录名猜测。CLI `--target` 绕过 mapping/default；没有 caller 时才使用 default。
+
+`$PWD/.env.s3-upload` 仅新增为 `S3_UPLOAD_TARGET` 选择器来源；不为 caller identity、全局 selector 或凭证 map 增加来源。该文件沿用项目私密配置文件的 owned regular `0600` 检查。它与其它项目 dotenv 都只读取当前工作目录。
 
 项目 credential map 按 process `S3_UPLOAD_PROJECT_CREDENTIALS_JSON` → `.env.local` 选择整张 map；全局 map 按 process `S3_UPLOAD_GLOBAL_CREDENTIALS_JSON` → 经授权的 home `.env` 选择整张 map。一个 profile 的四个字段绝不跨来源合并。
 

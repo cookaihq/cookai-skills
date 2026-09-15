@@ -4,7 +4,7 @@
 
 The invocation directory, project root, and Skill directory are separate facts:
 
-1. Capture `$PWD` when the process starts. Read only its `.env.local` and `.env`.
+1. Capture `$PWD` when the process starts. Read only its `.env.video-to-markdown`, `.env.local` and `.env`.
 2. Resolve the project root from `--project-root`, otherwise `git rev-parse --show-toplevel`, otherwise `$PWD`.
 3. Resolve the output base from `VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR`, otherwise the project root.
 4. Unless `--output-parent` was supplied, append `video-to-markdown-output/`.

@@ -134,6 +134,7 @@ def _protected_plan_path(path: str, context: PlanningContext) -> bool:
     home = lexical_absolute(context.config_home)
     exact = {
         os.path.join(project, ".env"),
+        os.path.join(project, ".env.s3-upload"),
         os.path.join(project, ".env.local"),
         os.path.join(project, ".s3-upload", "config.json"),
     }

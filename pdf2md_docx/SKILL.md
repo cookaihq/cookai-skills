@@ -1,7 +1,7 @@
 ---
 name: pdf2md_docx
-version: 1.2.0
-description: v1.2.0｜Use when the user wants to convert a PDF into Markdown / LaTeX / DOCX — phrases like "把这个 PDF 转成 markdown"、"PDF 转 md/docx"、"提取 PDF 里的公式和表格"、"PDF 转可编辑文档"、"pdf2md"、"doc2x". Wraps aihubmax.com Doc2X V3; handles formula recognition and cross-page table merging, returns a ZIP that is auto-extracted into a date-time-prefixed folder. Do NOT use for plain text extraction of a single short page (read it directly), image generation, OCR of photos, or non-PDF documents.
+version: 1.3.0
+description: v1.3.0｜Use when the user wants to convert a PDF into Markdown / LaTeX / DOCX — phrases like "把这个 PDF 转成 markdown"、"PDF 转 md/docx"、"提取 PDF 里的公式和表格"、"PDF 转可编辑文档"、"pdf2md"、"doc2x". Wraps aihubmax.com Doc2X V3; handles formula recognition and cross-page table merging, returns a ZIP that is auto-extracted into a date-time-prefixed folder. Do NOT use for plain text extraction of a single short page (read it directly), image generation, OCR of photos, or non-PDF documents.
 ---
 
 # pdf2md_docx
@@ -39,13 +39,16 @@ description: v1.2.0｜Use when the user wants to convert a PDF into Markdown / L
 **读取优先级（从高到低）**，按值去重，逐个尝试：
 
 1. 进程 env `AIHUB_API_KEY`（本轮显式注入 `AIHUB_API_KEY=... uv run --project <skill> ...`）
-2. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，不向上递归）
-3. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，不向上递归）
-4. `~/.config/pdf2md_docx/.env`（**仅 `--use-local-key`** 时读）
+2. `$PWD/.env.pdf2md_docx` 中的 `AIHUB_API_KEY=...`（**自动读取**，不向上递归）
+3. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，不向上递归）
+4. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，不向上递归）
+5. `~/.config/pdf2md_docx/.env`（**仅 `--use-local-key`** 时读）
 
 **401 自动 fallback**：某层 key 调用返回 HTTP 401（`authentication_error`）时自动尝试下一层。401 不消耗积分，安全。其他错误码（402/422/429/5xx）和网络错误**不**触发 fallback（429 走的是同一 key 的限流重试，见下节）。
 
-`.env` / `.env.local` 解析极简、非 shell：支持 `KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首注释、空行；同名取最后一次；**不支持** `${X}` / `$(...)` / 续行符。只识别 `AIHUB_API_KEY`（旧名 `X_API_KEY` 仍兼容）。key 日志一律 `head4****tail4` 掩码。
+`.env.pdf2md_docx` / `.env.local` / `.env` 解析极简、非 shell：支持 `KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首注释、空行；同名取最后一次；**不支持** `${X}` / `$(...)` / 续行符。鉴权只识别 `AIHUB_API_KEY`（旧名 `X_API_KEY` 仍兼容）。key 日志一律 `head4****tail4` 掩码。
+
+`PDF2MD_DOCX_OUTPUT_DIR` 也使用上述配置顺序；显式 `--output-dir` 优先。
 
 首次配置（可选）：`./scripts/set_key.sh`（或 `echo 'sk-xxx' | ./scripts/set_key.sh --stdin`）。
 
@@ -98,7 +101,7 @@ PATH 解析到系统解释器，跑的不是本 skill 钉死的解释器版本�
 从当前目录向上找 `pyproject.toml`，可能静默用上别的环境。写错了也有兜底——
 `scripts/convert.py` 启动时会把进程 exec 回 `<skill>/.venv`，环境缺失按 `uv.lock`
 自动重建（stderr 打一行 `[bootstrap]`），只有 uv 本体缺失或版本低于 0.8 才报错停下。
-注意 `.env` / `.env.local` 仍按**当前工作目录**读取，与 `--project` 无关。
+注意 `.env.pdf2md_docx` / `.env.local` / `.env` 仍按**当前工作目录**读取，与 `--project` 无关。
 
 自动统计本地 PDF 页数需要可选依赖 `pypdf`（默认不装）：
 `uv sync --project <skill> --extra page-count`。不装也能用——按提示传

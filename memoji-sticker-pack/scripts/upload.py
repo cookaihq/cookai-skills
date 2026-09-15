@@ -164,7 +164,7 @@ def main(argv=None) -> int:
     candidates = resolve_api_key_candidates(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
     if not candidates:
         print(
-            "未找到 %s（检查进程 env / $PWD/.env.local / $PWD/.env / --use-local-key）" % KEY_NAME,
+            "未找到 %s（检查进程 env / $PWD/.env.memoji-sticker-pack / $PWD/.env.local / $PWD/.env / --use-local-key）" % KEY_NAME,
             file=sys.stderr,
         )
         return 2

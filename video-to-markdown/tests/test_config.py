@@ -61,3 +61,18 @@ def test_legacy_key_is_supported_and_identified(tmp_path: Path):
     assert result.api_key == "abcdefghij"
     assert result.api_key_name == "X_API_KEY"
     assert config.mask_key(result.api_key) == "abcd****ghij"
+
+
+def test_skill_specific_layer_is_per_field_and_does_not_read_other_skills(tmp_path):
+    dedicated = tmp_path / ".env.video-to-markdown"
+    dedicated.write_text("AIHUB_API_KEY=skill-key\nVIDEO_TO_MARKDOWN_ASR_MODEL=''\n")
+    (tmp_path / ".env.local").write_text("AIHUB_API_KEY=local-key\nVIDEO_TO_MARKDOWN_ASR_MODEL=scribe-v2\n")
+    (tmp_path / ".env.other-skill").write_text("VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR=wrong\n")
+    result = config.resolve({}, tmp_path)
+    assert result.api_key == "skill-key"
+    assert result.sources["api_key"] == str(dedicated)
+    assert result.asr_model == "scribe-v2"
+    assert result.output_base is None
+    assert config.resolve({"AIHUB_API_KEY": "process-key"}, tmp_path).api_key == "process-key"
+    dedicated.write_text("AIHUB_API_KEY=''\n")
+    assert config.resolve({}, tmp_path).api_key == "local-key"

@@ -35,6 +35,7 @@ class HandoffTarget:
 def _protected(path: str, *, project_root: str, config_home: str, state_root: str) -> bool:
     exact = {
         os.path.join(project_root, ".env"),
+        os.path.join(project_root, ".env.s3-upload"),
         os.path.join(project_root, ".env.local"),
     }
     trees = (

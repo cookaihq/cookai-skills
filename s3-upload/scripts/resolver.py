@@ -97,6 +97,10 @@ def _select(*, cwd: str, environ: Dict[str, str], cli_target: Optional[str],
         return parse_reference(cli_target, "Target reference"), "cli"
     if environ.get("S3_UPLOAD_TARGET"):
         return parse_reference(environ["S3_UPLOAD_TARGET"], "Target reference"), "process"
+    skill_text = _read(os.path.join(cwd, ".env.s3-upload"), secret=True)
+    skill_values = _dotenv(skill_text, ".env.s3-upload", {"S3_UPLOAD_TARGET"})
+    if skill_values.get("S3_UPLOAD_TARGET"):
+        return parse_reference(skill_values["S3_UPLOAD_TARGET"], "Target reference"), "project-env-skill"
     env_local_text = _read(os.path.join(cwd, ".env.local"), secret=True)
     env_text = _read(os.path.join(cwd, ".env"), secret=False)
     env_local = _dotenv(env_local_text, ".env.local", {"S3_UPLOAD_TARGET"})

@@ -132,3 +132,25 @@ def test_guide_init_project_refuses_unignored_secret_in_git(tmp_path):
                     "--scope", "project", "--source", "sakura")
     assert r2.returncode == 0, r2.stderr
     assert "FRPC_LAUNCH_SAKURA_KEY=k_abcdefgh1234" in (cwd / ".env.local").read_text()
+
+
+def test_guide_init_reads_skill_layer_and_preserves_source_file(tmp_path):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    dedicated = project / ".env.frpc-launch"
+    original = "FRPC_LAUNCH_INIT_TOKEN=skill-token-012345\nFRPC_LAUNCH_SAKURA_KEY=skill-key-012345\nFRPC_LAUNCH_SAKURA_TUNNELS=''\n"
+    dedicated.write_text(original)
+    (project / ".env.local").write_text("FRPC_LAUNCH_INIT_TOKEN=local-token-012345\nFRPC_LAUNCH_SAKURA_KEY=local-key-012345\nFRPC_LAUNCH_SAKURA_TUNNELS=7,8\n")
+    official = _run_guide(home, project, {}, "--scope", "project", "--source", "frps", "--server-addr", "example.com", "--server-port", "7000")
+    assert official.returncode == 0, official.stderr
+    assert 'auth.token = "skill-token-012345"' in (project / "frpc.toml").read_text()
+    assert "skill-token-012345" not in official.stdout
+    sakura = _run_guide(home, project, {}, "--scope", "project", "--source", "sakura")
+    assert sakura.returncode == 0, sakura.stderr
+    assert "FRPC_LAUNCH_SAKURA_KEY=skill-key-012345" in (project / ".env.local").read_text()
+    assert "FRPC_LAUNCH_SAKURA_TUNNELS=7,8" in (project / ".env.local").read_text()
+    assert dedicated.read_text() == original
+    override = _run_guide(home, project, {"FRPC_LAUNCH_INIT_TOKEN": "process-token-012345"}, "--scope", "project", "--source", "frps", "--server-addr", "example.com", "--server-port", "7000")
+    assert override.returncode == 0, override.stderr
+    assert 'auth.token = "process-token-012345"' in (project / "frpc.toml").read_text()

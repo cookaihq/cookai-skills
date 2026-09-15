@@ -478,7 +478,7 @@ def run_asr(
     if api_key is None:
         raise AIHubError(
             "AIHUB_API_KEY is required when no subtitle is supplied "
-            "(process env, $PWD/.env.local, $PWD/.env, or --use-local-key)"
+            "(process env, $PWD/.env.video-to-markdown, $PWD/.env.local, $PWD/.env, or --use-local-key)"
         )
     model = manifest["asr"]["model"]
     if model in {"paraformer-v2", "paraformer-8k-v2"}:

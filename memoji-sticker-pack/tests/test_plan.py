@@ -152,3 +152,20 @@ exit 0
 
     assert result.returncode == 0, result.stderr
     assert (outdir / "base.png").read_bytes() == b"fake-image"
+
+
+def test_plan_upload_endpoint_uses_own_skill_layer(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIHUBMAX_BASE_URL", raising=False)
+    monkeypatch.delenv("FOXAPI_BASE_URL", raising=False)
+    dedicated = tmp_path / ".env.memoji-sticker-pack"
+    dedicated.write_text("AIHUBMAX_BASE_URL='https://skill.example'\n")
+    (tmp_path / ".env.local").write_text("AIHUBMAX_BASE_URL=https://shared.example\n")
+    (tmp_path / ".env.image-2").write_text("AIHUBMAX_BASE_URL=https://other.example\n")
+    assert "上传目标 host: https://skill.example" in run_plan(tmp_path, "--image", "person.jpg").stdout
+    monkeypatch.setenv("AIHUBMAX_BASE_URL", "https://process.example")
+    assert "上传目标 host: https://process.example" in run_plan(tmp_path, "--image", "person.jpg").stdout
+    monkeypatch.delenv("AIHUBMAX_BASE_URL")
+    dedicated.write_text("AIHUBMAX_BASE_URL=''\n")
+    assert "上传目标 host: https://shared.example" in run_plan(tmp_path, "--image", "person.jpg").stdout
+    (tmp_path / ".env.local").unlink()
+    assert "上传目标 host: https://api.aihubmax.com" in run_plan(tmp_path, "--image", "person.jpg").stdout

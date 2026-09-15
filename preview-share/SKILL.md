@@ -1,7 +1,7 @@
 ---
 name: preview-share
-version: 1.2.0
-description: v1.2.0｜Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
+version: 1.3.0
+description: v1.3.0｜Use when the user wants to put a local HTML page (or any local file) online for preview and get a shareable URL — phrases like "在线预览"、"传到预览服务器"、"生成预览链接"、"preview.html 打不开/想发出去看"、"把这个页面发上去看效果"、"上传到 FTP 看预览". The skill auto-detects the entry file's associated assets (images/CSS/JS referenced by relative paths) and uploads them together so the online page renders correctly. Do NOT use for production deploys, npm publish, git push, or uploading to non-preview destinations.
 ---
 
 # preview-share
@@ -44,11 +44,12 @@ description: v1.2.0｜Use when the user wants to put a local HTML page (or any l
 读取 `PREVIEW_SHARE_FTP`、`PREVIEW_SHARE_BASEURL`，每个变量独立按以下顺序取「首个非空来源」（详见仓库 `CLAUDE.md` 通用约定）：
 
 1. 进程环境变量（本轮显式注入 `PREVIEW_SHARE_FTP=... uv run --project <skill> ...` 或已 `export`）
-2. `$PWD/.env.local`（自动读，**不向上递归**）
-3. `$PWD/.env`（自动读，**不向上递归**）
-4. `~/.config/preview-share/.env`（**仅 `--use-local-key` 时读**，避免静默使用持久化凭证）
+2. `$PWD/.env.preview-share`（自动读，**不向上递归**）
+3. `$PWD/.env.local`（自动读，**不向上递归**）
+4. `$PWD/.env`（自动读，**不向上递归**）
+5. `~/.config/preview-share/.env`（**仅 `--use-local-key` 时读**，避免静默使用持久化凭证）
 
-`.env` / `.env.local` 解析规则（极简，非 shell）：支持 `KEY=value` / `KEY="value"` / `KEY='value'`、`#` 注释行、空行；同名取最后一次；**不支持** shell 展开 / 命令替换 / 续行。
+`.env.preview-share` / `.env.local` / `.env` 解析规则（极简，非 shell）：支持 `KEY=value` / `KEY="value"` / `KEY='value'`、`#` 注释行、空行；同名取最后一次；**不支持** shell 展开 / 命令替换 / 续行。
 
 ## Label（标签）建议
 
@@ -111,7 +112,7 @@ PATH 解析到系统解释器，跑的不是本 skill 钉死的解释器版本�
 `uv.lock` 自动重建（stderr 打一行 `[bootstrap]`）；只有 uv 本体缺失或版本低于
 0.8 才报错停下，此时按报错给出的命令安装 uv 后重试。
 
-注意：配置读取的 `$PWD/.env.local` / `$PWD/.env` 按**当前工作目录**解析，与
+注意：配置读取的 `$PWD/.env.preview-share` / `$PWD/.env.local` / `$PWD/.env` 按**当前工作目录**解析，与
 `--project` 指向的 skill 目录无关。
 
 ```bash

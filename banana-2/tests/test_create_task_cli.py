@@ -117,12 +117,13 @@ class Harness:
         if exit_code is not None:
             (directory / "exit").write_text(str(exit_code))
 
-    def run(self, *args, timeout=120) -> subprocess.CompletedProcess:
+    def run(self, *args, timeout=120, env_updates=None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin_dir}{os.pathsep}{env['PATH']}"
         env["FAKE_HTTP_DIR"] = str(self.state_dir)
         env["AIHUB_API_KEY"] = "sk-fake-test-key-0123456789"
         env["HOME"] = str(self.home)
+        env.update(env_updates or {})
         return subprocess.run(
             ["bash", str(SCRIPT), *args],
             cwd=self.tmp_path,
@@ -289,3 +290,25 @@ def test_deterministic_poll_error_with_empty_body_reports_the_status_code(harnes
     assert "HTTP 403" in result.stderr, result.stderr
     assert "task-403" in result.stderr, "确定性失败也要把 task_id 交回用户"
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("process_key, dedicated_key, expected_source", [
+    ("process-key", "skill-key", "env AIHUB_API_KEY"),
+    ("", "skill-key", ".env.banana-2"),
+    ("", "", ".env.local"),
+])
+def test_skill_file_layer_and_nonsecret_options(harness, process_key, dedicated_key, expected_source):
+    (harness.tmp_path / ".env.banana-2").write_text(
+        f"AIHUB_API_KEY='{dedicated_key}'\nAIHUBMAX_BASE_URL=https://skill.example\nBANANA_2_OUTPUT_DIR=skill-output\n"
+    )
+    (harness.tmp_path / ".env.local").write_text("AIHUB_API_KEY=local-key\nAIHUBMAX_BASE_URL=https://local.example\nBANANA_2_OUTPUT_DIR=local-output\n")
+    (harness.tmp_path / ".env.image-2").write_text("AIHUB_API_KEY=wrong-skill\n")
+    harness.scripted(1, body='{"id":"config-layer-test"}')
+    harness.scripted(2, body='{"status":"failed"}')
+    result = harness.run("--prompt", "config test", "--poll-interval", "1", "--max-attempts", "1",
+                         env_updates={"AIHUB_API_KEY": process_key, "X_API_KEY": "", "AIHUBMAX_BASE_URL": "", "BANANA_2_OUTPUT_DIR": ""})
+    assert result.returncode == 2, result.stdout + result.stderr
+    used_source = next(line for line in result.stdout.splitlines() if "[auth] Using key from:" in line)
+    assert expected_source in used_source
+    assert "https://skill.example/v1/images/generations" in result.stdout
+    assert "- save: skill-output/" in result.stdout

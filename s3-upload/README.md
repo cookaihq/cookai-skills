@@ -2,7 +2,7 @@
 
 把一个本地文件持久写入用户自己的 AWS SigV4-compatible object store，并返回严格 JSON Object Reference 与 public/presigned current-key URL。零第三方依赖，纯 Python 标准库实现。
 
-运行时由 uv 管理（工作区 ADR 0007）：`pyproject.toml` 声明 `requires-python >= 3.9`，环境落 `<skill>/.venv`。所有命令写 `uv run --project <skill> <skill>/scripts/upload.py ...`（下文 `<skill>` = 本目录路径），**不要裸 `python3`**。忘了写也有兜底：三个入口（`upload.py`，以及 maintainer/test surface 的 `setup.py`、`run_oss_live_matrix.py`——普通使用只需要 `upload.py`）启动时把进程 exec 回该 venv，缺失则按 `uv.lock` 自动重建，只有 uv 本体缺失（需 >= 0.8）才报错停下。项目配置 `.s3-upload/` 与 `.env.local` 仍按**当前工作目录**读取，与 `--project` 无关。
+运行时由 uv 管理（工作区 ADR 0007）：`pyproject.toml` 声明 `requires-python >= 3.9`，环境落 `<skill>/.venv`。所有命令写 `uv run --project <skill> <skill>/scripts/upload.py ...`（下文 `<skill>` = 本目录路径），**不要裸 `python3`**。忘了写也有兜底：三个入口（`upload.py`，以及 maintainer/test surface 的 `setup.py`、`run_oss_live_matrix.py`——普通使用只需要 `upload.py`）启动时把进程 exec 回该 venv，缺失则按 `uv.lock` 自动重建，只有 uv 本体缺失（需 >= 0.8）才报错停下。项目配置 `.s3-upload/`、`.env.s3-upload` 与 `.env.local` 仍按**当前工作目录**读取，与 `--project` 无关。
 
 ## Normal 支持范围
 

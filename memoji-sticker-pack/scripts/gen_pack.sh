@@ -47,12 +47,31 @@ STAGGER=0.6            # 并行提交每张之间的间隔秒，避免 429 限�
 PER_CALL_POLL=6        # 传给 create_task.sh 的轮询间隔
 PER_CALL_MAXATT=75     # 传给 create_task.sh 的最大轮询次数（6s×75≈450s 单张上限）
 
-# aihubmax 网关 base URL：上传接口与生成接口共用同一 host（可用 AIHUBMAX_BASE_URL
-# 覆盖，与 create_task.sh 同一约定；已废弃的 FOXAPI_BASE_URL 仍作兜底）。
-AIHUBMAX_BASE="${AIHUBMAX_BASE_URL:-${FOXAPI_BASE_URL:-https://api.aihubmax.com}}"
-if [[ -z "${AIHUBMAX_BASE_URL:-}" && -n "${FOXAPI_BASE_URL:-}" ]]; then
-  echo "⚠️ FOXAPI_BASE_URL 已废弃，请改用 AIHUBMAX_BASE_URL（本次仍按 FOXAPI_BASE_URL 读取）" >&2
-fi
+# 上传接口的 endpoint 按本 Skill 的配置层解析；生成接口由 image-2 自己解析。
+resolve_upload_base() {
+  local value="${AIHUBMAX_BASE_URL:-${FOXAPI_BASE_URL:-}}"
+  if [[ -n "${value}" ]]; then
+    if [[ -z "${AIHUBMAX_BASE_URL:-}" && -n "${FOXAPI_BASE_URL:-}" ]]; then
+      echo "⚠️ FOXAPI_BASE_URL 已废弃，请改用 AIHUBMAX_BASE_URL（本次仍按 FOXAPI_BASE_URL 读取）" >&2
+    fi
+    printf '%s' "${value}"
+    return 0
+  fi
+  local files=("${PWD}/.env.memoji-sticker-pack" "${PWD}/.env.local" "${PWD}/.env")
+  [[ ${USE_LOCAL_KEY} -eq 1 ]] && files+=("${HOME}/.config/memoji-sticker-pack/.env")
+  local file name
+  for file in "${files[@]}"; do
+    [[ -f "${file}" ]] || continue
+    for name in AIHUBMAX_BASE_URL FOXAPI_BASE_URL; do
+      value="$( { grep -E "^[[:space:]]*${name}[[:space:]]*=" "${file}" || true; } | tail -n 1 | sed -E "s/^[[:space:]]*${name}[[:space:]]*=[[:space:]]*//; s/^\"(.*)\"[[:space:]]*$/\\1/; s/^'(.*)'[[:space:]]*$/\\1/; s/[[:space:]]+$//")"
+      if [[ -n "${value}" ]]; then
+        printf '%s' "${value}"
+        return 0
+      fi
+    done
+  done
+  printf '%s' 'https://api.aihubmax.com'
+}
 
 # 输入预处理尺寸
 PHOTO_MAXPX=768        # 原始照片缩放上限
@@ -130,6 +149,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "未知参数: $1" >&2; usage; exit 1 ;;
   esac
 done
+
+AIHUBMAX_BASE="$(resolve_upload_base)"
 
 # ---------------- 校验 ----------------
 [[ -z "$IMAGE" && -z "$BASE_URL_REUSE" ]] && {

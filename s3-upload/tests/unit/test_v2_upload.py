@@ -783,3 +783,24 @@ def test_reconcile_complete_retries_only_snapshotted_reference_output(
     assert reference_out.read_bytes() == serialize_object_reference(recovered["object_reference"])
     assert attempts == [str(reference_out)]
     assert list((tmp_path / ".s3-upload" / "checkpoints").glob("*.json")) == []
+
+
+def test_skill_selector_layer_retains_credential_scope_and_authorization(tmp_path):
+    import resolver
+    configure(tmp_path)
+    dedicated = tmp_path / ".env.s3-upload"
+    dedicated.write_text("S3_UPLOAD_TARGET=project:images\n")
+    dedicated.chmod(0o600)
+    (tmp_path / ".env").write_text("S3_UPLOAD_TARGET=project:missing\n")
+    (tmp_path / ".env.other-skill").write_text("S3_UPLOAD_TARGET=project:wrong\n")
+    kwargs = dict(cwd=str(tmp_path), config_home=str(tmp_path / "home"), environ={}, cli_target=None, cli_caller=None, use_local_key=False, now=NOW)
+    selected = resolve_target(**kwargs)
+    assert selected.source == "project-env-skill"
+    assert selected.credential_source == "project-env-local"
+    assert resolve_target(**dict(kwargs, environ={"S3_UPLOAD_TARGET": "project:images"})).source == "process"
+    dedicated.write_text("S3_UPLOAD_TARGET=''\n")
+    (tmp_path / ".env").write_text("S3_UPLOAD_TARGET=project:images\n")
+    assert resolve_target(**kwargs).source == "project-env"
+    dedicated.write_text("S3_UPLOAD_TARGET=global:images\n")
+    with pytest.raises(resolver.ResolutionError, match="requires --use-local-key"):
+        resolve_target(**kwargs)

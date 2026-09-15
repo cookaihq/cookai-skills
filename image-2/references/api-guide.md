@@ -13,9 +13,10 @@ Provider docs:
 - Header: `Authorization: Bearer <YOUR_API_KEY>` (required)
 - The local skill resolves the key via the following chain (high → low) and forwards it as a Bearer token:
   1. env `AIHUB_API_KEY`
-  2. `$PWD/.env.local` (auto)
-  3. `$PWD/.env` (auto)
-  4. `~/.config/image-2/.env` (only with `--use-local-key`)
+  2. `$PWD/.env.image-2` (auto)
+  3. `$PWD/.env.local` (auto)
+  4. `$PWD/.env` (auto)
+  5. `~/.config/image-2/.env` (only with `--use-local-key`)
 - On HTTP 401, the skill automatically falls back to the next key in the chain. Other status codes do not trigger fallback. See SKILL.md "Auth & Key Handling" for details.
 
 ## Create Task

@@ -74,7 +74,7 @@ def resolve_api_key_candidates(
     environ: dict, cwd: str, use_local_key: bool, config_dir: str
 ) -> "list[KeyCandidate]":
     """Ordered candidates (first = highest priority), value-deduped.
-    Sources: process env -> $cwd/.env.local -> $cwd/.env -> $config_dir/.env (only
+    Sources: process env -> $cwd/.env.memoji-sticker-pack -> $cwd/.env.local -> $cwd/.env -> $config_dir/.env (only
     when use_local_key). $cwd files are read non-recursively (current dir only).
     Within one source the canonical name wins over the legacy one."""
     candidates: "list[KeyCandidate]" = []
@@ -83,7 +83,7 @@ def resolve_api_key_candidates(
         if env_key:
             candidates.append(KeyCandidate(env_key, "env %s" % name, name))
             break
-    paths = [os.path.join(cwd, fname) for fname in (".env.local", ".env")]
+    paths = [os.path.join(cwd, fname) for fname in (".env.memoji-sticker-pack", ".env.local", ".env")]
     if use_local_key:
         paths.append(os.path.join(config_dir, ".env"))
     for path in paths:

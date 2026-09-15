@@ -1,7 +1,7 @@
 ---
 name: frpc-launch
-version: 1.2.0
-description: v1.2.0｜Use when the user wants to 本地启动 frpc / 做内网穿透 / 打通 frp 隧道 / 把本地端口暴露到公网 / 连接自部署 FRPS 或宝塔面板的 frps / 使用樱花FRP（natfrp）隧道 —— phrases like "启动 frpc"、"起个内网穿透"、"frp 隧道连一下"、"把本地 8080 暴露出去"、"frps 连不上帮我看看"、"用樱花FRP 启动隧道"。检测不到配置时先引导用户配置（作用域选择 + 三来源帮助），frpc 二进制自动下载，后台常驻并提供 status/stop/logs。Do NOT use for 部署/管理 frps 服务端、注册系统服务（launchd/systemd 开机自启）、Windows 平台（v1 未实现）。
+version: 1.3.0
+description: v1.3.0｜Use when the user wants to 本地启动 frpc / 做内网穿透 / 打通 frp 隧道 / 把本地端口暴露到公网 / 连接自部署 FRPS 或宝塔面板的 frps / 使用樱花FRP（natfrp）隧道 —— phrases like "启动 frpc"、"起个内网穿透"、"frp 隧道连一下"、"把本地 8080 暴露出去"、"frps 连不上帮我看看"、"用樱花FRP 启动隧道"。检测不到配置时先引导用户配置（作用域选择 + 三来源帮助），frpc 二进制自动下载，后台常驻并提供 status/stop/logs。Do NOT use for 部署/管理 frps 服务端、注册系统服务（launchd/systemd 开机自启）、Windows 平台（v1 未实现）。
 ---
 
 # frpc-launch
@@ -24,7 +24,7 @@ bin/{macos,linux,windows}/   # 受管二进制按 OS 分层（windows 预留）�
 run/                 # {official,sakura}.pid / .log
 ```
 
-**配置分层**（每变量独立取首个非空来源）：进程环境变量 → `$PWD/.env.local` → `$PWD/.env` → 全局受管目录。`FRPC_LAUNCH_CONFIG` 可指向项目级 frpc.toml；`FRPC_LAUNCH_MODE=official|sakura` 显式指定模式。**使用全局配置启动时必须向用户报告「使用了全局配置」及具体来源**（脚本输出已含 `config_source`，转述给用户）。
+**配置分层**（每变量独立取首个非空来源）：进程环境变量 → `$PWD/.env.frpc-launch` → `$PWD/.env.local` → `$PWD/.env` → 全局受管目录。`guide-init` 的 `FRPC_LAUNCH_INIT_TOKEN`、`FRPC_LAUNCH_SAKURA_KEY` 与 `FRPC_LAUNCH_SAKURA_TUNNELS` 也按相同顺序读取，写入仍由显式 `--scope` 决定。`FRPC_LAUNCH_CONFIG` 可指向项目级 frpc.toml；`FRPC_LAUNCH_MODE=official|sakura` 显式指定模式。**使用全局配置启动时必须向用户报告「使用了全局配置」及具体来源**（脚本输出已含 `config_source`，转述给用户）。
 
 ## 第 0 步：检查更新（每次运行都做）
 

@@ -669,7 +669,14 @@ def _start(
     )
     settings_snapshot = settings_module.snapshot(resolved_status, cwd=cwd)
     publication_state = bundle_module.publication_state(settings_snapshot)
-    output_value = args.output_dir or environ.get("PDF2MARKDOWN_OUTPUT_DIR") or "pdf2markdown-output"
+    output_value = (
+        args.output_dir
+        or settings_module.resolve_variable(
+            "PDF2MARKDOWN_OUTPUT_DIR", environ=environ, cwd=cwd,
+            config_home=config_home, use_local_key=bool(args.use_local_key),
+        )
+        or "pdf2markdown-output"
+    )
     output_root = _absolute(output_value, cwd)
     output_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     output_root = output_root.resolve(strict=True)

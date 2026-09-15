@@ -1,7 +1,7 @@
 ---
 name: video-to-markdown
-version: 1.0.0
-description: v1.0.0｜Turn one local or directly downloadable video into a source-faithful GitHub Flavored Markdown document with timestamped transcript evidence, keyframe screenshots, short GIFs for motion-dependent information, adaptive visual resampling, and a resumable coverage review. Use for 视频转文档、带截图的视频笔记、video to Markdown, or preserving spoken and visual content together. Do not use for pure ASR, one-off video Q&A, downloading/editing/compressing video, video generation, or automatic publishing.
+version: 1.1.0
+description: v1.1.0｜Turn one local or directly downloadable video into a source-faithful GitHub Flavored Markdown document with timestamped transcript evidence, keyframe screenshots, short GIFs for motion-dependent information, adaptive visual resampling, and a resumable coverage review. Use for 视频转文档、带截图的视频笔记、video to Markdown, or preserving spoken and visual content together. Do not use for pure ASR, one-off video Q&A, downloading/editing/compressing video, video generation, or automatic publishing.
 compatibility: Requires Python managed by uv >= 0.8, ffmpeg, ffprobe, and a host Agent that can inspect images. AIHub ASR requires network access and AIHUB_API_KEY when no subtitle is supplied. Supports Codex and Claude Code.
 ---
 
@@ -38,7 +38,7 @@ Useful options:
 - `--use-local-key` authorizes this run to read `~/.config/video-to-markdown/.env`.
 - `--language <code>` records the requested source language hint. Translation is not implied.
 
-Configuration is resolved per variable from the process environment, then `$PWD/.env.local`, then `$PWD/.env`, then the authorized home file. Never search parent directories. `VIDEO_TO_MARKDOWN_ASR_MODEL` defaults to `paraformer-v2`; unknown models fail before any paid request.
+Configuration is resolved per variable from the process environment, then `$PWD/.env.video-to-markdown`, then `$PWD/.env.local`, then `$PWD/.env`, then the authorized home file. Never search parent directories. `VIDEO_TO_MARKDOWN_ASR_MODEL` defaults to `paraformer-v2`; unknown models fail before any paid request.
 
 To continue an existing task:
 

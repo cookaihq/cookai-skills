@@ -1,7 +1,7 @@
 ---
 name: memoji-sticker-pack
-version: 1.2.0
-description: v1.2.0｜从一张人物照片生成一套 Apple Memoji 风格（拟我表情）的表情贴纸包。当用户想"把这张照片/自拍做成 Memoji 表情包 / 拟我表情包 / 表情贴纸 / nimoji / Q 版头像表情"，或给一张人脸照片并想要一组不同表情（微笑/大笑/哭/惊讶/比心/点赞等）的卡通贴纸时，使用本技能——即使用户没明确说"Memoji"这个词，只要意图是"照片→一套人物表情贴纸"，也应触发。也支持只生成单张 Memoji 风格头像。不用于：视频/动态表情、OCR、给已有图做裁剪压缩水印等非生成式编辑。
+version: 1.3.0
+description: v1.3.0｜从一张人物照片生成一套 Apple Memoji 风格（拟我表情）的表情贴纸包。当用户想"把这张照片/自拍做成 Memoji 表情包 / 拟我表情包 / 表情贴纸 / nimoji / Q 版头像表情"，或给一张人脸照片并想要一组不同表情（微笑/大笑/哭/惊讶/比心/点赞等）的卡通贴纸时，使用本技能——即使用户没明确说"Memoji"这个词，只要意图是"照片→一套人物表情贴纸"，也应触发。也支持只生成单张 Memoji 风格头像。不用于：视频/动态表情、OCR、给已有图做裁剪压缩水印等非生成式编辑。
 ---
 
 # memoji-sticker-pack
@@ -10,7 +10,7 @@ description: v1.2.0｜从一张人物照片生成一套 Apple Memoji 风格（�
 
 输入**一张人物照片**，产出一套 **Apple Memoji 风格**的表情贴纸包：先把照片转成一张「基准 Memoji」头像锁定长相，再以它为参考逐个生成多个表情（默认 16 个），最后给出透明底 PNG + 可浏览的 `index.html` 画廊。
 
-本技能用 **image-2 (gpt-image-2)** 的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），并用自身 `scripts/upload.py` 把参考图上传到 aihubmax 文件接口换成 72h 公网 URL。**参考图统一走「上传取 URL」，不再内联 base64 data URI**：传给生成接口的 `image_urls` 全是 aihubmax CDN 链接。生成与上传共用同一把 `AIHUB_API_KEY`、同一 host（`api.aihubmax.com`，可用 `AIHUBMAX_BASE_URL` 覆盖）。
+本技能用 **image-2 (gpt-image-2)** 的 `create_task.sh` 生成图（复用它的 key 链、轮询、下载、401 兜底），并用自身 `scripts/upload.py` 把参考图上传到 aihubmax 文件接口换成 72h 公网 URL。**参考图统一走「上传取 URL」，不再内联 base64 data URI**：传给生成接口的 `image_urls` 全是 aihubmax CDN 链接。生成与上传都接受 `AIHUB_API_KEY` 和 `AIHUBMAX_BASE_URL`；各步骤读取执行该步骤的 Skill 专属文件，共享项目层可为两者提供相同配置。默认 host 为 `api.aihubmax.com`。
 
 ## 何时使用
 
@@ -29,7 +29,8 @@ description: v1.2.0｜从一张人物照片生成一套 Apple Memoji 风格（�
 
 - 需要生成图片时，已安装 **image-2** 技能（`~/.claude/skills/image-2*/scripts/create_task.sh`）。
 - 上传实现已内置在 `scripts/upload.py`，无需安装额外上传 Skill。只有 `--base-url ... --mode single` 完全不需要 image-2。
-- 配好 **aihubmax.com 的 key**（生成与上传共用，环境变量 `AIHUB_API_KEY`，或工作目录下 `.env` / `.env.local`；旧名 `X_API_KEY` 仍兼容）。
+- 配好 **aihubmax.com 的 key**（生成与上传共用，环境变量 `AIHUB_API_KEY`，或工作目录下 `.env.memoji-sticker-pack` / `.env.local` / `.env`；旧名 `X_API_KEY` 仍兼容）。
+  - 生成步骤由 `image-2` 读取 `.env.image-2`，本 Skill 上传器读取 `.env.memoji-sticker-pack`；各自优先于 `.env.local`，不会互读对方的专属文件。
   - ⚠️ 用 `--use-local-key` 时，image-2 读 `~/.config/image-2/.env`，本技能内置上传器读 `~/.config/memoji-sticker-pack/.env`（本仓约定每个 skill 各自持久化配置）。若只在其中一个配了 key，另一步会因缺 key 失败——**最省事是把 key 放进程 env 或 `$PWD/.env`，两步都能读到**。
 - macOS 自带 `sips`（用于缩图；缺失时回退 `ffmpeg`）。
 - **[uv](https://docs.astral.sh/uv/) >= 0.8**：本技能的 Python 运行时（`cutout.py` 用 numpy + Pillow）由 uv 按 `pyproject.toml` + `uv.lock` 钉死，venv 落 `$SKILL_DIR/.venv`，首次运行自动创建（ADR 0007）。`gen_pack.sh` 内部所有 Python 调用都走 `uv run --project "$SKILL_DIR" python`，**不要改回裸 `python3`**；单独跑某个 `.py` 时也用 `uv run --project "$SKILL_DIR" "$SKILL_DIR/scripts/<脚本>.py"`。环境损坏时手工重建：`rm -rf "$SKILL_DIR/.venv" && uv sync --project "$SKILL_DIR"`。

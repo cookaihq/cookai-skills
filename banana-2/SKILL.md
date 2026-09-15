@@ -1,7 +1,7 @@
 ---
 name: banana-2
-version: 1.2.0
-description: v1.2.0｜Use when the user asks to generate or edit an image with Nano Banana 2 / Banana 2 / nano banana / 香蕉 / gemini flash image / gemini-3.1-flash-image-preview, or when they size an image by ASPECT RATIO (16:9, 9:16, 21:9, match_input_image) or by QUALITY TIER (512 / 0.5K / 1K / 2K / 4K), or want web-grounded ("联网搜索") / image-search-assisted generation. For generic "生成图片" with pixel resolutions like 1024x1024 use the image-2 skill instead. Do NOT use for video generation, OCR, or non-generative editing (crop, compress, watermark).
+version: 1.3.0
+description: v1.3.0｜Use when the user asks to generate or edit an image with Nano Banana 2 / Banana 2 / nano banana / 香蕉 / gemini flash image / gemini-3.1-flash-image-preview, or when they size an image by ASPECT RATIO (16:9, 9:16, 21:9, match_input_image) or by QUALITY TIER (512 / 0.5K / 1K / 2K / 4K), or want web-grounded ("联网搜索") / image-search-assisted generation. For generic "生成图片" with pixel resolutions like 1024x1024 use the image-2 skill instead. Do NOT use for video generation, OCR, or non-generative editing (crop, compress, watermark).
 ---
 
 # banana-2
@@ -46,9 +46,10 @@ description: v1.2.0｜Use when the user asks to generate or edit an image with N
 
 1. 本轮对话显式提供的 key（通过 `AIHUB_API_KEY=...` 注入给脚本）
 2. 环境变量 `AIHUB_API_KEY`
-3. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
-4. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
-5. `~/.config/banana-2/.env`（仅 `--use-local-key` 时读）
+3. `$PWD/.env.banana-2` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+4. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+5. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+6. `~/.config/banana-2/.env`（仅 `--use-local-key` 时读）
 
 环境变量名 `AIHUB_API_KEY` 与 image-2 一致（都是 aihubmax.com 的 key，可共用同一个）；值通过 `Authorization: Bearer <key>` 提交给 aihubmax.com。
 
@@ -87,12 +88,14 @@ export AIHUB_API_KEY='sk-xxx'
 AIHUB_API_KEY=sk-xxx
 ```
 
-`.env` / `.env.local` 解析规则（极简，不等同于 shell）：
+`.env.banana-2` / `.env.local` / `.env` 解析规则（极简，不等同于 shell）：
 
 - 支持：`KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首的注释行、空行
 - 文件中 `AIHUB_API_KEY` 出现多次时取**最后一次**
 - **不支持** shell 展开（`${OTHER}` / `$OTHER`）、命令替换（`$(...)` / 反引号）、续行符 `\` ——这些都会被当作字面字符串
-- 只识别变量名 `AIHUB_API_KEY`，不识别 `OPENAI_API_KEY` / `AIHUBMAX_API_KEY` 等其他命名（旧名 `X_API_KEY` 仍兼容）
+- 鉴权只识别变量名 `AIHUB_API_KEY`，不识别 `OPENAI_API_KEY` / `AIHUBMAX_API_KEY` 等其他命名（旧名 `X_API_KEY` 仍兼容）
+
+`BANANA_2_OUTPUT_DIR` 与 `AIHUBMAX_BASE_URL` 也按同一顺序读取；对应命令行参数优先于这些配置层。
 
 ## Required & Optional Parameters
 

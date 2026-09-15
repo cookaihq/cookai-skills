@@ -15,7 +15,7 @@
   - `resolution`（画质档，非像素）：`512` / `0.5K`（half-size）、`1K`（~1MP）、`2K`（~4MP）、`4K`（~16MP）
 - **联网/图搜辅助**：`--google-search`（实时信息）、`--image-search`（图像搜索，本模型独有）
 - **自动下载到工作区**：任务终态 `completed` 后自动 `curl` 下载，命名 `{YYYYMMDD-HHMMSS}-{≤10 字标签}.{ext}`
-- **API Key 多层兜底**：环境变量 → `.env.local` → `.env` → 用户级配置文件，HTTP 401 自动 fallback 到下一层
+- **API Key 多层兜底**：环境变量 → `.env.banana-2` → `.env.local` → `.env` → 用户级配置文件，HTTP 401 自动 fallback 到下一层
 
 > 与本仓库的 `image-2`（`gpt-image-2`，像素分辨率 + 多图 + quality/mask）相比，Banana 2 是单模型、恒 1 张输出、用宽高比 + 画质档描述尺寸，并多了 `google_search` / `image_search`。泛化的"生成图片"且用像素分辨率（如 `1024x1024`）请用 `image-2`。
 
@@ -85,9 +85,10 @@ Agent 自动识别意图 → 调用脚本 → 轮询任务 → 下载到 `./2026
 | 优先级 | 来源 | 触发方式 |
 |---|---|---|
 | 1 | shell 环境变量 `AIHUB_API_KEY` | 已 `export` |
-| 2 | `$PWD/.env.local` 中的 `AIHUB_API_KEY=...` | 自动 |
-| 3 | `$PWD/.env` 中的 `AIHUB_API_KEY=...` | 自动 |
-| 4 | `~/.config/banana-2/.env` | 加 `--use-local-key` 启用 |
+| 2 | `$PWD/.env.banana-2` 中的 `AIHUB_API_KEY=...` | 自动 |
+| 3 | `$PWD/.env.local` 中的 `AIHUB_API_KEY=...` | 自动 |
+| 4 | `$PWD/.env` 中的 `AIHUB_API_KEY=...` | 自动 |
+| 5 | `~/.config/banana-2/.env` | 加 `--use-local-key` 启用 |
 
 **HTTP 401 自动 fallback**：如果上一层 key 调用 API 返回 401（认证失败），会自动尝试下一层；其他错误（402/422/429/5xx）立即停止。
 
@@ -103,7 +104,7 @@ echo 'sk-xxx' | ./scripts/set_key.sh --stdin
 | 配置 | 优先级 | 说明 |
 |---|---|---|
 | `--output-dir DIR` | 高 | 单次调用指定目录 |
-| env `BANANA_2_OUTPUT_DIR` | 中 | 全局默认目录 |
+| 分层配置 `BANANA_2_OUTPUT_DIR` | 中 | 进程变量 → 专属文件 → `.env.local` → `.env` → 经授权的 home 文件 |
 | 无配置 | 默认 | 落到 `$PWD`（当前工作区根目录） |
 
 文件名：
@@ -155,7 +156,7 @@ AIHUB_API_KEY=sk-xxx ./scripts/create_task.sh \
 
 - **联网**：是。调用 `https://api.aihubmax.com/v1/*`，从返回的图片 URL host 下载图片
 - **API Key**：必需。本 skill **不会**把完整 key 写入仓库、日志或回显；终端输出始终掩码为 `head4****tail4`，完整值仅出现在 `Authorization` HTTP header 中
-- **本地文件读取**：自动读取 `$PWD/.env.local` 与 `$PWD/.env`，但**不向上递归**（不读父目录、git root、`$HOME` 的 dotenv）；持久化 key 在 `~/.config/banana-2/.env`，**必须显式 `--use-local-key`** 才启用
+- **本地文件读取**：自动读取 `$PWD/.env.banana-2`、`$PWD/.env.local` 与 `$PWD/.env`，但**不向上递归**（不读父目录、git root、`$HOME` 的 dotenv）；持久化 key 在 `~/.config/banana-2/.env`，**必须显式 `--use-local-key`** 才启用
 - **本地文件写入**：默认在 `$PWD` 创建图片文件；可通过 `--no-save` 关闭
 - **第三方服务**：调用前请自行评估 [aihubmax.com](https://aihubmax.com) 的可信度与合规要求
 - **图片有效期**：aihubmax.com 返回的 URL **24 小时**后失效，长期保留请下载到本地（默认行为已下载）

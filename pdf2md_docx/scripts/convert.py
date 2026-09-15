@@ -8,9 +8,10 @@ extract into a date-time-prefixed folder.
 Key resolution chain (high -> low), value-deduped, 401 -> fall back to next.
 Each source accepts AIHUB_API_KEY first, then the deprecated X_API_KEY:
   1. env AIHUB_API_KEY
-  2. $PWD/.env.local         (auto, no flag)
-  3. $PWD/.env               (auto, no flag)
-  4. ~/.config/pdf2md_docx/.env  (only with --use-local-key)
+  2. $PWD/.env.pdf2md_docx         (auto, no flag)
+  3. $PWD/.env.local         (auto, no flag)
+  4. $PWD/.env               (auto, no flag)
+  5. ~/.config/pdf2md_docx/.env  (only with --use-local-key)
 
 401 does not consume credits, so the fallback is safe. It is the only status that
 advances to the next key: every other status stops the key chain right there.
@@ -139,7 +140,7 @@ from client import (  # noqa: E402
     NET_MAX_ATTEMPTS, RETRYABLE_STATUSES, AmbiguousWrite, backoff_seconds,
     call_with_key_fallback, is_transient_network_error, request_with_retry,
 )
-from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates
+from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates, resolve_variable
 from upload_helper import UploadHelperError, upload_local_file
 
 MODEL = "doc2x-v3"
@@ -433,7 +434,7 @@ def main(argv=None) -> int:
     # --- keys ---
     candidates = resolve_api_key_candidates(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
     if not candidates:
-        log("Error: 未找到 %s（env / $PWD/.env.local / $PWD/.env" % KEY_NAME
+        log("Error: 未找到 %s（env / $PWD/.env.pdf2md_docx / $PWD/.env.local / $PWD/.env" % KEY_NAME
             + ("" if args.use_local_key else " ；如需读取 ~/.config 请加 --use-local-key") + "）")
         return 2
     notice = legacy_key_notice(candidates)
@@ -547,7 +548,7 @@ def main(argv=None) -> int:
     log("[result] ZIP URL（24 小时后过期）: %s" % zip_url)
 
     # --- output dir ---
-    output_root = args.output_dir or os.environ.get("PDF2MD_DOCX_OUTPUT_DIR") or os.getcwd()
+    output_root = args.output_dir or resolve_variable("PDF2MD_DOCX_OUTPUT_DIR", os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR) or os.getcwd()
     os.makedirs(output_root, exist_ok=True)
 
     # --- download ZIP ---

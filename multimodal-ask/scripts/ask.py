@@ -14,7 +14,7 @@ if __name__ == "__main__":
     _runtime_bootstrap.ensure()
 
 from client import AmbiguousRequest  # noqa: E402  (must come after the bootstrap)
-from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates
+from config import KEY_NAME, legacy_key_notice, mask_key, resolve_api_key_candidates, resolve_variable
 from dedup import dedup_key  # noqa: F401  (exposed for callers/tests; same-round guard is Agent-side)
 from media import (CAPABILITY_BY_KIND, classify_source, normalize_youtube, size_warning)
 from messages import build_messages
@@ -25,8 +25,8 @@ from upload_helper import UploadHelperError, upload_local_file
 
 BASE_URL = "https://api.aihubmax.com"
 CONFIG_DIR = os.path.expanduser("~/.config/multimodal-ask")
-def _parse_warn_bytes() -> int:
-    raw = os.environ.get("MULTIMODAL_ASK_WARN_BYTES") or ""
+def _parse_warn_bytes(use_local_key=False) -> int:
+    raw = resolve_variable("MULTIMODAL_ASK_WARN_BYTES", os.environ, os.getcwd(), use_local_key, CONFIG_DIR)
     if raw:
         try:
             return int(raw)
@@ -35,7 +35,7 @@ def _parse_warn_bytes() -> int:
     return 20 * 1024 * 1024
 
 
-WARN_BYTES = _parse_warn_bytes()
+WARN_BYTES = 20 * 1024 * 1024
 
 
 def parse_args(argv):
@@ -83,7 +83,7 @@ def main(argv=None) -> int:
 
     candidates = resolve_api_key_candidates(os.environ, os.getcwd(), args.use_local_key, CONFIG_DIR)
     if not candidates:
-        print("未找到 %s（检查进程 env / $PWD/.env.local / $PWD/.env / --use-local-key）" % KEY_NAME,
+        print("未找到 %s（检查进程 env / $PWD/.env.multimodal-ask / $PWD/.env.local / $PWD/.env / --use-local-key）" % KEY_NAME,
               file=sys.stderr)
         return 2
     notice = legacy_key_notice(candidates)
@@ -114,7 +114,7 @@ def main(argv=None) -> int:
     for kind, src in raw_media:
         cls = classify_source(src)
         if cls == "local":
-            warn = size_warning(src, WARN_BYTES)
+            warn = size_warning(src, _parse_warn_bytes(args.use_local_key))
             if warn:
                 print("⚠ " + warn, file=sys.stderr)
             try:

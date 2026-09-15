@@ -25,6 +25,7 @@
 
 - 需要生成图片时，安装 [`image-2`](../image-2/) skill（脚本按 `~/.claude/skills/image-2*/scripts/create_task.sh` 定位）。
 - 上传实现已内置，无需安装额外上传 Skill。只有 `--base-url ... --mode single` 完全不需要 image-2。
+- 配置按进程变量 → `.env.memoji-sticker-pack` → `.env.local` → `.env` → 经 `--use-local-key` 启用的 home 文件读取；`image-2` 生成步骤读取自己的 `.env.image-2`，不会读取上传器的专属文件。
 - aihubmax.com 的 key（生成与上传共用 `AIHUB_API_KEY`；`--use-local-key` 时 image-2 读 `~/.config/image-2/.env`，内置上传器读 `~/.config/memoji-sticker-pack/.env`，最省事是放进程 env 或 `$PWD/.env`）。
 - [uv](https://docs.astral.sh/uv/) >= 0.8。Python 运行时（抠图用的 `Pillow` + `numpy`）由 uv 按 `pyproject.toml` + `uv.lock` 钉死，venv 落 `<skill>/.venv`，首次运行自动创建（ADR 0007）；`gen_pack.sh` 内部所有 Python 调用都走 `uv run --project <skill> python`，不用系统 `python3`。手工重建：`rm -rf <skill>/.venv && uv sync --project <skill>`。
 - macOS `sips`（或 `ffmpeg`）用于缩图。

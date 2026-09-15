@@ -14,7 +14,7 @@
   - `gpt-image-2`：11 种预设 + 自定义像素分辨率（256-3840、16 倍数）、`num_outputs` 1-10、`quality`/`output_format`/`background`/`mask_url` 控制
   - `gpt-image-2-limit`：3 种预设（`1024x1024` / `1024x1536` / `1536x1024`）、单图、无高级参数
 - **自动下载到工作区**：任务终态 `completed` 后自动 `curl` 下载，命名 `{YYYYMMDD-HHMMSS}-{≤10 字标签}.{ext}`，多输出加 `-01/-02` 后缀
-- **API Key 多层兜底**：环境变量 → `.env.local` → `.env` → 用户级配置文件，HTTP 401 自动 fallback 到下一层
+- **API Key 多层兜底**：环境变量 → `.env.image-2` → `.env.local` → `.env` → 用户级配置文件，HTTP 401 自动 fallback 到下一层
 
 ## Supported Platforms
 
@@ -82,9 +82,10 @@ Agent 自动识别意图 → 调用脚本 → 轮询任务 → 下载到 `./2026
 | 优先级 | 来源 | 触发方式 |
 |---|---|---|
 | 1 | shell 环境变量 `AIHUB_API_KEY` | 已 `export` |
-| 2 | `$PWD/.env.local` 中的 `AIHUB_API_KEY=...` | 自动 |
-| 3 | `$PWD/.env` 中的 `AIHUB_API_KEY=...` | 自动 |
-| 4 | `~/.config/image-2/.env` | 加 `--use-local-key` 启用 |
+| 2 | `$PWD/.env.image-2` 中的 `AIHUB_API_KEY=...` | 自动 |
+| 3 | `$PWD/.env.local` 中的 `AIHUB_API_KEY=...` | 自动 |
+| 4 | `$PWD/.env` 中的 `AIHUB_API_KEY=...` | 自动 |
+| 5 | `~/.config/image-2/.env` | 加 `--use-local-key` 启用 |
 
 **HTTP 401 自动 fallback**：如果上一层 key 调用 API 返回 401（认证失败），会自动尝试下一层；其他错误（402/422/429/5xx）不换 key。创建任务是计费写操作，只有 429 与「请求确定未发出」（DNS 解析失败 / 连接被拒）会用同一个 key 重试 3 次（指数退避 1s、2s，429 循 `Retry-After`）；**HTTP 5xx 与「请求已发出但响应丢失」都不重试**，按「任务可能已创建」的结果不明状态报出（ADR 0006）。轮询与下载是幂等 GET，5xx 在那里照常重试。
 
@@ -100,7 +101,7 @@ echo 'sk-xxx' | ./scripts/set_key.sh --stdin
 | 配置 | 优先级 | 说明 |
 |---|---|---|
 | `--output-dir DIR` | 高 | 单次调用指定目录 |
-| env `IMAGE_2_OUTPUT_DIR` | 中 | 全局默认目录 |
+| 分层配置 `IMAGE_2_OUTPUT_DIR` | 中 | 进程变量 → 专属文件 → `.env.local` → `.env` → 经授权的 home 文件 |
 | 无配置 | 默认 | 落到 `$PWD`（当前工作区根目录） |
 
 文件名：
@@ -168,7 +169,7 @@ uv run --project /absolute/s3-upload /absolute/s3-upload/scripts/upload.py uploa
 
 - **联网**：是。调用 `https://api.aihubmax.com/v1/*`，从阿里云 OSS 下载生成图片
 - **API Key**：必需。本 skill **不会**把完整 key 写入仓库、日志或回显；终端输出始终掩码为 `head4****tail4`，完整值仅出现在 `Authorization` HTTP header 中
-- **本地文件读取**：自动读取 `$PWD/.env.local` 与 `$PWD/.env`，但**不向上递归**（不读父目录、git root、`$HOME` 的 dotenv）；持久化 key 在 `~/.config/image-2/.env`，**必须显式 `--use-local-key`** 才启用
+- **本地文件读取**：自动读取 `$PWD/.env.image-2`、`$PWD/.env.local` 与 `$PWD/.env`，但**不向上递归**（不读父目录、git root、`$HOME` 的 dotenv）；持久化 key 在 `~/.config/image-2/.env`，**必须显式 `--use-local-key`** 才启用
 - **本地文件写入**：默认在 `$PWD` 创建图片文件；可通过 `--no-save` 关闭
 - **第三方服务**：调用前请自行评估 [aihubmax.com](https://aihubmax.com) 的可信度与合规要求
 - **图片有效期**：aihubmax.com 返回的 URL **24 小时**后失效，长期保留请下载到本地（默认行为已下载）

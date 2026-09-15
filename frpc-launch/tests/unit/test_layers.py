@@ -51,3 +51,18 @@ def test_sakura_config_requires_key_and_tunnels():
     cfg, source = sakura_config(both)
     assert cfg == {"key": "k1234567890", "tunnels": "11,22", "frpc_path": None}
     assert source == ".env"
+
+
+def test_skill_specific_file_precedence_and_isolation(tmp_path):
+    home = _mkhome(tmp_path)
+    (tmp_path / ".env.frpc-launch").write_text("FRPC_LAUNCH_MODE=official\nFRPC_LAUNCH_CONFIG=''\n")
+    (tmp_path / ".env.local").write_text("FRPC_LAUNCH_MODE=sakura\nFRPC_LAUNCH_CONFIG=/project/frpc.toml\n")
+    (tmp_path / ".env.other-skill").write_text("FRPC_LAUNCH_SAKURA_KEY=wrong\n")
+    result = resolve_layered({}, tmp_path, home)
+    assert result["FRPC_LAUNCH_MODE"] == ("official", ".env.frpc-launch")
+    assert result["FRPC_LAUNCH_CONFIG"] == ("/project/frpc.toml", ".env.local")
+    assert "FRPC_LAUNCH_SAKURA_KEY" not in result
+    assert resolve_layered({"FRPC_LAUNCH_MODE": "sakura"}, tmp_path, home)["FRPC_LAUNCH_MODE"] == ("sakura", "env")
+    child = tmp_path / "child"
+    child.mkdir()
+    assert resolve_layered({}, child, home) == {}

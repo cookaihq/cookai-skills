@@ -446,6 +446,7 @@ def _protected(path: str, project_root: str, config_home: str) -> bool:
     config_home = lexical_absolute(config_home)
     exact = {
         os.path.join(project_root, ".env"),
+        os.path.join(project_root, ".env.s3-upload"),
         os.path.join(project_root, ".env.local"),
         os.path.join(project_root, ".s3-upload", "config.json"),
     }

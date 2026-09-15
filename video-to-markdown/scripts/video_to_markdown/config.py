@@ -106,6 +106,7 @@ def resolve(
     )
     layers: list[tuple[str, dict[str, str]]] = [
         ("process environment", env),
+        (str(invocation_dir / ".env.video-to-markdown"), _read_dotenv(invocation_dir / ".env.video-to-markdown")),
         (str(invocation_dir / ".env.local"), _read_dotenv(invocation_dir / ".env.local")),
         (str(invocation_dir / ".env"), _read_dotenv(invocation_dir / ".env")),
     ]

@@ -7,9 +7,10 @@
 
 配置读取优先级（见仓库 CLAUDE.md「Skills 配置读取优先级」通用约定）：
   1. 进程环境变量（本轮显式注入或已 export）
-  2. $PWD/.env.local      （自动读，不向上递归）
-  3. $PWD/.env            （自动读，不向上递归）
-  4. ~/.config/preview-share/.env  （仅 --use-local-key 时读）
+  2. $PWD/.env.preview-share      （自动读，不向上递归）
+  3. $PWD/.env.local      （自动读，不向上递归）
+  4. $PWD/.env            （自动读，不向上递归）
+  5. ~/.config/preview-share/.env  （仅 --use-local-key 时读）
 每个变量独立按此顺序取「首个非空来源」。
 """
 import argparse
@@ -172,6 +173,7 @@ def resolve_config(use_local_key):
     """返回 (config dict, sources dict)。每个变量独立取首个非空来源。"""
     layers = []  # (label, dict)
     layers.append(("env", {k: os.environ[k] for k in VARS if os.environ.get(k)}))
+    layers.append(("$PWD/.env.preview-share", parse_env_file(os.path.join(os.getcwd(), ".env.preview-share"))))
     layers.append(("$PWD/.env.local", parse_env_file(os.path.join(os.getcwd(), ".env.local"))))
     layers.append(("$PWD/.env", parse_env_file(os.path.join(os.getcwd(), ".env"))))
     if use_local_key:
@@ -499,7 +501,7 @@ def main():
     missing_cfg = [v for v in VARS if not cfg.get(v)]
     if missing_cfg:
         log(f"[error] 缺少配置: {', '.join(missing_cfg)}")
-        log("  按优先级设置：进程环境变量 > $PWD/.env.local > $PWD/.env > ~/.config/preview-share/.env(--use-local-key)")
+        log("  按优先级设置：进程环境变量 > $PWD/.env.preview-share > $PWD/.env.local > $PWD/.env > ~/.config/preview-share/.env(--use-local-key)")
         return 2
     log(f"[config] PREVIEW_SHARE_FTP <- {src['PREVIEW_SHARE_FTP']}  ({mask_ftp(cfg['PREVIEW_SHARE_FTP'])})")
     log(f"[config] PREVIEW_SHARE_BASEURL <- {src['PREVIEW_SHARE_BASEURL']}  ({cfg['PREVIEW_SHARE_BASEURL']})")

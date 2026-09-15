@@ -92,9 +92,11 @@ uv run --project <skill> <skill>/scripts/workflow.py settings set-mode auto     
 
 **发布模式**默认 `skip`。当前实现不制定也不执行发布计划，`publishing.mode=upload` 在没有完整 publisher 绑定时视为 blocked。
 
-**非 Secret 值**按此顺序逐项独立解析（取首个非空）：命令行选项 → 进程环境变量 → `$PWD/.env.local` → `$PWD/.env` → 经显式授权的 home `.env` → `settings.json` → 内置默认。可用变量：`PDF2MARKDOWN_INTERACTION_MODE`、`PDF2MARKDOWN_PUBLISH_MODE`、`PDF2MARKDOWN_UPLOADER`、`PDF2MARKDOWN_UPLOAD_TARGET`、`PDF2MARKDOWN_OUTPUT_DIR`。dotenv 值按字面处理，不做 shell 展开。
+**非 Secret 值**按此顺序逐项独立解析（取首个非空）：命令行选项 → 进程环境变量 → `$PWD/.env.pdf2markdown` → `$PWD/.env.local` → `$PWD/.env` → 经显式授权的 home `.env` → `settings.json` → 内置默认。可用变量：`PDF2MARKDOWN_INTERACTION_MODE`、`PDF2MARKDOWN_PUBLISH_MODE`、`PDF2MARKDOWN_UPLOADER`、`PDF2MARKDOWN_UPLOAD_TARGET`。dotenv 值按字面处理，不做 shell 展开。
 
-**Secret**（`AIHUB_API_KEY`）只走：进程环境变量 → `$PWD/.env.local` → `$PWD/.env` → `~/.config/pdf2markdown/.env`（**仅在显式传 `--use-local-key` 时**）。该授权只对当前这一次调用生效，不会被保存、也不会被工作目录继承。不要把任何 key、凭证、签名 URL 放进 `settings.json`。
+`PDF2MARKDOWN_OUTPUT_DIR` 控制新建工作目录的存放位置，按 `--output-dir` → 进程变量 → `.env.pdf2markdown` → `.env.local` → `.env` → 经 `--use-local-key` 启用的 home 文件 → 内置目录解析；不从 `settings.json` 读取。
+
+**Secret**（`AIHUB_API_KEY`）只走：进程环境变量 → `$PWD/.env.pdf2markdown` → `$PWD/.env.local` → `$PWD/.env` → `~/.config/pdf2markdown/.env`（**仅在显式传 `--use-local-key` 时**）。该授权只对当前这一次调用生效，不会被保存、也不会被工作目录继承。不要把任何 key、凭证、签名 URL 放进 `settings.json`。
 
 来源暂存与后续轮询会记录所用凭证的**位置和指纹**（不记录 key 本身）；401 之后不会回退到优先级更低的来源，轮询也不会改用另一个账户。
 

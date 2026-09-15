@@ -1,7 +1,7 @@
 ---
 name: image-2
-version: 1.2.0
-description: v1.2.0｜Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
+version: 1.3.0
+description: v1.3.0｜Use when the user asks to generate, render, or recreate an image — phrases like "生成图片"、"图生图"、"海报图"、"封面图"，or when they specify an output resolution such as 1024x1024 / 1920x1080 / 1080x1920. Do NOT use for video generation, OCR, or non-generative image editing (crop, compress, watermark).
 ---
 
 # image-2
@@ -41,9 +41,10 @@ description: v1.2.0｜Use when the user asks to generate, render, or recreate an
 
 1. 本轮对话显式提供的 key（通过 `AIHUB_API_KEY=...` 注入给脚本）
 2. 环境变量 `AIHUB_API_KEY`
-3. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
-4. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
-5. `~/.config/image-2/.env`（仅 `--use-local-key` 时读）
+3. `$PWD/.env.image-2` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+4. `$PWD/.env.local` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+5. `$PWD/.env` 中的 `AIHUB_API_KEY=...`（**自动读取**，无需 flag）
+6. `~/.config/image-2/.env`（仅 `--use-local-key` 时读）
 
 值通过 `Authorization: Bearer <key>` 提交给 aihubmax.com。
 
@@ -82,12 +83,14 @@ export AIHUB_API_KEY='sk-xxx'
 AIHUB_API_KEY=sk-xxx
 ```
 
-`.env` / `.env.local` 解析规则（极简，不等同于 shell）：
+`.env.image-2` / `.env.local` / `.env` 解析规则（极简，不等同于 shell）：
 
 - 支持：`KEY=value` / `KEY="value"` / `KEY='value'`、等号两侧空白、`#` 起首的注释行、空行
 - 文件中 `AIHUB_API_KEY` 出现多次时取**最后一次**
 - **不支持** shell 展开（`${OTHER}` / `$OTHER`）、命令替换（`$(...)` / 反引号）、续行符 `\` ——这些都会被当作字面字符串
-- 只识别变量名 `AIHUB_API_KEY`，不识别 `OPENAI_API_KEY` / `AIHUBMAX_API_KEY` 等其他命名（旧名 `X_API_KEY` 仍兼容）
+- 鉴权只识别变量名 `AIHUB_API_KEY`，不识别 `OPENAI_API_KEY` / `AIHUBMAX_API_KEY` 等其他命名（旧名 `X_API_KEY` 仍兼容）
+
+`IMAGE_2_OUTPUT_DIR` 与 `AIHUBMAX_BASE_URL` 也按同一顺序读取；对应命令行参数优先于这些配置层。
 
 ## Required & Optional Parameters
 

@@ -6,9 +6,10 @@ v2：输出个人主页 index.html + 每条笔记一个 note-NN.html（详情页
 
 配置读取优先级（见仓库 CLAUDE.md 通用约定，本 skill 去掉 ~/.config 层）：
   1. 进程环境变量（本轮显式注入或已 export）
-  2. $PWD/.env.local（自动读，不向上递归）
-  3. $PWD/.env（自动读，不向上递归）
-  4. 内置默认（模板级在 templates/<t>/defaults.env 与内置素材；skill 级写在本文件）
+  2. $PWD/.env.template-preview（自动读，不向上递归）
+  3. $PWD/.env.local（自动读，不向上递归）
+  4. $PWD/.env（自动读，不向上递归）
+  5. 内置默认（模板级在 templates/<t>/defaults.env 与内置素材；skill 级写在本文件）
 每个变量独立按此顺序取「首个非空来源」。
 stdout 输出所有生成页面的绝对路径（每行一个，第一行为 index.html）；其余信息走 stderr。
 """
@@ -76,9 +77,10 @@ def parse_env_file(path):
 
 
 def resolve_config(varnames, builtin_defaults):
-    """返回 (cfg, src)。每个变量独立按 env > $PWD/.env.local > $PWD/.env > builtin 取首个非空。"""
+    """返回 (cfg, src)。每个变量独立按 env > $PWD/.env.template-preview > $PWD/.env.local > $PWD/.env > builtin 取首个非空。"""
     layers = [
         ("env", {k: os.environ[k] for k in varnames if os.environ.get(k)}),
+        ("$PWD/.env.template-preview", parse_env_file(os.path.join(os.getcwd(), ".env.template-preview"))),
         ("$PWD/.env.local", parse_env_file(os.path.join(os.getcwd(), ".env.local"))),
         ("$PWD/.env", parse_env_file(os.path.join(os.getcwd(), ".env"))),
         ("builtin", builtin_defaults),

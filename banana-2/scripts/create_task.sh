@@ -7,9 +7,10 @@ set -euo pipefail
 # Key resolution chain (high -> low). Every source accepts AIHUB_API_KEY first,
 # then the deprecated X_API_KEY:
 #   1. env AIHUB_API_KEY
-#   2. $PWD/.env.local             (AIHUB_API_KEY=... line; auto-read, no flag needed)
-#   3. $PWD/.env                   (AIHUB_API_KEY=... line; auto-read, no flag needed)
-#   4. ~/.config/banana-2/.env     (only with --use-local-key)
+#   2. $PWD/.env.banana-2             (AIHUB_API_KEY=... line; auto-read, no flag needed)
+#   3. $PWD/.env.local             (AIHUB_API_KEY=... line; auto-read, no flag needed)
+#   4. $PWD/.env                   (AIHUB_API_KEY=... line; auto-read, no flag needed)
+#   5. ~/.config/banana-2/.env     (only with --use-local-key)
 #
 # On HTTP 401 (authentication_error) the script falls back to the next key in
 # the chain. 401 does not consume credits.
@@ -28,7 +29,7 @@ set -euo pipefail
 
 KEY_NAME="AIHUB_API_KEY"
 LEGACY_KEY_NAME="X_API_KEY"
-BASE_URL="${AIHUBMAX_BASE_URL:-https://api.aihubmax.com}"
+BASE_URL=""
 CREATE_ENDPOINT="/v1/images/generations"
 QUERY_ENDPOINT_PREFIX="/v1/tasks"
 
@@ -113,9 +114,10 @@ Runtime options:
 Key resolution (high -> low; on HTTP 401 falls back to next). Each source
 accepts AIHUB_API_KEY first, then the deprecated X_API_KEY:
   1. env AIHUB_API_KEY
-  2. $PWD/.env.local         (auto)
-  3. $PWD/.env               (auto)
-  4. ~/.config/banana-2/.env  (only with --use-local-key)
+  2. $PWD/.env.banana-2         (auto)
+  3. $PWD/.env.local         (auto)
+  4. $PWD/.env               (auto)
+  5. ~/.config/banana-2/.env  (only with --use-local-key)
 
 Each key is sent as: Authorization: Bearer <key>
 
@@ -428,7 +430,7 @@ validate_resolution() {
 read_dotenv_var() {
   local file="$1" name="$2"
   [[ -f "$file" ]] || return 0
-  grep -E "^[[:space:]]*${name}[[:space:]]*=" "$file" 2>/dev/null \
+  { grep -E "^[[:space:]]*${name}[[:space:]]*=" "$file" 2>/dev/null || true; } \
     | tail -n 1 \
     | sed -E "s/^[[:space:]]*${name}[[:space:]]*=[[:space:]]*//; s/^\"(.*)\"[[:space:]]*\$/\1/; s/^'(.*)'[[:space:]]*\$/\1/; s/[[:space:]]+\$//"
 }
@@ -484,6 +486,7 @@ collect_keys() {
     add_key_candidate "$X_API_KEY" "env" 1
   fi
 
+  add_key_from_file "${PWD}/.env.banana-2" "${PWD}/.env.banana-2"
   add_key_from_file "$PWD/.env.local" "$PWD/.env.local"
   add_key_from_file "$PWD/.env" "$PWD/.env"
 
@@ -536,9 +539,30 @@ if [[ -n "$FILENAME" ]]; then
   FILENAME="${FILENAME%.*}"
 fi
 
-# Resolve save dir priority: --output-dir > env > $PWD
+# Resolve configurable endpoint and output directory after command-line flags.
+if [[ -z "${BASE_URL}" ]]; then
+  BASE_URL="${AIHUBMAX_BASE_URL:-}"
+  for config_file in "${PWD}/.env.banana-2" "${PWD}/.env.local" "${PWD}/.env"; do
+    [[ -n "${BASE_URL}" ]] && break
+    BASE_URL="$(read_dotenv_var "${config_file}" AIHUBMAX_BASE_URL)"
+  done
+  if [[ -z "${BASE_URL}" && ${USE_LOCAL_KEY} -eq 1 ]]; then
+    BASE_URL="$(read_dotenv_var "${HOME}/.config/banana-2/.env" AIHUBMAX_BASE_URL)"
+  fi
+  BASE_URL="${BASE_URL:-https://api.aihubmax.com}"
+fi
+
+# Resolve save dir priority: --output-dir > layered configuration > $PWD
 if [[ -z "$OUTPUT_DIR" ]]; then
-  OUTPUT_DIR="${BANANA_2_OUTPUT_DIR:-$PWD}"
+  OUTPUT_DIR="${BANANA_2_OUTPUT_DIR:-}"
+  for config_file in "${PWD}/.env.banana-2" "${PWD}/.env.local" "${PWD}/.env"; do
+    [[ -n "${OUTPUT_DIR}" ]] && break
+    OUTPUT_DIR="$(read_dotenv_var "${config_file}" BANANA_2_OUTPUT_DIR)"
+  done
+  if [[ -z "${OUTPUT_DIR}" && ${USE_LOCAL_KEY} -eq 1 ]]; then
+    OUTPUT_DIR="$(read_dotenv_var "${HOME}/.config/banana-2/.env" BANANA_2_OUTPUT_DIR)"
+  fi
+  OUTPUT_DIR="${OUTPUT_DIR:-${PWD}}"
 fi
 
 in_array "$MODEL" "${ALLOWED_MODELS[@]}" || {
@@ -560,6 +584,7 @@ collect_keys
 if [[ ${#KEY_VALUES[@]} -eq 0 ]]; then
   echo "Error: no API key found in any of:" >&2
   echo "  - env $KEY_NAME" >&2
+  echo "  - ${PWD}/.env.banana-2" >&2
   echo "  - $PWD/.env.local" >&2
   echo "  - $PWD/.env" >&2
   if [[ $USE_LOCAL_KEY -eq 1 ]]; then

@@ -30,7 +30,7 @@ uv run --project "$SKILL_DIR" "$SKILL_DIR/scripts/generate.py" --template xiaoho
 
 ## 配置
 
-人设与输出位置通过环境变量 / `.env` / `.env.local` 覆盖（不配则用内置默认）。完整变量表见 [SKILL.md](SKILL.md)。例如临时换昵称：
+人设与输出位置通过进程环境变量 → `.env.template-preview` → `.env.local` → `.env` 覆盖（不配则用内置默认）。完整变量表见 [SKILL.md](SKILL.md)。例如临时换昵称：
 
 ```bash
 TPL_XHS_NICKNAME='我的昵称' TPL_XHS_BIO='我的简介' \

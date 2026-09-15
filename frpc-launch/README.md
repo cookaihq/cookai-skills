@@ -35,9 +35,10 @@ uv run --project . scripts/frpc_launch.py stop           # 停止
 | 优先级 | 来源 | 说明 |
 |---|---|---|
 | 1 | 进程环境变量 | 本次运行显式注入 |
-| 2 | `$PWD/.env.local` | 项目级，不向上递归 |
-| 3 | `$PWD/.env` | 项目级，不向上递归 |
-| 4 | `~/.config/frpc-launch/` | 全局（official 为 `frpc.toml`，sakura 为 `.env`）；使用时会在输出中标明 |
+| 2 | `$PWD/.env.frpc-launch` | 项目级，不向上递归 |
+| 3 | `$PWD/.env.local` | 项目级，不向上递归 |
+| 4 | `$PWD/.env` | 项目级，不向上递归 |
+| 5 | `~/.config/frpc-launch/` | 全局（official 为 `frpc.toml`，sakura 为 `.env`）；使用时会在输出中标明 |
 
 **首次引导默认写项目级 `$PWD/.env.local`**（official 另生成项目级 `frpc.toml`）；只有你明确要求「全局 / 长期保存 / 多项目共用」时，才写入 `~/.config/frpc-launch/`。
 
