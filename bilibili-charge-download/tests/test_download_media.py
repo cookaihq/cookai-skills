@@ -514,7 +514,7 @@ class SkillVersionTest(unittest.TestCase):
         )["project"]["version"]
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         frontmatter = skill_text.split("---", 2)[1]
-        version_match = re.search(r"(?m)^version:\s*([^\s]+)\s*$", frontmatter)
+        version_match = re.search(r"(?m)^metadata:\s*\n  version:\s*\"([^\"\s]+)\"\s*$", frontmatter)
         description_match = re.search(
             r"(?m)^description:\s*(?:>-\s*\n\s*)?(v[0-9]+\.[0-9]+\.[0-9]+｜)",
             frontmatter,

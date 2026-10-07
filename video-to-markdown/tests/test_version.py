@@ -12,7 +12,7 @@ def test_version_is_consistent():
         "version"
     ]
     skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-    frontmatter_version = re.search(r"^version:\s*(\S+)$", skill_text, re.MULTILINE).group(1)
+    frontmatter_version = re.search(r"^metadata:\s*\n  version:\s*\"([^\"\s]+)\"$", skill_text, re.MULTILINE).group(1)
     description_version = re.search(
         r"^description:\s*v([^｜]+)｜", skill_text, re.MULTILINE
     ).group(1)

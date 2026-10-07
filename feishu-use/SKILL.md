@@ -1,6 +1,7 @@
 ---
 name: feishu-use
-version: 1.2.0
+metadata:
+  version: "1.2.0"
 description: >-
   v1.2.0｜Use when the user wants an agent to operate Feishu/Lark through the official
   lark-cli, or asks to install, update, configure, log in, re-authorize,

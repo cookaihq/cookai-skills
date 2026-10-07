@@ -1,6 +1,7 @@
 ---
 name: video-to-markdown
-version: 1.1.0
+metadata:
+  version: "1.1.0"
 description: v1.1.0｜Turn one local or directly downloadable video into a source-faithful GitHub Flavored Markdown document with timestamped transcript evidence, keyframe screenshots, short GIFs for motion-dependent information, adaptive visual resampling, and a resumable coverage review. Use for 视频转文档、带截图的视频笔记、video to Markdown, or preserving spoken and visual content together. Do not use for pure ASR, one-off video Q&A, downloading/editing/compressing video, video generation, or automatic publishing.
 compatibility: Requires Python managed by uv >= 0.8, ffmpeg, ffprobe, and a host Agent that can inspect images. AIHub ASR requires network access and AIHUB_API_KEY when no subtitle is supplied. Supports Codex and Claude Code.
 ---

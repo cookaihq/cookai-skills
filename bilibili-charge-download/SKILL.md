@@ -1,6 +1,7 @@
 ---
 name: bilibili-charge-download
-version: 1.0.0
+metadata:
+  version: "1.0.0"
 description: v1.0.0｜Download and verify a Bilibili charge-only video through a logged-in browser session when the user is authorized to watch, download, and retain that content. Use for B站充电视频、充电专属视频、已充电视频 downloads. Do not use to bypass payment, login, preview limits, or any restriction on downloading or saving the content.
 compatibility: >-
   Requires uv >= 0.8, Python 3.13, ffmpeg, ffprobe, network access to

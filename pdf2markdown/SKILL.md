@@ -1,6 +1,7 @@
 ---
 name: pdf2markdown
-version: 1.3.0
+metadata:
+  version: "1.3.0"
 description: v1.3.0｜Create, preflight, convert, fully review, evidence-correct, and finalize a verifiable Markdown work bundle from one PDF. Use when a user asks to begin or resume a PDF-to-Markdown workflow from a local PDF or public HTTPS PDF URL, including content-semantic review, ambiguity decisions, or controlled fidelity fallback without an external source uploader.
 ---
 

@@ -1,6 +1,7 @@
 ---
 name: s3-upload
-version: 1.3.0
+metadata:
+  version: "1.3.0"
 description: v1.3.0｜Use when the user explicitly wants to persist one local file in their own AWS SigV4-compatible object store and receive an Object Reference plus a public or presigned current-key URL. Do not use for hosted temporary URLs, remote/base64 input, bucket administration, or an upload inferred only from a caller mapping.
 ---
 
