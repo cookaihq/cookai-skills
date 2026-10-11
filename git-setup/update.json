@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "git-setup",
+  "channel": "stable",
+  "tag_prefix": "git-setup/v",
+  "ref_type": "tag"
+}

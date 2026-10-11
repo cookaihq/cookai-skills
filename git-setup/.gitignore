@@ -1,0 +1,6 @@
+tmp/
+data/
+node_modules/
+.env
+.env.local
+.env.git-setup
