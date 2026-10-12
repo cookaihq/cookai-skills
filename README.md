@@ -24,7 +24,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 
 ## 版本与 Release
 
-各目标的当前版本与对应 Release 地址（表格由 `harness/repo-harness/release-on-push.sh --table` 生成，升版本的提交须同步更新，约定见外层仓 `docs/adr/0009`）。当前开发分支的 git-setup 0.2.0 尚未发布，表内 0.2.0 地址暂不可用；已发布版本仍为 [0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv0.1.0)。
+各目标的当前版本与对应 Release 地址（表格由 `harness/repo-harness/release-on-push.sh --table` 生成，升版本的提交须同步更新，约定见外层仓 `docs/adr/0009`）：
 
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
