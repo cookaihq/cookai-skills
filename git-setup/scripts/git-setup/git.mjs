@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { realpath, lstat } from 'node:fs/promises';
+import { realpath, lstat, readFile, open, rename, rm, readdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { devNull } from 'node:os';
 import { auditSnapshot } from './audit.mjs';
 
@@ -18,7 +18,7 @@ function failure(code, message) {
 export function redact(value) {
   return String(value)
     .replace(/(https?:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
-    .replace(/([?&](?:token|access_token|key|password)=)[^&\s]*/gi, '$1[redacted]')
+    .replace(/([?&](?:token|access_token|api_key|key|password)=)[^&\s]*/gi, '$1[redacted]')
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g, '[redacted]');
 }
 
@@ -110,7 +110,7 @@ function validateName(name) {
   return name;
 }
 
-function validateUrl(url) {
+export function validateUrl(url) {
   if (typeof url !== 'string' || !url || /[\r\n\0]/.test(url) || url.startsWith('-') || url.includes('::')) throw failure('invalid_url', '远端地址为空、包含控制字符或使用了不支持的 Git remote helper。');
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
     let parsed;
@@ -151,6 +151,27 @@ async function authenticated(options, url) {
   const auth = await options.authForUrl(url);
   if (!auth || typeof auth.env !== 'object') throw failure('authentication_configuration', 'authForUrl 必须返回含 env 的对象。');
   return { ...options, env: { ...options.env, ...auth.env } };
+}
+
+/** Reads advertised refs without fetching objects or installing a remote. */
+export async function inspectRemote(project, url, options = {}) {
+  await runtime(project, options);
+  validateUrl(url);
+  const effective = await required(project, ['ls-remote', '--get-url', '--', url], options);
+  if (effective !== url) throw failure('url_rewrite', 'Git URL 重写改变了实际目标，请先明确最终地址。');
+  const output = await required(project, ['ls-remote', '--symref', '--', url], { ...await authenticated(options, url), timeout: READ_TIMEOUT, networkRead: true });
+  const refs = {};
+  let defaultRef = null;
+  for (const line of output.split('\n').filter(Boolean)) {
+    const [value, ref] = line.split('\t');
+    if (value.startsWith('ref: ')) {
+      if (ref === 'HEAD') defaultRef = value.slice(5);
+    } else {
+      if (!/^[a-f0-9]{40,64}$/.test(value) || !ref) throw failure('invalid_remote_output', '远端引用输出无法验证。');
+      if (!ref.endsWith('^{}')) refs[ref] = value;
+    }
+  }
+  return { url, readable: true, defaultRef, refs, empty: Object.keys(refs).length === 0 };
 }
 
 async function warningsAt(project, refs, options = {}) {
@@ -231,9 +252,23 @@ export async function init(project, options = {}) {
   if (!branch || !authorName || !authorEmail || /[\r\n\0]/.test(`${authorName}${authorEmail}`)) throw failure('initialization_inputs', '初始化必须提供初始分支、提交作者姓名和邮箱。');
   await validateRef(root, `refs/heads/${branch}`, options);
   await required(root, ['init', `--initial-branch=${branch}`], options);
-  await required(root, ['config', '--local', 'user.name', authorName], options);
-  await required(root, ['config', '--local', 'user.email', authorEmail], options);
+  await completeInitialization(root, options);
   return { status: 'initialized', committed: false, state: await inspect(root, options) };
+}
+
+/** Fill explicitly chosen repository author fields, including post-clone and interrupted init. */
+export async function completeInitialization(project, options = {}) {
+  const state = await inspect(project, options);
+  if (state.branch !== options.branch || state.type === 'worktree') throw failure('setup_initialization_changed', '选定分支或仓库类型已变化，请重新明确作者配置范围。');
+  const fields = [['user.name', options.authorName], ['user.email', options.authorEmail]];
+  await updateLocalConfig(project, options, async file => {
+    for (const [key, value] of fields) {
+      if (!value || /[\r\n\0]/.test(value)) throw failure('initialization_inputs', '初始化作者姓名和邮箱必须是明确的单行值。');
+      const current = await command(project, ['config', '--file', file, '--includes', '--get-all', key], options);
+      if (current.code === 1) await required(project, ['config', '--file', file, key, value], options);
+      else if (current.code !== 0 || current.stdout.trim() !== value) throw failure('setup_author_changed', '仓库已写入不同作者；不会用旧初始化选择覆盖，请核对实际身份。');
+    }
+  });
 }
 
 export async function addRemote(project, options = {}) {
@@ -254,6 +289,82 @@ export async function addRemote(project, options = {}) {
   const actual = await endpoint(root, name, false, options);
   if (actual !== url) throw failure('url_rewrite', 'Git URL 重写配置改变了实际目标，请检查 url.*.insteadOf 配置。');
   return { status: 'added', name, url };
+}
+
+/** Opaque state hash includes effective config, all refs and the index; no secret values escape. */
+export async function setupFacts(project, options = {}) {
+  const configuration = await required(project, ['config', '--null', '--list'], options);
+  const refs = await required(project, ['for-each-ref', '--format=%(refname) %(objectname) %(symref)'], options);
+  const index = await required(project, ['ls-files', '--stage', '-z'], options);
+  const branches = await command(project, ['config', '--get-regexp', '^branch\\..*\\.(remote|pushremote|merge)$'], options);
+  if (![0, 1].includes(branches.code)) throw failure('git_config', branches.stderr);
+  return {
+    fingerprint: createHash('sha256').update(JSON.stringify({ configuration, refs, index })).digest('hex'),
+    branches: redact(branches.stdout).trim().split('\n').filter(Boolean),
+    trackingRefs: refs.split('\n').filter(line => line.startsWith('refs/remotes/')),
+    worktrees: redact(await required(project, ['worktree', 'list', '--porcelain'], options)),
+  };
+}
+
+async function updateLocalConfig(root, options, update) {
+  const common = resolve(root, await required(root, ['rev-parse', '--git-common-dir'], options));
+  const file = join(common, 'config');
+  if ((await lstat(file)).isSymbolicLink()) throw failure('setup_complex_remote', 'Git config 是符号链接，需先明确配置归属。');
+  const lockPath = `${file}.lock`;
+  let lock;
+  try {
+    try { lock = await open(lockPath, 'wx', (await lstat(file)).mode & 0o777); }
+    catch (error) { if (error.code === 'EEXIST') throw failure('setup_config_busy', 'Git config.lock 已存在；先核对是否有正在执行或中断的 Git 操作。'); throw error; }
+    const raw = await readFile(file);
+    if (options.expectedState && (await setupFacts(root, options)).fingerprint !== options.expectedState) throw failure('setup_plan_changed', 'Git 状态在替换前变化，未替换。');
+    await lock.writeFile(raw); await lock.close(); lock = true;
+    await update(lockPath);
+    if (!(await readFile(file)).equals(raw)) throw failure('setup_plan_changed', 'Git 配置在替换期间变化，未覆盖。');
+    await rename(lockPath, file);
+    lock = false; // rename released this lock path; a later writer may now own a new one.
+  } finally {
+    if (lock) { if (lock !== true) await lock.close(); await rm(lockPath, { force: true }); }
+  }
+}
+
+/** Reject any effective remote address not solely owned by the common config file. */
+export async function assertLocalRemote(project, name, options = {}) {
+  validateName(name);
+  const common = resolve(project, await required(project, ['rev-parse', '--git-common-dir'], options));
+  for (const field of ['url', 'pushurl']) {
+    const direct = await command(project, ['config', '--file', join(common, 'config'), '--null', '--get-all', `remote.${name}.${field}`], options);
+    if (![0, 1].includes(direct.code)) throw failure('git_config', direct.stderr);
+    if (JSON.stringify(direct.stdout.split('\0').filter(Boolean)) !== JSON.stringify(await configValues(project, `remote.${name}.${field}`, options))) throw failure('setup_complex_remote', `远端 ${name} 地址来自包含文件、全局或 Worktree 配置；需先明确要修改的来源。`);
+  }
+}
+
+/** Replace a single locally owned remote in one atomic Git config update. */
+export async function replaceRemote(project, options = {}) {
+  const root = await rootOf(project, options);
+  const name = validateName(options.name), url = validateUrl(options.url);
+  const before = { fetch: await endpoint(root, name, false, options), push: await endpoint(root, name, true, options) };
+  if (before.fetch !== options.expectedFetch || before.push !== options.expectedPush) throw failure('setup_plan_changed', '远端旧地址已变化，未替换。');
+  if (before.fetch === url && before.push === url) return { status: 'unchanged', name, url };
+  await updateLocalConfig(root, options, async file => {
+    await assertLocalRemote(root, name, options);
+    await required(root, ['config', '--file', file, '--replace-all', `remote.${name}.url`, url], options);
+    if ((await configValues(root, `remote.${name}.pushurl`, options)).length) await required(root, ['config', '--file', file, '--replace-all', `remote.${name}.pushurl`, url], options);
+  });
+  return { status: 'replaced', name, url };
+}
+
+/** Native clone owns creation and checkout. Never retry it or remove a partial directory. */
+export async function cloneInto(project, options = {}) {
+  const root = await realpath(project);
+  const state = await inspect(root, options);
+  if (state.initialized || (await readdir(root)).length) throw failure('clone_directory_changed', '克隆目录不再为空，未覆盖任何文件。');
+  const name = validateName(options.name), url = validateUrl(options.url);
+  await validateRef(root, `refs/heads/${options.branch}`, options);
+  const auth = await authenticated(options, url);
+  await required(root, ['-c', `core.hooksPath=${devNull}`, 'clone', '--no-local', '--no-recurse-submodules', `--origin=${name}`, `--branch=${options.branch}`, '--', url, '.'], { ...auth, env: { ...auth.env, GIT_LFS_SKIP_SMUDGE: '1' }, timeout: TRANSFER_TIMEOUT });
+  const head = await required(root, ['rev-parse', 'HEAD'], options);
+  if (head !== options.expectedHead) throw failure('remote_changed', '克隆取得的 HEAD 与计划不一致；保留已下载内容，请重新检查远端及本地文件。');
+  return { status: 'cloned', project: root, head };
 }
 
 async function fetchRef(project, url, ref, destination, expected, options) {

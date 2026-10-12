@@ -13,9 +13,9 @@ if (Number(process.versions.node.split('.')[0]) < minimum) {
   process.exit(1);
 }
 
-const boolean = new Set(['apply', 'use-global-config', 'help', 'github-auth']);
+const boolean = new Set(['apply', 'use-global-config', 'help', 'github-auth', 'accept-effects']);
 const repeated = new Set(['ref', 'rule-file', 'label', 'assignee']);
-const valued = new Set(['project', 'workspace', 'input', 'override', 'project-rule', 'branch', 'author-name', 'author-email', 'name', 'url', 'remote', 'title', 'body-file', 'filename', 'operation-id', 'expected-fingerprint', 'issue-url', 'owner', 'visibility']);
+const valued = new Set(['project', 'workspace', 'input', 'override', 'project-rule', 'branch', 'author-name', 'author-email', 'name', 'url', 'remote', 'title', 'body-file', 'filename', 'operation-id', 'expected-fingerprint', 'issue-url', 'owner', 'visibility', 'action', 'plan-file']);
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 function parse(args) {
   const options = {};
@@ -79,6 +79,11 @@ async function gitAuth(project, options, loadEnvironment) {
 const help = `git-setup ${pkg.version} — node <skill>/scripts/git-setup/cli.mjs <command> [options]
 所有命令：--project <path>（默认当前目录），--use-global-config（显式启用个人全局业务配置）
 inspect                                      读取 Git 状态
+setup --url <url>                            检查当前项目并生成接入计划，不提交或推送
+      [--action add|replace --name <remote>] [--branch <name>]
+      [--author-name <name> --author-email <email>] [--accept-effects]
+      [--plan-file <ignored-json>] [--workspace <outer>] [--github-auth]
+      [--apply --expected-fingerprint <plan fingerprint>]
 audit --ref <full-ref> [--ref ...]             检查所有可达历史对象中的已知秘密模式及大文件
 init --branch <name> --author-name <name> --author-email <email> --apply
 remote-add --name <remote> --url <url> --apply
@@ -110,7 +115,10 @@ async function main() {
     issueOverride: await json(options.override), projectRuleIssue: await json(options['project-rule']),
   };
   let result;
-  if (command === 'config-check') result = await config.loadProject(project);
+  if (command === 'setup') {
+    const { setup } = await import('./setup.mjs');
+    result = await setup(project, { url: required(options.url, '--url'), action: options.action, name: options.name, apply: options.apply, branch: options.branch, authorName: options['author-name'], authorEmail: options['author-email'], expectedFingerprint: options['expected-fingerprint'], acceptEffects: options['accept-effects'], planFile: options['plan-file'], ...resolutionOptions, ...await gitAuth(project, options, config.loadEnvironment) });
+  } else if (command === 'config-check') result = await config.loadProject(project);
   else if (command === 'config-write') { apply(options); result = await config.writeProject(project, await json(required(options.input, '--input'))); }
   else if (command === 'auth-info') {
     const { values, sources } = await config.loadEnvironment((await config.inspectProject(project)).root, resolutionOptions);

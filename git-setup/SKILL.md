@@ -1,8 +1,8 @@
 ---
 name: git-setup
 metadata:
-  version: "0.1.0"
-description: v0.1.0｜为新项目初始化 Git、接入远端并配置多个仓库的单向同步；按项目规则选择本地或 GitHub Issue 保存位置，识别外仓与子仓的独立配置及继承关系，并核验写入和中断恢复结果。
+  version: "0.2.0"
+description: v0.2.0｜只提供仓库 URL 时为当前项目接入远端，已有远端先选择替换或添加，空目录按实际远端状态克隆或初始化；也支持明确请求的发布、单向同步和项目本地/GitHub Issue 规则。
 compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Claude Code, Codex and WorkBuddy; gh is optional for GitHub authentication.
 ---
 
@@ -31,7 +31,29 @@ node <skill>/scripts/git-setup/cli.mjs inspect --project <用户项目>
 
 所有业务命令输出 JSON。写入命令要求 `--apply`；这只是执行开关，Agent 应依据用户本次具体请求传入，不把它变成重复确认。状态不明、部分完成和检查未完成不能报告成功。配置来源使用 `config-check` / `auth-info`，后者仅输出字段是否填写及来源。
 
-## 2. 设置 Git、发布与同步
+## 2. 只提供仓库 URL 的默认流程
+
+Claude Code 的 `/git-setup <URL>`、Codex 的 `$git-setup <URL>`、WorkBuddy 对话中点名 git-setup 并提供 URL，默认表示：**为当前选定项目接入这个已有远端，完成 Git 设置和实际远端读取验证。** 不再泛问初始化、发布还是同步。用户明确要求“只检查”“克隆到”“推送”“增加同步目标”等动作时，以明确请求为准。
+
+先读取 [Git 操作](references/git.md) 和 [配置规则](references/configuration.md)，按第 1 节定位项目及规则，然后调用：
+
+```text
+node <skill>/scripts/git-setup/cli.mjs setup --project <项目目录> --url <完整仓库地址>
+```
+
+1. **已有任何远端都先选择。** 展示全部远端名称、脱敏 fetch/push 地址、当前分支使用的远端；询问“替换哪个现有远端的地址”或“保留现有远端并以哪个新名称添加”。已有相同 URL 也不跳过。仅沿用用户此前亲自明确作出且范围未变的添加/替换选择；Agent 自动采用 `origin`、脚本输出的 selection、计划记录或上次成功结果都不算用户选择。首次无远端可默认 `origin`，但完成后用户再次仅发送 URL 时，若从未明确选过添加/替换，必须询问。明确继续中断的同一次设置时可复用原操作参数。补全选择后传 `--action replace|add --name <名称>`。不同名称对应同一 URL 时说明会多出一个名称；同名同地址的 `add` 仅用于有既有操作依据的中断续作。
+2. **脚本根据真实状态分支。** `needs_input` 只补问 `required` 中的缺项。非空无 Git 目录遇到有历史远端时先明确文件保留/迁入方式；不能覆盖文件或创建无关历史。初始化需沿项目规则提供 `--branch`、`--author-name`、`--author-email`；空目录且远端有分支时克隆到当前选定目录，不另建子目录。默认分支不明、只有标签或自定义引用时明确实际分支，不当作空仓。父仓普通子目录不能自动改为操作父仓。
+3. **展示具体计划。** 说明项目路径、选中远端旧/新地址、写入的 Git 配置和 `.git-setup/project.json`、分支/作者来源以及完成范围。替换计划中的 `facts.worktrees` 表明同一 Git common config 的其他 Worktree 也受影响。`effects` 展示分支/推送设置、同步和 Issue 解析的变化；同步或 Issue 目标发生变化时，须让用户明确接受列出的具体变化后才传 `--accept-effects`，或先按其决定保留原目标。默认不迁移 Issue、不执行同步。
+4. **保存跨轮依据。** 需要等待选择或跨轮继续时，用 `--plan-file <路径>` 保存非敏感请求、计划指纹和执行状态。位置使用已有调用工作区中被忽略的 `data/git-setup/<任务>.json`（长期恢复）或 `tmp/git-setup/<任务>.json`（临时任务）；脚本拒绝跟踪路径、未忽略路径和符号链接。克隆目标须真正为空，记录放在已有调用工作区，不能先写入空目标。没有合规记录位置时先按项目规则确定位置及忽略规则，不假称已支持跨轮恢复。记录不含凭证，也不等于用户批准；Agent 同时保存本轮真实选择及授权范围，不从 `planned` 推断批准。
+5. **执行与核验。** 对已有授权且事实未变的具体计划，保留全部选择参数，增加 `--apply --expected-fingerprint <本次plan.fingerprint>`；`--plan-file` 继续用同一文件。脚本再次查询本地、共享配置、Issue 来源和远端引用，状态变化会拒绝旧计划。`needs_project_rules` 表示原地克隆已完成：Agent 读取新取得的 AGENTS.md/CLAUDE.md 等规则和共享配置，再沿用本次选择 `--action add --name <原名称>` 重新计划并执行余下设置，无需再次询问替换或添加。只有 `configured` 才表示 Git 设置和读取回读完成。
+6. **Issue 不阻塞缺省接入。** 沿用 `issues.resolution` 指出的环境、当前仓或已登记外仓配置；需要外仓、项目规则或已批准全局配置时传既有 `--workspace`、`--project-rule`、`--use-global-config`。`not_configured` 报告“尚未设置 Issue 默认位置”，不要求新选保存方式；`invalid` 报告原配置问题，不改投其他保存方式。共享 JSON 本身损坏会阻止合并写入。仅 URL 请求不创建 Issue。
+7. **中断先查证。** 读取计划记录和真实状态，使用已明确的远端选择形成新计划，补齐缺项。`applying`/`incomplete` 不能当作完成；克隆中断后先核对 Git、HEAD、检出文件及已完成步骤，禁止把残留 `.git` 当作完整克隆，禁止自动删除目录或盲目重跑 clone。没有原选择依据的新请求仍先询问替换/添加。过期的 fingerprint 不能复用。
+
+默认流程不暂存、提交、推送，不比较或合并历史。替换保留旧远端跟踪引用和 remote HEAD，并明确“本次未刷新这些引用、未验证本地与新远端历史关系”。读取成功不证明推送权限或访问账号；LFS/子模块内容未下载时按 `contentWarnings` 报告。
+
+**本节完成后的实际会话回复必须直接包含：`本次暂未提交和推送。`** 初始化、添加、替换、同地址核验、克隆和续作均适用，不能只把这句话留在 JSON、日志或文档。说明实际远端/目录、读取验证与 Issue 状态。部分失败先说明未完成步骤，再说明本次未提交和推送。后续明确请求提交/推送时按实际操作报告。
+
+## 3. 明确请求的设置、发布与同步
 
 进入此分支时读取 [Git 操作](references/git.md) 和 [配置规则](references/configuration.md)。
 
@@ -46,7 +68,7 @@ node <skill>/scripts/git-setup/cli.mjs inspect --project <用户项目>
 
 运行恢复不安装后台服务、hooks 或 CI。用户要求网页合并自动同步或双向合并时，说明首版边界并另行确定方案。
 
-## 3. 设置 Issue 默认规则及后续会话入口
+## 4. 设置 Issue 默认规则及后续会话入口
 
 读取 [配置规则](references/configuration.md)。先确定记录方式（local/github），再确定 current/outer/specified 和该方式必需字段。沿用项目已有目录、编号、模板、状态约定；复杂已有工具优先接入它，必须把解析出的最终目标显式传给该工具。
 
@@ -54,7 +76,7 @@ node <skill>/scripts/git-setup/cli.mjs inspect --project <用户项目>
 
 设置请求覆盖后续会话接入时，先核对当前项目各宿主实际加载的规则文件，使用 `install-rules --rule-file <实际文件>` 预览目标列表，然后在已有设置授权内加 `--apply`。只追加/替换本工具标记块，保留其他内容，符号链接实体去重。非子模块的外仓关系通过明确登记及 `--workspace <外仓>` 接入。不要因为某目录存在就声称该宿主已加载规则。用全新 Claude Code、Codex、WorkBuddy 会话分别验证普通自然语言 Issue 请求。
 
-## 4. 创建、更新与恢复 Issue
+## 5. 创建、更新与恢复 Issue
 
 1. 区分新建、更新和回复。“参考 #123 新建”不修改 #123；明确更新/回复原事项才沿原链接或本地路径执行。只有 GitHub.com 在线 Issue 受支持，其他平台不改投本地或 GitHub。
 2. 新建前调用 `issue-resolve --project <发起项目>`，需要已登记外仓时加 `--workspace`。没有配置但项目规则明确时，Agent 将实际规则转成完整 JSON 文件，经 `--project-rule` 传入。用户本次明确覆盖才传 `--override`；仅改目标时先保留原记录方式再形成完整记录，不改持久默认值。缺项或歧义先取得必要输入。

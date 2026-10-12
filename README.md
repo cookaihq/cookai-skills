@@ -8,7 +8,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 |---|---|---|
 | [bilibili-charge-download](bilibili-charge-download/) | 使用用户已登录且有完整播放及保存权限的 B 站账号下载充电专属视频，将 DASH 音视频封装并完整性验证为 MP4；不读取 Cookie，不绕过付费或访问限制 | [README](bilibili-charge-download/README.md) · [SKILL.md](bilibili-charge-download/SKILL.md) |
 | [feishu-use](feishu-use/) | 安全调用飞书官方 `lark-cli` 的通用入口：检查安装与最新版、确认更新选择、核对用户/应用身份和目标账户、引导链接 + 二维码登录、增量授权后再执行 Base / 文档 / 日历等操作 | [README](feishu-use/README.md) · [SKILL.md](feishu-use/SKILL.md) |
-| [git-setup](git-setup/) | 初始化 Git、接入多个远端并按指定引用同步；创建 Issue 时沿用项目本地/GitHub配置及外仓继承规则 | [README](git-setup/README.md) · [SKILL.md](git-setup/SKILL.md) |
+| [git-setup](git-setup/) | 仅提供 URL 即按当前项目状态接入远端；支持明确请求的发布、同步与本地/GitHub Issue | [README](git-setup/README.md) · [SKILL.md](git-setup/SKILL.md) |
 | [image-2](image-2/) | `gpt-image-2` 生成图片：文生图 / 图生图、11 种预设比例 + 自定义分辨率（最高 4K）、任务完成自动下载到工作区 | [README](image-2/README.md) · [SKILL.md](image-2/SKILL.md) |
 | [banana-2](banana-2/) | Nano Banana 2（`gemini-3.1-flash-image-preview`）生成 / 编辑图片：文生图 / 图生图 / 图像编辑、15 种宽高比 + `512`~`4K` 画质档、可选联网搜索 / 图片搜索增强、任务完成自动下载到工作区 | [README](banana-2/README.md) · [SKILL.md](banana-2/SKILL.md) |
 | [memoji-sticker-pack](memoji-sticker-pack/) | 从一张人物照片生成一套 Apple Memoji 风格（拟我表情）表情贴纸包：先出基准头像锁定长相，再并发生成 N 个表情（默认 16），绿幕出图 + 自动抠成透明底 PNG，产出画廊 `index.html`（调用 `image-2` 生成，内置参考图上传） | [README](memoji-sticker-pack/README.md) · [SKILL.md](memoji-sticker-pack/SKILL.md) |
@@ -24,7 +24,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 
 ## 版本与 Release
 
-各目标的当前版本与对应 Release（本节由 `harness/repo-harness/release-on-push.sh --table` 生成，升版本的提交须同步更新，约定见外层仓 `docs/adr/0009`）：
+各目标的当前版本与对应 Release 地址（表格由 `harness/repo-harness/release-on-push.sh --table` 生成，升版本的提交须同步更新，约定见外层仓 `docs/adr/0009`）。当前开发分支的 git-setup 0.2.0 尚未发布，表内 0.2.0 地址暂不可用；已发布版本仍为 [0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv0.1.0)。
 
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
@@ -34,7 +34,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | feishu-use | 1.2.0 | [feishu-use/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.2.0) |
 | frpc-launch | 1.3.0 | [frpc-launch/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.3.0) |
-| git-setup | 0.1.0 | [git-setup/v0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv0.1.0) |
+| git-setup | 0.2.0 | [git-setup/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv0.2.0) |
 | image-2 | 1.3.0 | [image-2/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.3.0) |
 | memoji-sticker-pack | 1.3.0 | [memoji-sticker-pack/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.3.0) |
 | multimodal-ask | 1.3.0 | [multimodal-ask/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.3.0) |

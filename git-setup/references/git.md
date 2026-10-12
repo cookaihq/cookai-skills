@@ -1,4 +1,4 @@
-# Git 初始化、发布与多远端同步
+# Git 接入、初始化、克隆、发布与多远端同步
 
 `scripts/git-setup/git.mjs` 只使用 Node.js 内置模块和 Git；需要 Node.js 20+、Git 2.29+。运行时会真实执行 Git 并检查版本。缺少系统程序时报告安装方式，不自动安装。
 
@@ -17,8 +17,12 @@ Agent 先读取项目规则，用 `inspect(project)` 识别实际根目录、外
 | 接口 | 输入与行为 |
 | --- | --- |
 | `inspect(project, options)` | 只读检查。返回实际根目录、仓库类型、HEAD、分支、upstream、作者、远端 fetch/push URL 和工作区状态；URL 凭证及常见 GitHub Token 脱敏 |
+| `inspectRemote(project, url, options)` | 实际执行 ls-remote，返回可见引用、SHA、默认 HEAD 与 empty；不安装 remote、不 fetch，不将失败或仅缺 HEAD 视为空仓 |
+| `setup(project, options)`（setup.mjs） | 读取本地、远端、Issue 规则并计划初始化/克隆/接入；apply 必须提供本次 expectedFingerprint。默认不提交或推送 |
 | `init(project, {branch, authorName, authorEmail})` | 三个字段必须明确；只初始化无 Git 的目录，并写仓库级作者。目录已属于任何 Git 仓库时拒绝，避免误建嵌套仓库 |
 | `addRemote(project, {name, url})` | 相同名称与相同 fetch/push 地址时不修改；地址冲突时停止。不替换 origin、不改变 upstream、不修改全局 Git 配置 |
+| `replaceRemote(project, options)` | 只由已选 replace 计划调用，核对 expectedFetch、expectedPush、expectedState；在 Git config.lock 内准备后原子替换选中远端 url/已有 pushurl。配置来自 include/全局/Worktree 独立文件时停止，其他设置保持原样 |
+| `cloneInto(project, options)` | 核对目录完全为空，用已存在的明确分支原地 clone，核对 HEAD 为计划 SHA；不递归子模块，跳过 LFS 下载，只执行一次。失败保留实际状态，不清理目录 |
 | `publish(project, {remote, refs, ...options})` | 将完整本地引用清单的对象推送到指定远端；不提交、不设置 upstream、不推送额外标签、不强推。每次写入后回读 SHA |
 | `sync(project, config, options)` | 从来源远端实际已发布引用取得快照，再逐目标复制约定引用。不同目标独立报告；重新调用时读取真实状态，只补齐缺项 |
 
@@ -53,3 +57,17 @@ CLI 的发布入口先执行完整历史内容检查，再将检查结果的引�
 `tests/git.test.mjs` 使用临时本地工作仓和 bare 远端，覆盖初始化边界、remote 幂等、来源引用范围、注解标签、FETCH_HEAD/本地引用/暂存区保留、只读计划、目标部分失败与恢复、分叉和标签冲突、显式发布、LFS 未覆盖状态及配置漂移。测试仅在被忽略的 `tmp/git-setup/` 下创建夹具；通过 `GIT_SETUP_TEST_ROOT` 可明确指定当前工作区的该目录。
 
 这些测试不证明 GitHub/CNB 线上权限、实际分支保护或三宿主会话已经通过；相关结果由交付验证记录分别说明。
+
+## 仅 URL 入口、确认与恢复
+
+Agent 使用 `setup --url <URL>` 取得 `needs_input` 或 `planned`。已有任意 remote 时先要求 `--action add|replace --name <名称>`，即使已有 URL 相同。只有用户明确作出且范围未变的选择，或明确继续中断的同一次设置，才可复用参数；自动采用 origin、selection 字段、计划记录和成功结果均不等于用户选择。没有 remote 默认 origin；完成后再次仅发送 URL 且从未明确选择时仍须询问。`--apply --expected-fingerprint <本次指纹>` 才执行写入，不继承旧计划的状态假设。
+
+替换保留名称，计划包含当前 fetch/push、所有分支 remote/merge/pushRemote 设置、remote.pushDefault、受影响 sync 和 Issue 的前后目标、Git common config 对应 Worktree。相关同步或 Issue 目标变化需要 `--accept-effects`。该开关不授权同步、Issue 迁移或推送。旧 refs/remotes 和 remote HEAD 原样保留，本次不 fetch，不宣称历史关系已验证。多地址、mirror、非仓库本地的 URL 来源不能通过本入口替换。
+
+“空目录”按 `readdir` 的全部条目判定，隐藏文件也算内容。查询成功且没有任何可见引用才是 empty；HEAD-only、自定义引用、只有标签都不是空仓。clone 需要远端声明且实际存在的默认分支，或明确的 `--branch`。原地克隆后返回 `needs_project_rules`（退出 2，尚未完成设置）；Agent 先读新取得的项目规则，再沿用 `add` 和原名称重新计划，合并远端信息并完成回读。此阶段不增加用户确认，只读取并执行适用规则。
+
+`--plan-file` 可将不含凭证的 request/result 写入已有调用工作区中已忽略且未跟踪的 `data/git-setup/<任务>.json` 或 `tmp/git-setup/<任务>.json`。等待选择前保存 `needs_input`；具体方案保存 `planned`；首次变更前保存 `applying`；最后保存 `configured`、`needs_project_rules` 或 `incomplete`。文件写入使用锁和原子替换，读取回验；不自动改 .gitignore。真正空的克隆目标不能用于保存计划。Agent 的实际用户授权另行记录，`planned` 本身不证明批准。
+
+状态记录用于查证，不自动重放。异常返回 failedStep、completedSteps 与本地回读；进程被终止时可能停在 applying，须重新读取真实状态。Git config.lock 或共享写锁残留时先查正在运行的操作，禁止自动删除锁。已 init/已配置远端时保留用户选择，生成新指纹补齐余下步骤；克隆中断须核对 HEAD、索引与检出文件，不能把存在 .git 视为完整成功，不能自动删除或盲重试。
+
+configured 只证明本地设置和远端读取；不会证明推送身份/权限，不暂存、提交或推送。Agent 的实际完成回复必须含“本次暂未提交和推送。”，包括同地址核验和续作。Issue 的 not_configured/invalid 与 Git 接入结果分别说明；LFS/子模块内容限制继续适用。`tests/setup.test.mjs` 从 CLI 入口核验这些行为；客户端最终回复另作实际验收。

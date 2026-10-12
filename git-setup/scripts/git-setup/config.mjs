@@ -166,19 +166,25 @@ export async function inspectProject(project) {
 /** Shared config only. Never reads parent configs or credential values. */
 export async function loadProject(project, _options = {}) {
   const inspected = await inspectProject(project);
-  const configPath = path.join(inspected.root, CONFIG);
+  return { project: inspected, ...await readProjectConfig(inspected.root) };
+}
+
+/** Read an already inspected root, including a project that has no Git yet. */
+export async function readProjectConfig(root) {
+  const configPath = path.join(root, CONFIG);
   const raw = await readOptional(configPath);
   const config = raw === null ? null : validateConfig(parseJson(raw, configPath));
-  return { project: inspected, config, configPath, exists: raw !== null, fingerprint: hash(raw ?? 'missing') };
+  return { config, configPath, exists: raw !== null, fingerprint: hash(raw ?? 'missing') };
 }
 
 /** Write a complete validated non-secret record; no Git index, commit or push mutation. */
-export async function writeProject(project, input) {
+export async function writeProject(project, input, options = {}) {
   validateConfig(input);
   const inspected = await inspectProject(project);
   const configPath = path.join(inspected.root, CONFIG);
   const raw = await readOptional(configPath);
   const before = { configPath, fingerprint: hash(raw ?? 'missing') };
+  if (options.expectedFingerprint && options.expectedFingerprint !== before.fingerprint) fail('CONFIG_CHANGED', 'Shared config changed since the plan; inspect it again before writing.');
   const directory = path.dirname(before.configPath);
   await fs.mkdir(directory, { recursive: true });
   if (await fs.realpath(directory) !== directory) fail('CONFIG_SYMLINK', 'Shared config directory must not be a symlink.');
@@ -316,12 +322,12 @@ async function assertContained(base, relativePath, label, mustExist = false) {
 
 /** Resolve first, then use this exact result; call again before a write to compare fingerprints. */
 export async function resolveIssue(project, options = {}) {
-  const initiating = await inspectProject(project);
+  const initiating = options.inspectedProject ?? await inspectProject(project);
   const workspace = await workspaceFor(initiating, options);
   const independent = workspace?.relationship.issues === 'independent';
   const policy = workspace?.config?.workspace?.issuePolicy;
   if (independent && policy?.allowIndependent === false) fail('ISSUE_POLICY_CONFLICT', 'Project rules prohibit independent child Issue configuration.');
-  const owner = workspace && !independent ? workspace : await loadProject(initiating.root);
+  const owner = workspace && !independent ? workspace : { project: initiating, ...await readProjectConfig(initiating.root) };
   if (independent && (!owner.exists || !owner.config?.issues)) fail('INDEPENDENT_CONFIG_MISSING', 'Registered independent child Issue configuration is missing; it cannot fall back to the workspace.');
   const environment = await loadEnvironment(owner.project.root, { ...options, issueOnly: true });
   let issue = owner.config?.issues;
@@ -363,7 +369,7 @@ export async function resolveIssue(project, options = {}) {
     if (issue.github) github = { ...issue.github };
     else {
       const targetConfig = target.root === owner.project.root ? owner : await loadProject(target.root);
-      github = targetConfig.config?.repository ?? githubFromRemotes(target);
+      github = targetConfig.config?.repository ?? githubFromRemotes(options.prospectiveRemotes && target.root === initiating.root ? { ...target, remotes: options.prospectiveRemotes } : target);
     }
     identity(github, 'resolved GitHub target');
     if (issue.target === 'specified') target = owner.project;
