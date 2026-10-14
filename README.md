@@ -14,7 +14,6 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [memoji-sticker-pack](memoji-sticker-pack/) | 从一张人物照片生成一套 Apple Memoji 风格（拟我表情）表情贴纸包：先出基准头像锁定长相，再并发生成 N 个表情（默认 16），绿幕出图 + 自动抠成透明底 PNG，产出画廊 `index.html`（调用 `image-2` 生成，内置参考图上传） | [README](memoji-sticker-pack/README.md) · [SKILL.md](memoji-sticker-pack/SKILL.md) |
 | [multimodal-ask](multimodal-ask/) | 指定模型做多模态理解与文本生成：分析 / 转写音视频、让指定模型读取本地或远程图片 / PDF、对混合媒体一次性推理（异步） | [README](multimodal-ask/README.md) · [SKILL.md](multimodal-ask/SKILL.md) |
 | [video-to-markdown](video-to-markdown/) | 把本地或可直接下载的视频转成可复核、可续跑的 Markdown 文档：结合带时间戳的语音转写、关键帧截图、短 GIF、自适应补采样和全时间线覆盖检查，保留语音与画面共同承载的内容 | [SKILL.md](video-to-markdown/SKILL.md) |
-| [pdf2md_docx](pdf2md_docx/) | PDF 转 Markdown / LaTeX / DOCX：公式识别、跨页表格合并，返回 ZIP 自动解压到带时间戳的目录 | [README](pdf2md_docx/README.md) · [SKILL.md](pdf2md_docx/SKILL.md) |
 | [pdf2markdown](pdf2markdown/) | 把一个 PDF（本地文件或公开 HTTPS 链接）转成可复核的 Markdown 工作目录：preflight 门禁、一次一个 Doc2X 转换任务（创建 + 轮询 + 原子采纳结果 ZIP 为不可变原始产物）、逐处证据绑定的人工复核与修正、原始产物全程保留，中断后可从任意阶段续跑；付费重试必须显式确认 | [README](pdf2markdown/README.md) · [SKILL.md](pdf2markdown/SKILL.md) |
 | [s3-upload](s3-upload/) | 把本地文件持久写入用户自己的 S3 兼容 bucket（AWS S3 / Cloudflare R2 / custom，OSS / COS experimental）：严格 JSON Object Reference + public/presigned URL、`--collision reject` 原子 no-overwrite 与同内容采纳、17 键闭合 result 合同与 `--result-out` 跨进程 handoff、checkpoint 只读对账恢复 | [README](s3-upload/README.md) · [SKILL.md](s3-upload/SKILL.md) |
 | [preview-share](preview-share/) | 把本地 HTML 页面（或任意本地文件）传到线上预览并拿到可分享 URL，自动识别并一并上传相对路径引用的图片 / CSS / JS | [README](preview-share/README.md) · [SKILL.md](preview-share/SKILL.md) |
@@ -39,7 +38,6 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | memoji-sticker-pack | 1.3.0 | [memoji-sticker-pack/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.3.0) |
 | multimodal-ask | 1.3.0 | [multimodal-ask/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.3.0) |
 | pdf2markdown | 1.3.0 | [pdf2markdown/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv1.3.0) |
-| pdf2md_docx | 1.3.0 | [pdf2md_docx/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2md_docx%2Fv1.3.0) |
 | preview-share | 1.3.0 | [preview-share/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.3.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | template-preview | 1.3.0 | [template-preview/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.3.0) |
@@ -92,7 +90,7 @@ npx skills add cookaihq/cookai-skills --skill image-2 -a claude-code
 
 ## 自动检查更新
 
-本仓全部 15 个 skill 都自带 `scripts/check_update.sh`，SKILL.md 的第 0 步会在每次运行时调用它：脚本按 skill 所在的 git 检出比对 `origin/main`，落后就把版本变化和提交摘要打印出来，由 Agent 转述给你并询问是否拉取；只有你同意后才会执行 `check_update.sh --pull`（仅当分支为 `main`、跟踪文件无未提交改动、且可 fast-forward 时执行 `git merge --ff-only`，脚本从不 commit / push / reset / checkout）。
+本仓全部 14 个 skill 都自带 `scripts/check_update.sh`，SKILL.md 的第 0 步会在每次运行时调用它：脚本按 skill 所在的 git 检出比对 `origin/main`，落后就把版本变化和提交摘要打印出来，由 Agent 转述给你并询问是否拉取；只有你同意后才会执行 `check_update.sh --pull`（仅当分支为 `main`、跟踪文件无未提交改动、且可 fast-forward 时执行 `git merge --ff-only`，脚本从不 commit / push / reset / checkout）。
 
 它只做检查和提醒，不会自动改你本机的文件。检查每 6 小时最多一次，`git fetch` 单次尝试、5 秒超时，网络失败、非 git 检出（如手工拷贝安装）一律静默跳过——更新检查任何情况下都不会挡住 skill 干正事。
 
