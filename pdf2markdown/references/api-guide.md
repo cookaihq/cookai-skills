@@ -116,7 +116,9 @@ Pending and processing results use a persisted 720-second local polling
 window. A completed task whose `results` is null or an empty list uses a
 separate 720-second result-pending window. The 8-second base and 720-second
 windows are local, pending-validation precedent derived from the verified
-legacy `pdf2md_docx` defaults of an 8-second interval and 90 attempts. They are
+retired `pdf2md_docx` defaults of an 8-second interval and 90 attempts (historical
+source: repository commit `80939f57823ecbd1e7750dc7b8c09fa5d3da16a5`,
+`pdf2md_docx/scripts/convert.py`). They are
 not upstream service guarantees. Reaching either deadline stops the current
 window without claiming the task or result is permanently unavailable; a
 later invocation can continue querying the same task.

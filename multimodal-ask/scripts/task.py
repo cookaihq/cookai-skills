@@ -131,7 +131,7 @@ def poll_task(task_id: str, key: str, *, base_url: str, transport=None,
 
     轮询是幂等 GET：单次瞬时失败（429/5xx/网络异常）先消耗内层重试（3 次 + 指数
     退避 + 日志）。**内层重试穷尽也不终止整个轮询**：本轮作废、消耗一格预算、
-    继续下一轮（ADR 0006 规则 5，与 pdf2md_docx 同口径）。
+    继续下一轮（ADR 0006 规则 5）。
 
     `timeout` 是**真墙钟预算**，不是「次数 × 间隔」的估算值：进入每一轮前先查
     deadline，超了立即抛 PollTimeout。内层重试的退避、上游变慢的响应时间都算在

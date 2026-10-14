@@ -46,7 +46,6 @@ BILLING_WRITE = "billing_write"  # 计费写：只有「确认未受理」的失
 # 超时不在此列：`urlopen(timeout=...)` 对建连超时与读应答超时抛的都是
 # `socket.timeout`，异常对象本身不带「卡在哪个阶段」的信息。按 ADR 0006
 # 「禁止臆断」的要求这里不猜，一律按结果不明（ambiguous）处理。
-# 判定口径与参考实现 pdf2md_docx/scripts/client.py 的 is_connection_stage_failure 一致。
 SEND_FAILED = "send_failed"
 RESPONSE_LOST = "response_lost"
 
