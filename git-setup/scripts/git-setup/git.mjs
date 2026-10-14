@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { realpath, lstat, readFile, open, rename, rm, readdir } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { realpath, lstat, readFile, open, rename, rm, readdir, mkdir } from 'node:fs/promises';
+import { resolve, join, relative, isAbsolute } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { devNull } from 'node:os';
 import { auditSnapshot } from './audit.mjs';
@@ -29,9 +29,12 @@ function transient(result) {
   return /could not resolve|failed to connect|connection (?:reset|timed out|refused)|broken pipe|early EOF|TLS.*(?:failed|error)|SSL.*(?:failed|error)|requested URL returned error: (?:429|5\d\d)|remote end hung up|network is unreachable/i.test(message);
 }
 
-async function command(project, args, { timeout = LOCAL_TIMEOUT, env = {}, networkRead = false, onRetry } = {}) {
+async function command(project, args, { timeout = LOCAL_TIMEOUT, env = {}, networkRead = false, onRetry, authMetadata } = {}) {
   // Ambient repository selectors can silently redirect `git -C` to another tree.
-  const childEnv = { ...process.env, ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', LC_ALL: 'C', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull };
+  const ambient = { ...process.env };
+  for (const key of Object.keys(ambient)) if (/^GIT_(?:CONFIG|TRACE|CURL_VERBOSE)/.test(key)) delete ambient[key];
+  const childEnv = { ...ambient, ...env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GCM_INTERACTIVE: 'never', LC_ALL: 'C', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull };
+  for (const key of Object.keys(childEnv)) if (/^GIT_(?:TRACE|CURL_VERBOSE|CONFIG_PARAMETERS)/.test(key)) delete childEnv[key];
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_SHALLOW_FILE']) delete childEnv[key];
   const once = () => new Promise((done) => {
     let stdout = '', stderr = '', timedOut = false, overflow = false;
@@ -51,7 +54,10 @@ async function command(project, args, { timeout = LOCAL_TIMEOUT, env = {}, netwo
     child.on('close', (code) => {
       clearTimeout(timer);
       for (const [key, value] of Object.entries(childEnv)) {
-        if (/token|password|secret/i.test(key) && typeof value === 'string' && value.length >= 4) stderr = stderr.split(value).join('[redacted]');
+        if (/token|password|secret/i.test(key) && typeof value === 'string' && value.length >= 4) {
+          stderr = stderr.split(value).join('[redacted]');
+          stdout = stdout.split(value).join('[redacted]');
+        }
       }
       done({ code: code ?? -1, stdout, stderr, timedOut, overflow });
     });
@@ -59,7 +65,13 @@ async function command(project, args, { timeout = LOCAL_TIMEOUT, env = {}, netwo
   for (let attempt = 1; ; attempt++) {
     const result = await once();
     if (result.unavailable) throw failure('git_unavailable', 'Git 无法执行。请按实际系统安装 Git：macOS 使用 xcode-select --install；Windows 使用 winget install --id Git.Git -e；Debian/Ubuntu 使用 sudo apt-get install git。');
-    if (!networkRead || !transient(result) || attempt === 3 || result.code === 0) return result;
+    if (!networkRead || !transient(result) || attempt === 3 || result.code === 0) {
+      if (result.code !== 0 && authMetadata?.binding) {
+        const binding = authMetadata.binding;
+        result.stderr += `\n目标：${binding.target.url}；已选来源：${binding.file || (binding.method === 'gh' ? `gh:${binding.account}` : binding.source)}。`;
+      }
+      return result;
+    }
     const event = { attempt: attempt + 1, attempts: 3, delayMs: 1000 * 2 ** (attempt - 1), reason: redact(result.timedOut ? 'Git read timed out' : result.stderr.trim()) };
     if (onRetry) onRetry(event); else console.error(JSON.stringify({ gitReadRetry: event }));
     await pause(event.delayMs);
@@ -133,7 +145,7 @@ async function endpoint(project, name, push, options = {}) {
 }
 
 async function readRefs(project, url, refs, options = {}) {
-  const output = await required(project, ['ls-remote', '--refs', '--', url, ...refs], { ...await authenticated(options, url), timeout: READ_TIMEOUT, networkRead: true });
+  const output = await required(project, ['ls-remote', '--refs', '--', url, ...refs], { ...await authenticated(project, options, url), timeout: READ_TIMEOUT, networkRead: true });
   const found = Object.fromEntries(refs.map((ref) => [ref, null]));
   for (const line of output.split('\n')) {
     if (!line) continue;
@@ -146,11 +158,12 @@ async function readRefs(project, url, refs, options = {}) {
   return found;
 }
 
-async function authenticated(options, url) {
-  if (!options.authForUrl) return options;
-  const auth = await options.authForUrl(url);
+async function authenticated(project, options, url) {
+  const { gitAuthentication } = await import('./auth.mjs');
+  const authenticate = options.authForUrl || gitAuthentication(project, options).authForUrl;
+  const auth = await authenticate(url);
   if (!auth || typeof auth.env !== 'object') throw failure('authentication_configuration', 'authForUrl 必须返回含 env 的对象。');
-  return { ...options, env: { ...options.env, ...auth.env } };
+  return { ...options, authMetadata: auth.metadata, env: { ...options.env, ...auth.env } };
 }
 
 /** Reads advertised refs without fetching objects or installing a remote. */
@@ -159,7 +172,7 @@ export async function inspectRemote(project, url, options = {}) {
   validateUrl(url);
   const effective = await required(project, ['ls-remote', '--get-url', '--', url], options);
   if (effective !== url) throw failure('url_rewrite', 'Git URL 重写改变了实际目标，请先明确最终地址。');
-  const output = await required(project, ['ls-remote', '--symref', '--', url], { ...await authenticated(options, url), timeout: READ_TIMEOUT, networkRead: true });
+  const output = await required(project, ['ls-remote', '--symref', '--', url], { ...await authenticated(project, options, url), timeout: READ_TIMEOUT, networkRead: true });
   const refs = {};
   let defaultRef = null;
   for (const line of output.split('\n').filter(Boolean)) {
@@ -256,6 +269,134 @@ export async function init(project, options = {}) {
   return { status: 'initialized', committed: false, state: await inspect(root, options) };
 }
 
+const initializationKey = 'gitsetup.initialization';
+
+/** A credential preparation is not a completed initialization or clone. */
+export async function credentialInitialization(project, options = {}) {
+  const result = await command(project, ['config', '--local', '--get-all', initializationKey], options);
+  if (result.code === 1) return null;
+  if (result.code !== 0) throw failure('setup_initialization_invalid', '无法读取凭证准备阶段的初始化记录。');
+  let record;
+  try { record = JSON.parse(result.stdout); } catch { /* Invalid records must not fall through to connect. */ }
+  const fields = ['version', 'project', 'target', 'originalEmpty', 'stage', 'name', 'branch', 'head'];
+  if (!record || Object.keys(record).some(key => !fields.includes(key)) || record.version !== 1
+      || record.project !== await realpath(project) || typeof record.target !== 'string'
+      || !/^(?:github\.com|cnb\.cool)\/[A-Za-z0-9_.\/-]+$/.test(record.target)
+      || typeof record.originalEmpty !== 'boolean' || !['preparing', 'prepared', 'fetching', 'checkout', 'checked-out'].includes(record.stage)) {
+    throw failure('setup_initialization_invalid', '初始化记录损坏或所属目录改变；先修复原记录，不能把残留 .git 当作已完成接入。');
+  }
+  if (record.stage === 'preparing') throw failure('setup_initialization_incomplete', 'Git 元数据准备曾中断；请核对 .git 与初始化记录后恢复，不重新初始化或报告接入完成。');
+  if (['fetching', 'checkout', 'checked-out'].includes(record.stage)) {
+    if (typeof record.branch !== 'string') throw failure('setup_initialization_invalid', '初始化记录缺少检出分支。');
+    validateName(record.name);
+    await validateRef(project, `refs/heads/${record.branch}`, options);
+    if (!/^[a-f0-9]{40,64}$/.test(record.head)) throw failure('setup_initialization_invalid', '初始化记录缺少已确认的远端提交。');
+  }
+  return record;
+}
+
+async function saveInitialization(project, record, options = {}) {
+  await updateLocalConfig(project, options, file => required(project, ['config', '--file', file, initializationKey, JSON.stringify(record)], options));
+}
+
+/** Establish Git's ignore boundary before creating any credential file. No remote is accessed. */
+export async function prepareCredentialRepository(project, target, options = {}) {
+  const state = await inspect(project, options);
+  if (state.initialized) throw failure('already_initialized', '凭证准备不能覆盖现有 Git 仓库或在父仓内自动初始化。');
+  const record = { version: 1, project: state.project, target, originalEmpty: (await readdir(state.project)).length === 0, stage: 'preparing' };
+  if (!options.apply) return { ...record, stage: 'prepared' };
+  // Exclusive creation plus a pre-init marker keeps even an interrupted init distinguishable.
+  const metadata = join(state.project, '.git');
+  await mkdir(metadata, { mode: 0o700 });
+  await required(state.project, ['config', '--file', join(metadata, 'config'), initializationKey, JSON.stringify(record)], options);
+  await required(state.project, ['-c', `core.hooksPath=${devNull}`, 'init', '--template='], options);
+  record.stage = 'prepared';
+  await saveInitialization(state.project, record, options);
+  return record;
+}
+
+/** Count all user content, including ignored/hidden files; exempt only the selected credential. */
+export async function credentialProjectFiles(project, file) {
+  const root = await realpath(project);
+  const allowed = file ? relative(root, file).replaceAll('\\', '/') : null;
+  if (file && (!allowed || isAbsolute(allowed) || allowed === '..' || allowed.startsWith('../'))) throw failure('setup_credential_path', '初始化凭证文件不属于当前项目。');
+  const files = [];
+  const walk = async (directory, prefix = '') => {
+    for (const name of await readdir(directory)) {
+      if (!prefix && name === '.git') continue;
+      const path = prefix + name;
+      if (path === allowed) continue;
+      const info = await lstat(join(directory, name));
+      if (allowed?.startsWith(`${path}/`) && info.isDirectory() && !info.isSymbolicLink()) await walk(join(directory, name), `${path}/`);
+      else files.push(path);
+    }
+  };
+  await walk(root);
+  return files.sort();
+}
+
+async function requireUnborn(project, options = {}) {
+  const head = await command(project, ['rev-parse', '--verify', 'HEAD'], options);
+  if (head.code === 0 || await required(project, ['for-each-ref', '--format=%(refname)', 'refs/heads/'], options)
+      || await required(project, ['ls-files', '--stage'], options)) throw failure('setup_initialization_changed', '凭证准备后已出现本地提交或暂存文件；先明确这些内容与远端历史的关系。');
+}
+
+export async function initializeCredentialRepository(project, options = {}) {
+  await requireUnborn(project, options);
+  if (await required(project, ['for-each-ref', '--format=%(refname)'], options)) throw failure('setup_initialization_changed', '准备中的仓库已有下载引用，不能按空远端初始化；先核对前次读取结果。');
+  await validateRef(project, `refs/heads/${options.branch}`, options);
+  await required(project, ['symbolic-ref', 'HEAD', `refs/heads/${options.branch}`], options);
+  await completeInitialization(project, options);
+}
+
+export async function finishCredentialInitialization(project, options = {}) {
+  await updateLocalConfig(project, options, file => required(project, ['config', '--file', file, '--unset-all', initializationKey], options));
+}
+
+/** Fetch into the prepared repository, protecting ignored credentials during checkout. */
+export async function cloneCredentialRepository(project, options = {}) {
+  const record = await credentialInitialization(project, options);
+  if (!record) throw failure('setup_initialization_invalid', '缺少凭证准备记录，不能把已有仓库当作待克隆目录。');
+  const name = validateName(options.name), branch = options.branch;
+  await validateRef(project, `refs/heads/${branch}`, options);
+  if (record.name && (record.name !== name || record.branch !== branch)) throw failure('setup_initialization_changed', '中断操作的远端名称或检出分支已改变；先核对原初始化记录。');
+  const snapshot = { ...record, name, branch, head: options.expectedHead };
+  const state = await inspect(project, options);
+  if (state.head) {
+    if (record.stage !== 'checkout' || state.head !== record.head || record.head !== options.expectedHead || state.branch !== branch
+        || (await command(project, ['diff', '--quiet'], options)).code !== 0
+        || (await command(project, ['diff', '--cached', '--quiet'], options)).code !== 0) {
+      throw failure('setup_initialization_changed', '中断检出的 HEAD、分支或文件无法与原计划核对；保留现场，不能当作完整克隆。');
+    }
+  } else {
+    await requireUnborn(project, options);
+    if ((await credentialProjectFiles(project, options.credentialFile)).length) throw failure('clone_directory_changed', '凭证以外出现了文件；先明确文件保留及迁入方式，未覆盖。');
+    await saveInitialization(project, { ...snapshot, stage: 'fetching' }, options);
+    await addRemote(project, { ...options, name });
+    await required(project, ['-c', 'fetch.prune=false', '-c', 'fetch.pruneTags=false', 'fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--no-auto-gc', '--', options.url,
+      `refs/heads/*:refs/remotes/${name}/*`, 'refs/tags/*:refs/tags/*'], { ...await authenticated(project, options, options.url), timeout: TRANSFER_TIMEOUT, networkRead: true });
+    const actual = await required(project, ['rev-parse', '--verify', `refs/remotes/${name}/${branch}`], options);
+    if (actual !== options.expectedHead) throw failure('remote_changed', '下载的远端分支与计划不一致；保留对象，重新检查后继续。');
+    const paths = (await required(project, ['ls-tree', '-r', '--name-only', '-z', actual], options)).split('\0').filter(Boolean);
+    const protectedFile = relative(project, options.credentialFile).replaceAll('\\', '/').toLowerCase();
+    if (paths.some(path => {
+      const candidate = path.toLowerCase();
+      return candidate === '.credentials' || candidate.startsWith('.credentials/') || candidate === protectedFile
+        || protectedFile.startsWith(`${candidate}/`) || candidate.startsWith(`${protectedFile}/`);
+    })) throw failure('setup_credential_collision', '远端历史包含凭证目录或与凭证文件冲突的路径；未检出，未覆盖凭证。');
+    if ((await credentialProjectFiles(project, options.credentialFile)).length) throw failure('clone_directory_changed', '下载期间目录出现了其他文件，未执行检出。');
+    await saveInitialization(project, { ...snapshot, stage: 'checkout' }, options);
+    await required(project, ['-c', `core.hooksPath=${devNull}`, 'checkout', '--no-overwrite-ignore', '--no-recurse-submodules', '-b', branch, '--track', `refs/remotes/${name}/${branch}`],
+      { ...options, env: { ...options.env, GIT_LFS_SKIP_SMUDGE: '1' }, timeout: TRANSFER_TIMEOUT });
+  }
+  if (await required(project, ['rev-parse', 'HEAD'], options) !== options.expectedHead) throw failure('setup_initialization_changed', '检出后 HEAD 与计划不一致，未标记完成。');
+  if (options.defaultRef?.startsWith('refs/heads/')) {
+    await required(project, ['symbolic-ref', `refs/remotes/${name}/HEAD`, `refs/remotes/${name}/${options.defaultRef.slice(11)}`], options);
+  }
+  await saveInitialization(project, { ...snapshot, stage: 'checked-out' }, options);
+  return { status: 'cloned', project, head: options.expectedHead };
+}
+
 /** Fill explicitly chosen repository author fields, including post-clone and interrupted init. */
 export async function completeInitialization(project, options = {}) {
   const state = await inspect(project, options);
@@ -306,7 +447,7 @@ export async function setupFacts(project, options = {}) {
   };
 }
 
-async function updateLocalConfig(root, options, update) {
+export async function updateLocalConfig(root, options, update) {
   const common = resolve(root, await required(root, ['rev-parse', '--git-common-dir'], options));
   const file = join(common, 'config');
   if ((await lstat(file)).isSymbolicLink()) throw failure('setup_complex_remote', 'Git config 是符号链接，需先明确配置归属。');
@@ -360,7 +501,7 @@ export async function cloneInto(project, options = {}) {
   if (state.initialized || (await readdir(root)).length) throw failure('clone_directory_changed', '克隆目录不再为空，未覆盖任何文件。');
   const name = validateName(options.name), url = validateUrl(options.url);
   await validateRef(root, `refs/heads/${options.branch}`, options);
-  const auth = await authenticated(options, url);
+  const auth = await authenticated(project, options, url);
   await required(root, ['-c', `core.hooksPath=${devNull}`, 'clone', '--no-local', '--no-recurse-submodules', `--origin=${name}`, `--branch=${options.branch}`, '--', url, '.'], { ...auth, env: { ...auth.env, GIT_LFS_SKIP_SMUDGE: '1' }, timeout: TRANSFER_TIMEOUT });
   const head = await required(root, ['rev-parse', 'HEAD'], options);
   if (head !== options.expectedHead) throw failure('remote_changed', '克隆取得的 HEAD 与计划不一致；保留已下载内容，请重新检查远端及本地文件。');
@@ -368,14 +509,14 @@ export async function cloneInto(project, options = {}) {
 }
 
 async function fetchRef(project, url, ref, destination, expected, options) {
-  await required(project, ['-c', 'fetch.prune=false', '-c', 'fetch.pruneTags=false', 'fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--no-auto-gc', '--', url, `${ref}:${destination}`], { ...await authenticated(options, url), timeout: TRANSFER_TIMEOUT, networkRead: true });
+  await required(project, ['-c', 'fetch.prune=false', '-c', 'fetch.pruneTags=false', 'fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--no-auto-gc', '--', url, `${ref}:${destination}`], { ...await authenticated(project, options, url), timeout: TRANSFER_TIMEOUT, networkRead: true });
   const actual = await required(project, ['rev-parse', '--verify', destination], options);
   if (actual !== expected) throw failure('remote_changed', `读取期间 ${ref} 已改变；停止使用旧计划。`);
 }
 
 async function pushOne(project, url, ref, source, expected, options) {
   // Never retry a write. Even failed or interrupted pushes are read back first.
-  const write = await command(project, ['push', '--porcelain', '--no-force', '--no-follow-tags', '--recurse-submodules=no', '--', url, `${source}:${ref}`], { ...await authenticated(options, url), timeout: TRANSFER_TIMEOUT });
+  const write = await command(project, ['push', '--porcelain', '--no-force', '--no-follow-tags', '--recurse-submodules=no', '--', url, `${source}:${ref}`], { ...await authenticated(project, options, url), timeout: TRANSFER_TIMEOUT });
   try {
     const actual = (await readRefs(project, url, [ref], options))[ref];
     if (actual === expected) return { ref, expected, actual, status: 'verified', writeReportedSuccess: write.code === 0 };
@@ -428,6 +569,7 @@ export async function sync(project, config, options = {}) {
   if (new Set([sourceUrl, ...targets.map((target) => target.url)]).size !== targets.length + 1) throw failure('duplicate_sync_endpoint', '来源和同步目标必须对应不同的远端地址。');
   const snapshot = await readRefs(root, sourceUrl, refs, options);
   for (const ref of refs) if (!snapshot[ref]) throw failure('missing_source_ref', `来源远端没有 ${ref}；不会用本地同名引用代替。`);
+  if (options.expectedRefs && (Object.keys(options.expectedRefs).length !== refs.length || refs.some(ref => options.expectedRefs[ref] !== snapshot[ref]))) throw failure('source_changed', '来源引用与已确认计划不同；尚未获取对象或写入目标。');
   if (options.dryRun) {
     const results = [];
     for (const target of targets) {

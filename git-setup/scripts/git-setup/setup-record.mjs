@@ -9,7 +9,7 @@ const exec = promisify(execFile);
 const fail = message => { throw Object.assign(new Error(message), { code: 'setup_record_path' }); };
 
 /** Agent-selected recovery file: ignored data/git-setup or tmp/git-setup in an existing workspace. */
-export async function saveSetupRecord(file, record) {
+export async function saveSetupRecord(file, record, { createOnly = false, beforeWrite } = {}) {
   file = resolve(file);
   let parent = dirname(file);
   while (true) {
@@ -33,6 +33,12 @@ export async function saveSetupRecord(file, record) {
   let lock;
   try {
     lock = await open(lockPath, 'wx', 0o600);
+    // Check caller-specific replacement conditions while holding the record lock.
+    if (beforeWrite) await beforeWrite();
+    if (createOnly) {
+      try { await lstat(file); fail('本次操作记录已经存在；先核对原记录，不覆盖或重发。'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
     const out = await open(temp, 'wx', 0o600);
     try { await out.writeFile(`${JSON.stringify({ schemaVersion: 1, ...record }, null, 2)}\n`); } finally { await out.close(); }
     await rename(temp, file);

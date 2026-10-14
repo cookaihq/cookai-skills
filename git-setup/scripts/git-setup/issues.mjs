@@ -1,8 +1,9 @@
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink, link } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { hostname } from 'node:os';
 import { validateGitHubTarget } from './github.mjs';
 
 export class IssueError extends Error {
@@ -89,28 +90,41 @@ async function atomicJson(file, value) {
 }
 
 async function lock(file, action) {
-  let handle;
-  try { handle = await open(file, 'wx', 0o600); }
-  catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    // Recover only a recorded lock whose process demonstrably no longer exists.
-    let previous;
-    try { previous = JSON.parse(await readFile(file, 'utf8')); } catch { /* incomplete lock remains explicit */ }
-    let stale = false;
-    if (Number.isSafeInteger(previous?.pid) && previous.pid > 0) {
-      try { process.kill(previous.pid, 0); } catch (probeError) { stale = probeError.code === 'ESRCH'; }
-    }
-    if (!stale) throw new IssueError('operation-locked', '同一操作或本地编号分配正在执行，或遗留锁无法确认；请核实进程后重试。', { lockPath: file });
-    const current = JSON.parse(await readFile(file, 'utf8'));
-    if (current.lockId !== previous.lockId) throw new IssueError('operation-locked', '锁已由其他进程更新，请稍后重试。');
-    await unlink(file);
-    return lock(file, action);
-  }
+  const owner = { pid: process.pid, host: hostname(), lockId: randomUUID() };
+  const temporary = `${file}.owner-${owner.lockId}`;
+  const out = await open(temporary, 'wx', 0o600);
+  try { await out.writeFile(JSON.stringify(owner)); await out.sync(); } finally { await out.close(); }
+  const readOwner = file => regularText(file, path.dirname(file)).then(JSON.parse);
+  const busy = () => { throw new IssueError('operation-locked', '同一操作或编号分配正在执行，或遗留锁的主机/进程无法确认；保留现场后重试。', { lockPath: file }); };
+  let rootOwner, acquired = false, selected = file;
+  const chain = [];
   try {
-    await handle.writeFile(JSON.stringify({ pid: process.pid, lockId: randomUUID(), startedAt: new Date().toISOString() }));
-    await handle.sync();
+    // Immutable successor paths prevent two recoveries from unlinking each other's lock.
+    for (let depth = 0; ; depth++) {
+      try { await link(temporary, selected); acquired = true; break; }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      let previous;
+      try { previous = await readOwner(selected); } catch { busy(); }
+      if (depth > 64 || previous.host !== hostname() || !Number.isSafeInteger(previous.pid) || previous.pid < 1 || !/^[a-f0-9-]{36}$/.test(previous.lockId)) busy();
+      let dead = false;
+      try { process.kill(previous.pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
+      if (!dead) busy();
+      rootOwner ||= previous;
+      if (selected !== file) chain.push(selected);
+      selected = `${file}.recovery-${previous.lockId}`;
+    }
+    rootOwner ||= owner;
+    if (hash(await readOwner(file)) !== hash(rootOwner)) busy();
     return await action();
-  } finally { await handle.close(); await unlink(file).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+  } finally {
+    await unlink(temporary);
+    if (acquired) {
+      // A new root belongs to another operation and must never be removed here.
+      let current; try { current = await readOwner(file); } catch { /* preserve unknown root */ }
+      if (rootOwner && current && hash(current) === hash(rootOwner)) await unlink(file);
+      for (const entry of [...chain, ...(selected === file ? [] : [selected])]) await unlink(entry).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    }
+  }
 }
 
 function journalRoot(resolution) { return resolution.targetProject || resolution.configOwner || resolution.initiatingProject; }
@@ -126,7 +140,7 @@ async function withJournal(resolution, operationId, action) {
   });
 }
 
-function contentFields(content, partial = false) {
+export function contentFields(content, partial = false) {
   if (!content || typeof content !== 'object') throw new IssueError('invalid-content', '缺少事项内容。');
   if ((!partial || content.title !== undefined) && (typeof content.title !== 'string' || !content.title.trim() || /[\r\n]/.test(content.title))) throw new IssueError('invalid-title', 'Issue 标题必须是非空单行文本。');
   if ((!partial || content.body !== undefined) && typeof content.body !== 'string') throw new IssueError('invalid-body', 'Issue 正文必须是文本。');
@@ -149,16 +163,25 @@ function githubTarget(resolution) {
   return validateGitHubTarget(resolution.github);
 }
 function sameOperation(previous, record) {
-  if (previous.kind !== record.kind || previous.contentHash !== record.contentHash || JSON.stringify(previous.target) !== JSON.stringify(record.target)) {
+  if (previous.kind !== record.kind || previous.contentHash !== record.contentHash || previous.fingerprint !== record.fingerprint || JSON.stringify(previous.target) !== JSON.stringify(record.target)) {
     throw new IssueError('operation-mismatch', 'operation-id 已用于不同内容或目标，拒绝复用；请核对已有记录。');
   }
 }
 function slug(title) { return title.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 72) || 'issue'; }
 const regexEscape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function validateLocalRules(config) {
+  const pattern = config.filename;
+  if (typeof pattern !== 'string' || !pattern || /\{(?!number\}|slug\})/.test(pattern)) throw new IssueError('invalid-filename-pattern', '文件名规则仅支持 {number} 与 {slug}。');
+  filenameSafe(pattern.replaceAll('{number}', '01').replaceAll('{slug}', 'issue'));
+  if (pattern.includes('{number}')) {
+    const { start, width } = config.numbering || {};
+    if (!Number.isSafeInteger(start) || start < 1 || !Number.isSafeInteger(width) || width < 1 || width > 12 || pattern.split('{number}').length !== 2) throw new IssueError('invalid-numbering', '明确编号起点和宽度（1–12），文件名只含一个 {number}。');
+  } else if (config.numbering !== undefined) throw new IssueError('invalid-numbering', '编号设置必须对应文件名中的 {number}。');
+}
 async function allocateName(directory, config, content) {
   if (content.filename !== undefined) return { filename: filenameSafe(content.filename) };
   const pattern = config.filename;
-  if (!pattern) throw new IssueError('filename-required', '项目未配置文件名规则；请按项目约定提供 --file-name。');
+  if (!pattern) throw new IssueError('filename-required', '本次输入缺少项目约定的文件命名规则。');
   if (typeof pattern !== 'string' || /\{(?!number\}|slug\})/.test(pattern)) throw new IssueError('invalid-filename-pattern', '文件名规则仅支持 {number} 与 {slug}。');
   let number;
   if (pattern.includes('{number}')) {
@@ -176,17 +199,18 @@ async function allocateName(directory, config, content) {
   return { filename: filenameSafe(pattern.replaceAll('{slug}', slug(content.title)).replaceAll('{number}', number || '')), number };
 }
 
-export async function createLocalIssue({ resolution, content, operationId = randomUUID(), authorized = false }) {
+export async function createLocalIssue({ resolution, content, operationId = randomUUID(), authorized = false, validate = async () => {} }) {
   authorization(authorized);
   const config = localTarget(resolution);
-  contentFields(content);
+  contentFields(content.document === undefined ? content : { title: content.title, body: '' });
+  if (content.document !== undefined && (typeof content.document !== 'string' || !content.document.trim())) throw new IssueError('invalid-content', '本地创建的完整 document 不能为空。');
   const root = await realpath(config.root);
   const target = { root, directory: config.directory };
-  const requested = { title: content.title, body: content.body, filename: content.filename || null, rule: config.filename || null, numbering: config.numbering || null };
+  const requested = { title: content.title, body: content.body, document: content.document, filename: content.filename || null, rule: config.filename || null, numbering: config.numbering || null };
   // Read the template before allocating a journal so a malformed template has no side effects.
-  const template = config.template ? await regularText(config.template, resolution.configOwner) : '# {title}\n\n{body}\n';
+  const template = config.template ? await regularText(config.template, config.templateRoot || resolution.configOwner) : content.document === undefined ? '# {title}\n\n{body}\n' : null;
   if (config.templateFingerprint && hash(template) !== config.templateFingerprint) throw new IssueError('template-changed', '本地 Issue 模板自目标解析后发生变化，请重新解析再创建。');
-  if (!template.includes('{title}') || !template.includes('{body}')) throw new IssueError('invalid-template', '本地模板必须含 {title} 和 {body}，避免丢失用户提供的内容。');
+  if (content.document === undefined && (!template.includes('{title}') || !template.includes('{body}'))) throw new IssueError('invalid-template', '正文渲染需要含 {title} 和 {body} 的已有模板；否则提交完整 document。');
   requested.templateHash = hash(template);
   const record = { version: 1, kind: 'local-issue', operationId, target, contentHash: hash(requested), fingerprint: resolution.fingerprint, createdAt: new Date().toISOString(), status: 'prepared' };
   return withJournal(resolution, operationId, async journal => {
@@ -199,11 +223,13 @@ export async function createLocalIssue({ resolution, content, operationId = rand
       const { filename, number } = await allocateName(directory, config, content);
       record.filePath = path.join(directory, filename);
       const variables = { title: content.title, body: content.body, number: number || '', slug: slug(content.title), date: record.createdAt.slice(0, 10) };
-      const output = template.replace(/\{(title|body|number|slug|date)\}/g, (_match, name) => variables[name]);
+      const output = content.document ?? template.replace(/\{(title|body|number|slug|date)\}/g, (_match, name) => variables[name]);
       record.outputHash = hash(output);
       await journal.save(record);
       let file;
       try {
+        await validate();
+        await safeDirectory(root, config.directory);
         file = await open(record.filePath, 'wx', 0o644);
         await file.writeFile(output); await file.sync();
       } catch (error) {
@@ -226,13 +252,58 @@ async function recoverLocal(record, journal) {
   record.status = 'verified';
   record.verifiedAt = new Date().toISOString();
   await journal.save(record);
-  return { status: 'verified', backend: 'local', operationId: record.operationId, filePath: record.filePath, message: '已按当前项目配置将 Issue 保存到本地' };
+  return { status: 'verified', backend: 'local', operationId: record.operationId, filePath: record.filePath, message: '已按当前项目规则将 Issue 保存到本地' };
 }
 
-function issueIdentity(issue, target) {
+export async function previewLocalEdit(resolution, content) {
+  const config = localTarget(resolution), existing = resolution.existing;
+  const original = await regularText(existing.file, config.root);
+  if (hash(original) !== existing.sha256) throw new IssueError('local-content-mismatch', '原事项内容已变化，先读取实际文件；不覆盖后续用户修改。');
+  let output;
+  if (resolution.action === 'update') {
+    if (typeof content?.document !== 'string' || !content.document.trim()) throw new IssueError('invalid-content', '本地更新需要 Agent 按原规则准备的完整 document。');
+    output = content.document;
+  } else {
+    if (typeof content?.body !== 'string' || !content.body.trim()) throw new IssueError('invalid-body', '本地回复需要非空正文。');
+    const heading = config.commentsHeading;
+    if (typeof heading !== 'string' || !/^#{1,6} [^\r\n]+$/.test(heading)) throw new IssueError('invalid-comments-heading', '必须提供规则约定的完整回复标题行。');
+    const lines = original.split(/\r?\n/), index = lines.indexOf(heading);
+    const level = heading.indexOf(' ');
+    if (index < 0 || lines.slice(index + 1).some(line => new RegExp(`^#{1,${level}} `).test(line))) throw new IssueError('comments-section-mismatch', '回复标题不是原事项最后一个对应层级的章节；Agent 需按原格式准备明确更新。');
+    output = original + (original.endsWith('\n') ? '\n' : '\n\n') + content.body + '\n';
+  }
+  return { original, output };
+}
+
+export async function editLocalIssue({ resolution, content, operationId, authorized = false, validate = async () => {} }) {
+  authorization(authorized);
+  const config = localTarget(resolution), filePath = resolution.existing.file;
+  const record = { version: 1, kind: `local-${resolution.action}`, operationId, target: { root: config.root, directory: config.directory }, contentHash: hash({ content, existing: resolution.existing }), fingerprint: resolution.fingerprint, filePath, createdAt: new Date().toISOString(), status: 'prepared' };
+  return withJournal(resolution, operationId, async journal => {
+    if (journal.previous) { sameOperation(journal.previous, record); return recoverLocal(journal.previous, journal); }
+    return lock(path.join(journal.directory, `local-item-${hash(filePath)}.lock`), async () => {
+      const { original, output } = await previewLocalEdit(resolution, content);
+      record.outputHash = hash(output);
+      record.pendingPath = `${filePath}.${operationId}.tmp`;
+      await journal.save(record);
+      await validate();
+      await safeDirectory(config.root, path.relative(config.root, path.dirname(filePath)));
+      const temporary = await open(record.pendingPath, 'wx', (await lstat(filePath)).mode & 0o777);
+      try { await temporary.writeFile(output); await temporary.sync(); } finally { await temporary.close(); }
+      await validate();
+      if (await regularText(filePath, config.root) !== original) throw new IssueError('local-content-mismatch', '写入前原事项已变化；保留原文件和临时结果供核对。');
+      await rename(record.pendingPath, filePath);
+      return recoverLocal(record, journal);
+    });
+  });
+}
+
+const sameGitHubUrl = (actual, expected) => typeof actual === 'string' && actual.toLowerCase() === expected.toLowerCase();
+function issueIdentity(issue, target, number) {
   if (!issue || issue.pull_request || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof issue.html_url !== 'string') throw new IssueError('invalid-issue-response', 'GitHub 响应不是可验证的 Issue。');
+  if (number !== undefined && issue.number !== number) throw new IssueError('issue-target-mismatch', 'GitHub 回读了不同的事项编号。');
   const expected = `https://github.com/${target.repository}/issues/${issue.number}`;
-  if (issue.html_url.toLowerCase() !== expected.toLowerCase() || issue.repository_url?.toLowerCase() !== `https://api.github.com/repos/${target.repository}`.toLowerCase()) throw new IssueError('issue-target-mismatch', 'GitHub 返回事项不属于已解析目标仓库，拒绝报告成功。');
+  if (!sameGitHubUrl(issue.html_url, expected) || !sameGitHubUrl(issue.repository_url, `https://api.github.com/repos/${target.repository}`)) throw new IssueError('issue-target-mismatch', 'GitHub 返回事项不属于已解析目标仓库，拒绝报告成功。');
   return issue;
 }
 function verifyContent(issue, content) {
@@ -255,7 +326,7 @@ function verifyRecordedContent(issue, record) {
   }
 }
 
-export async function createRemoteIssue({ resolution, content, operationId = randomUUID(), client, authorized = false }) {
+export async function createRemoteIssue({ resolution, content, operationId = randomUUID(), client, authorized = false, validate = async () => {} }) {
   authorization(authorized);
   const target = githubTarget(resolution);
   const fields = contentFields(content);
@@ -269,12 +340,13 @@ export async function createRemoteIssue({ resolution, content, operationId = ran
     if (repository.full_name?.toLowerCase() !== target.repository.toLowerCase() || repository.has_issues !== true || repository.archived === true) throw new IssueError('issues-unavailable', '目标仓库身份不匹配、未启用 Issues 或已经归档。');
     await journal.save(record);
     try {
+      await validate();
       const result = issueIdentity(await client.createIssue(target.repository, payload, { authorized }), target);
       record.number = result.number;
       record.url = result.html_url;
       record.status = 'created-unverified';
       await journal.save(record);
-      const actual = issueIdentity(await client.getIssue(target.repository, result.number), target);
+      const actual = issueIdentity(await client.getIssue(target.repository, result.number), target, result.number);
       verifyContent(actual, payload);
       record.status = 'verified'; record.verifiedAt = new Date().toISOString();
       await journal.save(record);
@@ -294,24 +366,25 @@ async function recoverRemote(record, journal, client, { maxPages = 20, budgetMs 
   const target = validateGitHubTarget(record.target);
   const matches = [];
   const deadline = Date.now() + budgetMs;
+  let complete = Boolean(record.number);
   if (record.number) {
-    matches.push(issueIdentity(await client.getIssue(target.repository, record.number, { deadline }), target));
+    matches.push(issueIdentity(await client.getIssue(target.repository, record.number, { deadline }), target, record.number));
   } else {
     const since = new Date(Date.parse(record.createdAt) - 5 * 60_000).toISOString();
     for (let page = 1; page <= maxPages && Date.now() < deadline; page++) {
       const issues = await client.listIssues(target.repository, { page, since, deadline });
       if (!Array.isArray(issues)) throw new IssueError('invalid-issue-response', 'GitHub 列表响应无效。');
       for (const issue of issues) if (!issue.pull_request && typeof issue.body === 'string' && issue.body.includes(record.marker)) matches.push(issueIdentity(issue, target));
-      if (issues.length < 100) break;
+      if (issues.length < 100) { complete = true; break; }
     }
   }
   const unique = [...new Map(matches.map(issue => [issue.number, issue])).values()];
-  if (unique.length !== 1 || !unique[0].body?.includes(record.marker)) {
+  if (!complete || unique.length !== 1 || !unique[0].body?.includes(record.marker)) {
     record.status = unique.length > 1 ? 'multiple-matches' : 'ambiguous';
     await journal.save(record);
     return { status: record.status, operationId: record.operationId, retryAllowed: false, message: '尚不能唯一核实此前创建结果；一次查询为空不能证明未创建，禁止自动重发。' };
   }
-  const actual = issueIdentity(await client.getIssue(target.repository, unique[0].number, { deadline }), target);
+  const actual = issueIdentity(await client.getIssue(target.repository, unique[0].number, { deadline }), target, unique[0].number);
   if (!actual.body?.includes(record.marker)) throw new IssueError('operation-marker-mismatch', '回读事项缺少本次唯一操作标识。');
   verifyRecordedContent(actual, record);
   record.number = actual.number; record.url = actual.html_url; record.status = 'verified'; record.verifiedAt = new Date().toISOString();
@@ -319,45 +392,105 @@ async function recoverRemote(record, journal, client, { maxPages = 20, budgetMs 
   return { status: 'verified', backend: 'github', operationId: record.operationId, number: actual.number, url: actual.html_url, recovered: true };
 }
 
-export async function recoverIssue({ resolution, operationId, client }) {
+export async function recoverIssue({ resolution, operationId, client, validate = async () => {} }) {
   return withJournal(resolution, operationId, async journal => {
     const record = journal.previous;
     if (!record) throw new IssueError('operation-not-found', '该项目没有此 operation-id 的操作记录。');
-    if (record.kind === 'local-issue') {
+    if (record.fingerprint !== resolution.fingerprint) throw new IssueError('operation-mismatch', '规则、模板、关系、目标或本次输入与原操作不同，不能沿用旧记录。');
+    await validate();
+    if (['local-issue', 'local-update', 'local-comment'].includes(record.kind)) {
       const target = localTarget(resolution);
       if (await realpath(target.root) !== record.target.root || target.directory !== record.target.directory) throw new IssueError('operation-target-changed', '当前解析目标与原本地操作不同；请显式解析原目标再恢复。');
       return recoverLocal(record, journal);
     }
-    if (record.kind === 'github-issue') {
+    if (['github-issue', 'github-update', 'github-comment'].includes(record.kind)) {
       const target = githubTarget(resolution);
       if (target.host !== record.target.host || target.repository.toLowerCase() !== record.target.repository.toLowerCase()) throw new IssueError('operation-target-changed', '当前解析目标与原 GitHub 操作不同；不能转移恢复目标。');
-      return recoverRemote(record, journal, client);
+      return record.kind === 'github-issue' ? recoverRemote(record, journal, client) : recoverRemoteEdit(record, journal, client);
     }
     throw new IssueError('unsupported-recovery', '该记录不是 Issue 创建记录。');
   });
 }
 
-export async function updateRemoteIssue({ resolution, number, content, client, authorized = false }) {
-  authorization(authorized);
-  const target = githubTarget(resolution);
-  const fields = contentFields(content, true);
-  if (!Object.keys(fields).length) throw new IssueError('empty-update', '没有要求更新的 Issue 字段。');
-  issueIdentity(await client.getIssue(target.repository, number), target);
-  await client.updateIssue(target.repository, number, fields, { authorized });
-  const actual = issueIdentity(await client.getIssue(target.repository, number), target);
-  verifyContent(actual, fields);
-  return { status: 'verified', backend: 'github', number: actual.number, url: actual.html_url };
+function commentIdentity(comment, target, number, id) {
+  if (!Number.isSafeInteger(comment?.id) || comment.id < 1 || (id !== undefined && comment.id !== id)
+      || !sameGitHubUrl(comment.issue_url, `https://api.github.com/repos/${target.repository}/issues/${number}`)
+      || !sameGitHubUrl(comment.html_url, `https://github.com/${target.repository}/issues/${number}#issuecomment-${comment.id}`)) {
+    throw new IssueError('comment-mismatch', '回复回读不属于原 Issue、目标仓库或回复编号。');
+  }
+  return comment;
 }
 
-export async function commentRemoteIssue({ resolution, number, body, client, authorized = false }) {
+async function recoverRemoteEdit(record, journal, client) {
+  const target = validateGitHubTarget(record.target), deadline = Date.now() + 120_000;
+  let actual;
+  if (record.kind === 'github-update') {
+    actual = issueIdentity(await client.getIssue(target.repository, record.number, { deadline }), target, record.number);
+  } else if (record.commentId) {
+    actual = commentIdentity(await client.getComment(target.repository, record.commentId, { deadline }), target, record.number, record.commentId);
+  } else {
+    const matches = new Map();
+    let complete = false;
+    for (let page = 1; page <= 20 && Date.now() < deadline; page++) {
+      const comments = await client.listComments(target.repository, record.number, { page, since: new Date(Date.parse(record.createdAt) - 300_000).toISOString(), deadline });
+      if (!Array.isArray(comments)) throw new IssueError('comment-mismatch', 'GitHub 回复列表无效。');
+      for (const comment of comments) if (comment.body?.includes(record.marker)) matches.set(comment.id, commentIdentity(comment, target, record.number));
+      if (comments.length < 100) { complete = true; break; }
+    }
+    if (!complete || matches.size !== 1) {
+      record.status = matches.size > 1 ? 'multiple-matches' : 'ambiguous';
+      await journal.save(record);
+      return { status: record.status, operationId: record.operationId, retryAllowed: false, message: '不能唯一核实原回复；不重复 POST。' };
+    }
+    const id = [...matches.keys()][0];
+    actual = commentIdentity(await client.getComment(target.repository, id, { deadline }), target, record.number, id);
+  }
+  verifyRecordedContent(actual, record);
+  if (record.kind === 'github-comment') {
+    if (!actual.body?.includes(record.marker)) throw new IssueError('operation-marker-mismatch', '回复缺少原操作标识。');
+    record.commentId = actual.id;
+  }
+  record.status = 'verified'; record.url = actual.html_url; record.verifiedAt = new Date().toISOString();
+  await journal.save(record);
+  return { status: 'verified', backend: 'github', operationId: record.operationId, number: record.number, url: record.url, recovered: true };
+}
+
+async function editRemote({ resolution, number, fields, operationId, client, authorized, validate }, kind) {
   authorization(authorized);
-  const target = githubTarget(resolution);
+  const target = githubTarget(resolution), contentHash = hash(fields);
+  const marker = kind === 'github-comment' ? `<!-- git-setup-operation:${operationId} sha256:${contentHash} -->` : undefined;
+  const payload = marker ? { body: `${fields.body}\n\n${marker}` } : fields;
+  const record = { version: 1, kind, operationId, number, target: { host: target.host, repository: target.repository }, contentHash: hash({ number, fields }), contentChecks: contentChecks(payload), marker, fingerprint: resolution.fingerprint, createdAt: new Date().toISOString(), status: 'prepared' };
+  return withJournal(resolution, operationId, async journal => {
+    if (journal.previous) { sameOperation(journal.previous, record); return recoverRemoteEdit(journal.previous, journal, client); }
+    issueIdentity(await client.getIssue(target.repository, number), target, number);
+    await journal.save(record);
+    try {
+      await validate();
+      if (kind === 'github-update') issueIdentity(await client.updateIssue(target.repository, number, payload, { authorized }), target, number);
+      else {
+        const result = commentIdentity(await client.createComment(target.repository, number, payload.body, { authorized }), target, number);
+        record.commentId = result.id;
+      }
+      record.status = 'written-unverified'; await journal.save(record);
+      return await recoverRemoteEdit(record, journal, client);
+    } catch (error) {
+      record.status = error.status >= 400 && error.status < 500 && !error.ambiguous ? 'rejected' : 'ambiguous';
+      record.errorCode = error.code || 'unknown'; await journal.save(record);
+      error.operationId = operationId; throw error;
+    }
+  });
+}
+
+export async function updateRemoteIssue({ content, operationId = randomUUID(), validate = async () => {}, ...options }) {
+  const fields = contentFields(content, true);
+  if (!Object.keys(fields).length) throw new IssueError('empty-update', '没有要求更新的 Issue 字段。');
+  return editRemote({ ...options, fields, operationId, validate }, 'github-update');
+}
+
+export async function commentRemoteIssue({ body, operationId = randomUUID(), validate = async () => {}, ...options }) {
   if (typeof body !== 'string' || !body.trim()) throw new IssueError('invalid-body', '回复正文必须是非空文本。');
-  issueIdentity(await client.getIssue(target.repository, number), target);
-  const result = await client.createComment(target.repository, number, body, { authorized });
-  const actual = await client.getComment(target.repository, result.id);
-  if (actual.body !== body || actual.issue_url !== `https://api.github.com/repos/${target.repository}/issues/${number}`) throw new IssueError('comment-mismatch', '回复回读与原 Issue 或正文不一致。');
-  return { status: 'verified', backend: 'github', number, url: actual.html_url };
+  return editRemote({ ...options, fields: { body }, operationId, validate }, 'github-comment');
 }
 
 export async function createRemoteRepository({ projectRoot, owner, name, private: isPrivate, operationId = randomUUID(), client, authorized = false }) {

@@ -14,7 +14,9 @@ if (ignore.status !== 0) throw new Error(`测试临时目录未被 Git 忽略：
 mkdirSync(testRoot, { recursive: true });
 const tests = readdirSync(resolve(skill, 'tests')).filter(name => name.endsWith('.test.mjs')).map(name => resolve(skill, 'tests', name));
 const result = spawnSync(process.execPath, ['--test', ...tests], {
-  cwd: skill, stdio: 'inherit', timeout: 180000,
+  // Relationship and multi-repository scenarios launch real Git/CLI processes.
+  cwd: skill, stdio: 'inherit', timeout: 1200000,
   env: { ...process.env, GIT_SETUP_TEST_ROOT: testRoot },
 });
+if (result.error) process.stderr.write(`完整测试进程未完成：${result.error.code || 'process_error'}（总预算 1200 秒）。\n`);
 process.exitCode = result.status ?? 1;

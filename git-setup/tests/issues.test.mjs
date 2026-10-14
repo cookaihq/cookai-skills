@@ -46,7 +46,7 @@ test('local creation preserves template and returns explicit local message and a
   await writeFile(path.join(root, 'template.md'), '# {number} {title}\n\n状态：待处理\n\n{body}\n');
   resolution.local.template = path.join(root, 'template.md');
   const result = await createLocalIssue({ resolution, content, authorized: true });
-  assert.equal(result.message, '已按当前项目配置将 Issue 保存到本地');
+  assert.equal(result.message, '已按当前项目规则将 Issue 保存到本地');
   assert.equal(path.basename(result.filePath), '001-不能打开页面.md');
   assert.match(await readFile(result.filePath, 'utf8'), /^# 001 不能打开页面\n\n状态：待处理/);
   const record = JSON.parse(await readFile(path.join(root, 'data/git-setup', `${result.operationId}.json`), 'utf8'));

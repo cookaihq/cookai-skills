@@ -18,7 +18,7 @@ Agent 先读取项目规则，用 `inspect(project)` 识别实际根目录、外
 | --- | --- |
 | `inspect(project, options)` | 只读检查。返回实际根目录、仓库类型、HEAD、分支、upstream、作者、远端 fetch/push URL 和工作区状态；URL 凭证及常见 GitHub Token 脱敏 |
 | `inspectRemote(project, url, options)` | 实际执行 ls-remote，返回可见引用、SHA、默认 HEAD 与 empty；不安装 remote、不 fetch，不将失败或仅缺 HEAD 视为空仓 |
-| `setup(project, options)`（setup.mjs） | 读取本地、远端、Issue 规则并计划初始化/克隆/接入；apply 必须提供本次 expectedFingerprint。默认不提交或推送 |
+| `setup(project, options)`（setup.mjs） | 读取本地 Git、远端及实际 Harness 策略并计划初始化/克隆/接入；apply 必须提供本次 expectedFingerprint。默认不提交或推送 |
 | `init(project, {branch, authorName, authorEmail})` | 三个字段必须明确；只初始化无 Git 的目录，并写仓库级作者。目录已属于任何 Git 仓库时拒绝，避免误建嵌套仓库 |
 | `addRemote(project, {name, url})` | 相同名称与相同 fetch/push 地址时不修改；地址冲突时停止。不替换 origin、不改变 upstream、不修改全局 Git 配置 |
 | `replaceRemote(project, options)` | 只由已选 replace 计划调用，核对 expectedFetch、expectedPush、expectedState；在 Git config.lock 内准备后原子替换选中远端 url/已有 pushurl。配置来自 include/全局/Worktree 独立文件时停止，其他设置保持原样 |
@@ -36,9 +36,17 @@ CLI 的发布入口先执行完整历史内容检查，再将检查结果的引�
 
 ## 鉴权与超时
 
-模块保留现有 Git credential helper 和 SSH 配置。调用方可以传入 `options.authForUrl(url)`，返回 `{env, metadata?}`；每一次远端读取、fetch 和 push 前按实际 URL 调用，`env` 只合并到该次子进程。调用方必须先确定访问账号和凭证来源，按完整目标绑定 Token，不能把一个目标的 Token 发送给另一个目标。模块不读取、保存或自动切换凭证；`options.env` 只适用于调用方已明确限定范围的进程配置。凭证来源元信息由调用方报告，不能输出秘密值。
+GitHub HTTPS 与 CNB HTTPS 的实际网络入口调用 `auth.mjs`，按完整远端读取已选来源，缺少选择或凭证时拒绝访问；首次流程见 [仓库鉴权](authentication.md)。CNB SSH 明确拒绝。其他平台与 GitHub SSH 保留已有项目鉴权。
 
-本地 Git 命令最多 15 秒，远端引用读取每次最多 60 秒，传输每次最多 300 秒。只读网络操作只对明确瞬时错误尝试最多三次，退避为 1 秒和 2 秒，并记录脱敏重试原因。确定性鉴权、权限和仓库不存在错误不重试。写入只尝试一次；即使超时或命令失败，也先回读实际引用。无法回读或结果不一致时报告 `uncertain`/`failed`，不重复写入。
+`options.authForUrl(url)` 供已经核验计划的调用方复用同一选择，返回 `{env, metadata}`。每次远端读取、fetch 和 push 前重新读取并检查来源；单次传输与持久设置共用 credential helper 协议。凭证仅通过环境交给该次 Git/helper 进程，不进入命令参数或 Git 配置；helper 校验主机和完整路径。`setup` 安装仓库级持续 helper，原生 Git 后续也读取同一来源，来源失效时拒绝回退。
+
+本地 Git 命令最多 15 秒，远端引用读取每次最多 60 秒，传输每次最多 300 秒。只读网络操作只对明确瞬时错误尝试最多三次，退避为 1 秒和 2 秒，并记录脱敏重试原因。确定性鉴权、权限和仓库不存在错误不重试。脚本每项只调用一次 git push；Git/libcurl 在完全未收到 HTTP 响应时可能在该调用内重发传输，不能把脚本单次调用当成网络层只发送一次。即使超时或命令失败，也先回读实际引用。无法回读或结果不一致时报告 `uncertain`/`failed`，不重复写入。
+
+## 项目 Harness
+
+公开 CLI 与项目入口的 check/read/publish/sync 接受 `--repository <登记路径>` 和可选 `--checkout <该仓检出>`；公开 CLI 的 `--project` 指安装 Harness 的管理仓。预览列出安装位置、实际检出、登记依据、远端、完整 refs、鉴权来源和指纹。每仓读取自己的策略，未选择时只操作入口所属项目；错误选择不回退外仓。详见 [选仓流程](harness.md#从一份-harness-选择一个仓库)。
+
+仅在 Agent 明确调用 Skill 时，按 [标准 Harness](harness.md) 先读取实际宿主规则和调用链、比较标准。采用后使用项目规则登记的实际 `run.mjs`；位置由计划指定，不预设目录。发布/同步先预览，再以同参数和指纹执行，项目扩展使用稳定 operation-id。公开 CLI 的 publish/sync 使用已登记位置，也可显式传 `--harness-directory`；日常入口只核对必要运行文件、目标和来源，不调查无关说明。普通 URL 设置不读取 Issue 文档或旧项目 JSON，不维护远端地址副本；Harness 同步缺策略或损坏时停止。
 
 ## 同步数据流与完整性
 
@@ -62,12 +70,14 @@ CLI 的发布入口先执行完整历史内容检查，再将检查结果的引�
 
 Agent 使用 `setup --url <URL>` 取得 `needs_input` 或 `planned`。已有任意 remote 时先要求 `--action add|replace --name <名称>`，即使已有 URL 相同。只有用户明确作出且范围未变的选择，或明确继续中断的同一次设置，才可复用参数；自动采用 origin、selection 字段、计划记录和成功结果均不等于用户选择。没有 remote 默认 origin；完成后再次仅发送 URL 且从未明确选择时仍须询问。`--apply --expected-fingerprint <本次指纹>` 才执行写入，不继承旧计划的状态假设。
 
-替换保留名称，计划包含当前 fetch/push、所有分支 remote/merge/pushRemote 设置、remote.pushDefault、受影响 sync 和 Issue 的前后目标、Git common config 对应 Worktree。相关同步或 Issue 目标变化需要 `--accept-effects`。该开关不授权同步、Issue 迁移或推送。旧 refs/remotes 和 remote HEAD 原样保留，本次不 fetch，不宣称历史关系已验证。多地址、mirror、非仓库本地的 URL 来源不能通过本入口替换。
+替换保留名称，计划包含当前 fetch/push、所有分支 remote/merge/pushRemote 设置、remote.pushDefault、本仓和已验证管理仓中受影响的 Harness 目标及 sync、Git common config 对应 Worktree。相关 Harness 策略或其他 Worktree 受影响时需要 `--accept-effects`。该开关不授权同步、Issue 迁移或推送。旧 refs/remotes 和 remote HEAD 原样保留，本次不 fetch，不宣称历史关系已验证。多地址、mirror、非仓库本地的 URL 来源不能通过本入口替换。
 
 “空目录”按 `readdir` 的全部条目判定，隐藏文件也算内容。查询成功且没有任何可见引用才是 empty；HEAD-only、自定义引用、只有标签都不是空仓。clone 需要远端声明且实际存在的默认分支，或明确的 `--branch`。原地克隆后返回 `needs_project_rules`（退出 2，尚未完成设置）；Agent 先读新取得的项目规则，再沿用 `add` 和原名称重新计划，合并远端信息并完成回读。此阶段不增加用户确认，只读取并执行适用规则。
 
+独立文件鉴权在无 Git 项目中先准备 `.git` 和受保护凭证，因此由本机 `gitsetup.initialization` 记录区分这种未完成初始化。`setup` 只排除本次 Git 元数据及确切凭证文件检查其他内容：有其他文件且远端有历史时仍停下；只有准备文件时获取远端分支/标签并安全检出，返回同一个 `needs_project_rules`。检出拒绝凭证路径冲突，使用 `--no-overwrite-ignore`；远端为空则明确作者和分支后完成初始化。该分支不调用要求空目录的 `git clone ... .`，不制造本地提交。记录、HEAD、索引、目标及来源参与恢复校验，设置成功后清除初始化记录。
+
 `--plan-file` 可将不含凭证的 request/result 写入已有调用工作区中已忽略且未跟踪的 `data/git-setup/<任务>.json` 或 `tmp/git-setup/<任务>.json`。等待选择前保存 `needs_input`；具体方案保存 `planned`；首次变更前保存 `applying`；最后保存 `configured`、`needs_project_rules` 或 `incomplete`。文件写入使用锁和原子替换，读取回验；不自动改 .gitignore。真正空的克隆目标不能用于保存计划。Agent 的实际用户授权另行记录，`planned` 本身不证明批准。
 
-状态记录用于查证，不自动重放。异常返回 failedStep、completedSteps 与本地回读；进程被终止时可能停在 applying，须重新读取真实状态。Git config.lock 或共享写锁残留时先查正在运行的操作，禁止自动删除锁。已 init/已配置远端时保留用户选择，生成新指纹补齐余下步骤；克隆中断须核对 HEAD、索引与检出文件，不能把存在 .git 视为完整成功，不能自动删除或盲重试。
+状态记录用于查证，不自动重放。异常返回 failedStep、completedSteps 与本地回读；进程被终止时可能停在 applying，须重新读取真实状态。Git config.lock 残留时先查正在运行的操作，禁止自动删除锁。已 init/已配置远端时保留用户选择，生成新指纹补齐余下步骤；克隆中断须核对 HEAD、索引与检出文件，不能把存在 .git 视为完整成功，不能自动删除或盲重试。
 
-configured 只证明本地设置和远端读取；不会证明推送身份/权限，不暂存、提交或推送。Agent 的实际完成回复必须含“本次暂未提交和推送。”，包括同地址核验和续作。Issue 的 not_configured/invalid 与 Git 接入结果分别说明；LFS/子模块内容限制继续适用。`tests/setup.test.mjs` 从 CLI 入口核验这些行为；客户端最终回复另作实际验收。
+configured 证明本地设置和远端读取；支持的 HTTPS 目标还包含已选来源及持久 helper 核验。GitHub 账号以 `/user` 结果为准，CNB 仅验证 Git 读取。推送预检与实际推送均未执行，不暂存、提交或推送。Agent 的实际完成回复必须含“本次暂未提交和推送。”，包括同地址核验和续作。无关 Issue 文档缺失、不可读或变化均不阻塞普通 Git setup；旧 JSON 损坏和旧写锁不读取或删除；LFS/子模块内容限制继续适用。`tests/setup.test.mjs` 从 CLI 入口核验这些行为；客户端最终回复另作实际验收。
