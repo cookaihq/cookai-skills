@@ -1,8 +1,8 @@
 ---
 name: git-setup
 metadata:
-  version: "0.2.0"
-description: v0.2.0｜检查项目 Git 配置与 Harness，为当前项目接入仓库 URL，按选择生成可独立运行的 Git 脚本；也支持明确请求的发布、单向同步和项目本地/GitHub Issue 规则。
+  version: "0.3.0"
+description: v0.3.0｜检查项目 Git 配置与 Harness，为当前项目接入仓库 URL，按选择生成可独立运行的 Git 脚本；也支持明确请求的发布、单向同步和项目本地/GitHub Issue 规则。
 compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Claude Code, Codex and WorkBuddy; gh is optional for GitHub authentication.
 ---
 
@@ -32,7 +32,7 @@ node <skill>/scripts/git-setup/cli.mjs check --project <用户项目>
 
 管理仓、主检出、当前检出和登记来源以共同解析结果为准；旧 JSON 与本机 `gitsetup.repository` 不构成关系依据。多管理仓候选须明确选择。
 
-每次调用都先读 [标准 Harness](references/harness.md) 并检查实际项目，包括 URL、发布、同步和 Issue 请求。公开 check 提供事实，不代表脚本已理解规则；其他业务命令不再附带完整 Skill 检查。只输入 Skill 时默认完成 Harness 与 Git 配置来源检查，报告符合项、具体问题和来源、待选项及未知项，不先索要 URL 或只给帮助。读取候选脚本及其真实 hooks/CI 调用链，比较标准行为；指纹不代替语义比较。分别取得“是否采用标准”和“重新实现哪些独有功能”的决定，按实际规则和授权把 `directory`、`ruleFiles` 交给公开计划入口，生成并登记真实项目入口；不预设脚本目录。事实未变时沿用同范围明确选择。检查本身不授权写入，也不扩大本次任务。
+每次调用都先读 [标准 Harness](references/harness.md) 并检查实际项目，包括 URL、发布、同步和 Issue 请求。公开 check 提供事实，不代表脚本已理解规则；其他业务命令不再附带完整 Skill 检查。只输入 Skill 时默认完成 Harness 与 Git 配置来源检查，报告符合项、具体问题和来源、待选项及未知项，不先索要 URL 或只给帮助。读取候选脚本及其真实 hooks/CI 调用链，比较标准行为；指纹不代替语义比较。分别取得“是否采用标准”和“重新实现哪些独有功能”的决定，按实际规则和授权把 `directory`、`ruleFiles` 交给公开计划入口，生成并登记真实项目入口；不预设脚本目录。事实未变时沿用同范围明确选择。检查本身不授权写入，也不扩大本次任务。 升级先列出生成、保留和明确修改的文件。扩展优先放在所选 Harness 的 `extensions/`，旧目录外扩展继续有效；省略策略保留原值，明确空扩展列表仅停用、不删除项目文件。配置语义不变时保留原字节和权限。只有核对新目标并获同范围授权后，才传 `refreshTargets: true` 刷新根仓目标身份。具体维护和恢复规则见同一参考文档。
 
 所有业务命令输出 JSON。写入命令要求 `--apply`；这只是执行开关，Agent 应依据用户本次具体请求传入，不把它变成重复确认。状态不明、部分完成和检查未完成不能报告成功。鉴权来源使用 `auth-info`，仅输出字段是否填写及来源；Issue 使用 `issue-resolve --input` 验证本次输入。
 

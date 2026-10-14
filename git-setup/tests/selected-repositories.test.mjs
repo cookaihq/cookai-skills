@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, readFile, mkdir, cp, rename, rm } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, cp, rename, rm, chmod, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { repositoryFixture, cli, skill } from './fixtures/repositories.mjs';
 import { gitService } from './fixtures/git-service.mjs';
@@ -27,6 +27,16 @@ test('one generated manager entry selects an independent Worktree for read publi
   await f.install(manager);
   await writeFile(join(manager, 'vcs/repos.conf'), 'api\nweb\n');
   await f.install(manager, { repositories: { api: { sync: { source: 'api-origin', targets: ['api-backup'], refs: ['refs/heads/feature-api'] } } } });
+  const configPath = join(manager, 'vcs/config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.repositories.api = { sync: config.repositories.api.sync, targets: config.repositories.api.targets };
+  await writeFile(configPath, JSON.stringify(config, null, 4) + '\n\n');
+  await chmod(configPath, 0o640);
+  const policyBefore = await readFile(configPath);
+  await f.install(manager);
+  assert.deepEqual(await readFile(configPath), policyBefore);
+  assert.equal((await lstat(configPath)).mode & 0o777, 0o640);
+  assert.equal(await readFile(join(manager, 'vcs/repos.conf'), 'utf8'), 'api\nweb\n');
   const before = { manager: await facts(f, manager), sibling: await facts(f, sibling), child: await facts(f, child) };
   const entry = join(manager, 'vcs/run.mjs');
   assert.equal((await f.run(entry, [], f.root)).project, manager);

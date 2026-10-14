@@ -22,7 +22,7 @@ export async function projectCheck(root, { directory, command = 'check', remote,
     await safePath(root, join(path, 'manifest.json'));
     if (!(await lstat(join(path, 'manifest.json'))).isFile()) throw new Error('manifest');
     const manifest = JSON.parse(await readFile(join(path, 'manifest.json'), 'utf8'));
-    if (manifest.standard !== 'git-setup' || manifest.schemaVersion !== 1 || manifest.directory !== selected.directory || !manifest.files || Array.isArray(manifest.files)) throw new Error('manifest');
+    if (manifest.standard !== 'git-setup' || ![1, 2].includes(manifest.schemaVersion) || manifest.directory !== selected.directory || !manifest.files || Array.isArray(manifest.files)) throw new Error('manifest');
     hashes = Object.fromEntries(Object.entries(await packageFiles(join(path, 'runtime'))).map(([name, sha]) => [`runtime/${name}`, sha]));
     await safePath(root, join(path, 'run.mjs'));
     hashes['run.mjs'] = digest(await readFile(join(path, 'run.mjs')));

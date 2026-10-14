@@ -46,6 +46,201 @@ function behavior(id, evidence, extra = {}) {
   return { id, summary: '现有项目 Git 入口', trigger: '用户手动调用', inputs: '本仓 origin 和 main', writes: '推送目标引用', failure: '失败停止', evidence, classification: 'standard', ...extra };
 }
 
+test('public adoption preserves an extension already placed inside the selected Harness and runs it independently', async () => {
+  const f = await fixture(), copy = join(f.root, 'skill-copy');
+  await cp(skill, copy, { recursive: true });
+  const cli = join(copy, 'scripts/git-setup/cli.mjs');
+  const directory = 'tools/automation/git', path = `${directory}/extensions/record.mjs`;
+  const content = "import { appendFile } from 'node:fs/promises';\nlet raw=''; for await(const c of process.stdin) raw+=c;\nconst input=JSON.parse(raw); await appendFile('data/git-setup/extension-count', input.event+'\\n');\n";
+  await mkdir(join(f.work, directory, 'extensions'), { recursive: true });
+  await writeFile(join(f.work, path), content, { mode: 0o640 });
+  const extension = { id: 'record', path, sha256: digest(content), event: 'after-publish', description: '发布成功后记录事件', timeoutMs: 5000 };
+  const input = { choice: 'standard', directory, ruleFiles: ['AGENTS.md'], evidenceFiles: [path],
+    comparison: [behavior('record', [path], { classification: 'unique', decision: 'retain', extension: 'record' })], extensions: [extension] };
+  const inputFile = join(f.root, 'adoption-input.json'); await writeFile(inputFile, JSON.stringify(input));
+  const args = ['--project', f.work, '--input', inputFile, '--plan-file', f.planFile];
+  const plan = await f.run(cli, ['harness-plan', ...args], f.root);
+  assert.equal(plan.status, 'planned', JSON.stringify(plan));
+  assert.ok(plan.changes.preserved.includes(path));
+  const applied = await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', plan.fingerprint, '--apply'], f.root);
+  assert.equal(applied.complete, true, JSON.stringify(applied));
+  assert.equal(await readFile(join(f.work, path), 'utf8'), content);
+  assert.equal((await lstat(join(f.work, path))).mode & 0o777, 0o640);
+  await rename(copy, `${copy}-unavailable`);
+  const entry = join(f.work, directory, 'run.mjs');
+  assert.equal((await f.run(entry, ['check'], f.root)).status, 'checked');
+  const publishArgs = ['publish', '--remote', 'origin', '--ref', 'refs/heads/main', '--operation-id', 'inside-extension-001'];
+  const preview = await f.run(entry, publishArgs, f.root);
+  assert.equal(preview.status, 'planned', JSON.stringify(preview));
+  const result = await f.run(entry, [...publishArgs, '--expected-fingerprint', preview.fingerprint, '--apply'], f.root);
+  assert.equal(result.complete, true, JSON.stringify(result));
+  assert.equal(await f.git(f.origin, 'rev-parse', 'main'), await f.git(f.work, 'rev-parse', 'main'));
+  assert.equal((await f.run(entry, [...publishArgs, '--expected-fingerprint', preview.fingerprint, '--apply'], f.root)).recovered, true);
+  assert.equal(await readFile(join(f.work, 'data/git-setup/extension-count'), 'utf8'), 'after-publish\n');
+});
+
+test('public upgrade preserves omitted policy selections and exact project files while explicit removal only disables the extension', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs'), directory = 'vcs';
+  const path = 'vcs/extensions/record.mjs', content = "import { appendFile } from 'node:fs/promises';\nfor await(const c of process.stdin) {}\nawait appendFile('data/git-setup/upgrade-extension-count', 'ran\\n');\n";
+  await mkdir(join(f.work, 'vcs/extensions'), { recursive: true }); await writeFile(join(f.work, path), content);
+  const extension = { id: 'record', path, sha256: digest(content), event: 'after-publish', description: '记录发布事件', timeoutMs: 5000 };
+  const comparison = [behavior('record', [path], { classification: 'unique', decision: 'retain', extension: 'record' })];
+  const inputFile = join(f.root, 'upgrade-input.json');
+  const args = ['--project', f.work, '--input', inputFile, '--plan-file', f.planFile];
+  async function adopt(input) {
+    await writeFile(inputFile, JSON.stringify(input));
+    const plan = await f.run(cli, ['harness-plan', ...args]);
+    assert.equal(plan.status, 'planned', JSON.stringify(plan));
+    const result = await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', plan.fingerprint, '--apply']);
+    assert.equal(result.complete, true, JSON.stringify(result));
+    return plan;
+  }
+  await adopt({ choice: 'standard', directory, ruleFiles: ['AGENTS.md'], evidenceFiles: [path], comparison, extensions: [extension], sync: { source: 'origin', targets: ['backup'], refs: ['refs/heads/main'] } });
+  const configPath = join(f.work, 'vcs/config.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  const configText = JSON.stringify(config, null, 4)+'\n\n';
+  await writeFile(configPath, configText); await chmod(configPath, 0o640);
+  const registry = '# No independent repositories selected yet\n';
+  await writeFile(join(f.work, 'vcs/repos.conf'), registry, { mode: 0o640 });
+  const resource = Buffer.from([0, 255, 1, 254, 13, 10]);
+  await writeFile(join(f.work, 'vcs/extensions/resource.bin'), resource, { mode: 0o640 });
+  const beforeFiles = await readdir(join(f.work, 'vcs/extensions'));
+  const plan = await adopt({ choice: 'standard', comparison });
+  for (const name of ['vcs/config.json', 'vcs/repos.conf', path, 'vcs/extensions/resource.bin']) assert.ok(plan.changes.preserved.includes(name), name);
+  assert.equal(await readFile(configPath, 'utf8'), configText);
+  assert.equal((await lstat(configPath)).mode & 0o777, 0o640);
+  assert.equal(await readFile(join(f.work, 'vcs/repos.conf'), 'utf8'), registry);
+  assert.deepEqual(await readFile(join(f.work, 'vcs/extensions/resource.bin')), resource);
+  assert.equal((await lstat(join(f.work, 'vcs/extensions/resource.bin'))).mode & 0o777, 0o640);
+  const entry = join(f.work, 'vcs/run.mjs');
+  const publication = ['publish', '--remote', 'origin', '--ref', 'refs/heads/main', '--operation-id', 'upgrade-extension-001'];
+  const preview = await f.run(entry, publication, f.root);
+  assert.equal((await f.run(entry, [...publication, '--expected-fingerprint', preview.fingerprint, '--apply'], f.root)).complete, true);
+  assert.equal(await readFile(join(f.work, 'data/git-setup/upgrade-extension-count'), 'utf8'), 'ran\n');
+  await adopt({ choice: 'standard', extensions: [], comparison: [behavior('record', [path], { classification: 'unique', decision: 'drop' })] });
+  assert.deepEqual((JSON.parse(await readFile(configPath, 'utf8'))).extensions, []);
+  assert.deepEqual(await readdir(join(f.work, 'vcs/extensions')), beforeFiles);
+  assert.equal(await readFile(join(f.work, path), 'utf8'), content);
+  const noExtensionArgs = ['publish', '--remote', 'origin', '--ref', 'refs/heads/main'];
+  const withoutExtension = await f.run(entry, noExtensionArgs);
+  assert.equal((await f.run(entry, [...noExtensionArgs, '--expected-fingerprint', withoutExtension.fingerprint, '--apply'])).complete, true);
+  assert.equal(await readFile(join(f.work, 'data/git-setup/upgrade-extension-count'), 'utf8'), 'ran\n');
+});
+
+test('public upgrades accept changed root targets only when refreshTargets is explicitly true', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  await f.adopt({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'] });
+  const configPath = join(f.work, 'vcs/config.json'), before = await readFile(configPath, 'utf8');
+  await f.git(f.work, 'remote', 'set-url', 'origin', f.backup);
+  const inputFile = join(f.root, 'refresh-targets.json'), args = ['--input', inputFile, '--plan-file', f.planFile];
+  await writeFile(inputFile, JSON.stringify({ choice: 'standard' }));
+  const preserved = await f.run(cli, ['harness-plan', ...args]);
+  assert.equal(preserved.status, 'planned', JSON.stringify(preserved));
+  assert.equal((await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', preserved.fingerprint, '--apply'])).complete, true);
+  assert.equal(await readFile(configPath, 'utf8'), before);
+  const entry = join(f.work, 'vcs/run.mjs');
+  assert.equal((await f.run(entry, ['check'])).code, 'harness_target_changed');
+  await writeFile(inputFile, JSON.stringify({ choice: 'standard', refreshTargets: true }));
+  const refreshed = await f.run(cli, ['harness-plan', ...args]);
+  assert.equal(refreshed.status, 'planned', JSON.stringify(refreshed));
+  assert.ok(refreshed.changes.modified.includes('vcs/config.json'));
+  assert.equal((await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', refreshed.fingerprint, '--apply'])).complete, true);
+  assert.equal((await f.run(entry, ['check'])).status, 'checked');
+  for (const input of [{ choice: 'keep', refreshTargets: true }, { choice: 'standard', refreshTargets: 'true' }]) {
+    await writeFile(inputFile, JSON.stringify(input));
+    const rejected = await f.run(cli, ['harness-plan', ...args]);
+    assert.notEqual(rejected.exit, 0, JSON.stringify(rejected));
+  }
+});
+
+test('public adoption refuses a target directory with unknown empty directories', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  await mkdir(join(f.work, 'vcs/user-empty'), { recursive: true });
+  const inputFile = join(f.root, 'unknown-directory.json');
+  await writeFile(inputFile, JSON.stringify({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'] }));
+  const rejected = await f.run(cli, ['harness-plan', '--input', inputFile]);
+  assert.equal(rejected.code, 'harness_existing_modified', JSON.stringify(rejected));
+  assert.equal((await lstat(join(f.work, 'vcs/user-empty'))).isDirectory(), true);
+});
+
+test('public adoption refuses existing manifests that parse as falsy JSON without replacing project files', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  await mkdir(join(f.work, 'vcs/extensions'), { recursive: true });
+  const content = 'keep the original project resource\n';
+  await writeFile(join(f.work, 'vcs/extensions/resource.txt'), content);
+  const inputFile = join(f.root, 'invalid-manifest.json');
+  await writeFile(inputFile, JSON.stringify({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'] }));
+  for (const value of ['null', 'false', '0', '""']) {
+    await writeFile(join(f.work, 'vcs/manifest.json'), value);
+    const rejected = await f.run(cli, ['harness-plan', '--input', inputFile]);
+    assert.equal(rejected.code, 'harness_existing_modified', JSON.stringify(rejected));
+    assert.equal(await readFile(join(f.work, 'vcs/extensions/resource.txt'), 'utf8'), content);
+    await assert.rejects(lstat(join(f.work, 'vcs/run.mjs')), { code: 'ENOENT' });
+  }
+});
+
+test('public upgrade refuses stale project file contents permissions additions and removals', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  await f.adopt({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'] });
+  await assert.rejects(lstat(join(f.work, 'vcs/extensions')), { code: 'ENOENT' });
+  await mkdir(join(f.work, 'vcs/extensions'));
+  const resource = join(f.work, 'vcs/extensions/resource.bin'), bytes = Buffer.from([0, 1, 255]);
+  await writeFile(resource, bytes, { mode: 0o640 });
+  const inputFile = join(f.root, 'stale-project-files.json');
+  await writeFile(inputFile, JSON.stringify({ choice: 'standard' }));
+  const args = ['--input', inputFile, '--plan-file', f.planFile];
+  const plan = await f.run(cli, ['harness-plan', ...args]);
+  assert.equal(plan.status, 'planned', JSON.stringify(plan));
+  const manifest = await readFile(join(f.work, 'vcs/manifest.json'));
+  const added = join(f.work, 'vcs/extensions/added.txt');
+  for (const [change, undo] of [
+    [() => writeFile(resource, 'changed'), () => writeFile(resource, bytes)],
+    [() => chmod(resource, 0o600), () => chmod(resource, 0o640)],
+    [() => writeFile(added, 'new project resource'), () => rm(added)],
+    [() => rm(resource), () => writeFile(resource, bytes, { mode: 0o640 })],
+  ]) {
+    await change();
+    const denied = await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', plan.fingerprint, '--apply']);
+    assert.equal(denied.code, 'harness_plan_changed', JSON.stringify(denied));
+    assert.deepEqual(await readFile(join(f.work, 'vcs/manifest.json')), manifest);
+    await assert.rejects(lstat(join(f.work, '.git/git-setup-harness.lock')), { code: 'ENOENT' });
+    await undo();
+  }
+  const applied = await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', plan.fingerprint, '--apply']);
+  assert.equal(applied.complete, true, JSON.stringify(applied));
+  assert.deepEqual(await readFile(resource), bytes);
+  for (const name of ['unknown.txt', 'runtime/unknown.mjs']) {
+    const path = join(f.work, 'vcs', name); await writeFile(path, 'not generator-owned\n');
+    const rejected = await f.run(cli, ['harness-plan', ...args]);
+    assert.equal(rejected.code, 'harness_existing_modified', JSON.stringify(rejected));
+    assert.equal(await readFile(path, 'utf8'), 'not generator-owned\n');
+    await rm(path);
+  }
+});
+
+test('public upgrade accepts the first phase manifest format and preserves its edited project configuration', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  await f.adopt({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'] });
+  const manifestPath = join(f.work, 'vcs/manifest.json'), configPath = join(f.work, 'vcs/config.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  // A v1 format fixture, including its formerly generated config hash.
+  manifest.schemaVersion = 1;
+  manifest.files['config.json'] = digest(await readFile(configPath));
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  config.sync = { source: 'origin', targets: ['backup'], refs: ['refs/heads/main'] };
+  const edited = JSON.stringify(config, null, 4) + '\n';
+  await writeFile(configPath, edited); await chmod(configPath, 0o640);
+  const inputFile = join(f.root, 'v1-upgrade.json'); await writeFile(inputFile, JSON.stringify({ choice: 'standard' }));
+  const args = ['--input', inputFile, '--plan-file', f.planFile];
+  const plan = await f.run(cli, ['harness-plan', ...args]);
+  assert.equal(plan.status, 'planned', JSON.stringify(plan));
+  assert.equal((await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', plan.fingerprint, '--apply'])).complete, true);
+  assert.equal(await readFile(configPath, 'utf8'), edited);
+  assert.equal((await lstat(configPath)).mode & 0o777, 0o640);
+  assert.equal((await f.run(join(f.work, 'vcs/run.mjs'), ['check'], f.root)).status, 'checked');
+});
+
 test('planned project layouts register a portable entry and run from another directory without the Skill', async () => {
   for (const directory of ['vcs', 'tools/automation/project-git']) {
     const f = await fixture(), copy = join(f.root, 'layout-skill-copy');
@@ -319,7 +514,8 @@ test('selected extension runs once after verified Git success and recovery never
   await f.git(f.work, 'config', 'core.hooksPath', '.githooks');
   const extension = { id: 'record-release', path, sha256: digest(content), event: 'after-publish', description: '在确认发布完成后记录一次事件', timeoutMs: 5000 };
   await f.adopt({ choice: 'standard', directory: 'scripts/git-setup', ruleFiles: ['AGENTS.md'], evidenceFiles: [path], comparison: [behavior('record-release', [path, '.githooks/pre-push', '@git-hooks/pre-push'], { classification: 'unique', decision: 'retain', extension: extension.id })], extensions: [extension], edits: [{ path: '.githooks/pre-push', content: '#!/bin/sh\nexit 0\n' }] });
-  await assert.rejects(planHarness(f.work, { choice: 'standard', directory: 'scripts/git-setup', ruleFiles: ['AGENTS.md'], comparison: [behavior('reviewed', [path, '.githooks/pre-push', '@git-hooks/pre-push'])] }), { code: 'harness_extension_choice_required' });
+  const upgrade = await planHarness(f.work, { choice: 'standard', directory: 'scripts/git-setup', ruleFiles: ['AGENTS.md'], comparison: [behavior('reviewed', [path, '.githooks/pre-push', '@git-hooks/pre-push'])] });
+  assert.deepEqual(upgrade.config.extensions, [extension]);
   const entry = join(f.work, 'scripts/git-setup/run.mjs');
   const args = ['publish', '--remote', 'origin', '--ref', 'refs/heads/main', '--operation-id', 'publish-operation-001'];
   const plan = await f.run(entry, args);
@@ -334,6 +530,53 @@ test('selected extension runs once after verified Git success and recovery never
   assert.equal(receipt.request.operationId, 'publish-operation-001');
   assert.equal(await readFile(join(f.work, 'data/git-setup/extension-count'), 'utf8'), 'after-publish\n');
   await assert.rejects(lstat(join(f.work, 'data/git-setup/legacy-count')), { code: 'ENOENT' });
+});
+
+test('public recovery preserves internal project files across the backup and stage window and refuses later changes', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  const path = 'vcs/extensions/record.mjs', content = 'for await (const chunk of process.stdin) {}\n';
+  await mkdir(join(f.work, 'vcs/extensions'), { recursive: true });
+  await writeFile(join(f.work, path), content, { mode: 0o640 });
+  const comparison = [behavior('record', [path], { classification: 'unique', decision: 'retain', extension: 'record' })];
+  await f.adopt({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'], evidenceFiles: [path], comparison,
+    extensions: [{ id: 'record', path, sha256: digest(content), event: 'after-publish', description: '记录发布', timeoutMs: 5000 }] });
+  const inputFile = join(f.root, 'recover-extension.json');
+  await writeFile(inputFile, JSON.stringify({ choice: 'standard', comparison, sync: { source: 'origin', targets: ['backup'], refs: ['refs/heads/main'] } }));
+  const args = ['--input', inputFile, '--plan-file', f.planFile];
+  const plan = await f.run(cli, ['harness-plan', ...args]);
+  assert.equal(plan.status, 'planned', JSON.stringify(plan));
+  await writeFile(join(f.work, '.git/config.lock'), 'fixture busy\n');
+  const interrupted = await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', plan.fingerprint, '--apply']);
+  assert.equal(interrupted.code, 'setup_config_busy', JSON.stringify(interrupted));
+  await rm(join(f.work, '.git/config.lock'));
+  // Reconstruct a persisted rename window from the actual staged package and backup.
+  // This tests new-process recovery, not SIGKILL injection at every filesystem call.
+  const stage = join(f.work, '.git-setup-stage-1f807067-afce-45c3-a2c8-f3a98a542893');
+  await rename(join(f.work, 'vcs'), stage);
+  const record = JSON.parse(await readFile(f.planFile, 'utf8'));
+  record.transaction.stage = stage;
+  await writeFile(f.planFile, JSON.stringify(record));
+  const recoverArgs = ['harness-recover', '--plan-file', f.planFile];
+  const recovery = await f.run(cli, recoverArgs);
+  assert.equal(recovery.status, 'recovery_ready', JSON.stringify(recovery));
+  const staged = join(stage, 'extensions/record.mjs'), original = join(interrupted.backup, 'extensions/record.mjs');
+  await chmod(staged, 0o600);
+  assert.equal((await f.run(cli, [...recoverArgs, '--apply', '--expected-fingerprint', recovery.fingerprint])).code, 'harness_recovery_changed');
+  assert.equal((await lstat(staged)).mode & 0o777, 0o600);
+  await chmod(staged, 0o640);
+  await writeFile(original, `${content}// later change\n`);
+  assert.equal((await f.run(cli, recoverArgs)).code, 'harness_recovery_changed');
+  assert.equal(await readFile(original, 'utf8'), `${content}// later change\n`);
+  await writeFile(original, content);
+  const ready = await f.run(cli, recoverArgs);
+  assert.equal(ready.status, 'recovery_ready', JSON.stringify(ready));
+  const resumed = await f.run(cli, [...recoverArgs, '--apply', '--expected-fingerprint', ready.fingerprint]);
+  assert.equal(resumed.complete, true, JSON.stringify(resumed));
+  assert.equal(await readFile(join(f.work, path), 'utf8'), content);
+  assert.equal((await lstat(join(f.work, path))).mode & 0o777, 0o640);
+  assert.equal((await f.run(join(f.work, 'vcs/run.mjs'), ['check'], f.root)).status, 'checked');
+  await assert.rejects(lstat(stage), { code: 'ENOENT' });
+  await assert.rejects(lstat(interrupted.backup), { code: 'ENOENT' });
 });
 
 test('interrupted public adoption retains evidence and resumes only verified original changes', async () => {

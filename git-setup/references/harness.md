@@ -27,7 +27,7 @@ Agent 依据实际项目规则确定 `directory`（项目内安装目录）和 `
 }
 ```
 
-`directory` 与 `ruleFiles` 首次采用必须明确；以后省略时只复用本检出的本机选择，不猜测目录。已登记位置改变时停止，旧入口实际迁移需另行计划。不需要同步用 `sync: null`。保留用 `choice: "keep"`，不能附带 sync、repositories、extensions 或 edits。生成和同步均不读取 `.git-setup/project.json`，缺少策略不回退；原文件不自动删除。Issue 只使用现有文档与本次完整输入；旧配置退出不迁移或删除使用者文件。
+`directory` 与 `ruleFiles` 首次采用必须明确；以后省略时只复用本检出的本机选择，不猜测目录。已登记位置改变时停止，旧入口实际迁移需另行计划。不需要同步用 `sync: null`。保留用 `choice: "keep"`，不能修改 sync、repositories、extensions、edits 或刷新目标身份。生成和同步均不读取 `.git-setup/project.json`，缺少策略不回退；原文件不自动删除。Issue 只使用现有文档与本次完整输入；旧配置退出不迁移或删除使用者文件。
 
 comparison 每项包含 id、summary、trigger、inputs、writes、failure、evidence 和 classification。分类为 standard、configuration、unique、conflict、unknown；采用前解决 conflict/unknown，unique 明确 decision 为 retain/drop。retain 的 extension 必须对应已选择扩展 ID。计划不是授权。
 
@@ -39,7 +39,7 @@ node <skill>/scripts/git-setup/cli.mjs harness-plan --project <项目> --input <
 node <skill>/scripts/git-setup/cli.mjs harness-apply --project <项目> --input <同一选择文件> --plan-file <同一记录> --expected-fingerprint <指纹> --apply
 ```
 
-不带 plan-file 的预览不写文件；显式保存仅写指定、未跟踪且已忽略的 `data/git-setup/*.json` 或 `tmp/git-setup/*.json`。输入文件与记录分开。已有生成锁或未完成事务时，保存新预览会被拒绝，不能覆盖原阶段记录。计划列出生成文件和规则编辑；应用取得本仓锁，再核对原文件、链接实体、目标和标准，按计划写入并回读。没有自动暂存、提交、推送或安装 hooks。
+不带 plan-file 的预览不写文件；显式保存仅写指定、未跟踪且已忽略的 `data/git-setup/*.json` 或 `tmp/git-setup/*.json`。输入文件与记录分开。已有生成锁或未完成事务时，保存新预览会被拒绝，不能覆盖原阶段记录。计划分别列出 generated（生成）、preserved（原样保留）、modified（明确修改）文件；应用取得本仓锁，再核对原文件、权限、链接实体、目标和标准，在同一阶段目录中生成运行包并复制项目文件，按计划替换并回读。没有自动暂存、提交、推送或安装 hooks。
 
 ## 独立运行与日常校验
 
@@ -70,9 +70,21 @@ node <skill>/scripts/git-setup/cli.mjs harness-recover --project <项目> --plan
 
 首次只读核对真实文件、原选择、标准、目标、锁和进程状态。原进程仍存在、锁无法归属、用户文件或部分运行包不符合原计划时停止，保留现场供人工核查，不盲删残留。现场匹配才返回 recovery_ready；明确继续原范围时使用该指纹完成剩余写入。旧成功记录只报告 historical_receipt_only，不充当本轮验证。恢复不改变原选择或扩展范围，失效计划需重新审阅。未开始写入的计划仍可用原 input 重新计划；没有原选择依据时不能从记录猜授权。
 
-保留现有扩展保护：扩展使用项目内、生成目录外的 `.mjs`，包含唯一 id、path、sha256、event（after-publish/after-sync）、description、timeoutMs（1000–300000）。仅在对应 Git 操作全部成功后执行；重新生成须明确列出保留清单或空清单。stdin 为 `{schemaVersion,event,project,operationId,git}`，退出 0 表示扩展自身完成，业务回读由扩展负责；框架不记录 stdout/stderr。有扩展时预览和执行传同一 `--operation-id`，恢复记录不安全则在 Git 写入前停止。中断或失败不自动重发；历史收据不替代远端核验。
+扩展使用项目内 `.mjs`，推荐放在所选 Harness 的 `extensions/` 下；目录外的旧路径仍支持，不自动搬迁。Harness 内其他位置不能作为扩展。扩展包含唯一 id、path、sha256、event（after-publish/after-sync）、description、timeoutMs（1000–300000）。仅在对应 Git 操作全部成功后执行。stdin 为 `{schemaVersion,event,project,operationId,git}`，退出 0 表示扩展自身完成，业务回读由扩展负责；框架不记录 stdout/stderr。有扩展时预览和执行传同一 `--operation-id`，恢复记录不安全则在 Git 写入前停止。中断或失败不自动重发；历史收据不替代远端核验。
 
-扩展维护方案、hooks 的适用/启用、主检出迁移、全局安装更新和三宿主真实入口验收均留待后续。脚本、生成入口、普通 Git、三客户端会话及真实平台账号/权限分别记录，不能互相替代。
+hooks 的适用/启用、主检出迁移、全局安装更新和三宿主真实入口验收均留待后续。脚本、生成入口、普通 Git、三客户端会话及真实平台账号/权限分别记录，不能互相替代。
+
+## 升级时保留项目文件
+
+生成器维护 `runtime/`、`run.mjs`、`README.md` 和 `manifest.json`；项目维护 `config.json`、可选 `repos.conf` 及 `extensions/` 中的文件。新清单使用 `schemaVersion: 2`，`files` 只记录生成器维护的文件摘要；旧 `schemaVersion: 1` 清单也能检查和升级。未知或被修改的运行文件仍拒绝覆盖。首次安装目录可为空，或预先仅包含 `extensions/`；无扩展不创建空目录。
+
+升级输入省略 `extensions`、`sync`、`repositories` 时保留已有策略。`extensions: []` 只停用扩展，仍保留脚本和资源；`sync: null` 清除同步策略；`repositories: {}` 明确移除全部子仓策略。已选扩展指纹未变时不要求再次选择，新增、改选或内容改变时仍须比较实际行为并确认新指纹。省略比较不代表可以跳过新发现的候选入口。
+
+原配置语义未变时保留原字节、格式及普通文件权限，对象键序不改变语义。`repos.conf`、扩展脚本和二进制资源同样保留；其新增、删除、内容或权限变化会拒绝旧安装计划。所选 `.mjs` 扩展脚本在业务执行前另有 256 KiB 上限；安装复制检查要求普通文件、禁止符号链接、单文件不超过 2 MiB、整包不超过 300 文件。资源文件可使用复制检查的 2 MiB 上限。
+
+根仓远端 targets 默认保持原先确认值。实际远端改变时，日常入口仍会拒绝；Agent 核对新目标和鉴权并取得同范围授权后，在采用输入中明确传 `refreshTargets: true`，才能从根仓实际 Git 配置刷新 targets。该字段只影响根仓，不刷新子仓或绑定凭证；子仓目标仍通过明确传入对应 `repositories` 策略更新。
+
+恢复时，内部扩展可能已经随原目录移入备份；程序分别核对当前、阶段和备份目录的完整内容及项目文件权限，不因原路径暂时缺失就认定扩展丢失。任一现场不符都保留现场并停止，不覆盖后续修改。阶段目录部分写入尚不完整时不会自动补写或清除。
 
 ## 仓库关系
 

@@ -1,14 +1,16 @@
 import { readFile, readdir, lstat, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { devNull } from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
 import { inspectProject } from './config.mjs';
 import { inspect } from './git.mjs';
 import { localGit } from './auth-roots.mjs';
-import { runtimeBundle, packageFiles, safePath, digest, runtimeFail as fail } from './runtime-bundle.mjs';
+import { runtimeBundle, safePath, digest, runtimeFail as fail } from './runtime-bundle.mjs';
 import { readChoice, fields, portablePath, publicText, confirmedTargets, readHarnessConfig, validateHarnessConfig } from './harness-config.mjs';
 import { projectLauncher } from './project-launcher.mjs';
 import { registrationEdits, ruleSnapshot, withoutRegistration } from './harness-rules.mjs';
 import { registeredRepositories, selectRepository } from './repository-relationship.mjs';
+import { projectFile, installationFiles } from './harness-files.mjs';
 
 export const standardBehavior = {
   inspect: '明确调用 Skill 时读取实际规则并比较实现；日常入口只核对必要运行文件、目标、绑定和计划。',
@@ -69,18 +71,24 @@ export async function harnessFacts(project, { evidenceFiles = [], recoveryPaths 
     const path = join(root, directory);
     await safePath(root, path);
     await lstat(path);
-    const actual = await packageFiles(path);
-    files['@standard'] = snapshotHash(actual);
+    const snapshot = await installationFiles(path), actual = snapshot.files;
+    files['@standard'] = snapshot.fingerprint;
     let manifest;
-    try { manifest = JSON.parse(await readFile(join(path, 'manifest.json'), 'utf8')); } catch { fail('harness_manifest_invalid', '标准目录已存在但没有有效清单；不覆盖。'); }
-    fields(manifest, ['schemaVersion', 'standard', 'sourceVersion', 'sourceFingerprint', 'files', 'comparison', 'evidenceFiles', 'directory', 'ruleFiles'], '标准清单');
-    publicText(manifest);
-    if (manifest.schemaVersion !== 1 || manifest.standard !== 'git-setup' || !manifest.files || typeof manifest.files !== 'object' || Array.isArray(manifest.files) || !/^[a-f0-9]{64}$/.test(manifest.sourceFingerprint)
-      || Object.entries(manifest.files).some(([name, value]) => { portablePath(name); return !/^[a-f0-9]{64}$/.test(value); })) fail('harness_manifest_invalid', '标准 Harness 清单无效。');
-    const changed = Object.keys({ ...manifest.files, ...actual }).filter(name => !['manifest.json', 'config.json', 'repos.conf'].includes(name) && manifest.files[name] !== actual[name]);
-    if (actual['repos.conf']) await registeredRepositories(root, { harnessDirectory: directory });
-    const config = await readHarnessConfig(root, directory);
-    installed = { path, manifest, config: config.config, configFingerprint: config.fingerprint, changed, status: changed.length ? 'modified' : 'installed' };
+    try { manifest = JSON.parse(await readFile(join(path, 'manifest.json'), 'utf8')); }
+    catch (error) {
+      if (error.code !== 'ENOENT' || (await readdir(path, { withFileTypes: true })).some(entry => entry.name !== 'extensions' || !entry.isDirectory())) fail('harness_manifest_invalid', '标准目录已存在但没有有效清单；不覆盖。');
+      installed = { path, projectFiles: snapshot.projectFiles, changed: [], status: 'project_files_only' };
+    }
+    if (!installed) {
+      fields(manifest, ['schemaVersion', 'standard', 'sourceVersion', 'sourceFingerprint', 'files', 'comparison', 'evidenceFiles', 'directory', 'ruleFiles'], '标准清单');
+      publicText(manifest);
+      if (![1, 2].includes(manifest.schemaVersion) || manifest.standard !== 'git-setup' || !manifest.files || typeof manifest.files !== 'object' || Array.isArray(manifest.files) || !/^[a-f0-9]{64}$/.test(manifest.sourceFingerprint)
+        || Object.entries(manifest.files).some(([name, value]) => { portablePath(name); return !/^[a-f0-9]{64}$/.test(value); })) fail('harness_manifest_invalid', '标准 Harness 清单无效。');
+      const changed = Object.keys({ ...manifest.files, ...actual }).filter(name => name !== 'manifest.json' && !projectFile(name) && manifest.files[name] !== actual[name]);
+      if (actual['repos.conf']) await registeredRepositories(root, { harnessDirectory: directory });
+      const config = await readHarnessConfig(root, directory);
+      installed = { path, manifest, config: config.config, configFingerprint: config.fingerprint, projectFiles: snapshot.projectFiles, changed, status: changed.length ? 'modified' : 'installed' };
+    }
   } catch (error) {
     if (error.code !== 'ENOENT') installed = { status: 'invalid', code: error.code, message: error.message };
   }
@@ -116,14 +124,16 @@ function validateComparison(input, facts) {
     if (item.decision === 'retain' && (!item.extension || !input.extensions?.some(extension => extension.id === item.extension))) fail('harness_extension_required', '选择重新实现的功能必须对应一个已提供的项目扩展。');
   }
   if (facts.candidates.some(file => !covered.has(file.evidence)) || (facts.unknown.length && input.choice === 'standard')) fail('harness_comparison_required', '尚有入口或调用关系未完成实际行为比较；不自动采用或替换。');
-  for (const extension of input.extensions || []) if (!behaviors.some(item => item.decision === 'retain' && item.extension === extension.id)) fail('harness_extension_unselected', '扩展必须对应用户明确选择重新实现的功能。');
+  for (const extension of input.extensions || []) if (!behaviors.some(item => item.decision === 'retain' && item.extension === extension.id)
+    && !facts.installed?.config?.extensions.some(previous => digest(previous) === digest(extension))) fail('harness_extension_unselected', '新增或改选扩展必须对应用户明确选择重新实现的功能。');
 }
 
-const readme = directory => `# 项目 Git 操作\n\n本目录由 git-setup 生成，可在移除 Skill 后独立运行，需要 Node.js >=20、Git >=2.29；选择 gh 时还需已登录的 GitHub CLI。\n\n请让 Agent 从本项目的 ${directory}/run.mjs 入口检查、发布或同步。无参数只检查；发布指定本地完整 refs，同步只使用 config.json 的来源、目标和完整 refs。两者分别调用，不自动互相触发，不创建提交、标签、Release、hooks 或 CI。\n\n远端地址从 Git 配置读取；config.json 中 targets 保存用户已确认的目标身份，用于检测地址变化。凭证沿用主检出或明确统筹外仓主检出的 .credentials/repositories/，每个目标独立；本目录不保存凭证或本机账号。Git helper 位于实际 Git common directory，新的 clone 需重新选择并安装本机鉴权。\n\n入口命令：check；read --remote <名称>；publish --remote <名称> --ref <完整引用>；sync。选仓加 --repository <登记路径>，外仓自身用 .；省略时只操作本项目。可加 --checkout <所选仓的检出>，相对本项目解释。每仓策略在 config.json 的 repositories 中保存，缺少时停止，不套用外仓策略。计划区分安装位置、实际检出、登记依据、远端、完整 refs 和鉴权来源；相关事实变化拒绝旧计划。auth-info/auth-prepare/auth-verify 也接受相同选仓参数。发布与同步先生成计划，再以同参数加 --apply --expected-fingerprint <指纹> 执行。有扩展时还需 --operation-id <本次稳定标识>。扩展只在对应操作全部成功后执行；中断或失败不自动重新执行，先检查 data/git-setup/ 中记录及真实结果。\n\n版本和源文件指纹在 manifest.json；升级先由 Agent 比较新旧实现及项目扩展，再按具体文件计划执行。不要手动改 runtime/；项目扩展独立维护，修改后重新确认内容指纹。配置检查不等于远端鉴权或推送权限验证。\n`;
+const readme = directory => `# 项目 Git 操作\n\n本目录由 git-setup 生成，可在移除 Skill 后独立运行，需要 Node.js >=20、Git >=2.29；选择 gh 时还需已登录的 GitHub CLI。\n\n请让 Agent 从本项目的 ${directory}/run.mjs 入口检查、发布或同步。无参数只检查；发布指定本地完整 refs，同步只使用 config.json 的来源、目标和完整 refs。两者分别调用，不自动互相触发，不创建提交、标签、Release、hooks 或 CI。\n\n远端地址从 Git 配置读取；config.json 中 targets 保存用户已确认的目标身份，用于检测地址变化。凭证沿用主检出或明确统筹外仓主检出的 .credentials/repositories/，每个目标独立；本目录不保存凭证或本机账号。Git helper 位于实际 Git common directory，新的 clone 需重新选择并安装本机鉴权。\n\n入口命令：check；read --remote <名称>；publish --remote <名称> --ref <完整引用>；sync。选仓加 --repository <登记路径>，外仓自身用 .；省略时只操作本项目。可加 --checkout <所选仓的检出>，相对本项目解释。每仓策略在 config.json 的 repositories 中保存，缺少时停止，不套用外仓策略。计划区分安装位置、实际检出、登记依据、远端、完整 refs 和鉴权来源；相关事实变化拒绝旧计划。auth-info/auth-prepare/auth-verify 也接受相同选仓参数。发布与同步先生成计划，再以同参数加 --apply --expected-fingerprint <指纹> 执行。有扩展时还需 --operation-id <本次稳定标识>。扩展只在对应操作全部成功后执行；中断或失败不自动重新执行，先检查 data/git-setup/ 中记录及真实结果。\n\n版本和源文件指纹在 manifest.json；升级先由 Agent 比较新旧实现及项目扩展，再按具体文件计划执行。生成器维护 runtime/、run.mjs、README.md 和清单；项目维护 config.json、可选 repos.conf 以及 extensions/ 下的扩展和资源。无扩展不创建空目录，旧目录外扩展仍有效。升级省略策略时保留已有配置、扩展和普通文件权限；明确停用扩展也保留文件。新增或改变扩展需确认内容指纹，原目标身份只有明确要求刷新时才更新。计划后文件变化会停止安装；中断后检查原记录、阶段目录和备份再继续，不覆盖后续修改。配置检查不等于远端鉴权或推送权限验证。\n`;
 
 export async function planHarness(project, input) {
-  fields(input, ['choice', 'directory', 'ruleFiles', 'evidenceFiles', 'comparison', 'sync', 'repositories', 'extensions', 'edits'], 'Harness 选择');
+  fields(input, ['choice', 'directory', 'ruleFiles', 'evidenceFiles', 'comparison', 'sync', 'repositories', 'extensions', 'refreshTargets', 'edits'], 'Harness 选择');
   publicText(input);
+  if (input.refreshTargets !== undefined && typeof input.refreshTargets !== 'boolean') fail('harness_config_invalid', 'refreshTargets 必须是布尔值。');
   if (!['keep', 'standard'].includes(input.choice)) fail('harness_choice_required', '在会话明确选择保留现有 Harness 或采用标准。');
   const state = await inspect(project);
   if (!state.initialized || state.bare || state.insideParent) fail('harness_project_required', '生成或保存 Harness 选择前先完成目标仓库初始化；不修改父仓。');
@@ -136,14 +146,15 @@ export async function planHarness(project, input) {
   ruleFiles.forEach(portablePath);
   if (saved?.directory && saved.directory !== directory) fail('harness_location_changed', '已登记安装位置变化；先明确旧入口的迁移方案，不自动创建第二套入口。');
   const facts = await harnessFacts(project, { evidenceFiles: input.evidenceFiles, directory, ruleFiles });
+  input = { ...input, evidenceFiles: input.evidenceFiles ?? saved?.evidenceFiles ?? [] };
+  if (input.choice === 'standard') input.extensions = input.extensions ?? facts.installed?.config?.extensions ?? [];
   validateComparison(input, facts);
   let config = null;
-  const files = {}, edits = [];
+  const files = {}, edits = [], preserved = {};
   const repositories = {}, repositoryFacts = {};
-  if (input.choice === 'keep' && ((input.edits?.length || input.extensions?.length) || input.sync !== undefined || input.repositories !== undefined)) fail('harness_keep_readonly', '保留现有 Harness 时不生成脚本、不改仓库策略或扩展。');
+  if (input.choice === 'keep' && ((input.edits?.length || input.extensions?.length) || input.sync !== undefined || input.repositories !== undefined || input.refreshTargets)) fail('harness_keep_readonly', '保留现有 Harness 时不生成脚本、不改仓库策略或扩展。');
   if (input.choice === 'standard') {
     if (facts.installed && ['modified', 'invalid'].includes(facts.installed.status)) fail('harness_existing_modified', '已有标准目录被修改或无法识别；先将实际修改纳入项目扩展，不覆盖。');
-    if (facts.installed?.config?.extensions?.length && input.extensions === undefined) fail('harness_extension_choice_required', '已有项目扩展；明确列出继续使用的扩展或空清单，不能在重新生成时静默丢弃。');
     const policies = input.repositories ?? facts.installed?.config?.repositories ?? {};
     fields(policies, Object.keys(policies), '各仓策略选择');
     for (const [name, policy] of Object.entries(policies)) {
@@ -153,7 +164,10 @@ export async function planHarness(project, input) {
       repositories[name] = { targets: input.repositories ? confirmedTargets(actual) : policy.targets, sync: policy.sync ?? null };
       repositoryFacts[name] = { relationship: selection.relationship.fingerprint, remotes: actual.remotes };
     }
-    config = validateHarnessConfig({ schemaVersion: 1, targets: confirmedTargets(state), sync: input.sync ?? (input.sync === null ? null : facts.installed?.config?.sync ?? null), extensions: input.extensions || [], ...(Object.keys(repositories).length ? { repositories } : {}) }, directory);
+    config = validateHarnessConfig({ ...(facts.installed?.config || { schemaVersion: 1, targets: confirmedTargets(state) }),
+      ...(input.refreshTargets ? { targets: confirmedTargets(state) } : {}),
+      sync: input.sync ?? (input.sync === null ? null : facts.installed?.config?.sync ?? null), extensions: input.extensions,
+      ...(input.repositories !== undefined || Object.keys(repositories).length ? { repositories } : {}) }, directory);
     for (const extension of config.extensions) {
       await safePath(state.root, join(state.root, extension.path));
       if (digest(await readFile(join(state.root, extension.path))) !== extension.sha256) fail('harness_extension_changed', '项目扩展内容与本次选择不同。');
@@ -161,14 +175,11 @@ export async function planHarness(project, input) {
     const bundle = await runtimeBundle();
     for (const [name, content] of Object.entries(bundle.files)) files[`runtime/${name}`] = content;
     files['run.mjs'] = projectLauncher(directory);
-    files['config.json'] = json(config); files['README.md'] = readme(directory);
-    if (facts.installed) {
-      const registry = join(state.root, directory, 'repos.conf');
-      try { files['repos.conf'] = await readFile(registry, 'utf8'); }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
-    }
-    files['manifest.json'] = json({ schemaVersion: 1, standard: 'git-setup', directory, ruleFiles, sourceVersion: bundle.version, sourceFingerprint: bundle.fingerprint,
-      files: Object.fromEntries(Object.entries(files).map(([name, content]) => [name, digest(content)])), comparison: input.comparison || [], evidenceFiles: input.evidenceFiles || [] });
+    if (!isDeepStrictEqual(config, facts.installed?.config)) files['config.json'] = json(config);
+    files['README.md'] = readme(directory);
+    for (const [name, record] of Object.entries(facts.installed?.projectFiles || {})) if (!Object.hasOwn(files, name)) preserved[name] = record;
+    files['manifest.json'] = json({ schemaVersion: 2, standard: 'git-setup', directory, ruleFiles, sourceVersion: bundle.version, sourceFingerprint: bundle.fingerprint,
+      files: Object.fromEntries(Object.entries(files).filter(([name]) => !projectFile(name)).map(([name, content]) => [name, digest(content)])), comparison: input.comparison || [], evidenceFiles: input.evidenceFiles || [] });
     for (const edit of input.edits || []) {
       fields(edit, ['path', 'content'], '已确认入口修改'); portablePath(edit.path);
       if (edit.path === directory || edit.path.startsWith(`${directory}/`) || !Object.hasOwn(facts.files, edit.path) || typeof edit.content !== 'string' || ruleFiles.includes(edit.path)) fail('harness_edit_invalid', '只允许修改计划内已检查的入口；规则登记由 ruleFiles 生成。');
@@ -181,9 +192,10 @@ export async function planHarness(project, input) {
     if (new Set(edits.map(item => item.path)).size !== edits.length) fail('harness_edit_invalid', '入口修改路径重复。');
   }
   const context = { facts: facts.fingerprint, remotes: state.remotes, repositoryFacts, commonDir: state.commonDir, installedFingerprint: facts.files['@standard'] ?? null, observedFiles: facts.files, hooksPath: facts.hooksPath, standard: facts.standard.fingerprint, choiceBefore: saved };
+  const modified = [...edits.map(edit => edit.path), ...(facts.installed?.config && files['config.json'] ? [`${directory}/config.json`] : [])];
   return { schemaVersion: 1, status: 'planned', choice: input.choice, project: state.root, directory, ruleFiles, input, context, config,
-    fingerprint: digest({ context, input }), files, edits,
-    changes: { generated: Object.keys(files).map(name => `${directory}/${name}`), modified: edits.map(edit => edit.path), legacyConfig: 'preserved', gitConfig: 'repository-local Harness choice only' },
+    fingerprint: digest({ context, input }), files, edits, preserved,
+    changes: { generated: Object.keys(files).map(name => `${directory}/${name}`).filter(name => !modified.includes(name)), preserved: Object.keys(preserved).map(name => `${directory}/${name}`), modified, legacyConfig: 'preserved', gitConfig: 'repository-local Harness choice only' },
     actualWrites: 'not_performed', committed: false, pushed: false };
 }
 

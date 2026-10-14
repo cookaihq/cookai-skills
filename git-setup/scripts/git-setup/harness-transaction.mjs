@@ -9,11 +9,12 @@ import { choiceKey, readChoice } from './harness-config.mjs';
 import { selectRepository } from './repository-relationship.mjs';
 import { verifyEdit, ruleSnapshot } from './harness-rules.mjs';
 import { saveSetupRecord } from './setup-record.mjs';
-import { digest, packageFiles, writePackage, safePath, runtimeFail as fail } from './runtime-bundle.mjs';
+import { digest, writePackage, safePath, runtimeFail as fail } from './runtime-bundle.mjs';
+import { installationFiles, plannedInstallation, copyProjectFiles } from './harness-files.mjs';
 
 const hashFiles = files => digest(Object.entries(files).sort(([a], [b]) => a.localeCompare(b)));
 const lockPath = plan => join(plan.context.commonDir, 'git-setup-harness.lock');
-const generatedHash = plan => hashFiles(Object.fromEntries(Object.entries(plan.files).map(([name, content]) => [name, digest(content)])));
+const generatedHash = plan => plannedInstallation(plan).fingerprint;
 async function assertOwner(tx) {
   await safePath(tx.plan.context.commonDir, lockPath(tx.plan));
   let actual;
@@ -24,7 +25,7 @@ async function snapshot(root, path) {
   if (!path) return null;
   await safePath(root, path);
   try { await lstat(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  return hashFiles(await packageFiles(path));
+  return (await installationFiles(path)).fingerprint;
 }
 const requestFor = plan => ({ project: plan.project, input: plan.input, expectedFingerprint: plan.fingerprint });
 async function checkpoint(tx, status = 'applying', extra = {}) {
@@ -40,7 +41,10 @@ async function observe(tx) {
   const facts = await harnessFacts(root, { directory: plan.directory, ruleFiles: plan.ruleFiles, evidenceFiles: plan.input.evidenceFiles, recoveryPaths: [tx.stage, tx.backup].filter(Boolean) });
   const state = await inspect(root);
   const ignored = new Set(['@standard', ...plan.edits.flatMap(edit => [edit.path, ...(edit.evidenceNames || []), ...(edit.aliases || []).map(alias => alias.path)])]);
-  const unrelated = files => Object.fromEntries(Object.entries(files).filter(([name]) => !ignored.has(name)));
+  // Installation evidence moves with the directory; the full snapshots below
+  // verify it at the current, stage and backup locations during rename recovery.
+  const unrelated = files => Object.fromEntries(Object.entries(files).filter(([name]) => !ignored.has(name)
+    && !(plan.directory && (name === plan.directory || name.startsWith(`${plan.directory}/`)))));
   if (state.root !== root || facts.commonDir !== plan.context.commonDir || digest(state.remotes) !== digest(plan.context.remotes)
     || facts.hooksPath !== plan.context.hooksPath || facts.standard.fingerprint !== plan.context.standard
     || hashFiles(unrelated(facts.files)) !== hashFiles(unrelated(plan.context.observedFiles))) fail('harness_recovery_changed', '原计划的仓库、目标、标准或入口证据发生变化；保留现场，先重新审阅。');
@@ -81,7 +85,10 @@ async function finish(tx, observation) {
       if (observation.current !== generatedHash(plan)) {
         await safePath(root, directory); await mkdir(dirname(directory), { recursive: true });
         if (!tx.stage) { tx.stage = join(dirname(directory), `.git-setup-stage-${randomUUID()}`); await checkpoint(tx); }
-        if (!observation.stage) { await mkdir(tx.stage, { mode: 0o700 }); await writePackage(tx.stage, plan.files); }
+        if (!observation.stage) {
+          await mkdir(tx.stage, { mode: 0o700 }); await writePackage(tx.stage, plan.files);
+          await copyProjectFiles(observation.current !== null ? directory : tx.backup, tx.stage, plan.preserved || {});
+        }
         await observe(tx); // Recheck originals after writing the isolated package.
         if (observation.current !== null) {
           if (observation.backup !== null) fail('harness_recovery_changed', '原目录和备份同时存在；先核对现场，不覆盖备份。');

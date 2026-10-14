@@ -25,7 +25,7 @@ function validatePolicy(config, directory) {
   for (const extension of config.extensions) {
     fields(extension, ['id', 'path', 'sha256', 'event', 'description', 'timeoutMs'], '项目扩展');
     portablePath(extension.path);
-    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(extension.id) || ids.has(extension.id) || !extension.path.endsWith('.mjs') || (directory && (extension.path === directory || extension.path.startsWith(`${directory}/`)))
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(extension.id) || ids.has(extension.id) || !extension.path.endsWith('.mjs') || (directory && (extension.path === directory || (extension.path.startsWith(`${directory}/`) && !extension.path.startsWith(`${directory}/extensions/`))))
       || !/^[a-f0-9]{64}$/.test(extension.sha256) || !['after-publish', 'after-sync'].includes(extension.event) || typeof extension.description !== 'string' || !extension.description.trim()
       || !Number.isSafeInteger(extension.timeoutMs) || extension.timeoutMs < 1000 || extension.timeoutMs > 300000) fail('harness_config_invalid', '扩展必须有唯一名称、项目内 Node 文件、内容指纹、成功后触发时机和有限超时。');
     ids.add(extension.id);
