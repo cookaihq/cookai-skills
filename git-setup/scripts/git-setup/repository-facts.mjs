@@ -83,4 +83,3 @@ export async function inspectProject(project) {
   }
   return { requestedPath, root, isGit: true, gitDir, commonDir, isWorktree: gitDir !== commonDir, superprojectRoot, remotes };
 }
-
