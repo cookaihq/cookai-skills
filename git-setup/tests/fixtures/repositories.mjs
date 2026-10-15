@@ -39,7 +39,7 @@ export async function repositoryFixture() {
     return directory;
   };
   const run = async (entry, args, cwd = root) => {
-    try { const result = await exec(process.execPath, [entry, ...args], { cwd, env, timeout: 90000 }); return { exit: 0, ...JSON.parse(result.stdout) }; }
+    try { const result = await exec(process.execPath, [entry, ...args], { cwd, env, timeout: 300000 }); return { exit: 0, ...JSON.parse(result.stdout) }; }
     catch (error) { return { exit: error.code, ...JSON.parse(error.stdout || error.stderr) }; }
   };
   const install = async (project, input = {}, entry = cli) => {

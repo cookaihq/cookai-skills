@@ -6,7 +6,7 @@ import { harnessFacts, planHarness } from './harness.mjs';
 import { inspect, updateLocalConfig, redact } from './git.mjs';
 import { localGit } from './auth-roots.mjs';
 import { choiceKey, readChoice } from './harness-config.mjs';
-import { selectRepository } from './repository-relationship.mjs';
+import { selectRepository, registeredRepositories } from './repository-relationship.mjs';
 import { verifyEdit, ruleSnapshot } from './harness-rules.mjs';
 import { saveSetupRecord } from './setup-record.mjs';
 import { digest, writePackage, safePath, runtimeFail as fail } from './runtime-bundle.mjs';
@@ -68,8 +68,15 @@ async function observe(tx) {
     || (current === null && plan.context.installedFingerprint !== null && backup === null))) fail('harness_recovery_changed', '生成目录、临时目录或备份与原计划不符；保留残留供核查。');
   for (const [repository, expectedFacts] of Object.entries(plan.context.repositoryFacts || {})) {
     try {
-      const selection = await selectRepository(root, { repository, harnessDirectory: plan.directory,
-        registrySourceDirectory: current !== null ? directory : stage !== null ? tx.stage : tx.backup });
+      const registryOptions = { harnessDirectory: plan.directory,
+        registrySourceDirectory: current !== null ? directory : stage !== null ? tx.stage : tx.backup };
+      if (expectedFacts.unavailable) {
+        const registered = (await registeredRepositories(root, registryOptions)).entries.find(entry => entry.path === repository);
+        const actual = registered && !registered.repository && { unavailable: registered.unavailable, path: registered.path, kind: registered.kind, gitlink: registered.gitlink };
+        if (digest(actual) !== digest(expectedFacts)) throw new Error('changed');
+        continue;
+      }
+      const selection = await selectRepository(root, { repository, ...registryOptions });
       const actual = await inspect(selection.project.root);
       if (digest({ relationship: selection.relationship.fingerprint, remotes: actual.remotes }) !== digest(expectedFacts)) throw new Error('changed');
     } catch { fail('harness_recovery_changed', '原计划的子仓登记、检出或远端发生变化；保留现场，不继续应用。'); }

@@ -47,6 +47,7 @@ node <skill>/scripts/git-setup/cli.mjs harness-apply --project <项目> --input 
 
 | 入口 | 校验与结果 |
 | --- | --- |
+| runtime-info | 仅核对完整生成运行包并返回安装根、相对目录及运行文件指纹；不读任何仓库的凭证、不联网 |
 | 生成入口无参数/check | 只核对本项目运行文件、配置、已确认目标和本机鉴权来源；不联网或修改文件 |
 | read --remote | 使用该目标来源读取真实远端引用 |
 | publish --remote --ref | 审查指定本地完整 refs 的历史，预览目标，逐引用传输并回读 |
@@ -95,7 +96,7 @@ hooks 的适用/启用、主检出迁移、全局安装更新和三宿主真实�
 
 公开 CLI 的 `check/read/publish/sync` 与生成入口都接受 `--repository <登记路径>`，外仓自身用 `.`；省略时只操作入口所属项目。`--checkout <路径>` 必须与 repository 一起使用，相对路径以管理仓为基准。先证明检出与登记仓有相同 Git common directory 和主检出；同 URL 的独立 clone 会被拒绝。公开 CLI 的 `--project` 是安装 Harness 的管理仓，不能另传不同的 workspace 重定向操作。
 
-采用计划用 `repositories` 按登记路径明确选择每仓策略，例如 `{"repositories":{"api":{"sync":{"source":"api-origin","targets":["api-backup"],"refs":["refs/heads/main"]}}}}`。登记 api 后，生成器从 api 的实际 Git 配置取得已确认 targets；生成 config.json 的 repositories.api 包含其 targets 和 sync。首次独立仓先安装 Harness、在实际目录登记，再计划各仓策略；子模块直接使用 Git 登记。未传 repositories 时保留已安装的策略并重验登记；传空对象表示明确移除全部子仓策略。缺少所选仓策略直接停止，不套用外仓策略。子仓扩展维护不在本阶段范围。
+采用计划用 `repositories` 按登记路径明确选择每仓策略，例如 `{"repositories":{"api":{"sync":{"source":"api-origin","targets":["api-backup"],"refs":["refs/heads/main"]}}}}`。登记 api 后，生成器从 api 的实际 Git 配置取得已确认 targets；生成 config.json 的 repositories.api 包含其 targets 和 sync。首次独立仓先安装 Harness、在实际目录登记，再计划各仓策略；子模块直接使用 Git 登记。未传 repositories 时保留已安装的策略并重验登记；无关未初始化子模块或缺失独立检出不阻断选中可用仓，已有未初始化目标的策略在升级与恢复中原样保留。选中不可用仓、明确重建其策略时仍报错，损坏 Git 元数据、非法登记与重复路径不跳过；传空对象表示明确移除全部子仓策略。缺少所选仓策略直接停止，不套用外仓策略。子仓扩展维护不在本阶段范围。
 
 ```text
 node <管理仓>/<安装目录>/run.mjs check --repository api --checkout <api 的已验证 Worktree>

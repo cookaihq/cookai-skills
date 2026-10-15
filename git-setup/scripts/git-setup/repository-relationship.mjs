@@ -24,29 +24,38 @@ export async function registeredRepositories(manager, { harnessDirectory, regist
     paths.add(repositoryPath);
     const candidate = resolve(outer.root, repositoryPath);
     await safePath(outer.root, candidate);
-    let repository;
-    try { repository = await mainCheckout(candidate); }
-    catch (error) {
-      if (error.code === 'PROJECT_UNAVAILABLE') fail('WORKSPACE_REPOSITORY_MISSING', `登记仓库不可用：${repositoryPath}`);
-      throw error;
-    }
-    if (!repository.isGit || repository.root !== candidate) fail(kind === 'submodule' ? 'WORKSPACE_SUBMODULE_UNINITIALIZED' : 'WORKSPACE_REPOSITORY_MISSING', `登记路径不是已初始化仓库根：${repositoryPath}`);
-    if (repository.commonDir === outer.commonDir || commonDirs.has(repository.commonDir)) fail('WORKSPACE_DUPLICATE', '重复登记同一仓库或把管理仓自身列为子仓。');
-    commonDirs.add(repository.commonDir);
     let gitlink = null;
     if (kind === 'submodule') {
       const raw = await localGit(outer.root, ['ls-files', '--stage', '-z', '--', repositoryPath]);
       const records = raw.split('\0').filter(Boolean);
       const match = records.length === 1 && /^160000 ([a-f0-9]+) 0\t(.+)$/.exec(records[0]);
       if (!match || match[2] !== repositoryPath) fail('WORKSPACE_SUBMODULE_INVALID', '子模块缺少唯一的 Git index gitlink 登记。');
+      gitlink = match[1];
+    }
+    let repository;
+    try { repository = await mainCheckout(candidate); }
+    catch (error) {
+      if (error.code !== 'PROJECT_UNAVAILABLE') throw error;
+    }
+    if (!repository?.isGit || repository.root !== candidate) {
+      // A missing checkout is a normal registration state. Corrupt or linked Git
+      // metadata is never treated as an uninitialized checkout.
+      try { await lstat(join(candidate, '.git')); fail('WORKSPACE_REPOSITORY_INVALID', '登记路径存在无法验证的 Git 元数据。'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      entries.push({ path: repositoryPath, kind, evidence, moduleName: moduleName || null, gitlink, repository: null,
+        unavailable: kind === 'submodule' ? 'WORKSPACE_SUBMODULE_UNINITIALIZED' : 'WORKSPACE_REPOSITORY_MISSING' });
+      return;
+    }
+    if (repository.commonDir === outer.commonDir || commonDirs.has(repository.commonDir)) fail('WORKSPACE_DUPLICATE', '重复登记同一仓库或把管理仓自身列为子仓。');
+    commonDirs.add(repository.commonDir);
+    if (kind === 'submodule') {
       const parent = repository.superprojectRoot && await mainCheckout(repository.superprojectRoot);
       const expected = resolve(outer.root, (await localGit(outer.root, ['rev-parse', '--git-path', `modules/${moduleName}`])).trim());
       let moduleDir;
       try { moduleDir = await realpath(expected); } catch { fail('WORKSPACE_SUBMODULE_INVALID', '子模块的 Git 元数据登记缺失。'); }
       if (!parent || parent.commonDir !== outer.commonDir || moduleDir !== repository.commonDir) fail('WORKSPACE_SUBMODULE_INVALID', '子模块的 .gitmodules、gitlink 和实际 Git 元数据不一致。');
-      gitlink = match[1];
     } else if (repository.superprojectRoot) fail('WORKSPACE_SUBMODULE_DUPLICATE', '子模块只能以 Git 登记为准，不能作为独立仓登记。');
-    entries.push({ path: repositoryPath, kind, evidence, gitlink, repository });
+    entries.push({ path: repositoryPath, kind, evidence, moduleName: moduleName || null, gitlink, repository });
   };
   const modules = await optionalFile(join(outer.root, '.gitmodules'));
   if (modules !== null) {
@@ -110,7 +119,7 @@ export async function resolveRepository(project, options = {}) {
     if (seen.has(outer.commonDir)) fail('WORKSPACE_CYCLE', '仓库管理关系出现循环。');
     seen.add(outer.commonDir);
     const registration = await registeredRepositories(outer, {});
-    if (!registration.entries.some(entry => entry.repository.commonDir === cursor.commonDir)) fail('WORKSPACE_UNREGISTERED', 'Git 外仓没有有效登记当前仓库。');
+    if (!registration.entries.some(entry => entry.repository?.commonDir === cursor.commonDir)) fail('WORKSPACE_UNREGISTERED', 'Git 外仓没有有效登记当前仓库。');
     candidates.push(registration); cursor = outer;
   }
   const hint = options.expectedRelationship;
@@ -123,7 +132,7 @@ export async function resolveRepository(project, options = {}) {
       if (!chosen.isGit) fail('WORKSPACE_INVALID', '所选管理仓不可用。');
       let selected = candidates.find(item => item.outer.commonDir === chosen.commonDir);
       selected ||= await registeredRepositories(chosen, { harnessDirectory: options.harnessDirectory || hint?.directory, registrySourceDirectory: options.registrySourceDirectory });
-      const entry = selected.entries.find(item => item.repository.commonDir === repository.commonDir);
+      const entry = selected.entries.find(item => item.repository?.commonDir === repository.commonDir);
       if (!entry && !candidates.includes(selected)) fail('WORKSPACE_UNREGISTERED', '指定管理仓未登记当前仓库；路径嵌套、同一 URL 或旧本机绑定均不能替代登记。');
       management = selected.outer; directory = selected.directory;
       registration = entry ? { kind: entry.kind, path: entry.path, evidence: entry.evidence, gitlink: entry.gitlink } : { kind: 'submodule-chain', path: relative(management.root, repository.main), evidence: candidates.map(item => item.fingerprint) };
@@ -131,7 +140,7 @@ export async function resolveRepository(project, options = {}) {
   } else if (candidates.length) {
     if (candidates.length !== 1) fail('WORKSPACE_AMBIGUOUS', `多个已验证管理仓，需要明确选择：${candidates.map(item => item.outer.root).join('、')}`);
     management = candidates[0].outer; directory = candidates[0].directory;
-    const entry = candidates[0].entries.find(item => item.repository.commonDir === repository.commonDir);
+    const entry = candidates[0].entries.find(item => item.repository?.commonDir === repository.commonDir);
     registration = { kind: entry.kind, path: entry.path, evidence: entry.evidence, gitlink: entry.gitlink };
   }
   if (options.expectedOwner && (management.main !== options.expectedOwner.main || (options.expectedOwner.commonDir !== null && management.commonDir !== options.expectedOwner.commonDir))) fail('auth_owner_changed', '已绑定的凭证主检出发生变化；修复原关系，不切换来源。');
@@ -153,6 +162,7 @@ export async function selectRepository(manager, { repository = '.', checkout, ha
     const registered = await registeredRepositories(outer, { harnessDirectory, registrySourceDirectory });
     const entry = registered.entries.find(item => item.path === repository);
     if (!entry) fail('WORKSPACE_UNREGISTERED', '所选仓库没有登记在这个管理仓；不回退操作外仓。');
+    if (!entry.repository) fail(entry.unavailable, `所选登记仓库不可用：${repository}`);
     selected = entry.repository;
   }
   if (checkout !== undefined) {

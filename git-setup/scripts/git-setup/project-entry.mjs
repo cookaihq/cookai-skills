@@ -135,6 +135,12 @@ export async function projectOperation(root, command, options = {}) {
 export async function runProject(root, directory) {
   const [command = 'check', ...args] = process.argv.slice(2);
   try {
+    if (command === 'runtime-info') {
+      if (args.length) fail('invalid_argument', 'runtime-info 不接受仓库选择或业务参数。');
+      const manifest = JSON.parse(await readFile(join(root, directory, 'manifest.json'), 'utf8'));
+      process.stdout.write(`${JSON.stringify({ status: 'runtime_verified', installation: { root, directory, path: join(root, directory) }, fingerprint: digest(manifest.files), authentication: 'not_inspected', network: 'not_performed' })}\n`);
+      return;
+    }
     if (['auth-info', 'auth-prepare', 'auth-verify'].includes(command)) {
       if (args.some(value => ['--project', '--workspace', '--credential-workspace', '--harness-directory'].includes(value))) fail('invalid_argument', '生成入口的管理仓与安装位置固定；用 repository/checkout 选择已登记仓库。');
       const selectionOptions = {}, forwarded = [];

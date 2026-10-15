@@ -7,7 +7,7 @@ import http from 'node:http';
 import net from 'node:net';
 
 const exec = promisify(execFile);
-export async function gitService(t, fixture, targets, { hosts = ['cnb.cool'] } = {}) {
+export async function gitService(t, fixture, targets, { hosts = ['cnb.cool'], githubUsers = ['x-access-token'] } = {}) {
   const root = join(fixture.root, 'git-service'); await mkdir(root);
   const repositories = {};
   for (const name of Object.keys(targets)) {
@@ -21,10 +21,10 @@ export async function gitService(t, fixture, targets, { hosts = ['cnb.cool'] } =
   const server = https.createServer({ key: await readFile(join(root, 'key.pem')), cert: await readFile(join(root, 'cert.pem')) }, (req, res) => {
     const endpoint = new URL(req.url, 'https://fixture');
     const name = endpoint.pathname.match(/^\/(.+)\.git\//)?.[1];
-    const username = req.headers.host === 'github.com' ? 'x-access-token' : 'cnb';
-    const expected = targets[name] && `Basic ${Buffer.from(`${username}:${targets[name]}`).toString('base64')}`;
-    if (!expected || req.headers.authorization !== expected) { res.writeHead(401, { 'www-authenticate': 'Basic realm="fixture"' }); res.end(); return; }
-    requests.push({ repository: name, path: endpoint.pathname, method: req.method });
+    const users = req.headers.host === 'github.com' ? githubUsers : ['cnb'];
+    const username = targets[name] && users.find(user => req.headers.authorization === `Basic ${Buffer.from(`${user}:${targets[name]}`).toString('base64')}`);
+    if (!username) { res.writeHead(401, { 'www-authenticate': 'Basic realm="fixture"' }); res.end(); return; }
+    requests.push({ repository: name, path: endpoint.pathname, method: req.method, username });
     const drop = req.method === 'POST' && endpoint.pathname.endsWith('/git-receive-pack') && droppedResponses.delete(name);
     const child = spawn('git', ['http-backend'], { env: { ...fixture.env, GIT_PROJECT_ROOT: root, GIT_HTTP_EXPORT_ALL: '1', PATH_INFO: endpoint.pathname, QUERY_STRING: endpoint.search.slice(1), REQUEST_METHOD: req.method, CONTENT_TYPE: req.headers['content-type'] || '', CONTENT_LENGTH: req.headers['content-length'] || '', REMOTE_USER: 'cnb', HTTP_GIT_PROTOCOL: req.headers['git-protocol'] || '' }, stdio: ['pipe', 'pipe', 'pipe'] });
     const timer = setTimeout(() => child.kill('SIGKILL'), 30000);

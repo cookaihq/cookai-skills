@@ -365,13 +365,13 @@ export async function inspectAuth(project, url, options = {}) {
       await protectedPath(binding.file, binding.owner);
       validateFileInfo(await lstat(binding.file), binding.file);
     }
-    if (binding.state === 'ready') {
+    if (binding.state === 'ready' && !options.metadataOnly) {
       const current = await readCredential(binding);
       if (binding.credentialRevision !== current.revision) authFail('auth_source_changed', `已选凭证已变化，需要重新验证：${source}`);
     }
     return { status: binding.state, target, method: binding.method, source, owner: binding.owner,
       account: binding.account, sourceRevision: binding.credentialRevision,
-      previousIdentity: binding.identity, network: 'not_performed' };
+      previousIdentity: binding.identity, ...(options.metadataOnly ? { credentialContent: 'not_read' } : {}), network: 'not_performed' };
   } catch (error) {
     return { status: 'invalid', target, code: error.code, message: error.code?.startsWith('auth_') || error.code?.startsWith('gh_') ? error.message : '无法检查已选来源；不回退。', network: 'not_performed' };
   }

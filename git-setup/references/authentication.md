@@ -91,3 +91,7 @@ CNB 令牌须覆盖完整目标仓库：读取需要代码只读权限，推送�
 - [Git credential helper 协议](https://git-scm.com/docs/gitcredentials)：空 helper 重置列表、useHttpPath、quit 阻止回退。实现核对 Git 2.29 文档。
 - [gh auth status](https://cli.github.com/manual/gh_auth_status) 与 [gh auth token](https://cli.github.com/manual/gh_auth_token)：账号列表与 `--user`。
 - [CNB Git 认证](https://docs.cnb.cool/zh/guide/git-access.md)、[访问令牌](https://docs.cnb.cool/zh/guide/access-token.md)、[部署令牌](https://docs.cnb.cool/zh/guide/deploy-key.md)：2026-10-13 查证。
+
+## 项目环境工具的本机检查
+
+项目自有环境导出器可以从已验证的生成运行包调用 `inspectAuth(project, url, {metadataOnly: true})`，只核对已选绑定和文件元数据，返回 `credentialContent: not_read`。这不能证明文件内容仍有效，不能替代 `authSelection`、`auth-verify` 或权限验证。导出器先明确拒绝 gh/legacy 等不支持的来源，再读取同一文件绑定，避免在拒绝前先取出系统登录凭证。普通 `auth-info` 保持原来的完整本机来源检查。

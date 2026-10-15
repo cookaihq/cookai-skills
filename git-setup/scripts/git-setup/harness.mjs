@@ -159,6 +159,16 @@ export async function planHarness(project, input) {
     fields(policies, Object.keys(policies), '各仓策略选择');
     for (const [name, policy] of Object.entries(policies)) {
       fields(policy, input.repositories ? ['sync'] : ['targets', 'sync'], '各仓策略选择');
+      if (input.repositories === undefined) {
+        const registration = await registeredRepositories(state.root, { harnessDirectory: directory });
+        const registered = registration.entries.find(entry => entry.path === name);
+        if (!registered) fail('WORKSPACE_UNREGISTERED', '已有策略的仓库登记已移除；明确处理原策略，不静默丢弃。');
+        if (!registered.repository) {
+          repositories[name] = policy;
+          repositoryFacts[name] = { unavailable: registered.unavailable, path: registered.path, kind: registered.kind, gitlink: registered.gitlink };
+          continue;
+        }
+      }
       const selection = await selectRepository(state.root, { repository: name, harnessDirectory: directory });
       const actual = await inspect(selection.project.root);
       repositories[name] = { targets: input.repositories ? confirmedTargets(actual) : policy.targets, sync: policy.sync ?? null };

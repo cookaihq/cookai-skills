@@ -107,7 +107,7 @@ test('public relationship checks reject legacy registration, duplicate paths and
   assert.equal((await f.run(cli, ['auth-prepare', '--project', child, ...args, '--url', 'https://cnb.cool/team/shared', '--auth-method', 'cnb-url', '--apply'])).code, 'WORKSPACE_DUPLICATE');
   await assert.rejects(lstat(join(outer, '.credentials')), { code: 'ENOENT' });
   await writeFile(join(outer, 'vcs/repos.conf'), 'missing\n');
-  assert.equal((await f.run(cli, ['check', '--project', child, ...args])).code, 'WORKSPACE_REPOSITORY_MISSING');
+  assert.equal((await f.run(cli, ['check', '--project', child, ...args])).code, 'WORKSPACE_UNREGISTERED');
 });
 
 test('a normal repository beneath a modules directory remains an independent repository', async () => {
@@ -138,7 +138,7 @@ test('public submodule checks require registration, gitlink and actual Git metad
   await f.git(outer, 'update-index', '--add', '--cacheinfo', `160000,${await f.git(child, 'rev-parse', 'HEAD')},module`);
   await f.git(outer, 'submodule', 'deinit', '-f', 'module');
   assert.equal((await f.run(cli, ['check', '--project', outer, '--workspace', outer])).status, 'checked');
-  assert.equal((await f.run(cli, ['check', '--project', source, '--workspace', outer])).code, 'WORKSPACE_SUBMODULE_UNINITIALIZED');
+  assert.equal((await f.run(cli, ['check', '--project', source, '--workspace', outer])).code, 'WORKSPACE_UNREGISTERED');
 });
 
 test('multiple verified managers require a choice and setup rejects a removed registration before writes', async () => {
