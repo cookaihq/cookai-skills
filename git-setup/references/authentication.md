@@ -41,9 +41,9 @@ node <skill>/scripts/git-setup/cli.mjs auth-prepare --project <项目> --url <UR
 
 脚本在凭证实体所属仓库检查未跟踪、实际忽略及实体路径，拒绝符号链接和已跟踪文件。文件准备授权已包含忽略设置时可加 `--allow-ignore`，脚本只在该仓本机 `.git/info/exclude` 增加该文件规则；否则返回缺失的忽略条件。新目录在 macOS/Linux 为 700，新文件为 600，以排他方式创建为空；已有文件不覆盖，权限不符合时报出实际路径。Windows 原生使用同一路径规则，不把 POSIX mode 当作 Windows ACL 验收；该环境须单独验证。
 
-创建后的**同一条会话回复**必须包含：
+首次创建后，以及跨会话恢复时重新请用户填写的**同一条会话回复**，都必须包含：
 
-- 可点击的完整实际文件路径；
+- 可点击的完整实际文件路径；使用返回的 `credentialLink`。恢复检查只返回 `credentialFile` 时，用该原始绝对路径生成 Markdown 链接；不以代码块、路径缩写或“复制路径打开”替代链接；
 - 完整目标仓库及本次用途；
 - GitHub：单行 Token 原文，不加引号、变量名或空格；
 - CNB：单行 `https://cnb:<访问令牌>@cnb.cool/<完整仓库路径>`，用户名必须为 `cnb`，不加引号或变量名；
@@ -51,6 +51,8 @@ node <skill>/scripts/git-setup/cli.mjs auth-prepare --project <项目> --url <UR
 - 请用户在本机填写，完成后回复“已填写”。不得要求把 Token 发到聊天。
 
 在用户回复前停在 `awaiting_credentials`；文件非空不等于已确认。收到回复后才使用 `--credentials-filled` 继续计划和验证；已完成绑定以后不重复要求填写。`pending` 与来源信息保存在本机 Git 配置，换会话后通过 `auth-info --url` 恢复。
+
+报告准备结果时区分三个状态：凭证文件是否新建或保留；本机 Git 配置是否已保存文件目标预留与待确认来源；远端设置、持久 helper 和网络核验是否已执行。`auth-prepare --apply` 成功会保存前两项，本阶段尚未完成后续接入；不能把“尚未添加远端”写成“未写任何 Git 配置”。恢复时先回读这些事实，不从文件非空推断用户已确认。
 
 尚无 Git 的项目选择独立文件时，文件准备包含建立 Git 元数据及本机忽略规则。在本次已授权的准备范围内使用 `auth-prepare --allow-ignore --apply`：脚本先排他创建 `.git`，在本机 Git config 记录目标和未完成的初始化状态，再验证忽略并创建受保护空文件。此时没有连接远端，没有确定最终检出分支，也不算设置完成。只做计划不创建 `.git` 或凭证文件。
 
