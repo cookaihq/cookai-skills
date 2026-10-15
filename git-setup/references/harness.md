@@ -47,6 +47,7 @@ node <skill>/scripts/git-setup/cli.mjs harness-apply --project <项目> --input 
 
 | 入口 | 校验与结果 |
 | --- | --- |
+| project-entries | 只读核对并列出 event: explicit 的项目入口、描述、完整路径与内容摘要；不联网、不读凭证、不执行入口 |
 | runtime-info | 仅核对完整生成运行包并返回安装根、相对目录及运行文件指纹；不读任何仓库的凭证、不联网 |
 | 生成入口无参数/check | 只核对本项目运行文件、配置、已确认目标和本机鉴权来源；不联网或修改文件 |
 | read --remote | 使用该目标来源读取真实远端引用 |
@@ -71,7 +72,9 @@ node <skill>/scripts/git-setup/cli.mjs harness-recover --project <项目> --plan
 
 首次只读核对真实文件、原选择、标准、目标、锁和进程状态。原进程仍存在、锁无法归属、用户文件或部分运行包不符合原计划时停止，保留现场供人工核查，不盲删残留。现场匹配才返回 recovery_ready；明确继续原范围时使用该指纹完成剩余写入。旧成功记录只报告 historical_receipt_only，不充当本轮验证。恢复不改变原选择或扩展范围，失效计划需重新审阅。未开始写入的计划仍可用原 input 重新计划；没有原选择依据时不能从记录猜授权。
 
-扩展使用项目内 `.mjs`，推荐放在所选 Harness 的 `extensions/` 下；目录外的旧路径仍支持，不自动搬迁。Harness 内其他位置不能作为扩展。扩展包含唯一 id、path、sha256、event（after-publish/after-sync）、description、timeoutMs（1000–300000）。仅在对应 Git 操作全部成功后执行。stdin 为 `{schemaVersion,event,project,operationId,git}`，退出 0 表示扩展自身完成，业务回读由扩展负责；框架不记录 stdout/stderr。有扩展时预览和执行传同一 `--operation-id`，恢复记录不安全则在 Git 写入前停止。中断或失败不自动重发；历史收据不替代远端核验。
+扩展使用项目内 `.mjs`，推荐放在所选 Harness 的 `extensions/` 下；目录外的旧路径仍支持，不自动搬迁。Harness 内其他位置不能作为扩展。扩展包含唯一 id、path、sha256、event、description。自动扩展使用 event: after-publish/after-sync，并提供 timeoutMs（1000–300000）。自动扩展仅在对应 Git 操作全部成功后执行。stdin 为 `{schemaVersion,event,project,operationId,git}`，退出 0 表示扩展自身完成，业务回读由扩展负责；框架不记录 stdout/stderr。有自动扩展时预览和执行传同一 `--operation-id`，恢复记录不安全则在 Git 写入前停止。中断或失败不自动重发；历史收据不替代远端核验。
+
+明确调用的项目命令使用 `event: "explicit"`，提供相同的 id/path/sha256/description，不提供 timeoutMs。它参与采用时的行为比较、文件摘要、升级保留和中断恢复；`decision: retain` 可以指向这个 ID。生成入口 `project-entries` 验证登记文件后列出其实际路径，不执行命令。Agent 按该命令自己的说明显式调用；参数、业务预览、授权、超时、锁和恢复均由项目命令负责。标准 publish/sync 不执行它，也不为它要求 operation-id。不能把 explicit 登记写成框架已替该命令限制执行时间或核验业务权限。
 
 hooks 的适用/启用、主检出迁移、全局安装更新和三宿主真实入口验收均留待后续。脚本、生成入口、普通 Git、三客户端会话及真实平台账号/权限分别记录，不能互相替代。
 

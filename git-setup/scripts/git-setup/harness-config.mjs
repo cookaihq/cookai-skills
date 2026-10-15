@@ -26,8 +26,8 @@ function validatePolicy(config, directory) {
     fields(extension, ['id', 'path', 'sha256', 'event', 'description', 'timeoutMs'], '项目扩展');
     portablePath(extension.path);
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(extension.id) || ids.has(extension.id) || !extension.path.endsWith('.mjs') || (directory && (extension.path === directory || (extension.path.startsWith(`${directory}/`) && !extension.path.startsWith(`${directory}/extensions/`))))
-      || !/^[a-f0-9]{64}$/.test(extension.sha256) || !['after-publish', 'after-sync'].includes(extension.event) || typeof extension.description !== 'string' || !extension.description.trim()
-      || !Number.isSafeInteger(extension.timeoutMs) || extension.timeoutMs < 1000 || extension.timeoutMs > 300000) fail('harness_config_invalid', '扩展必须有唯一名称、项目内 Node 文件、内容指纹、成功后触发时机和有限超时。');
+      || !/^[a-f0-9]{64}$/.test(extension.sha256) || !['after-publish', 'after-sync', 'explicit'].includes(extension.event) || typeof extension.description !== 'string' || !extension.description.trim()
+      || (extension.event === 'explicit' ? extension.timeoutMs !== undefined : !Number.isSafeInteger(extension.timeoutMs) || extension.timeoutMs < 1000 || extension.timeoutMs > 300000)) fail('harness_config_invalid', '扩展必须有唯一名称、项目内 Node 文件、内容指纹及触发方式；自动扩展有有限超时，explicit 入口由调用方管理执行，不能设置 timeoutMs。');
     ids.add(extension.id);
   }
   return config;

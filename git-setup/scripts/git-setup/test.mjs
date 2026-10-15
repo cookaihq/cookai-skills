@@ -15,8 +15,10 @@ mkdirSync(testRoot, { recursive: true });
 const tests = readdirSync(resolve(skill, 'tests')).filter(name => name.endsWith('.test.mjs')).map(name => resolve(skill, 'tests', name));
 const result = spawnSync(process.execPath, ['--test', ...tests], {
   // Relationship and multi-repository scenarios launch real Git/CLI processes.
-  cwd: skill, stdio: 'inherit', timeout: 1200000,
+  // A busy host exceeded 1200 seconds with 120 passing results; preserve assertions
+  // and per-operation limits while allowing the complete suite a 30-minute budget.
+  cwd: skill, stdio: 'inherit', timeout: 1800000,
   env: { ...process.env, GIT_SETUP_TEST_ROOT: testRoot },
 });
-if (result.error) process.stderr.write(`完整测试进程未完成：${result.error.code || 'process_error'}（总预算 1200 秒）。\n`);
+if (result.error) process.stderr.write(`完整测试进程未完成：${result.error.code || 'process_error'}（总预算 1800 秒）。\n`);
 process.exitCode = result.status ?? 1;

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { projectCheck } from './project-check.mjs';
 import { selectRepository } from './repository-relationship.mjs';
-import { assertHarnessTargets } from './harness-config.mjs';
+import { assertHarnessTargets, readHarnessConfig } from './harness-config.mjs';
 import { digest, safePath, runtimeFail as fail } from './runtime-bundle.mjs';
 import { gitAuthentication } from './auth.mjs';
 import { localEnvironment } from './auth-roots.mjs';
@@ -135,6 +135,14 @@ export async function projectOperation(root, command, options = {}) {
 export async function runProject(root, directory) {
   const [command = 'check', ...args] = process.argv.slice(2);
   try {
+    if (command === 'project-entries') {
+      if (args.length) fail('invalid_argument', 'project-entries 只核对当前项目登记的明确调用入口，不接受业务参数。');
+      const installed = await readHarnessConfig(root, directory);
+      const entries = installed.config.extensions.filter(extension => extension.event === 'explicit');
+      await assertExtensions(root, entries);
+      process.stdout.write(`${JSON.stringify({ status: 'project_entries_verified', installation: { root, directory }, entries: entries.map(item => ({ ...item, absolutePath: join(root, item.path) })), execution: 'not_performed', authentication: 'not_inspected', network: 'not_performed' })}\n`);
+      return;
+    }
     if (command === 'runtime-info') {
       if (args.length) fail('invalid_argument', 'runtime-info 不接受仓库选择或业务参数。');
       const manifest = JSON.parse(await readFile(join(root, directory, 'manifest.json'), 'utf8'));
