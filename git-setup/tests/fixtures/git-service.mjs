@@ -7,7 +7,7 @@ import http from 'node:http';
 import net from 'node:net';
 
 const exec = promisify(execFile);
-export async function gitService(t, fixture, targets) {
+export async function gitService(t, fixture, targets, { hosts = ['cnb.cool'] } = {}) {
   const root = join(fixture.root, 'git-service'); await mkdir(root);
   const repositories = {};
   for (const name of Object.keys(targets)) {
@@ -21,7 +21,8 @@ export async function gitService(t, fixture, targets) {
   const server = https.createServer({ key: await readFile(join(root, 'key.pem')), cert: await readFile(join(root, 'cert.pem')) }, (req, res) => {
     const endpoint = new URL(req.url, 'https://fixture');
     const name = endpoint.pathname.match(/^\/(.+)\.git\//)?.[1];
-    const expected = targets[name] && `Basic ${Buffer.from(`cnb:${targets[name]}`).toString('base64')}`;
+    const username = req.headers.host === 'github.com' ? 'x-access-token' : 'cnb';
+    const expected = targets[name] && `Basic ${Buffer.from(`${username}:${targets[name]}`).toString('base64')}`;
     if (!expected || req.headers.authorization !== expected) { res.writeHead(401, { 'www-authenticate': 'Basic realm="fixture"' }); res.end(); return; }
     requests.push({ repository: name, path: endpoint.pathname, method: req.method });
     const drop = req.method === 'POST' && endpoint.pathname.endsWith('/git-receive-pack') && droppedResponses.delete(name);
@@ -52,7 +53,7 @@ export async function gitService(t, fixture, targets) {
   await new Promise(done => server.listen(0, '127.0.0.1', done));
   const proxy = http.createServer();
   proxy.on('connect', (req, socket, head) => {
-    if (req.url !== 'cnb.cool:443') { socket.destroy(); return; }
+    if (!hosts.some(host => req.url === `${host}:443`)) { socket.destroy(); return; }
     const upstream = net.connect(server.address().port, '127.0.0.1', () => { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head.length) upstream.write(head); socket.pipe(upstream); upstream.pipe(socket); });
     for (const stream of [socket, upstream]) { sockets.add(stream); stream.on('error', () => stream.destroy()); stream.on('close', () => sockets.delete(stream)); }
   });
