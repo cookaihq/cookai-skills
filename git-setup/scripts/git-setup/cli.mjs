@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { createHash } from 'node:crypto';
 
 const skill = fileURLToPath(new URL('../../', import.meta.url));
 const pkg = JSON.parse(await readFile(resolve(skill, 'package.json'), 'utf8'));
@@ -13,9 +11,9 @@ if (Number(process.versions.node.split('.')[0]) < minimum) {
   process.exit(1);
 }
 
-const boolean = new Set(['apply', 'use-global-config', 'help', 'github-auth', 'accept-effects']);
-const repeated = new Set(['ref', 'rule-file', 'label', 'assignee']);
-const valued = new Set(['project', 'workspace', 'input', 'override', 'project-rule', 'branch', 'author-name', 'author-email', 'name', 'url', 'remote', 'title', 'body-file', 'filename', 'operation-id', 'expected-fingerprint', 'issue-url', 'owner', 'visibility', 'action', 'plan-file']);
+const boolean = new Set(['apply', 'use-global-config', 'help', 'github-auth', 'accept-effects', 'credentials-filled', 'allow-ignore', 'replace-auth', 'api-only']);
+const repeated = new Set(['ref']);
+const valued = new Set(['project', 'repository', 'checkout', 'harness-directory', 'workspace', 'input', 'branch', 'author-name', 'author-email', 'name', 'url', 'remote', 'operation-id', 'expected-fingerprint', 'owner', 'visibility', 'action', 'plan-file', 'auth-method', 'gh-user', 'credential-workspace', 'credential-file']);
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 function parse(args) {
   const options = {};
@@ -34,51 +32,35 @@ function parse(args) {
 }
 async function json(path) {
   if (!path) return undefined;
-  try { return JSON.parse(await readFile(resolve(path), 'utf8')); }
-  catch { fail('invalid_input_file', `无法读取有效 JSON 文件：${resolve(path)}（不输出文件内容）。`); }
+  try {
+    if (path !== '-') return JSON.parse(await readFile(resolve(path), 'utf8'));
+    if (process.stdin.isTTY) throw new Error('stdin required');
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of process.stdin) {
+      size += chunk.length;
+      if (size > 8 * 1024 * 1024) throw new Error('input too large');
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+  catch { fail('invalid_input_file', `无法读取有效 JSON：${path === '-' ? '标准输入（上限 8 MiB）' : resolve(path)}（不输出输入内容）。`); }
 }
 function required(value, name) { if (!value) fail('missing_argument', `缺少 ${name}`); return value; }
 function apply(options) { if (!options.apply) fail('apply_required', '写入需要 --apply；Agent 只在本次请求已有具体操作授权时传入，无需重复询问已有授权。'); }
 function scrub(text) {
   return text.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1***@').replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g, '[REDACTED]');
 }
-const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-
-async function gitAuth(project, options, loadEnvironment) {
-  if (!options['github-auth']) return {};
-  const { values } = await loadEnvironment(project, { useGlobalConfig: options['use-global-config'] });
-  const repo = required(values.GIT_SETUP_GITHUB_REPOSITORY, 'GIT_SETUP_GITHUB_REPOSITORY');
-  if (values.GIT_SETUP_GITHUB_HOST !== 'github.com' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) fail('invalid_auth_binding', 'GitHub 凭证必须绑定 github.com 和完整 owner/repo。');
-  const method = required(values.GIT_SETUP_GITHUB_AUTH, 'GIT_SETUP_GITHUB_AUTH');
-  if (!['token', 'gh'].includes(method)) fail('invalid_auth_method', 'GitHub 鉴权仅支持 token 或 gh。');
-  return { authForUrl: async url => {
-    let parsed;
-    try { parsed = new URL(url); } catch { return { env: {}, metadata: { method: 'existing' } }; }
-    const target = parsed.pathname.replace(/^\//, '').replace(/\.git$/, '');
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com' || target.toLowerCase() !== repo.toLowerCase()) return { env: {}, metadata: { method: 'existing' } };
-    if (parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash) fail('invalid_remote_url', 'GitHub HTTPS 目标不能内嵌凭证或附加查询参数。');
-    let token = values.GIT_SETUP_GITHUB_TOKEN;
-    if (method === 'gh') {
-      try { token = execFileSync('gh', ['auth', 'token', '--hostname', 'github.com'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GH_HOST: 'github.com', GH_TOKEN: '', GITHUB_TOKEN: '' } }).trim(); }
-      catch { fail('gh_auth_unavailable', '无法读取 gh 的 GitHub 登录凭证；请核对 gh 安装和该主机的登录状态。'); }
-    }
-    required(token, 'GIT_SETUP_GITHUB_TOKEN');
-    const count = Number(process.env.GIT_CONFIG_COUNT || 0);
-    if (!Number.isInteger(count) || count < 0 || count > 100) fail('invalid_git_environment', 'GIT_CONFIG_COUNT 无效。');
-    return { env: {
-      GIT_SETUP_ASKPASS_TOKEN: token,
-      GIT_ASKPASS: `${quote(process.execPath.replaceAll('\\', '/'))} ${quote(resolve(skill, 'scripts/git-setup/askpass.mjs').replaceAll('\\', '/'))}`,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_CONFIG_COUNT: String(count + 2),
-      [`GIT_CONFIG_KEY_${count}`]: 'credential.helper', [`GIT_CONFIG_VALUE_${count}`]: '',
-      [`GIT_CONFIG_KEY_${count + 1}`]: 'credential.useHttpPath', [`GIT_CONFIG_VALUE_${count + 1}`]: 'true',
-    }, metadata: { method, host: 'github.com', repository: repo } };
-  } };
-}
-
 const help = `git-setup ${pkg.version} — node <skill>/scripts/git-setup/cli.mjs <command> [options]
 所有命令：--project <path>（默认当前目录），--use-global-config（显式启用个人全局业务配置）
+--input - 从标准输入接收本次 JSON，无需创建临时参数文件。
 inspect                                      读取 Git 状态
+check                                        只读事实检查（无参数默认）；Agent 另读实际宿主规则
+      [--harness-directory <项目内实际目录>]  没有本机位置记录时显式提供，不猜测目录
+harness-plan --input <含 choice/directory/ruleFiles/比较的 JSON> [--plan-file <ignored-json>]
+harness-apply [--input <同一选择.json|->] --plan-file <ignored-json> --expected-fingerprint <指纹> --apply
+      已保存计划可省略 --input；choice=keep 无需 --plan-file。
+harness-recover --plan-file <原记录> [--apply --expected-fingerprint <恢复检查指纹>]
 setup --url <url>                            检查当前项目并生成接入计划，不提交或推送
       [--action add|replace --name <remote>] [--branch <name>]
       [--author-name <name> --author-email <email>] [--accept-effects]
@@ -88,105 +70,128 @@ audit --ref <full-ref> [--ref ...]             检查所有可达历史对象中
 init --branch <name> --author-name <name> --author-email <email> --apply
 remote-add --name <remote> --url <url> --apply
 publish --remote <name> --ref <full-ref> [--ref ...] --apply [--github-auth]
-sync [--apply] [--github-auth]                不带 --apply 仅预检
-config-check | config-write --input <json> --apply
-auth-info                                    仅显示凭证字段来源和填写状态
-issue-resolve [--workspace <outer>] [--override <json>] [--project-rule <json>]
-issue-create --title <text> --body-file <path> --operation-id <id> --apply
-             [--expected-fingerprint <issue-resolve fingerprint>]
-             [--filename <name>] [--label <label>] [--assignee <login>]
-issue-recover --operation-id <id>             恢复同一目标上的创建结果
-issue-update --issue-url <GitHub Issue URL> [--title <text>] [--body-file <path>] --apply
-issue-comment --issue-url <GitHub Issue URL> --body-file <path> --apply
+sync [--apply --expected-fingerprint <指纹>]  只读已登记 Harness 同步策略，无旧 JSON 回退
+read --remote <name>                       通过已登记 Harness 读取选中目标
+check/read/publish/sync 可用 --repository <登记路径或 .> [--checkout <该仓检出>]。
+--project 是 Harness 管理仓；各仓使用独立策略，错误选择不回退外仓。
+可用 --harness-directory <项目内实际目录>；项目日常入口不执行 Skill 完整比较
+auth-info [--url <url>]                      显示来源及选择/填写缺项，不输出凭证
+auth-cleanup [--apply --expected-fingerprint <指纹>]  显式检查或清理本仓未引用的旧 helper 运行包
+auth-prepare --url <url> --auth-method gh|github-token|cnb-url [--gh-user <login>]
+             [--credential-workspace <outer>] [--credential-file <existing-file>]
+             [--allow-ignore] [--replace-auth] [--apply]
+auth-verify --url <url> [--credentials-filled] [--api-only] [--apply --expected-fingerprint <fingerprint>]
+setup 另接受 --auth-method、--gh-user、--credential-workspace、--credential-file、--credentials-filled。
+--workspace 与 --credential-workspace 指定同一管理关系；同时提供时必须一致。
+管理关系核对 Git 子模块登记及元数据，或实际 Harness 目录内的 repos.conf；不读取旧 JSON 登记。
+--harness-directory 指管理仓内实际位置；已保存的鉴权选择仍须通过当前登记核验。
+issue-resolve --input <本次完整输入.json>      验证规则实体、关系、目标、模板及所选鉴权
+issue-create|issue-update|issue-comment --input <同一输入.json>
+             [--apply --expected-fingerprint <本次计划指纹>]
+issue-recover --input <原输入.json>           回读同一操作结果，不重复创建或回复
 repo-create --owner <login> --name <repo> --visibility private|public --operation-id <id> --apply
-install-rules --rule-file <relative-path> [--rule-file ...] [--workspace <outer>] [--apply]
-Issue 创建/恢复也接受 issue-resolve 的选择参数。Git 和 Issue 不自动 commit。
+Issue 输入契约见 references/configuration.md；Agent 解释现有规则，CLI 不解析 Markdown 语义。
+旧 config-check/config-write/install-rules 已退出，不读取或重建旧项目 JSON/routing。
+Git 和 Issue 不自动 commit。
 `;
 
 async function main() {
-  const [command = 'help', ...args] = process.argv.slice(2);
+  const [command = 'check', ...args] = process.argv.slice(2);
   const options = parse(args);
   if (command === 'help' || options.help) { process.stdout.write(help); return; }
+  if (['config-check', 'config-write', 'install-rules'].includes(command)) fail('legacy_command_removed', '旧项目配置和 Issue routing 已退出；Issue 使用现有规则及本次 --input，真实 Harness 入口通过 harness-plan/apply 登记。');
   const project = resolve(options.project || process.cwd());
+  if ((options.repository !== undefined || options.checkout !== undefined) && !['check', 'read', 'publish', 'sync'].includes(command)) fail('invalid_argument', 'repository/checkout 只用于项目 Harness 的 check/read/publish/sync。');
+  if (options.checkout !== undefined && options.repository === undefined) fail('missing_argument', 'checkout 必须与明确的 repository 一起提供。');
+  if (options.repository !== undefined && [options.workspace, options['credential-workspace']].some(value => value !== undefined && resolve(value) !== project)) fail('WORKSPACE_CONFLICT', '选仓操作的 project 是 Harness 管理仓；其他管理仓参数不能重定向该入口。');
+  const operationOptions = { directory: options['harness-directory'], repository: options.repository, checkout: options.checkout, remote: options.remote, refs: options.ref || [], apply: Boolean(options.apply), 'expected-fingerprint': options['expected-fingerprint'], 'operation-id': options['operation-id'] };
   const config = await import('./config.mjs');
-  const resolutionOptions = {
-    workspace: options.workspace && resolve(options.workspace),
-    useGlobalConfig: Boolean(options['use-global-config']),
-    issueOverride: await json(options.override), projectRuleIssue: await json(options['project-rule']),
-  };
+  const authModule = await import('./auth.mjs');
+  const authenticationOptions = { workspace: options.workspace && resolve(options.workspace), harnessDirectory: options['harness-directory'], authMethod: options['auth-method'], ghUser: options['gh-user'], credentialWorkspace: options['credential-workspace'], credentialFile: options['credential-file'], credentialsFilled: Boolean(options['credentials-filled']), githubAuth: Boolean(options['github-auth']), useGlobalConfig: Boolean(options['use-global-config']) };
   let result;
-  if (command === 'setup') {
+  if (command === 'read' || (command === 'check' && options.repository !== undefined)) {
+    const { projectOperation } = await import('./project-entry.mjs');
+    result = await projectOperation(project, command, operationOptions);
+  }
+  else if (command === 'check') {
+    const { entryCheck } = await import('./entry-check.mjs');
+    result = await entryCheck(project, { useGlobalConfig: Boolean(options['use-global-config']), directory: options['harness-directory'], ...authenticationOptions });
+  }
+  else if (command === 'auth-cleanup') {
+    const { cleanupRuntimes } = await import('./runtime-cleanup.mjs');
+    result = await cleanupRuntimes(project, { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
+  }
+  else if (command === 'harness-recover') {
+    const { recoverHarness } = await import('./harness-transaction.mjs');
+    result = await recoverHarness(project, required(options['plan-file'], '--plan-file'), { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
+  }
+  else if (['harness-plan', 'harness-apply'].includes(command)) {
+    const harness = await import('./harness.mjs');
+    let input;
+    if (options.input) input = await json(options.input);
+    else if (command === 'harness-apply' && options['plan-file']) {
+      const saved = await json(options['plan-file']);
+      if (saved.transaction || saved.result?.status !== 'planned' || saved.request?.project !== project || !saved.request.input) fail('harness_record_invalid', '需要本项目尚未执行的原计划；已开始的操作使用 harness-recover。');
+      input = saved.request.input;
+    } else required(options.input, '--input');
+    if (command === 'harness-apply') {
+      apply(options);
+      result = await harness.applyHarness(project, input, { expectedFingerprint: options['expected-fingerprint'], planFile: options['plan-file'] });
+    } else {
+      const plan = await harness.planHarness(project, input);
+      result = { ...plan, files: undefined, edits: plan.edits.map(({ content, ...edit }) => edit) };
+      if (options['plan-file']) {
+        const { saveHarnessPreview } = await import('./harness-transaction.mjs');
+        if (options.input !== '-' && resolve(options.input) === resolve(options['plan-file'])) fail('harness_record_path', '选择输入与恢复记录必须使用不同文件。');
+        await saveHarnessPreview(options['plan-file'], result);
+      }
+    }
+  } else if (command === 'setup') {
     const { setup } = await import('./setup.mjs');
-    result = await setup(project, { url: required(options.url, '--url'), action: options.action, name: options.name, apply: options.apply, branch: options.branch, authorName: options['author-name'], authorEmail: options['author-email'], expectedFingerprint: options['expected-fingerprint'], acceptEffects: options['accept-effects'], planFile: options['plan-file'], ...resolutionOptions, ...await gitAuth(project, options, config.loadEnvironment) });
-  } else if (command === 'config-check') result = await config.loadProject(project);
-  else if (command === 'config-write') { apply(options); result = await config.writeProject(project, await json(required(options.input, '--input'))); }
-  else if (command === 'auth-info') {
-    const { values, sources } = await config.loadEnvironment((await config.inspectProject(project)).root, resolutionOptions);
-    result = { sources, present: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Boolean(value)])) };
-  } else if (command === 'issue-resolve') result = await config.resolveIssue(project, resolutionOptions);
-  else if (command === 'install-rules') {
-    const { installRules } = await import('./integration.mjs');
-    result = await installRules(project, { files: options['rule-file'], workspace: options.workspace, apply: options.apply });
-  } else if (command === 'audit') {
+    result = await setup(project, { url: required(options.url, '--url'), action: options.action, name: options.name, apply: options.apply, branch: options.branch, authorName: options['author-name'], authorEmail: options['author-email'], expectedFingerprint: options['expected-fingerprint'], acceptEffects: options['accept-effects'], planFile: options['plan-file'], ...authenticationOptions });
+  } else if (['auth-info', 'auth-prepare', 'auth-verify'].includes(command)) {
+    const { authCommand } = await import('./auth-command.mjs');
+    result = await authCommand(project, command, options);
+  } else if (['issue-resolve', 'issue-create', 'issue-update', 'issue-comment', 'issue-recover'].includes(command)) {
+    for (const key of Object.keys(options)) if (!['project', 'input', 'apply', 'expected-fingerprint', 'use-global-config'].includes(key)) fail('invalid_argument', 'Issue 操作仅消费 --input 中的完整本次输入，旧目标覆盖参数已退出。');
+    const { issueOperation } = await import('./issue-operation.mjs');
+    result = await issueOperation(project, command, await json(required(options.input, '--input')), { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'], useGlobalConfig: Boolean(options['use-global-config']) });
+  }
+  else if (command === 'audit') {
     const { auditHistory } = await import('./audit.mjs');
     result = auditHistory(project, required(options.ref, '--ref'));
   } else if (['inspect', 'init', 'remote-add', 'publish', 'sync'].includes(command)) {
     const git = await import('./git.mjs');
-    const auth = ['publish', 'sync'].includes(command) ? await gitAuth((await config.inspectProject(project)).root, options, config.loadEnvironment) : {};
+    const auth = ['publish', 'sync'].includes(command) ? authModule.gitAuthentication((await config.inspectProject(project)).root, authenticationOptions) : {};
     if (command === 'inspect') result = await git.inspect(project);
     if (command === 'init') { apply(options); result = await git.init(project, { branch: required(options.branch, '--branch'), authorName: required(options['author-name'], '--author-name'), authorEmail: required(options['author-email'], '--author-email') }); }
     if (command === 'remote-add') { apply(options); result = await git.addRemote(project, { name: required(options.name, '--name'), url: required(options.url, '--url') }); }
     if (command === 'publish') {
-      apply(options);
       const refs = required(options.ref, '--ref');
-      const { auditHistory } = await import('./audit.mjs');
-      const audit = auditHistory(project, refs);
-      if (!audit.complete) result = { status: 'audit_blocked', complete: false, audit };
-      else result = { ...await git.publish(project, { remote: required(options.remote, '--remote'), refs, expectedRefs: audit.snapshot, ...auth }), audit };
-    }
-    if (command === 'sync') result = await git.sync(project, (await config.loadProject(project)).config, { dryRun: !options.apply, ...auth });
-  } else if (['issue-create', 'issue-recover', 'issue-update', 'issue-comment', 'repo-create'].includes(command)) {
-    const io = await import('./issues.mjs');
-    const github = await import('./github.mjs');
-    const clientFor = async (target, configRoot = project) => {
-      const { values } = await config.loadEnvironment((await config.inspectProject(configRoot)).root, resolutionOptions);
-      return github.createGitHubClient({ auth: github.authFromEnvironment(values, target), host: target.host });
-    };
-    const body = options['body-file'] ? await readFile(resolve(options['body-file']), 'utf8') : undefined;
-    const operationId = ['issue-create', 'issue-recover', 'repo-create'].includes(command) ? required(options['operation-id'], '--operation-id（本次操作的稳定标识，恢复时复用）') : undefined;
-    const content = { title: options.title, body, filename: options.filename, labels: options.label, assignees: options.assignee };
-    if (command === 'repo-create') {
-      apply(options);
-      if (!['private', 'public'].includes(options.visibility)) fail('visibility_required', '明确指定 --visibility private 或 public。');
-      const owner = required(options.owner, '--owner'); const name = required(options.name, '--name');
-      const client = await clientFor({ host: 'github.com', repository: `${owner}/${name}` });
-      result = await io.createRemoteRepository({ projectRoot: project, owner, name, private: options.visibility === 'private', operationId, client, authorized: true });
-    } else if (['issue-update', 'issue-comment'].includes(command)) {
-      apply(options);
-      const url = new URL(required(options['issue-url'], '--issue-url'));
-      const match = url.pathname.match(/^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues\/([1-9][0-9]*)$/);
-      if (url.protocol !== 'https:' || url.host !== 'github.com' || url.username || url.password || !match || url.search || url.hash) fail('unsupported_issue_url', '请提供完整的 https://github.com/owner/repo/issues/number 地址。');
-      const target = { host: 'github.com', repository: `${match[1]}/${match[2]}` };
-      const resolution = { backend: 'github', initiatingProject: project, configOwner: project, targetProject: null, github: target, local: null, source: { kind: 'explicit-existing-issue', path: url.href }, fingerprint: createHash('sha256').update(url.href).digest('hex') };
-      const input = { resolution, number: Number(match[3]), content, body, client: await clientFor(target), authorized: true };
-      if (command === 'issue-comment') required(body, '--body-file');
-      else if (content.title === undefined && content.body === undefined) fail('empty_update', '更新必须提供标题或正文。');
-      result = await (command === 'issue-comment' ? io.commentRemoteIssue(input) : io.updateRemoteIssue(input));
-    } else {
-      const resolution = await config.resolveIssue(project, resolutionOptions);
-      if (command === 'issue-create' && options['expected-fingerprint'] !== undefined
-          && options['expected-fingerprint'] !== resolution.fingerprint) {
-        fail('configuration_changed', 'Issue 配置与此前展示的目标不一致；请重新解析并核对目标，未创建事项。');
-      }
-      const client = resolution.backend === 'github' ? await clientFor(resolution.github, resolution.targetProject || resolution.configOwner) : undefined;
-      if (command === 'issue-recover') result = await io.recoverIssue({ resolution, operationId: required(options['operation-id'], '--operation-id'), client });
-      else {
-        apply(options); required(content.title, '--title'); required(options['body-file'], '--body-file');
-        const current = await config.resolveIssue(project, resolutionOptions);
-        if (current.fingerprint !== resolution.fingerprint) fail('configuration_changed', 'Issue 配置已变化，请重新解析目标。');
-        result = await (resolution.backend === 'local' ? io.createLocalIssue : io.createRemoteIssue)({ resolution: current, content, operationId, client, authorized: true });
+      const { readHarnessConfig } = await import('./harness-config.mjs');
+      if (options.repository !== undefined || (await readHarnessConfig(project, options['harness-directory'])).exists) {
+        const { projectOperation } = await import('./project-entry.mjs');
+        result = await projectOperation(project, 'publish', { ...operationOptions, remote: required(options.remote, '--remote'), refs });
+      } else {
+        apply(options);
+        const { auditHistory } = await import('./audit.mjs');
+        const audit = auditHistory(project, refs);
+        if (!audit.complete) result = { status: 'audit_blocked', complete: false, audit };
+        else result = { ...await git.publish(project, { remote: required(options.remote, '--remote'), refs, expectedRefs: audit.snapshot, ...auth }), audit };
       }
     }
+    if (command === 'sync') {
+      const { projectOperation } = await import('./project-entry.mjs');
+      result = { ...await projectOperation(project, 'sync', operationOptions), configurationSource: 'harness' };
+    }
+    if (auth.authReports && !result.authentication) result.authentication = { sources: auth.authReports, pushPreflight: 'not_performed', actualPush: options.apply ? 'see_per_ref_results' : 'not_performed' };
+  } else if (command === 'repo-create') {
+    apply(options);
+    if (!['private', 'public'].includes(options.visibility)) fail('visibility_required', '明确指定 --visibility private 或 public。');
+    const { createRemoteRepository } = await import('./issues.mjs');
+    const owner = required(options.owner, '--owner'), name = required(options.name, '--name');
+    const client = await authModule.boundGitHubClient((await config.inspectProject(project)).root, { host: 'github.com', repository: `${owner}/${name}` }, authenticationOptions);
+    result = await createRemoteRepository({ projectRoot: project, owner, name, private: options.visibility === 'private', operationId: required(options['operation-id'], '--operation-id'), client, authorized: true });
   } else fail('unknown_command', `未知命令：${command}`);
   process.stdout.write(`${scrub(JSON.stringify(result, null, 2))}\n`);
   const planned = result?.dryRun === true && result.status === 'planned' && result.sourceStable === true

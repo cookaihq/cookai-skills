@@ -5,13 +5,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { registerRepositories } from './fixtures/repositories.mjs';
+import { issueInput } from './fixtures/issue-input.mjs';
 
 const exec = promisify(execFile);
 const skill = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const worktree = path.resolve(skill, '../..');
 const cliFile = path.join(skill, 'scripts/git-setup/cli.mjs');
 
-test('documented CLI adds a mirror, preserves local Issue conventions, recovers and installs future-session rules', async t => {
+test('documented CLI adds a mirror, preserves local Issue conventions, recovers using existing tracker documents', async t => {
   const base = path.join(process.env.GIT_SETUP_TEST_ROOT ?? path.join(worktree, 'tmp/git-setup'), 'forward-test');
   await fs.mkdir(base, { recursive: true });
   const root = await fs.mkdtemp(path.join(base, 'run-'));
@@ -61,8 +63,9 @@ test('documented CLI adds a mirror, preserves local Issue conventions, recovers 
   await git(outer, 'commit', '--quiet', '-m', 'existing local Issue convention');
   await initExisting(app);
   await fs.writeFile(path.join(app, 'README.md'), '# Existing application\n');
+  await fs.writeFile(path.join(app, '.gitignore'), 'data/git-setup/\n');
   await fs.writeFile(path.join(app, 'AGENTS.md'), '# Existing child rules\n\nRetain this project-specific instruction.\n');
-  await git(app, 'add', 'README.md', 'AGENTS.md');
+  await git(app, 'add', 'README.md', 'AGENTS.md', '.gitignore');
   await git(app, 'commit', '--quiet', '-m', 'existing application');
   await git(root, 'init', '--bare', '--quiet', origin);
   await git(root, 'init', '--bare', '--quiet', mirror);
@@ -82,15 +85,16 @@ test('documented CLI adds a mirror, preserves local Issue conventions, recovers 
 
   await cli(app, 'inspect');
   await cli(app, 'remote-add', '--name', 'backup', '--url', mirror, '--apply');
-  const appConfig = path.join(root, 'application-config.json');
-  await fs.writeFile(appConfig, JSON.stringify({ schemaVersion: 1, remotes: { origin, backup: mirror }, sync: { source: 'origin', targets: ['backup'], refs: ['refs/heads/main'] } }));
-  await cli(app, 'config-write', '--input', appConfig, '--apply');
-  await cli(app, 'config-check');
-  await cli(app, 'publish', '--remote', 'origin', '--ref', 'refs/heads/main', '--apply');
-  await cli(app, 'sync');
+  const harnessInput = path.join(root, 'application-harness.json');
+  await fs.writeFile(harnessInput, JSON.stringify({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'], sync: { source: 'origin', targets: ['backup'], refs: ['refs/heads/main'] } }));
+  const adoption = JSON.parse(await cli(app, 'harness-plan', '--input', harnessInput));
+  await cli(app, 'harness-apply', '--input', harnessInput, '--plan-file', path.join(app, 'data/git-setup/adoption.json'), '--expected-fingerprint', adoption.fingerprint, '--apply');
+  const publication = JSON.parse(await cli(app, 'publish', '--remote', 'origin', '--ref', 'refs/heads/main'));
+  await cli(app, 'publish', '--remote', 'origin', '--ref', 'refs/heads/main', '--expected-fingerprint', publication.fingerprint, '--apply');
+  const synchronization = JSON.parse(await cli(app, 'sync'));
   const beforeMirror = await git(mirror, 'show-ref', '--heads').catch(() => '');
   assert.equal(beforeMirror, '', 'Preview must not write remote refs');
-  await cli(app, 'sync', '--apply');
+  await cli(app, 'sync', '--expected-fingerprint', synchronization.fingerprint, '--apply');
   assert.equal(await git(origin, 'rev-parse', 'refs/heads/main'), head);
   assert.equal(await git(mirror, 'rev-parse', 'refs/heads/main'), head);
   assert.equal(await git(mirror, 'show-ref', '--verify', 'refs/heads/local-only').catch(() => ''), '');
@@ -98,14 +102,16 @@ test('documented CLI adds a mirror, preserves local Issue conventions, recovers 
   assert.equal(await git(app, 'ls-files', '--stage'), index);
   assert.equal(await fs.readFile(path.join(app, 'README.md'), 'utf8'), readme);
 
-  const outerConfig = path.join(root, 'management-config.json');
-  await fs.writeFile(outerConfig, JSON.stringify({ schemaVersion: 1, issues: { backend: 'local', target: 'outer', local: { directory: 'issues', filename: '{number}-{slug}.md', numbering: { start: 1, width: 2 } } }, workspace: { repositories: [{ path: 'application', issues: 'inherit' }], issuePolicy: { backend: 'local' } } }));
-  await cli(outer, 'config-write', '--input', outerConfig, '--apply');
-  const resolved = await cli(app, 'issue-resolve', '--workspace', outer);
-  assert.match(resolved, /"backend":\s*"local"/);
-  const body = path.join(root, 'issue-body.md');
-  await fs.writeFile(body, 'Status: open\n\nKeep Issues in the existing management repository while mirroring application code.\n');
-  const created = await cli(app, 'issue-create', '--workspace', outer, '--title', 'Preserve local Issue conventions', '--body-file', body, '--operation-id', 'forward-local-issue-001', '--apply');
+  await registerRepositories(outer, ['application']);
+  const input = await issueInput(outer);
+  input.initiatingProject = app;
+  input.relationship = { workspace: outer, kind: 'independent', path: 'application' };
+  input.target.scope = 'outer'; input.target.local.directory = 'issues';
+  const issueFile = path.join(root, 'issue-operation.json');
+  await fs.writeFile(issueFile, JSON.stringify(input));
+  const resolved = JSON.parse(await cli(app, 'issue-resolve', '--input', issueFile));
+  assert.equal(resolved.backend, 'local');
+  const created = await cli(app, 'issue-create', '--input', issueFile, '--expected-fingerprint', resolved.fingerprint, '--apply');
   assert.match(created, /保存到本地/);
   const issueFiles = (await fs.readdir(path.join(outer, 'issues'))).filter(name => name.endsWith('.md'));
   assert.equal(issueFiles.length, 2);
@@ -113,31 +119,17 @@ test('documented CLI adds a mirror, preserves local Issue conventions, recovers 
   assert.match(newIssueName, /^09-.*\.md$/);
   const newIssue = path.join(outer, 'issues', newIssueName);
   assert.match(await fs.readFile(newIssue, 'utf8'), /Status: open/);
-  const recovered = await cli(app, 'issue-recover', '--workspace', outer, '--operation-id', 'forward-local-issue-001');
+  const recovered = await cli(app, 'issue-recover', '--input', issueFile);
   assert.match(recovered, /保存到本地/);
   assert.deepEqual((await fs.readdir(path.join(outer, 'issues'))).sort(), issueFiles.sort());
   assert.equal(await fs.stat(path.join(app, 'issues')).then(() => true, () => false), false);
 
-  await fs.symlink('AGENTS.md', path.join(app, 'CLAUDE.md'));
-  await cli(app, 'install-rules', '--workspace', outer, '--rule-file', 'AGENTS.md', '--rule-file', 'CLAUDE.md');
-  assert.equal(await fs.readFile(path.join(app, 'AGENTS.md'), 'utf8'), '# Existing child rules\n\nRetain this project-specific instruction.\n');
-  await cli(app, 'install-rules', '--workspace', outer, '--rule-file', 'AGENTS.md', '--rule-file', 'CLAUDE.md', '--apply');
   const rules = await fs.readFile(path.join(app, 'AGENTS.md'), 'utf8');
   assert.match(rules, /Retain this project-specific instruction/);
-  assert.match(rules, /\.git-setup\/issue-routing\.md/);
-  const routing = await fs.readFile(path.join(app, '.git-setup/issue-routing.md'), 'utf8');
-  assert.match(routing, /issue-resolve/);
-  assert.match(routing, /--workspace/);
-  assert.equal(await fs.readFile(path.join(app, 'CLAUDE.md'), 'utf8'), rules);
-  await cli(app, 'install-rules', '--workspace', outer, '--rule-file', 'AGENTS.md', '--apply');
-  assert.equal(await fs.readFile(path.join(app, 'AGENTS.md'), 'utf8'), rules);
-  // Each call is a separate Node process: persisted rules/config survive process boundaries.
-  const workspaceReference = /路径基准：`([^`]+)`/.exec(routing)?.[1];
-  assert.ok(workspaceReference, 'Installed routing instructions identify the workspace relative to the project');
-  const fresh = await cli(app, 'issue-resolve', '--workspace', path.resolve(app, workspaceReference));
-  assert.equal(JSON.parse(fresh).backend, 'local');
-  assert.equal(JSON.parse(fresh).configOwner, outer);
+  assert.equal(await fs.stat(path.join(app, '.git-setup')).then(() => true, () => false), false);
+  const fresh = JSON.parse(await cli(app, 'issue-resolve', '--input', issueFile));
+  assert.equal(fresh.backend, 'local'); assert.equal(fresh.configOwner, outer);
   assert.equal(await git(app, 'rev-parse', 'HEAD'), head);
-  log.push({ observed: 'selected main exists at both remotes; private branch absent; index/upstream/uncommitted README retained; exactly one new numbered outer local Issue; recovery returns same Issue; rules retained and idempotent across separate CLI processes', issueFile: newIssue });
+  log.push({ observed: 'selected main exists at both remotes; private branch absent; index/upstream/uncommitted README retained; exactly one new numbered outer local Issue; recovery returns same Issue; existing tracker documents reused across separate CLI processes', issueFile: newIssue });
   assert.deepEqual(anomalies, []);
 });

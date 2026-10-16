@@ -213,6 +213,7 @@ export function createGitHubClient({ auth, host = 'github.com', transport, sleep
   };
   return {
     host,
+    getAuthenticatedUser: repository => request('GET', '/user', repository),
     getRepository: repository => request('GET', repoPath(repository), repository),
     getIssue: (repository, number, { deadline } = {}) => request('GET', `${repoPath(repository)}/issues/${numberPath(number)}`, repository, undefined, undefined, deadline),
     listIssues: (repository, { page = 1, since, deadline } = {}) => {
@@ -224,7 +225,13 @@ export function createGitHubClient({ auth, host = 'github.com', transport, sleep
     createIssue: (repository, content, { authorized } = {}) => request('POST', `${repoPath(repository)}/issues`, repository, content, authorized),
     updateIssue: (repository, number, content, { authorized } = {}) => request('PATCH', `${repoPath(repository)}/issues/${numberPath(number)}`, repository, content, authorized),
     createComment: (repository, number, body, { authorized } = {}) => request('POST', `${repoPath(repository)}/issues/${numberPath(number)}/comments`, repository, { body }, authorized),
-    getComment: (repository, id) => request('GET', `${repoPath(repository)}/issues/comments/${numberPath(id)}`, repository),
+    getComment: (repository, id, { deadline } = {}) => request('GET', `${repoPath(repository)}/issues/comments/${numberPath(id)}`, repository, undefined, undefined, deadline),
+    listComments: (repository, number, { page = 1, since, deadline } = {}) => {
+      if (!Number.isSafeInteger(page) || page < 1) throw new GitHubError('invalid-page', '页码必须为正整数。');
+      const query = new URLSearchParams({ per_page: '100', page: String(page) });
+      if (since) query.set('since', since);
+      return request('GET', `${repoPath(repository)}/issues/${numberPath(number)}/comments?${query}`, repository, undefined, undefined, deadline);
+    },
     async createRepository({ owner, name, private: isPrivate, authorized }) {
       requireAuthorization(authorized);
       const repository = `${owner}/${name}`;
