@@ -76,7 +76,7 @@ Agent 使用 `setup --url <URL>` 取得 `needs_input` 或 `planned`。已有任�
 
 独立文件鉴权在无 Git 项目中先准备 `.git` 和受保护凭证，因此由本机 `gitsetup.initialization` 记录区分这种未完成初始化。`setup` 只排除本次 Git 元数据及确切凭证文件检查其他内容：有其他文件且远端有历史时仍停下；只有准备文件时获取远端分支/标签并安全检出，返回同一个 `needs_project_rules`。检出拒绝凭证路径冲突，使用 `--no-overwrite-ignore`；远端为空则明确作者和分支后完成初始化。该分支不调用要求空目录的 `git clone ... .`，不制造本地提交。记录、HEAD、索引、目标及来源参与恢复校验，设置成功后清除初始化记录。
 
-`--plan-file` 可将不含凭证的 request/result 写入已有调用工作区中已忽略且未跟踪的 `data/git-setup/<任务>.json` 或 `tmp/git-setup/<任务>.json`。等待选择前保存 `needs_input`；具体方案保存 `planned`；首次变更前保存 `applying`；最后保存 `configured`、`needs_project_rules` 或 `incomplete`。文件写入使用锁和原子替换，读取回验；不自动改 .gitignore。真正空的克隆目标不能用于保存计划。Agent 的实际用户授权另行记录，`planned` 本身不证明批准。
+`--plan-file` 可将不含凭证的 request/result 写入已有调用工作区中已忽略且未跟踪的 `data/git-setup/<任务>.json` 或 `tmp/git-setup/<任务>.json`。等待选择前保存 `needs_input`；具体方案保存 `planned`；首次变更前保存 `applying`；最后保存 `configured`、`needs_project_rules` 或 `incomplete`。成功 configured 后，同一文件只保留目标、完成步骤、指纹和完成时间；等待和中断仍保留恢复所需完整状态。没有跨轮需要时不传 plan-file，也不预建目录。文件写入使用锁和原子替换，读取回验；不自动改 .gitignore。真正空的克隆目标不能用于保存计划。Agent 的实际用户授权另行记录，`planned` 本身不证明批准。
 
 状态记录用于查证，不自动重放。异常返回 failedStep、completedSteps 与本地回读；进程被终止时可能停在 applying，须重新读取真实状态。Git config.lock 残留时先查正在运行的操作，禁止自动删除锁。已 init/已配置远端时保留用户选择，生成新指纹补齐余下步骤；克隆中断须核对 HEAD、索引与检出文件，不能把存在 .git 视为完整成功，不能自动删除或盲重试。
 

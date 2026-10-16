@@ -1,6 +1,5 @@
 import { readFile, lstat, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { projectCheck } from './project-check.mjs';
 import { selectRepository } from './repository-relationship.mjs';
@@ -11,6 +10,7 @@ import { localEnvironment } from './auth-roots.mjs';
 import { inspectRemote, publish, sync, redact } from './git.mjs';
 import { auditHistory } from './audit.mjs';
 import { saveSetupRecord } from './setup-record.mjs';
+import { authCommand, parseAuthArguments } from './auth-command.mjs';
 
 function parse(args) {
   const options = { refs: [] };
@@ -161,9 +161,9 @@ export async function runProject(root, directory) {
       }
       if (selectionOptions.checkout && !selectionOptions.repository) fail('missing_argument', 'checkout 必须与明确的 repository 一起提供。');
       const selection = await selectRepository(root, { ...selectionOptions, harnessDirectory: directory });
-      const cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));
-      const child = spawn(process.execPath, [cli, command, '--project', selection.project.root, '--workspace', root, '--harness-directory', directory, ...forwarded], { stdio: 'inherit', windowsHide: true });
-      process.exitCode = await new Promise(done => { child.on('error', () => done(1)); child.on('close', code => done(code ?? 1)); });
+      const result = await authCommand(selection.project.root, command, { ...parseAuthArguments(forwarded), workspace: root, 'harness-directory': directory });
+      process.stdout.write(`${redact(JSON.stringify(result, null, 2))}\n`);
+      if (result.complete === false) process.exitCode = 2;
       return;
     }
     const result = await projectOperation(root, command, { ...parse(args), directory });

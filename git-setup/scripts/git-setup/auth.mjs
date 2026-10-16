@@ -229,8 +229,8 @@ async function persistBinding(project, binding, install = false) {
   const scope = await credentialOwner(project, { expectedOwner: binding.owner, expectedRelationship: binding.relationship });
   const updated = { ...binding, project: scope.repository.main, commonDir: scope.repository.commonDir, owner: scope.owner, relationship: relationshipSelection(scope.relationship) };
   if (!scope.repository.isGit) authFail('auth_requires_git', '持久鉴权绑定需要先建立目标 Git 仓库。');
-  const runtime = install ? await installHelperRuntime(scope.repository.commonDir) : null;
   await updateLocalConfig(project, {}, async file => {
+    const runtime = install ? await installHelperRuntime(scope.repository.commonDir) : null;
     await localGit(project, ['config', '--file', file, bindingKey(binding.target), JSON.stringify(updated)]);
     if (install) {
       const prefix = `credential.https://${binding.target.host}`;

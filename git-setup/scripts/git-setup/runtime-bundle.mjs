@@ -7,18 +7,26 @@ const source = fileURLToPath(new URL('../../', import.meta.url));
 export const digest = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
 export const runtimeFail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 
-/** Copy the complete shipped Node runtime; no source-machine paths or credentials. */
-export async function runtimeBundle() {
+/** Ship each entry's local dependencies, including files launched via new URL. */
+export async function runtimeBundle(profile = 'project') {
+  if (!['project', 'helper'].includes(profile)) runtimeFail('runtime_profile_invalid', '未知运行包用途。');
   const files = {};
   for (const name of ['package.json', 'LICENSE']) files[name] = await readFile(join(source, name), 'utf8');
   const directory = join(source, 'scripts/git-setup');
-  for (const name of (await readdir(directory)).sort()) {
-    if (!name.endsWith('.mjs') || name === 'test.mjs') continue;
+  const pending = [profile === 'project' ? 'project-entry.mjs' : 'credential-helper.mjs'];
+  const included = new Set();
+  while (pending.length) {
+    const name = pending.shift();
+    if (included.has(name)) continue;
+    if (!/^[a-z][a-z0-9-]*\.mjs$/.test(name)) runtimeFail('runtime_source_invalid', '运行依赖必须是同目录普通模块。');
+    included.add(name);
     const info = await lstat(join(directory, name));
     if (!info.isFile() || info.isSymbolicLink()) runtimeFail('runtime_source_invalid', '运行包源文件必须是普通文件。');
-    files[`scripts/git-setup/${name}`] = await readFile(join(directory, name), 'utf8');
+    const content = await readFile(join(directory, name), 'utf8');
+    files[`scripts/git-setup/${name}`] = content;
+    for (const match of content.matchAll(/\b(?:from\s+|import\s*\(\s*|new URL\(\s*)['"]\.\/([^'"]+\.mjs)['"]/g)) pending.push(match[1]);
   }
-  const hashes = Object.fromEntries(Object.entries(files).map(([name, value]) => [name, digest(value)]));
+  const hashes = Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => [name, digest(value)]));
   return { files, hashes, fingerprint: digest(hashes), version: JSON.parse(files['package.json']).version };
 }
 
@@ -63,7 +71,7 @@ export async function writePackage(directory, files) {
 
 /** Immutable, content-addressed runtime in this repository's actual common directory. */
 export async function installHelperRuntime(commonDir) {
-  const bundle = await runtimeBundle();
+  const bundle = await runtimeBundle('helper');
   const parent = join(commonDir, 'git-setup');
   const directory = join(parent, bundle.fingerprint);
   await safePath(commonDir, directory);

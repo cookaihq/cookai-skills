@@ -205,6 +205,11 @@ test('partial configuration writes preserve the selected operation and can be co
   await rm(join(f.work, '.git/config.lock'));
   const next = await f.run('setup', ...args);
   assert.equal((await f.run('setup', ...args, '--expected-fingerprint', next.fingerprint, '--apply')).status, 'configured');
+  const completed = JSON.parse(await readFile(planFile, 'utf8'));
+  assert.equal(completed.kind, 'setup-result');
+  assert.equal(completed.request.url, f.remote);
+  assert.equal(completed.result.local, undefined);
+  assert.equal(completed.result.facts, undefined);
   // An unrelated new invocation still asks for the remote decision.
   assert.equal((await f.run('setup', '--url', f.remote)).status, 'needs_input');
 });

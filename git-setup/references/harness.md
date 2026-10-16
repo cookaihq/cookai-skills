@@ -27,23 +27,25 @@ Agent 依据实际项目规则确定 `directory`（项目内安装目录）和 `
 }
 ```
 
-`directory` 与 `ruleFiles` 首次采用必须明确；以后省略时只复用本检出的本机选择，不猜测目录。已登记位置改变时停止，旧入口实际迁移需另行计划。不需要同步用 `sync: null`。保留用 `choice: "keep"`，不能修改 sync、repositories、extensions、edits 或刷新目标身份。生成和同步均不读取 `.git-setup/project.json`，缺少策略不回退；原文件不自动删除。Issue 只使用现有文档与本次完整输入；旧配置退出不迁移或删除使用者文件。
+`directory` 与 `ruleFiles` 首次采用必须明确；以后省略时只复用本检出的本机选择，不猜测目录。已登记位置改变时停止，旧入口实际迁移需另行计划。不需要同步用 `sync: null`。保留用 `choice: "keep"`，不能修改 sync、repositories、extensions、edits 或刷新目标身份。生成和同步均不读取 `.git-setup/project.json`，缺少策略不回退；原文件不自动删除。普通本地 Issue 复用现有文档和 matt 流程；低层 Issue CLI 仅按需接收完整本次输入；旧配置退出不迁移或删除使用者文件。
 
 comparison 每项包含 id、summary、trigger、inputs、writes、failure、evidence 和 classification。分类为 standard、configuration、unique、conflict、unknown；采用前解决 conflict/unknown，unique 明确 decision 为 retain/drop。retain 的 extension 必须对应已选择扩展 ID。计划不是授权。
 
 edits 只改已检查的项目内入口，每项填写 path 和完整 content。规则登记交给 ruleFiles：保留原文，只增改 `git-setup:harness` 标记块；明确指定的缺失规则文件可创建。项目内文件符号链接写入其原实体，多个别名去重；不替换链接，不写项目外实体，也不通过链接目录写入。前后指纹及链接关系变化时停止。
 
 ```text
-node <skill>/scripts/git-setup/cli.mjs harness-plan --project <项目> --input <选择文件>
-node <skill>/scripts/git-setup/cli.mjs harness-plan --project <项目> --input <选择文件> --plan-file <已忽略记录>
-node <skill>/scripts/git-setup/cli.mjs harness-apply --project <项目> --input <同一选择文件> --plan-file <同一记录> --expected-fingerprint <指纹> --apply
+node <skill>/scripts/git-setup/cli.mjs harness-plan --project <项目> --input -
+node <skill>/scripts/git-setup/cli.mjs harness-plan --project <项目> --input - --plan-file <已忽略记录>
+node <skill>/scripts/git-setup/cli.mjs harness-apply --project <项目> --plan-file <同一记录> --expected-fingerprint <指纹> --apply
 ```
 
-不带 plan-file 的预览不写文件；显式保存仅写指定、未跟踪且已忽略的 `data/git-setup/*.json` 或 `tmp/git-setup/*.json`。输入文件与记录分开。已有生成锁或未完成事务时，保存新预览会被拒绝，不能覆盖原阶段记录。计划分别列出 generated（生成）、preserved（原样保留）、modified（明确修改）文件；应用取得本仓锁，再核对原文件、权限、链接实体、目标和标准，在同一阶段目录中生成运行包并复制项目文件，按计划替换并回读。没有自动暂存、提交、推送或安装 hooks。
+Agent 将 JSON 写入 stdin，无需选择文件。保存后的标准安装计划包含原输入，apply 可省略 input，单份记录足够；已开始写入须用 harness-recover。选择 keep 时，apply 用同一 stdin 输入及指纹，仅原子保存 Git 本机选择，不要求 plan-file，也不创建安装目录或恢复记录；已有未完成安装锁时停止。
+
+不带 plan-file 的预览不写文件；显式保存仅写指定、未跟踪且已忽略的 `data/git-setup/*.json` 或 `tmp/git-setup/*.json`。若显式使用输入文件，则它不能与记录同路径；默认 stdin 没有此副本。已有生成锁或未完成事务时，保存新预览会被拒绝，不能覆盖原阶段记录。计划分别列出 generated（生成）、preserved（原样保留）、modified（明确修改）文件；应用取得本仓锁，再核对原文件、权限、链接实体、目标和标准，在同一阶段目录中生成运行包并复制项目文件，按计划替换并回读。没有自动暂存、提交、推送或安装 hooks。
 
 ## 独立运行与日常校验
 
-所选目录包含 `run.mjs`、`config.json`、`manifest.json`、`README.md` 和 `runtime/`。入口从自身位置加载相邻配置和完整 Node 运行包，通过生成时记录的相对关系验证 Git 根；不依赖调用者 CWD、固定层数、开发电脑路径或 Skill 安装位置。需要 Node >=20、Git >=2.29；gh 来源另需 GitHub CLI。新 clone 可直接调用已登记的生成入口；公开 CLI 可用 `--harness-directory <实际项目相对目录>` 指定位置，不扫描目录猜测。
+所选目录包含 `run.mjs`、`config.json`、`manifest.json`、`README.md` 和 `runtime/`。项目与 helper 分别仅打包各入口实际引用的模块，不复制测试、安装器或 Issue CLI。入口从自身位置加载相邻配置和完整依赖运行包，通过生成时记录的相对关系验证 Git 根；不依赖调用者 CWD、固定层数、开发电脑路径或 Skill 安装位置。需要 Node >=20、Git >=2.29；gh 来源另需 GitHub CLI。新 clone 可直接调用已登记的生成入口；公开 CLI 可用 `--harness-directory <实际项目相对目录>` 指定位置，不扫描目录猜测。
 
 | 入口 | 校验与结果 |
 | --- | --- |
@@ -63,7 +65,7 @@ config.json 为 `schemaVersion: 1`、`targets`、`sync`、`extensions`，可选 
 
 ## 中断与扩展保护
 
-生成记录保存原计划、文件内容与摘要、选择、锁持有进程、阶段和备份位置，不含凭证。发生中断保留锁、完整或部分临时目录、原目录备份和已完成步骤，不宣称回滚。新进程先检查：
+安装未完成时，生成记录保存原计划、文件内容与摘要、选择、锁持有进程、阶段和备份位置，不含凭证。成功并释放原锁后，同一文件压缩成结果摘要，不再保存源文件内容、原输入或事务；压缩失败报告 deferred，完整记录保留，不能把已经完成的安装报告为失败。发生中断保留锁、完整或部分临时目录、原目录备份和已完成步骤，不宣称回滚。新进程先检查：
 
 ```text
 node <skill>/scripts/git-setup/cli.mjs harness-recover --project <项目> --plan-file <原记录>

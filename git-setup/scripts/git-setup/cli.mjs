@@ -32,8 +32,19 @@ function parse(args) {
 }
 async function json(path) {
   if (!path) return undefined;
-  try { return JSON.parse(await readFile(resolve(path), 'utf8')); }
-  catch { fail('invalid_input_file', `无法读取有效 JSON 文件：${resolve(path)}（不输出文件内容）。`); }
+  try {
+    if (path !== '-') return JSON.parse(await readFile(resolve(path), 'utf8'));
+    if (process.stdin.isTTY) throw new Error('stdin required');
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of process.stdin) {
+      size += chunk.length;
+      if (size > 8 * 1024 * 1024) throw new Error('input too large');
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+  catch { fail('invalid_input_file', `无法读取有效 JSON：${path === '-' ? '标准输入（上限 8 MiB）' : resolve(path)}（不输出输入内容）。`); }
 }
 function required(value, name) { if (!value) fail('missing_argument', `缺少 ${name}`); return value; }
 function apply(options) { if (!options.apply) fail('apply_required', '写入需要 --apply；Agent 只在本次请求已有具体操作授权时传入，无需重复询问已有授权。'); }
@@ -42,11 +53,13 @@ function scrub(text) {
 }
 const help = `git-setup ${pkg.version} — node <skill>/scripts/git-setup/cli.mjs <command> [options]
 所有命令：--project <path>（默认当前目录），--use-global-config（显式启用个人全局业务配置）
+--input - 从标准输入接收本次 JSON，无需创建临时参数文件。
 inspect                                      读取 Git 状态
 check                                        只读事实检查（无参数默认）；Agent 另读实际宿主规则
       [--harness-directory <项目内实际目录>]  没有本机位置记录时显式提供，不猜测目录
 harness-plan --input <含 choice/directory/ruleFiles/比较的 JSON> [--plan-file <ignored-json>]
-harness-apply --input <同一选择.json> --plan-file <ignored-json> --expected-fingerprint <指纹> --apply
+harness-apply [--input <同一选择.json|->] --plan-file <ignored-json> --expected-fingerprint <指纹> --apply
+      已保存计划可省略 --input；choice=keep 无需 --plan-file。
 harness-recover --plan-file <原记录> [--apply --expected-fingerprint <恢复检查指纹>]
 setup --url <url>                            检查当前项目并生成接入计划，不提交或推送
       [--action add|replace --name <remote>] [--branch <name>]
@@ -63,6 +76,7 @@ check/read/publish/sync 可用 --repository <登记路径或 .> [--checkout <该
 --project 是 Harness 管理仓；各仓使用独立策略，错误选择不回退外仓。
 可用 --harness-directory <项目内实际目录>；项目日常入口不执行 Skill 完整比较
 auth-info [--url <url>]                      显示来源及选择/填写缺项，不输出凭证
+auth-cleanup [--apply --expected-fingerprint <指纹>]  显式检查或清理本仓未引用的旧 helper 运行包
 auth-prepare --url <url> --auth-method gh|github-token|cnb-url [--gh-user <login>]
              [--credential-workspace <outer>] [--credential-file <existing-file>]
              [--allow-ignore] [--replace-auth] [--apply]
@@ -103,13 +117,23 @@ async function main() {
     const { entryCheck } = await import('./entry-check.mjs');
     result = await entryCheck(project, { useGlobalConfig: Boolean(options['use-global-config']), directory: options['harness-directory'], ...authenticationOptions });
   }
+  else if (command === 'auth-cleanup') {
+    const { cleanupRuntimes } = await import('./runtime-cleanup.mjs');
+    result = await cleanupRuntimes(project, { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
+  }
   else if (command === 'harness-recover') {
     const { recoverHarness } = await import('./harness-transaction.mjs');
     result = await recoverHarness(project, required(options['plan-file'], '--plan-file'), { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
   }
   else if (['harness-plan', 'harness-apply'].includes(command)) {
     const harness = await import('./harness.mjs');
-    const input = await json(required(options.input, '--input'));
+    let input;
+    if (options.input) input = await json(options.input);
+    else if (command === 'harness-apply' && options['plan-file']) {
+      const saved = await json(options['plan-file']);
+      if (saved.transaction || saved.result?.status !== 'planned' || saved.request?.project !== project || !saved.request.input) fail('harness_record_invalid', '需要本项目尚未执行的原计划；已开始的操作使用 harness-recover。');
+      input = saved.request.input;
+    } else required(options.input, '--input');
     if (command === 'harness-apply') {
       apply(options);
       result = await harness.applyHarness(project, input, { expectedFingerprint: options['expected-fingerprint'], planFile: options['plan-file'] });
@@ -118,23 +142,16 @@ async function main() {
       result = { ...plan, files: undefined, edits: plan.edits.map(({ content, ...edit }) => edit) };
       if (options['plan-file']) {
         const { saveHarnessPreview } = await import('./harness-transaction.mjs');
-        if (resolve(options.input) === resolve(options['plan-file'])) fail('harness_record_path', '选择输入与恢复记录必须使用不同文件。');
+        if (options.input !== '-' && resolve(options.input) === resolve(options['plan-file'])) fail('harness_record_path', '选择输入与恢复记录必须使用不同文件。');
         await saveHarnessPreview(options['plan-file'], result);
       }
     }
   } else if (command === 'setup') {
     const { setup } = await import('./setup.mjs');
     result = await setup(project, { url: required(options.url, '--url'), action: options.action, name: options.name, apply: options.apply, branch: options.branch, authorName: options['author-name'], authorEmail: options['author-email'], expectedFingerprint: options['expected-fingerprint'], acceptEffects: options['accept-effects'], planFile: options['plan-file'], ...authenticationOptions });
-  } else if (command === 'auth-prepare') {
-    result = await authModule.prepareAuth(project, required(options.url, '--url'), { ...authenticationOptions, apply: options.apply, allowIgnore: options['allow-ignore'], replaceAuth: options['replace-auth'] });
-  } else if (command === 'auth-verify') {
-    result = await authModule.verifyAuth(project, required(options.url, '--url'), { ...authenticationOptions, apiOnly: Boolean(options['api-only']), apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
-  }  else if (command === 'auth-info') {
-    if (options.url) result = authModule.publicSelection(await authModule.authSelection(project, options.url, authenticationOptions));
-    else {
-      const { values, sources } = await config.loadEnvironment((await config.inspectProject(project)).root, authenticationOptions);
-      result = { sources, present: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, Boolean(value)])), hint: '用 --url 查询特定完整远端的文件或 gh 绑定。' };
-    }
+  } else if (['auth-info', 'auth-prepare', 'auth-verify'].includes(command)) {
+    const { authCommand } = await import('./auth-command.mjs');
+    result = await authCommand(project, command, options);
   } else if (['issue-resolve', 'issue-create', 'issue-update', 'issue-comment', 'issue-recover'].includes(command)) {
     for (const key of Object.keys(options)) if (!['project', 'input', 'apply', 'expected-fingerprint', 'use-global-config'].includes(key)) fail('invalid_argument', 'Issue 操作仅消费 --input 中的完整本次输入，旧目标覆盖参数已退出。');
     const { issueOperation } = await import('./issue-operation.mjs');

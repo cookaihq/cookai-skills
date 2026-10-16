@@ -137,9 +137,21 @@ async function finish(tx, observation) {
       tx.backup = null;
     }
     const result = { status: 'configured', choice: plan.choice, complete: true, fingerprint: facts.fingerprint, changes: plan.changes, completed: tx.completed, committed: false, pushed: false };
-    await saveSetupRecord(tx.file, { request: requestFor(plan), transaction: tx, result });
+    const completeRecord = await saveSetupRecord(tx.file, { request: requestFor(plan), transaction: tx, result });
     await assertOwner(tx);
     await rm(lockPath(plan));
+    // Keep the full transaction until the original lock is released. A crash
+    // before then must still have enough information for normal recovery.
+    try {
+      await saveSetupRecord(tx.file, { kind: 'harness-result', request: { project: root, choice: plan.choice, directory: plan.directory },
+        result, completedAt: new Date().toISOString() }, {
+        beforeWrite: async () => {
+          if (digest(JSON.parse(await readFile(tx.file, 'utf8'))) !== digest(completeRecord)) fail('harness_record_changed', '原记录已由后续操作更新，不压缩。');
+          try { await lstat(lockPath(plan)); fail('harness_record_changed', '后续安装已开始，不压缩。'); }
+          catch (error) { if (error.code !== 'ENOENT') throw error; }
+        },
+      });
+    } catch (error) { result.recordCompaction = { status: 'deferred', code: error.code || 'record_write_failed' }; }
     return result;
   } catch (error) {
     const extra = { code: error.code, message: redact(error.message) };
@@ -186,6 +198,13 @@ export async function recoverHarness(project, file, { apply = false, expectedFin
   await safePath(dirname(file), file);
   let record;
   try { record = JSON.parse(await readFile(file, 'utf8')); } catch { fail('harness_recovery_invalid', '无法读取原生成记录；不猜测恢复步骤。'); }
+  if (record.kind === 'harness-result') {
+    if (record.request?.project !== resolve(project) || record.result?.complete !== true || record.result.status !== 'configured') fail('harness_recovery_invalid', '完成记录不属于本项目或格式无效。');
+    const state = await inspect(project);
+    try { await lstat(join(state.commonDir, 'git-setup-harness.lock')); fail('harness_recovery_required', '已有其他未完成安装；使用该操作的原记录。'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return { status: 'previous_completed', complete: true, verification: 'historical_receipt_only', actualWrites: 'not_performed', directory: record.request.directory };
+  }
   const tx = record.transaction;
   if (!tx || tx.plan?.project !== resolve(project) || tx.file !== file || digest(record.request) !== digest(requestFor(tx.plan))) fail('harness_recovery_invalid', '恢复记录不属于本项目或原计划。');
   let owner;

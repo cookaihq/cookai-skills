@@ -78,7 +78,7 @@ CNB 令牌须覆盖完整目标仓库：读取需要代码只读权限，推送�
 
 `auth.mjs` 将完整目标、已选方式、实际主检出/文件路径、gh 账号、验证后的身份和非明文校验值保存到当前仓库的本机 Git 配置。Token 不进入该配置、remote、argv、共享 JSON 或计划。文件名预留记录保存在凭证外仓的本机 Git 配置，防止不同子仓将碰撞路径绑定给不同目标。
 
-`setup` 在生成计划前检查选择与身份，计划指纹包含来源。执行时重新核对，安装持久仓库 credential helper，并通过原生 `git credential fill` 在进程内比对实际取得的凭证，不把其 stdout 交给 Agent。helper 使用明确的 Node 路径和本仓 Git 实际 common directory 下 `git-setup/<源码指纹>/` 的完整运行包；同仓 Worktree 共用，移除 Skill 后仍可使用。新 clone 需重新建立绑定；仓库、Node 或绑定路径变化时修复原来源。运行包无凭证，不自动迁移或删除旧文件。GitHub/CNB 主机的 helper 链先清空再设置；带完整仓库路径的请求才能取得相应文件或 gh 账号，未知目标、文件缺失、来源轮换或脚本失效会终止认证，不能退回 keychain、其他 helper 或 ASKPASS。已有额外 HTTP 鉴权头冲突时报告错误。
+`setup` 在生成计划前检查选择与身份，计划指纹包含来源。执行时重新核对，安装持久仓库 credential helper，并通过原生 `git credential fill` 在进程内比对实际取得的凭证，不把其 stdout 交给 Agent。helper 使用明确的 Node 路径和本仓 Git 实际 common directory 下 `git-setup/<源码指纹>/` 的完整运行包；同仓 Worktree 共用，移除 Skill 后仍可使用。新 clone 需重新建立绑定；仓库、Node 或绑定路径变化时修复原来源。运行包只携带 helper 所需依赖、不含凭证；安装不自动删除旧版本。GitHub/CNB 主机的 helper 链先清空再设置；带完整仓库路径的请求才能取得相应文件或 gh 账号，未知目标、文件缺失、来源轮换或脚本失效会终止认证，不能退回 keychain、其他 helper 或 ASKPASS。已有额外 HTTP 鉴权头冲突时报告错误。
 
 `publish`、`sync` 的每个实际远端和 GitHub API 最终目标分别查自己的绑定。API 先核验账号，再使用固定 `api.github.com` 接口；不会借用发起子仓或外仓账号。凭证轮换只修改原文件，再运行 `auth-verify --url <目标>` 取得新指纹，按已有授权加 `--apply --expected-fingerprint <指纹>` 更新校验结果。验证失败不切换来源，也不授权重发结果不明的业务写入。
 
@@ -97,3 +97,11 @@ CNB 令牌须覆盖完整目标仓库：读取需要代码只读权限，推送�
 ## 项目环境工具的本机检查
 
 项目自有环境导出器可以从已验证的生成运行包调用 `inspectAuth(project, url, {metadataOnly: true})`，只核对已选绑定和文件元数据，返回 `credentialContent: not_read`。这不能证明文件内容仍有效，不能替代 `authSelection`、`auth-verify` 或权限验证。导出器先明确拒绝 gh/legacy 等不支持的来源，再读取同一文件绑定，避免在拒绝前先取出系统登录凭证。普通 `auth-info` 保持原来的完整本机来源检查。
+
+## 显式清理旧 helper 运行包
+
+用户要求清理时，Agent 先调用 `node <skill>/scripts/git-setup/cli.mjs auth-cleanup --project <仓库>`，展示 candidates 和 retained。仅对这个仓库实际 common directory 的 `git-setup/<内容指纹>/` 生效，覆盖其已登记 Worktree；不清理其他仓、项目生成入口或运行记录。按当前明确清理授权，加 `--apply --expected-fingerprint <指纹>` 执行。
+
+程序核对当前及历史包的完整内容、所有登记 Worktree 的有效配置和运行进程；执行时锁住本仓/Worktree 配置和当前读取的个人、系统配置来源，删除前再次检查。锁只在清理期间保留，不修改配置正文；来源不可锁定时停止。仍被配置引用、正在运行、被修改或无法识别的目录保留。任何 Git 进程尚在运行、安装残留、配置锁、不可用 Worktree、include/includeIf 或无法读取进程时拒绝清理。它不输出进程参数、配置原文或凭证，不创建清理记录，也不自动清理旧计划或结果不明的操作。跨仓手工引用 helper 不属于支持的绑定方式，应先修复为各仓独立安装。
+
+macOS/Linux 使用 ps，Windows 原生使用 PowerShell 的 Get-CimInstance 只读核验进程；缺少命令或检查失败时保留文件。Windows/WSL 实机验证另记，不能以本机测试替代。

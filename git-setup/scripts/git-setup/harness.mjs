@@ -3,10 +3,10 @@ import { join, resolve } from 'node:path';
 import { devNull } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { inspectProject } from './config.mjs';
-import { inspect } from './git.mjs';
+import { inspect, updateLocalConfig } from './git.mjs';
 import { localGit } from './auth-roots.mjs';
 import { runtimeBundle, safePath, digest, runtimeFail as fail } from './runtime-bundle.mjs';
-import { readChoice, fields, portablePath, publicText, confirmedTargets, readHarnessConfig, validateHarnessConfig } from './harness-config.mjs';
+import { readChoice, choiceKey, fields, portablePath, publicText, confirmedTargets, readHarnessConfig, validateHarnessConfig } from './harness-config.mjs';
 import { projectLauncher } from './project-launcher.mjs';
 import { registrationEdits, ruleSnapshot, withoutRegistration } from './harness-rules.mjs';
 import { registeredRepositories, selectRepository } from './repository-relationship.mjs';
@@ -128,7 +128,19 @@ function validateComparison(input, facts) {
     && !facts.installed?.config?.extensions.some(previous => digest(previous) === digest(extension))) fail('harness_extension_unselected', '新增或改选扩展必须对应用户明确选择重新实现的功能。');
 }
 
-const readme = directory => `# 项目 Git 操作\n\n本目录由 git-setup 生成，可在移除 Skill 后独立运行，需要 Node.js >=20、Git >=2.29；选择 gh 时还需已登录的 GitHub CLI。\n\n请让 Agent 从本项目的 ${directory}/run.mjs 入口检查、发布或同步。无参数只检查；发布指定本地完整 refs，同步只使用 config.json 的来源、目标和完整 refs。两者分别调用，不自动互相触发，不创建提交、标签、Release、hooks 或 CI。\n\n远端地址从 Git 配置读取；config.json 中 targets 保存用户已确认的目标身份，用于检测地址变化。凭证沿用主检出或明确统筹外仓主检出的 .credentials/repositories/，每个目标独立；本目录不保存凭证或本机账号。Git helper 位于实际 Git common directory，新的 clone 需重新选择并安装本机鉴权。\n\n入口命令：check；read --remote <名称>；publish --remote <名称> --ref <完整引用>；sync。选仓加 --repository <登记路径>，外仓自身用 .；省略时只操作本项目。可加 --checkout <所选仓的检出>，相对本项目解释。每仓策略在 config.json 的 repositories 中保存，缺少时停止，不套用外仓策略。计划区分安装位置、实际检出、登记依据、远端、完整 refs 和鉴权来源；相关事实变化拒绝旧计划。auth-info/auth-prepare/auth-verify 也接受相同选仓参数。发布与同步先生成计划，再以同参数加 --apply --expected-fingerprint <指纹> 执行。有 after-publish/after-sync 扩展时还需 --operation-id <本次稳定标识>。这两类扩展只在对应操作全部成功后执行；中断或失败不自动重新执行，先检查 data/git-setup/ 中记录及真实结果。\n\nproject-entries 只读核对并列出 event: explicit 的项目入口及内容摘要，不联网、不读取凭证、不执行入口。Agent 根据每个项目命令的说明明确调用其路径；参数、预览、写入授权、超时与恢复由该命令负责。普通 publish/sync 不自动执行 explicit 入口。\n\n版本和源文件指纹在 manifest.json；升级先由 Agent 比较新旧实现及项目扩展，再按具体文件计划执行。生成器维护 runtime/、run.mjs、README.md 和清单；项目维护 config.json、可选 repos.conf 以及 extensions/ 下的扩展和资源。无扩展不创建空目录，旧目录外扩展仍有效。升级省略策略时保留已有配置、扩展和普通文件权限；明确停用扩展也保留文件。新增或改变扩展需确认内容指纹，原目标身份只有明确要求刷新时才更新。计划后文件变化会停止安装；中断后检查原记录、阶段目录和备份再继续，不覆盖后续修改。配置检查不等于远端鉴权或推送权限验证。\n`;
+const readme = directory => `# 项目 Git 操作
+
+本目录由 git-setup 生成，移除 Skill 后仍可运行。需要 Node.js >=20、Git >=2.29；选择 gh 鉴权时还需已登录的 GitHub CLI。
+
+让 Agent 调用本项目的 ${directory}/run.mjs：无参数或 check 只检查；read --remote <名称> 读取；publish --remote <名称> --ref <完整引用> 发布；sync 按 config.json 同步。发布与同步先预览，再加 --apply --expected-fingerprint <指纹> 执行，不自动互相触发。选仓加 --repository <登记路径或 .>，可加 --checkout <该仓检出>；各仓使用自己的策略。auth-info/auth-prepare/auth-verify 使用同一选仓方式。
+
+config.json 保存非敏感策略，repos.conf 仅登记实际独立仓；远端来自 Git 配置，凭证来自已选主检出或管理仓。新 clone 需重新建立本机鉴权。runtime/、run.mjs、manifest.json 和本说明由生成器维护；项目维护配置、仓库登记及 extensions/。升级交给 git-setup 先比较和列出文件计划，省略的项目策略和文件会保留。
+
+project-entries 只核对并列出明确调用的项目命令；Agent 按各命令说明执行。after-publish/after-sync 扩展只在对应操作全部成功后执行，需稳定 --operation-id；中断后先核对 data/git-setup/ 中原记录与实际结果，不重发未知操作。安装中断用 git-setup 的 harness-recover 读取原计划，保留备份及后续修改。完成记录仅是历史摘要，不替代本轮检查。
+
+本入口不自动创建提交、标签、Release、hooks、CI 或 Issue。检查通过不等于远端鉴权、推送权限或客户端验收通过。
+`;
+
 
 export async function planHarness(project, input) {
   fields(input, ['choice', 'directory', 'ruleFiles', 'evidenceFiles', 'comparison', 'sync', 'repositories', 'extensions', 'refreshTargets', 'edits'], 'Harness 选择');
@@ -212,6 +224,21 @@ export async function planHarness(project, input) {
 export async function applyHarness(project, input, { expectedFingerprint, planFile } = {}) {
   const plan = await planHarness(project, input);
   if (!expectedFingerprint || expectedFingerprint !== plan.fingerprint) fail('harness_plan_changed', '项目入口、标准、远端或选择发生变化；重新检查后使用当前计划。');
+  if (plan.choice === 'keep') {
+    await updateLocalConfig(plan.project, {}, async file => {
+      try {
+        await lstat(join(plan.context.commonDir, 'git-setup-harness.lock'));
+        fail('harness_recovery_required', '已有未完成安装；先核对原记录，不能改写选择。');
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      const current = await planHarness(plan.project, input);
+      if (current.fingerprint !== expectedFingerprint) fail('harness_plan_changed', '保存选择前项目事实发生变化。');
+      const choice = { choice: 'keep', directory: plan.directory, ruleFiles: plan.ruleFiles, fingerprint: plan.context.facts,
+        evidenceFiles: plan.input.evidenceFiles || [], comparison: plan.input.comparison || [] };
+      await localGit(plan.project, ['config', '--file', file, choiceKey(plan.project), JSON.stringify(choice)]);
+    });
+    if ((await harnessFacts(plan.project)).choice !== 'keep') fail('harness_readback', '保存的选择或项目事实已变化，请重新检查。');
+    return { status: 'configured', choice: 'keep', complete: true, changes: plan.changes, completed: ['choice'], committed: false, pushed: false };
+  }
   if (!planFile) fail('harness_record_required', '应用前提供已忽略的 --plan-file，供中断后核对选择和实际完成步骤。');
   const { beginHarness } = await import('./harness-transaction.mjs');
   return beginHarness(plan, planFile);

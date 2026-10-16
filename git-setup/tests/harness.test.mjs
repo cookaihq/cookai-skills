@@ -35,8 +35,13 @@ async function fixture() {
     assert.equal(result.status, 'configured', JSON.stringify(result));
     return result;
   };
-  const run = async (entry, args = [], cwd = work) => {
-    try { const result = await exec(process.execPath, [entry, ...args], { env, cwd, timeout: 90000 }); return { exit: 0, ...JSON.parse(result.stdout) }; }
+  const run = async (entry, args = [], cwd = work, input = '') => {
+    try {
+      const pending = exec(process.execPath, [entry, ...args], { env, cwd, timeout: 90000 });
+      pending.child.stdin.end(input);
+      const result = await pending;
+      return { exit: 0, ...JSON.parse(result.stdout) };
+    }
     catch (error) { return { exit: error.code, ...JSON.parse(error.stdout || error.stderr) }; }
   };
   return { root, work, env, git, origin, backup, adopt, planFile, run };
@@ -45,6 +50,51 @@ async function fixture() {
 function behavior(id, evidence, extra = {}) {
   return { id, summary: '现有项目 Git 入口', trigger: '用户手动调用', inputs: '本仓 origin 和 main', writes: '推送目标引用', failure: '失败停止', evidence, classification: 'standard', ...extra };
 }
+
+test('public plans accept standard input without creating input or recovery files', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  const before = await readdir(f.work);
+  const result = await f.run(cli, ['harness-plan', '--input', '-'], f.work, JSON.stringify({ choice: 'keep' }));
+  assert.equal(result.status, 'planned', JSON.stringify(result));
+  assert.deepEqual(await readdir(f.work), before);
+  const invalid = await f.run(cli, ['harness-plan', '--input', '-'], f.work, 'private malformed input');
+  assert.equal(invalid.code, 'invalid_input_file');
+  assert.equal(JSON.stringify(invalid).includes('private malformed input'), false);
+});
+
+test('keeping existing tools saves the choice without an installation record and rejects pending installations', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  const input = JSON.stringify({ choice: 'keep' });
+  const args = ['--input', '-'];
+  const before = await readdir(f.work);
+  const plan = await f.run(cli, ['harness-plan', ...args], f.work, input);
+  const applied = await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', plan.fingerprint, '--apply'], f.work, input);
+  assert.equal(applied.status, 'configured', JSON.stringify(applied));
+  assert.equal((await f.run(cli, ['check'])).harness.choice, 'keep');
+  assert.deepEqual(await readdir(f.work), before);
+  const next = await f.run(cli, ['harness-plan', ...args], f.work, input);
+  const config = await readFile(join(f.work, '.git/config'));
+  await writeFile(join(f.work, '.git/git-setup-harness.lock'), 'unfinished installation');
+  const denied = await f.run(cli, ['harness-apply', ...args, '--expected-fingerprint', next.fingerprint, '--apply'], f.work, input);
+  assert.equal(denied.code, 'harness_recovery_required');
+  assert.deepEqual(await readFile(join(f.work, '.git/config')), config);
+});
+
+test('one saved adoption plan is sufficient and successful recovery retains no input or file snapshots', async () => {
+  const f = await fixture(), cli = join(skill, 'scripts/git-setup/cli.mjs');
+  const input = JSON.stringify({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'] });
+  const planned = await f.run(cli, ['harness-plan', '--input', '-', '--plan-file', f.planFile], f.work, input);
+  assert.equal(planned.status, 'planned', JSON.stringify(planned));
+  const applied = await f.run(cli, ['harness-apply', '--plan-file', f.planFile, '--expected-fingerprint', planned.fingerprint, '--apply']);
+  assert.equal(applied.complete, true, JSON.stringify(applied));
+  const record = JSON.parse(await readFile(f.planFile, 'utf8'));
+  assert.equal(record.kind, 'harness-result');
+  assert.equal(record.request.input, undefined);
+  assert.equal(record.transaction, undefined);
+  const recovered = await f.run(cli, ['harness-recover', '--plan-file', f.planFile]);
+  assert.equal(recovered.verification, 'historical_receipt_only');
+  assert.equal((await f.run(join(f.work, 'vcs/run.mjs'), ['check'])).status, 'checked');
+});
 
 test('public adoption preserves an extension already placed inside the selected Harness and runs it independently', async () => {
   const f = await fixture(), copy = join(f.root, 'skill-copy');
@@ -404,9 +454,12 @@ test('fresh projects get a self-contained entry that publishes and syncs after t
   assert.equal(plan.status, 'planned');
   const applied = await f.run(cli, ['harness-apply', '--input', inputFile, '--plan-file', f.planFile, '--expected-fingerprint', plan.fingerprint, '--apply']);
   assert.equal(applied.status, 'configured', JSON.stringify(applied));
+  const modules = await readdir(join(f.work, 'scripts/git-setup/runtime/scripts/git-setup'));
+  for (const name of ['cli.mjs', 'issues.mjs', 'issue-rules.mjs', 'issue-operation.mjs', 'setup.mjs', 'harness.mjs', 'harness-transaction.mjs']) assert.equal(modules.includes(name), false, name);
   await rename(copy, `${copy}-unavailable`);
   const entry = join(f.work, 'scripts/git-setup/run.mjs');
   assert.equal((await f.run(entry)).status, 'checked');
+  assert.equal((await f.run(entry, ['auth-info'])).exit, 0);
   assert.equal((await f.run(entry, ['read', '--remote', 'origin'])).status, 'read');
   const publishArgs = ['publish', '--remote', 'origin', '--ref', 'refs/heads/main'];
   const publishing = await f.run(entry, publishArgs);
@@ -438,6 +491,10 @@ test('ordinary Git uses the repository helper after the installing Skill copy mo
   assert.equal(config.includes(copy), false);
   assert.equal(config.includes('fixture-local-only-token'), false);
   assert.ok(config.includes('/git-setup/'));
+  const installed = (await readdir(join(f.work, '.git/git-setup'))).filter(name => /^[a-f0-9]{64}$/.test(name));
+  assert.equal(installed.length, 1);
+  const modules = await readdir(join(f.work, '.git/git-setup', installed[0], 'scripts/git-setup'));
+  for (const name of ['cli.mjs', 'issues.mjs', 'project-entry.mjs', 'harness.mjs', 'harness-transaction.mjs']) assert.equal(modules.includes(name), false, name);
   await rename(copy, `${copy}-unavailable`);
   const fill = async () => new Promise(done => {
     const child = spawn('git', ['-C', f.work, 'credential', 'fill'], { env: { ...f.env, GIT_ASKPASS: 'echo forbidden-fallback' }, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -628,7 +685,11 @@ test('interrupted public adoption retains evidence and resumes only verified ori
   await assert.rejects(lstat(join(f.work, '.git/git-setup-harness.lock')), { code: 'ENOENT' });
   assert.equal((await f.run(cli)).harness.choice, 'standard');
   await assert.rejects(lstat(successor), { code: 'ENOENT' });
-  // A completed receipt can coexist with its old lock after a process exits.
+  // Reconstruct the crash window before lock release and result compaction.
+  const beforeCompaction = JSON.parse(recordBefore);
+  beforeCompaction.result.complete = true;
+  beforeCompaction.result.status = 'configured';
+  await writeFile(f.planFile, JSON.stringify(beforeCompaction));
   await writeFile(join(f.work, '.git/git-setup-harness.lock'), lockBefore);
   const unlock = await f.run(cli, ['harness-recover', '--plan-file', f.planFile]);
   assert.equal(unlock.status, 'recovery_ready', JSON.stringify(unlock));

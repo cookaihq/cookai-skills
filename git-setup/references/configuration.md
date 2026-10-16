@@ -1,4 +1,4 @@
-# 配置来源与本次 Issue 输入
+# 配置来源与可选 Issue CLI 输入
 
 Git 远端来自所选仓库的实际 Git 配置。Harness 策略来自已登记的实际安装目录 `config.json`；外仓自身使用顶层 `targets/sync`，已登记子仓使用 `repositories[登记路径]`，缺策略不回退外仓。详见 [Harness](harness.md)。
 
@@ -6,19 +6,25 @@ Git 远端来自所选仓库的实际 Git 配置。Harness 策略来自已登记
 
 `.git-setup/project.json`、`.git-setup/issue-routing.md`、`GIT_SETUP_ISSUE_JSON` 已退出正常读写；`config-check`、`config-write`、`install-rules` 明确拒绝。旧文件原样保留，不兼容、不自动迁移或删除。普通 Git setup 不读取 Issue 规则，不维护旧 JSON 中的 remote 副本。
 
-## 从文档到本次操作
+## 默认复用项目流程
+
+普通本地 Markdown Issue 由 Agent 读取项目现有 tracker、模板和状态约定，沿已初始化的 matt-pocock-skills 流程直接写入并回读正式事项。不要求 JSON、operationId、额外模板或 git-setup 恢复记录；不重新初始化已有工程规则。Git 设置本身不强制安装 matt-pocock-skills。
+
+下文只适用于 GitHub 写入，以及明确选择脚本校验/编号/恢复能力的本地操作。原 CLI 继续可用，其输入契约没有改成项目长期配置。
+
+## 低层 CLI 的本次输入
 
 Agent 在明确的发起项目读取 `docs/agents/issue-tracker.md`，沿引用读取模板、限制与状态约定。有项目声明的 Worktree 文档映射时访问同一实体。Agent 解释任意 Markdown；脚本不推断文档语义，也不把文档改为固定格式。
 
-Agent 为本次创建、更新或回复准备一份完整 JSON，保存在按项目规则允许的位置。需要跨会话恢复时保留原输入及其实际路径，目录须按项目规则忽略。输入可能包含事项正文，应按同一内容的保存权限保护；无凭证操作记录只保存摘要。输入仅供本次操作及恢复，不能作为未来新建的长期默认值。
+Agent 为本次创建、更新或回复准备完整 JSON，默认经 `--input -` 传入 stdin（UTF-8，最多 8 MiB），不保存参数文件。旧 `--input <文件>` 仍支持。只有跨会话恢复无法从已有任务材料完整重建输入时，才按项目规则保存一份原输入，并报告实际位置；输入可能含正文，应按其权限保护。操作记录只含摘要，不能重建输入。输入只供本次及恢复，不成为未来新建的默认值。
 
 ```text
-node <skill>/scripts/git-setup/cli.mjs issue-resolve --project <发起项目> --input <本次输入.json>
-node <skill>/scripts/git-setup/cli.mjs issue-create --project <同一项目> --input <同一输入.json> --apply --expected-fingerprint <计划指纹>
-node <skill>/scripts/git-setup/cli.mjs issue-recover --project <同一项目> --input <原输入.json>
+node <skill>/scripts/git-setup/cli.mjs issue-resolve --project <发起项目> --input -
+node <skill>/scripts/git-setup/cli.mjs issue-create --project <同一项目> --input - --apply --expected-fingerprint <计划指纹>
+node <skill>/scripts/git-setup/cli.mjs issue-recover --project <同一项目> --input -
 ```
 
-更新和回复分别使用 `issue-update`、`issue-comment`，同样先预览，再带指纹执行。恢复不带 `--apply`，只回读实际事项并更新本机恢复记录。直接调用 CLI 不证明 Agent 已完成规则调查和标准比较。
+上面每次调用均由 Agent 向 stdin 传入同一完整 JSON。更新和回复分别使用 `issue-update`、`issue-comment`，同样先预览，再带指纹执行。恢复不带 `--apply`，只回读实际事项并更新本机恢复记录。直接调用 CLI 不证明 Agent 已完成规则调查和标准比较。
 
 ## 输入契约
 
@@ -82,7 +88,7 @@ GitHub update/comment 使用 `existing: {url: "https://github.com/owner/name/iss
 
 可选 `rules.mapping` 格式为 `{from: "docs-anchor", to: "docs", declaration: {path: "AGENTS.md", sha256: "..."}}`。from 是检出内实际符号链接，必须指向同仓主检出的 docs 实体；declaration 是该检出内已读取的普通文件。主规则改用 `docs-anchor/agents/issue-tracker.md`，模板和引用可使用同一前缀。脚本验证链接、目标实体、声明与各文档指纹；不按目录名猜映射。
 
-主规则真正缺失时，一般项目提示 `/setup-matt-pocock-skills`，不自动运行。已有禁止重跑依据时只提示修复原文档或映射。本工作区按 ADR 0004 使用 repair-existing，不建议解除禁令。不可读、模板缺失或内容变化时报告实际问题，不创建另一份默认设置；无关 Issue 文档不阻塞普通 Git 操作。
+主规则真正缺失时，按当前宿主及实际已安装版本提示 matt-pocock-skills 的初始化入口，不自动运行或假定固定命令存在。已有禁止重跑依据时只提示修复原文档或映射，不建议解除禁令。不可读、模板缺失或内容变化时报告实际问题，不创建另一份默认设置；无关 Issue 文档不阻塞普通 Git 操作。
 
 ## 鉴权环境配置
 

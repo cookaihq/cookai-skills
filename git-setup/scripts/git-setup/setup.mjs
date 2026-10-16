@@ -62,7 +62,13 @@ export async function setup(project, options = {}) {
   const request = { project: local.project, url: options.url, action: options.action, name: options.name, branch: options.branch, authorName: options.authorName, authorEmail: options.authorEmail, workspace: options.workspace, harnessDirectory: options.harnessDirectory, useGlobalConfig: Boolean(options.useGlobalConfig), acceptEffects: Boolean(options.acceptEffects),
     authMethod: options.authMethod, ghUser: options.ghUser, credentialWorkspace: options.credentialWorkspace, credentialFile: options.credentialFile, credentialsFilled: Boolean(options.credentialsFilled), githubAuth: Boolean(options.githubAuth) };
   const record = async result => {
-    if (options.planFile) await saveSetupRecord(options.planFile, { request, result });
+    if (options.planFile) {
+      const saved = result.status === 'configured' && result.complete === true
+        ? { kind: 'setup-result', request: { project: request.project, url: request.url, action: request.action, name: request.name },
+          result: { status: result.status, complete: true, fingerprint: result.fingerprint, completedSteps: result.completedSteps, committed: false, pushed: false }, completedAt: new Date().toISOString() }
+        : { request, result };
+      await saveSetupRecord(options.planFile, saved);
+    }
     return result;
   };
   const need = async (required, detail, extra = {}) => {

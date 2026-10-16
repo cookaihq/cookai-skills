@@ -4,7 +4,7 @@
 
 ## 调用关系
 
-Agent 读取现有 tracker 文档、引用及模板，按 [输入契约](configuration.md) 准备完整本次输入。CLI 的 `issue-resolve/create/update/comment/recover --input` 先经 `issue-rules.mjs` 验证文件与仓库事实，`issue-operation.mjs` 再选择最终目标的鉴权。计划指纹包含输入、规则、模板、关系和来源；实际写入前再次核对，变化则停止。
+普通本地 Markdown 沿已有 matt 工程流程直接写入和回读，不进入本文件的操作记录协议。只有 GitHub 写入或明确选择低层 CLI 时，Agent 读取现有 tracker 文档、引用及模板，按 [输入契约](configuration.md) 准备完整本次输入。CLI 的 `issue-resolve/create/update/comment/recover --input` 先经 `issue-rules.mjs` 验证文件与仓库事实，`issue-operation.mjs` 再选择最终目标的鉴权。计划指纹包含输入、规则、模板、关系和来源；实际写入前再次核对，变化则停止。
 
 GitHub 目标始终是输入的 `target.github`，不从 CWD、origin、GH_REPO 或活动账号推断。`target.project` 为已存在的实际 Git 根，承载该目标已选鉴权及操作记录。本地 `target.local.directory` 相对目标检出根；模板从规则 owner 或其声明的同仓文档映射读取。更新与回复的 existing 指向原事项，reference 只用于参考新建。
 
@@ -35,7 +35,7 @@ API 版本为 `2022-11-28`。接口可能返回 PR，读取时用 `pull_request`
 
 读取仓库得到 404 可能表示没有访问权限，不证明仓库不存在。用户已经明确要求创建指定 owner/name 和可见性时，创建入口可调用只负责新建的 API；它不会更新已有仓库。目标已可读且存在时直接报告已有，不改变可见性。401/403、账户不匹配等情况停止。
 
-## 本地写入
+## 可选 CLI 的本地写入
 
 本地事项必须遵守解析结果中的目录、文件名和模板规则。`filename` 支持 `{number}`、`{slug}`；`numbering` 可指定正整数 `start` 和 1–12 的 `width`。filename 必须在本次输入中明确；固定的 `.md` 文件名也可使用，脚本不发明编号规则。
 
@@ -47,9 +47,9 @@ Agent 可按现有自然语言规则直接提交 `content: {title, document}`，
 
 ## 写入中断与恢复
 
-每次创建、更新和回复必须使用操作标识 `operationId`。Agent 在执行前生成稳定标识，写入本次完整 `--input` 文件，CLI 不自行生成；后续恢复复用同一个标识，不能用新标识掩盖结果不明的旧操作。
+使用本文件的 CLI 创建、更新和回复时必须提供操作标识 `operationId`。Agent 在执行前生成稳定标识，放入本次完整 JSON，默认经 `--input -` 传入 stdin；只有确有跨会话需要才保存原输入文件，CLI 不自行生成；后续恢复复用同一个标识，不能用新标识掩盖结果不明的旧操作。
 
-`issues.mjs` 在目标项目 `data/git-setup/<operationId>.json` 保存操作类型、目标、内容哈希、时间和状态，不保存 Token 或正文。本地记录包含实际文件路径；文件名使用标题时，路径也会包含该标题片段。首次写入前验证该目录未被 Git 跟踪且实际被忽略；缺少忽略规则时返回具体说明，由已有授权决定是否修改项目忽略规则，写入模块不会自行改文件。
+这些低层操作由 `issues.mjs` 在目标项目 `data/git-setup/<operationId>.json` 保存操作类型、目标、内容哈希、时间和状态，不保存 Token 或正文。本地记录包含实际文件路径；文件名使用标题时，路径也会包含该标题片段。首次写入前验证该目录未被 Git 跟踪且实际被忽略；缺少忽略规则时返回具体说明，由已有授权决定是否修改项目忽略规则，写入模块不会自行改文件。
 
 本地更新接收原路径、已读 SHA 和完整新原文；回复按明确标题追加。临时结果写完后再次核对原内容及本次依据，再替换原文件。本地恢复按操作记录的路径和完整内容哈希回读；部分写入、冲突或后续编辑报告未完成，不覆盖文件或自动换名创建。
 
