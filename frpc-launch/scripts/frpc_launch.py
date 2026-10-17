@@ -706,7 +706,8 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--server-port", type=int, default=0, dest="server_port")
             sp.add_argument("--proxy", action="append", default=[], dest="proxies",
                             help="代理规格，如 name=web;type=http;localPort=8080;"
-                                 "customDomains=a.com（可重复）")
+                                 "customDomains=app.example.com;localIP=127.0.0.1;"
+                                 "locations=/api/（locations 仅 HTTP；可重复 --proxy）")
             sp.add_argument("--allow-tracked", action="store_true",
                             help="显式允许写入未被 git 忽略的 Secret 文件")
     return p
@@ -718,6 +719,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_proxy_spec(spec: str) -> dict:
+    allowed = {"name", "type", "localIP", "localPort", "remotePort",
+               "customDomains", "locations"}
     fields = {}
     for part in spec.split(";"):
         part = part.strip()
@@ -726,7 +729,15 @@ def parse_proxy_spec(spec: str) -> dict:
         if "=" not in part:
             raise FrpcLaunchError("代理规格片段缺少 '=': %r（完整规格: %s）" % (part, spec))
         k, v = part.split("=", 1)
-        fields[k.strip()] = v.strip()
+        k, v = k.strip(), v.strip()
+        if k not in allowed:
+            raise FrpcLaunchError("guide-init 不支持代理字段 %s；请使用原生 frpc.toml，"
+                                  "不会忽略该字段生成配置" % k)
+        if k in fields:
+            raise FrpcLaunchError("代理字段重复: %s" % k)
+        if not v:
+            raise FrpcLaunchError("代理字段不能为空: %s" % k)
+        fields[k] = v
     for required in ("name", "type", "localPort"):
         if not fields.get(required):
             raise FrpcLaunchError("代理规格缺少必填字段 %s: %s" % (required, spec))
@@ -737,6 +748,20 @@ def parse_proxy_spec(spec: str) -> dict:
         raise FrpcLaunchError("tcp/udp 代理必须提供 remotePort: %s" % spec)
     if fields["type"] in ("http", "https") and not fields.get("customDomains"):
         raise FrpcLaunchError("http/https 代理必须提供 customDomains: %s" % spec)
+    if fields["type"] in ("http", "https") and "remotePort" in fields:
+        raise FrpcLaunchError("http/https 代理不使用 remotePort；请核对公网入口与 vhost 端口")
+    if fields["type"] in ("tcp", "udp") and "customDomains" in fields:
+        raise FrpcLaunchError("tcp/udp 代理不使用 customDomains")
+    if "locations" in fields and fields["type"] != "http":
+        raise FrpcLaunchError("locations 只适用于 http 代理，不能用于 %s" % fields["type"])
+    for key in ("customDomains", "locations"):
+        if key not in fields:
+            continue
+        values = [value.strip() for value in fields[key].split(",")]
+        if any(not value for value in values):
+            raise FrpcLaunchError("%s 必须是非空的逗号分隔列表" % key)
+        if key == "locations" and any(not value.startswith("/") for value in values):
+            raise FrpcLaunchError("locations 的每个路径必须以 / 开头")
     for port_key in ("localPort", "remotePort"):
         if port_key in fields:
             fields[port_key] = _validated_port(fields[port_key], port_key)
@@ -763,11 +788,16 @@ def render_frpc_toml(server_addr: str, server_port: int, token: str, proxies: li
                   "name = %s" % json.dumps(p["name"]),
                   "type = %s" % json.dumps(p["type"]),
                   "localPort = %d" % int(p["localPort"])]
+        if "localIP" in p:
+            lines.append("localIP = %s" % json.dumps(p["localIP"]))
         if "remotePort" in p:
             lines.append("remotePort = %d" % int(p["remotePort"]))
         if "customDomains" in p:
             domains = [d.strip() for d in p["customDomains"].split(",") if d.strip()]
             lines.append("customDomains = [%s]" % ", ".join(json.dumps(d) for d in domains))
+        if "locations" in p:
+            locations = [location.strip() for location in p["locations"].split(",")]
+            lines.append("locations = [%s]" % ", ".join(json.dumps(p) for p in locations))
     return "\n".join(lines) + "\n"
 
 
@@ -963,7 +993,9 @@ def cmd_status(args) -> int:
             if os_subdir else {}
         modes[mode] = {
             "running": running,
-            "verified": record.get("verified", True) if running else None,
+            "verified": record.get("verified") if running else None,
+            "verification_scope": "startup_log",
+            "public_endpoint": "not_checked",
             "pid": record.get("pid") if running else None,
             "config_source": source_map.get(mode, ""),
             "binary_version": meta.get("version", ""),
@@ -973,7 +1005,8 @@ def cmd_status(args) -> int:
         "%s: %s%s%s" % (
             m,
             "运行中 (pid %s)" % v["pid"] if v["running"] else "未运行",
-            "（未见登录成功证据）" if v["running"] and v["verified"] is False else "",
+            ("（启动时见成功日志，公网入口未检查）" if v["verified"] is True
+             else "（启动日志证据未确认，公网入口未检查）") if v["running"] else "",
             "，配置来源: %s" % v["config_source"] if v["config_source"] else "")
         for m, v in modes.items())
     _emit(args, {"modes": modes}, human)
@@ -1114,7 +1147,7 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
             if record.get("config_digest") == digest:
                 # review M2：timeout 写入的记录标记 verified=false；
                 # 二次 start 必须复核成功证据，不得把未登录成功的进程报成 0
-                if not record.get("verified", True):
+                if not record.get("verified", False):
                     # review I2：复核成功证据必须扫全量日志（尾部窗口会被后续日志顶掉）；
                     # review W2：先掩码再截断，避免 secret 跨切片边界残留明文
                     try:
@@ -1213,11 +1246,14 @@ def cmd_start(args) -> int:
         return 4
     result = _start_one_mode(args, mode, decision, layered)
     exit_code = result.pop("exit_code")
+    # 启动日志不证明各条代理、当前连接或公网业务可用；不从配置猜公网 URL。
+    result["verification_scope"] = "startup_log"
+    result["public_endpoint"] = "not_checked"
     human_map = {
-        "ok": "frpc（%s 模式）启动成功，配置来源: %s%s" % (
+        "ok": "frpc（%s 模式）已见启动成功日志，公网入口未检查，配置来源: %s%s" % (
             mode, result.get("config_source", ""),
             "（使用了全局配置）" if result.get("config_source") == "global" else ""),
-        "already_running": "frpc（%s 模式）已在运行（pid %s），未重复拉起" % (
+        "already_running": "frpc（%s 模式）已在运行（pid %s），未重复拉起；公网入口未检查" % (
             mode, result.get("pid")),
         "config_changed": result.get("detail", "配置已变更，需确认"),
     }

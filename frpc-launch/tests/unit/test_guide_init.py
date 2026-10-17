@@ -3,6 +3,7 @@ import os
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -23,10 +24,10 @@ def test_parse_proxy_spec_tcp_requires_remoteport():
 
 
 def test_render_frpc_toml():
-    text = render_frpc_toml("devfrp.zhidalab.cn", 7005, "tok_1234567890", [
+    text = render_frpc_toml("frps.example.com", 7000, "tok_1234567890", [
         parse_proxy_spec("name=web;type=http;localPort=8080;customDomains=demo.example.com")])
-    assert 'serverAddr = "devfrp.zhidalab.cn"' in text
-    assert "serverPort = 7005" in text
+    assert 'serverAddr = "frps.example.com"' in text
+    assert "serverPort = 7000" in text
     assert 'auth.token = "tok_1234567890"' in text
     assert "[[proxies]]" in text and 'customDomains = ["demo.example.com"]' in text
 
@@ -57,7 +58,7 @@ def test_guide_init_global_official_writes_toml_0600(tmp_path):
     cwd.mkdir()
     r = _run_guide(home, cwd, {"FRPC_LAUNCH_INIT_TOKEN": "tok_abcdefgh1234"},
                    "--scope", "global", "--source", "frps",
-                   "--server-addr", "devfrp.zhidalab.cn", "--server-port", "7005",
+                   "--server-addr", "frps.example.com", "--server-port", "7000",
                    "--proxy", "name=web;type=http;localPort=8080;customDomains=d.example.com")
     assert r.returncode == 0, r.stderr
     toml = home / "frpc.toml"
@@ -154,3 +155,51 @@ def test_guide_init_reads_skill_layer_and_preserves_source_file(tmp_path):
     override = _run_guide(home, project, {"FRPC_LAUNCH_INIT_TOKEN": "process-token-012345"}, "--scope", "project", "--source", "frps", "--server-addr", "example.com", "--server-port", "7000")
     assert override.returncode == 0, override.stderr
     assert 'auth.token = "process-token-012345"' in (project / "frpc.toml").read_text()
+
+
+def test_guide_init_preserves_host_path_and_local_destination(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "project"
+    project.mkdir()
+    result = _run_guide(
+        home, project, {}, "--scope", "project", "--source", "baota",
+        "--server-addr", "frps.example.com", "--server-port", "7000",
+        "--proxy", "name=web;type=http;localIP=127.0.0.1;localPort=8080;"
+                   "customDomains=app.example.com;locations=/",
+        "--proxy", "name=api;type=http;localIP=192.0.2.10;localPort=8081;"
+                   "customDomains=app.example.com;locations=/api/,/health")
+    assert result.returncode == 0, result.stderr
+    config_path = project / "frpc.toml"
+    config = tomllib.loads(config_path.read_text())
+    assert config["proxies"] == [
+        {"name": "web", "type": "http", "localIP": "127.0.0.1", "localPort": 8080,
+         "customDomains": ["app.example.com"], "locations": ["/"]},
+        {"name": "api", "type": "http", "localIP": "192.0.2.10", "localPort": 8081,
+         "customDomains": ["app.example.com"], "locations": ["/api/", "/health"]},
+    ]
+    assert str(config_path.resolve()) in (project / ".env.local").read_text()
+    assert not (home / "frpc.toml").exists()
+
+
+@pytest.mark.parametrize("spec", [
+    "name=web;type=http;localPort=8080;customDomains=app.example.com;location=/api/",
+    "name=web;type=http;localPort=8080;customDomains=app.example.com;localPort=8081",
+    "name=web;type=https;localPort=8080;customDomains=app.example.com;locations=/api/",
+    "name=web;type=http;localPort=8080;customDomains=app.example.com;locations=api/",
+    "name=web;type=http;localPort=8080;customDomains=app.example.com;locations=/api/,,/",
+    "name=web;type=http;localPort=8080;customDomains=,",
+    "name=web;type=http;localPort=8080;customDomains=app.example.com;localIP=",
+    "name=web;type=http;localPort=8080;customDomains=app.example.com;remotePort=9000",
+    "name=web;type=tcp;localPort=8080;remotePort=9000;customDomains=app.example.com",
+])
+def test_invalid_route_does_not_overwrite_existing_files(tmp_path, spec):
+    home, project = tmp_path / "home", tmp_path / "project"
+    project.mkdir()
+    config, env = project / "frpc.toml", project / ".env.local"
+    config.write_text('serverAddr = "existing.example.com"\n')
+    env.write_text("OTHER_SETTING=keep\n")
+    before = (config.read_bytes(), env.read_bytes())
+    result = _run_guide(home, project, {}, "--scope", "project", "--source", "frps",
+                        "--server-addr", "frps.example.com", "--server-port", "7000",
+                        "--proxy", spec)
+    assert result.returncode == 1
+    assert (config.read_bytes(), env.read_bytes()) == before

@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "frpc-launch",
+  "channel": "stable",
+  "tag_prefix": "frpc-launch/v",
+  "ref_type": "tag"
+}

@@ -32,7 +32,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | feishu-use | 1.2.0 | [feishu-use/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.2.0) |
-| frpc-launch | 1.3.0 | [frpc-launch/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.3.0) |
+| frpc-launch | 1.3.1 | [frpc-launch/v1.3.1](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.3.1) |
 | git-setup | 0.4.0 | [git-setup/v0.4.0](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv0.4.0) |
 | image-2 | 1.3.0 | [image-2/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.3.0) |
 | memoji-sticker-pack | 1.3.0 | [memoji-sticker-pack/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.3.0) |

@@ -51,6 +51,12 @@ def test_start_success_reports_global_source(tmp_path):
         assert r.returncode == 0
         assert out["result"] == "ok" and out["config_source"] == "global"
         assert "login to server success" in out["log_tail"]
+        assert out["verification_scope"] == "startup_log"
+        assert out["public_endpoint"] == "not_checked"
+        status = json.loads(run_cli(home, cwd, "status").stdout)["modes"]["official"]
+        assert status["verified"] is True
+        assert status["verification_scope"] == "startup_log"
+        assert status["public_endpoint"] == "not_checked"
     finally:
         run_cli(home, cwd, "stop")
 
@@ -195,6 +201,25 @@ def test_unverified_rescan_reads_full_log_not_tail(tmp_path):
         r2 = run_cli(home, cwd, "start", "--wait", "2")
         assert r2.returncode == 0
         assert json.loads(r2.stdout)["result"] == "already_running"
+    finally:
+        run_cli(home, cwd, "stop")
+
+
+def test_legacy_pid_without_verification_does_not_imply_success(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_SILENT)
+    try:
+        assert run_cli(home, cwd, "start", "--wait", "0.5").returncode == 1
+        record_path = home / "run" / "official.pid"
+        record = json.loads(record_path.read_text())
+        del record["verified"]
+        record_path.write_text(json.dumps(record))
+        status = json.loads(run_cli(home, cwd, "status").stdout)["modes"]["official"]
+        assert status["running"] is True
+        assert status["verified"] is None
+        assert status["public_endpoint"] == "not_checked"
+        restarted = run_cli(home, cwd, "start", "--wait", "0.5")
+        assert restarted.returncode == 1
+        assert json.loads(restarted.stdout)["result"] == "running_unverified"
     finally:
         run_cli(home, cwd, "stop")
 
