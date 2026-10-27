@@ -1,170 +1,99 @@
 # pdf2markdown
 
-把**一个** PDF 转成一份可复核的 Markdown 工作目录（work bundle）：冻结来源、逐页建立基线、经 Doc2X 转换、对全文做内容语义复核、只允许证据绑定的修正，最后选出一个本地 final Markdown 指针。
+把一份 PDF 转为可继续处理的 Markdown：AIHub Doc2X 完成云端转换，Claude Code、Codex 或 WorkBuddy 对照全部页图核验内容、修订错误，最后在本地交付 Markdown、图片、核验报告和三栏对照预览。
 
-运行时由 uv 管理（工作区 ADR 0007）：`pyproject.toml` 声明 `requires-python >= 3.9`，Python 依赖 PyMuPDF 与 BeautifulSoup4 锁在同目录 `uv.lock`，环境落 `<skill>/.venv`。所有命令写 `uv run --project <skill> <skill>/scripts/workflow.py ...`，**不要裸 `python3`**——裸 `python3` 按 PATH 解析到系统解释器，那里没有锁定依赖。写错了也有兜底：`workflow.py` 启动时把进程 exec 回 `<skill>/.venv`，环境缺失按 `uv.lock` 自动重建（stderr 打一行 `[bootstrap]`），只有 uv 本体缺失或版本低于 0.8 才报错停下。
+适合需要保留原稿、检查表格和公式、追踪修订或中途续跑的文档处理。每次处理一份 PDF；不自动删除品牌、公司介绍、联系方式、二维码或页眉页脚，也不接入飞书任务表、OSS 发布和通知。
 
-Pandoc 是**系统级可执行文件**，不由 uv 管理，也**从不自动安装**（macOS: `brew install pandoc`）。`advance` 会真实执行预检确认 PyMuPDF、Pandoc、BeautifulSoup4 的 API 可用；任一不可用记为 `recoverable_error / dependency_missing`（预检输出的 `detail` 字段带底层异常原文，便于区分「没装」和「装坏了」），装好后用新返回的 generation 重跑同一条命令即可。
+## 让 Agent 帮你安装
 
-**适用**：转换结果需要被复核和追责的场景——正式文档、需要保留原始产物、需要说清「哪一处改了、依据是什么」、中途会中断需要续跑。
+在 Claude Code、Codex 或 WorkBuddy 中复制这段话：
 
-**不适用**：只需一次性转换、不需要复核记录的场景。本 skill 的每一步都要求显式确认、写入历史、可回溯，流程明显更长。
+> 请安装 cookaihq/cookai-skills 仓库中的独立 Skill pdf2markdown。优先从 https://github.com/cookaihq/cookai-skills 安装，遇到网络故障时自动尝试同项目的 https://cnb.cool/zhidateam/tannt/tannt-skills，仓库内目录都是 pdf2markdown；保留已有设置，并验证当前 Agent 能发现和调用它。
 
-## 它解决什么
+本页对应 **2.0.0**，固定版本使用标签 `pdf2markdown/v2.0.0`。从 1.x 升级前先阅读下方迁移说明；已有任务继续使用原版本完成，或提供已有 Doc2X ZIP 在新版重新核验。
 
-一次性转换工具的问题不在转得准不准，而在**转完之后无从追责**：哪些页漏了、表格是不是被合并错了、公式有没有掉、某一处措辞是转换器改的还是原文如此——都答不上来。重转一次还要再付一次费。
+三宿主共用一份 Skill。Claude Code 的本地入口是 `~/.claude/skills/pdf2markdown`，Codex 是 `~/.agents/skills/pdf2markdown`，两者可按技能链接到检出目录；WorkBuddy 本地安装使用 `~/.workbuddy/skills/pdf2markdown`，从同一来源生成安装副本，不要求符号链接。Codex 可用 `$pdf2markdown` 显式调用，Claude Code 可用 `/pdf2markdown`，WorkBuddy 可在新会话点名使用 `pdf2markdown`。自然语言请求也属于预定触发范围。
 
-所以这里不是一个转换命令，而是一个**带状态的工作目录**：
+Agent 需要能够读取本地 PNG。运行工具为 uv（0.8 或更高）和 Pandoc **3.10.1**；Python 与依赖按随包锁文件准备，不下载本地模型。Pandoc 缺失或版本不符时，Agent 会说明需要安装的版本与位置，确认后再安装系统工具。
 
-- **来源被冻结**：`source.pdf` 及其 SHA-256 是唯一事实来源，后续每一步都绑定它
-- **原始产物不可变**：Doc2X 返回的 ZIP 经完整校验后原子采纳为 `03-converted/attempts/conversion-attempt-NNNN/`，此后只读；修正写在别处，原始基线永远留着
-- **每一步都进 append-only 历史**：`.state/history.ndjson` 只追加不改写，任何一次崩溃都能从中间状态恢复到确定结果
-- **付费动作必须显式授权**：上一次尝试出现提交结果不明、明确失败、结果数量异常、结果版式不可用时，**不会**自动重试——必须拿一个一次性 `action_id` 显式决策，避免重复扣费
-- **修正必须有证据**：每处修改绑定到源页、Markdown 块、字节锚点和原文哈希；风格改写、总结、翻译、无依据补全一律拒绝
+本次验证状态：macOS 的 110 项自动测试、本地合成文档核验闭环和浏览器三栏预览已通过。Claude Code 技能列表与 Codex 原生加载接口能发现 2.0.0；各客户端的完整业务流程、WorkBuddy 发现、真实 Doc2X 请求和 Windows 原生环境仍待验收。Windows 的运行时路径、锁及文件替换适配已加入，不能据此视为实机通过。
 
-## 快速开始
+## 完成首次配置
 
-```bash
-# 1. 冻结来源，建立工作目录
-uv run --project <skill> <skill>/scripts/workflow.py start --source ./paper.pdf
+需要 AIHub 账号的 `AIHUB_API_KEY`，用于上传 PDF、创建 Doc2X 转换任务及查询结果。接口固定为 `https://api.aihubmax.com`，无需飞书账号或 OSS 配置。已有同一 PDF 的 Doc2X ZIP 时，可以跳过上传和转换，无需 Key，仍进行逐页核验。
 
-# 2. 渲染每页 PNG 基线（需显式声明宿主能看图）
-uv run --project <skill> <skill>/scripts/workflow.py advance \
-  --work-bundle <dir> --expected-generation <n> --visual-capability available
+> 请帮我配置 pdf2markdown，沿用已有选择，或让我选择 secret-book / 自填 .env。首次新增默认保存在个人全局，已有错误修复实际生效的原文件；选择 secret-book 时按它的流程取值保存。告诉我写入位置和实际来源，隐藏密钥值。
 
-# 3. 逐页提交 preflight 结论（JSON 输入，schema 见 references/preflight-contract.md）
-uv run --project <skill> <skill>/scripts/workflow.py record preflight \
-  --work-bundle <dir> --expected-generation <n> \
-  --action-id <id> --evidence-hash <sha256> --input preflight-record.json
+手填时由 Agent 定位文件，你在本机填写，不必把完整密钥发到聊天里。新增全局配置通常保存在下表位置，须经你授权才写入。选择项目保存时使用工作文件夹的 `.env.local`，先检查文件未被 Git 跟踪且已忽略；不会同时复制到两处。
 
-# 4. 之后的来源暂存、创建 Doc2X 任务、轮询、采纳结果，全部由 resume 推进
-uv run --project <skill> <skill>/scripts/workflow.py resume --work-bundle <dir> --expected-generation <n>
+| 运行环境 | 全局配置文件 |
+| --- | --- |
+| macOS / Linux | 当前用户个人文件夹下的 `.config/pdf2markdown/.env`，如 `/Users/你的用户名/.config/pdf2markdown/.env` |
+| Windows 原生 | Python `Path.home()` 指向的用户文件夹下 `.config\pdf2markdown\.env`，通常为 `C:\Users\你的用户名\.config\pdf2markdown\.env`；由 Agent 在实际环境确认 |
+| WSL | WSL 用户个人文件夹下 `.config/pdf2markdown/.env`，如 `/home/你的用户名/.config/pdf2markdown/.env`，与 Windows 配置分开 |
 
-# 5. 采纳完成后开复核轮次，提交复核记录
-uv run --project <skill> <skill>/scripts/workflow.py resume \
-  --work-bundle <dir> --expected-generation <n> --visual-capability available
-uv run --project <skill> <skill>/scripts/workflow.py record review \
-  --work-bundle <dir> --expected-generation <n> \
-  --action-id <id> --evidence-hash <sha256> --input review-record.json
+读取顺序为：运行程序时的环境变量 → 工作文件夹中的 `.env.pdf2markdown` → `.env.local` → `.env` → **明确启用的**个人全局 `.env`。每项独立取首个非空值；不向父目录寻找，不扫描其他 Skill 的文件。工作文件夹是发起转换的项目目录，和 Skill 安装目录不同。
 
-# 随时只读查看状态
-uv run --project <skill> <skill>/scripts/workflow.py inspect --work-bundle <dir>
-```
+使用全局配置时，对 Agent 说“本次使用 pdf2markdown 的个人全局配置”，Agent 会在本次及续跑命令中显式启用。全局默认保存不改变上述优先级。任务保存所用凭证的来源和哈希，恢复时继续使用同一来源；密钥变更时会停下说明，不换账号继续请求。
 
-每个命令在 stdout 输出**恰好一个**带版本的 JSON 对象；stderr 只是诊断日志，不要从中推断成功。每次调用后保存返回的 `generation`、一次性 `action_id` 和 `evidence_hash`，下一条命令要用。
+可选的 `PDF2MARKDOWN_OUTPUT_DIR` 按相同顺序设置输出根目录；本次明确指定的目录优先。诊断请求：
 
-来源接受一个本地普通文件，或一个**无需鉴权的公开 HTTPS** PDF 链接（不接受符号链接、目录、特殊文件，也不接受带 userinfo / cookie / 自定义请求头的 URL）。
+> 请检查 pdf2markdown 的实际工作文件夹、AIHUB_API_KEY 是否已填写及来自哪里；不要显示密钥，也不要为检查配置创建转换任务。
 
-输出根目录按 `--output-dir` → `PDF2MARKDOWN_OUTPUT_DIR` → `$PWD/pdf2markdown-output` 顺序决定。
+保存成功只说明本机配置已写入，不等于线上鉴权或转换已成功。secret-book 可用于配置，不是日常转换的依赖；表中改值不会自动同步本机。
 
-## 工作目录结构
+## 第一次使用
 
-```text
-<work-bundle>/
-├── manifest.json                 # 权威状态：generation、conversion_state、settings 快照、artifacts
-├── .state/
-│   ├── private.json              # 私有数据：临时上传 URL、结果 URL（不进 manifest、不进 stdout）
-│   ├── history.ndjson            # append-only 事件历史，崩溃恢复的依据
-│   └── lock                      # 写锁
-├── 01-source/
-│   ├── source.pdf                # 冻结的来源，SHA-256 即身份
-│   └── source-inventory.json     # 非视觉证据：链接目标、表单值、旋转、图片、注释
-├── 02-pages/                     # 每页一张无损全页 PNG（默认 300 DPI，可 72-600）
-├── 03-converted/attempts/
-│   └── conversion-attempt-NNNN/  # 每次尝试的 result.zip + 解压出的原始树，采纳后不可变
-├── 04-review/                    # 复核证据、修正后 Markdown、diff、裁剪图
-└── 05-published/                 # 预留；当前实现不做发布
-```
+PDF 会上传到 AIHub，转换可能消耗账号额度；页图核验由宿主 Agent 按其数据处理方式执行。结果保存在本地，不代表 PDF 内容全程不离开电脑。请求转换后，流程不增加每次计费前的额外询问。
 
-不要直接编辑 `manifest.json`、`.state/private.json`、`.state/history.ndjson`——所有写入都必须经命令边界，否则下次 `inspect` 会以 `invalid_bundle`（退出码 4）拒绝。
+将 PDF 提供给 Agent，继续对话：
 
-## 配置
+> 使用 pdf2markdown 转换这份 PDF，使用我已配置的个人全局 Key，对照每一页核验文字、表格、公式和图片。结果放到我指定的“文档转换结果”文件夹，保留原稿，并说明无法确认的内容。
 
-**交互模式**决定遇到需要拍板的岔口时怎么办：
+支持本地 PDF 和无需登录、Cookie 的公开 HTTPS PDF 链接。Agent 返回独立任务目录，以及其中 `result/` 下的：
 
-```bash
-uv run --project <skill> <skill>/scripts/workflow.py settings init
-uv run --project <skill> <skill>/scripts/workflow.py settings set-mode confirm   # 默认：返回一次性动作，等显式决策
-uv run --project <skill> <skill>/scripts/workflow.py settings set-mode auto      # 自动接受 warning；但不明 / 失败结果仍然停住
-```
+| 文件 | 用途 |
+| --- | --- |
+| `source.pdf` | 原 PDF 副本，输入文件不被修改 |
+| `direct.md` | 直转稿，图片引用改为本地相对路径 |
+| `final.md` | 应用有原文证据的修订后的 Markdown |
+| `images/` | 两份 Markdown 所需图片 |
+| `index.html` | 同时查看 PDF、直转稿、最终稿；可隐藏或重新展开各栏 |
+| `review.json` | 每轮核验、修订及未解决问题 |
+| `manifest.json` | 文件清单与哈希 |
 
-`auto` 不等于全自动：它只自动接受 preflight warning，**不会**替你承担任何可能重复扣费的决定。
+没有指定目录时，结果根目录为工作文件夹下的 `pdf2markdown-output/`；每份 PDF 使用一个 `document-*` 任务目录。整个任务目录保留来源、页图、原始 ZIP 和恢复状态，不自动删除。分享时复制整个 `result/`，不要只拿走 Markdown，也不要分享含临时 URL 的 `.state/`。
 
-**发布模式**默认 `skip`。当前实现不制定也不执行发布计划，`publishing.mode=upload` 在没有完整 publisher 绑定时视为 blocked。
+预览无需 CDN；浏览器限制本地 PDF 嵌入时，可使用预览中的 PDF 下载链接。文件已经生成与内容全部核实是两种结果：有不可辨认内容、疑似漏图、未解决的页级问题或终轮再次修订时，Agent 会明确列出仍需核实的事项。
 
-**非 Secret 值**按此顺序逐项独立解析（取首个非空）：命令行选项 → 进程环境变量 → `$PWD/.env.pdf2markdown` → `$PWD/.env.local` → `$PWD/.env` → 经显式授权的 home `.env` → `settings.json` → 内置默认。可用变量：`PDF2MARKDOWN_INTERACTION_MODE`、`PDF2MARKDOWN_PUBLISH_MODE`、`PDF2MARKDOWN_UPLOADER`、`PDF2MARKDOWN_UPLOAD_TARGET`。dotenv 值按字面处理，不做 shell 展开。
+## 常用请求
 
-`PDF2MARKDOWN_OUTPUT_DIR` 控制新建工作目录的存放位置，按 `--output-dir` → 进程变量 → `.env.pdf2markdown` → `.env.local` → `.env` → 经 `--use-local-key` 启用的 home 文件 → 内置目录解析；不从 `settings.json` 读取。
+- “继续上次的 pdf2markdown 任务，目录是……”：从原检查点恢复，同一个转换任务继续查询；核验过的页不从头再做。
+- “用这份 PDF 和它已有的 Doc2X ZIP 重新核验，不再次转换”：跳过上传与计费创建。程序不能独立证明 ZIP 与 PDF 配对，由你提供正确组合。
+- “查看这个任务目前到哪一步”：只检查状态和已保存文件，不创建转换任务。
 
-**Secret**（`AIHUB_API_KEY`）只走：进程环境变量 → `$PWD/.env.pdf2markdown` → `$PWD/.env.local` → `$PWD/.env` → `~/.config/pdf2markdown/.env`（**仅在显式传 `--use-local-key` 时**）。该授权只对当前这一次调用生效，不会被保存、也不会被工作目录继承。不要把任何 key、凭证、签名 URL 放进 `settings.json`。
+每页至少核验一次，首轮修改过的页再复核一次。页与 Markdown 块的对应是启发式候选，Agent 仍需看整页及相邻内容。完全缺失且没有可替换块的段落、无法安全修复的图片等问题会进入报告，不凭空补写。
 
-来源暂存与后续轮询会记录所用凭证的**位置和指纹**（不记录 key 本身）；401 之后不会回退到优先级更低的来源，轮询也不会改用另一个账户。
+## 遇到问题
 
-## 中断与续跑
+- **网络中断或轮询窗口耗尽**：让 Agent 继续原任务，仍使用已经创建的任务 ID。查询与下载有次数、时长上限。
+- **上传或创建结果不明**：让 Agent 核对上游状态；恢复不会重发该创建请求，也不能把“再新建一个”当作自动修复。
+- **Key 缺失、变更或鉴权拒绝**：让 Agent 报告实际来源，选择修复本机配置或通过 secret-book 保存。网络、余额和权限错误不直接当作 Key 错误。
+- **依赖问题**：让 Agent 检查冻结运行环境及 Pandoc 3.10.1。Skill 自有 Python 环境可按锁文件修复，系统工具安装另行确认。
+- **文件被改动或旧任务格式**：保留现状，让 Agent 检查；不要手动修改检查点、页图或原始解压文件来跳过校验。
 
-`resume` 是唯一的推进命令，也是唯一的恢复命令——它按保存的状态判断该做什么，不需要你告诉它走到哪了：
+## 从 1.x 升级
 
-```bash
-uv run --project <skill> <skill>/scripts/workflow.py resume --work-bundle <dir> --expected-generation <n>
-```
+2.0.0 改用 `run / resume / inspect / record-review`，不再使用旧的 `start/advance/record preflight`、代次参数、`settings.json` 和发布设置。已有 `AIHUB_API_KEY`、项目配置层和显式全局配置继续有效。
 
-- `--expected-generation` 传 `start` 或 `inspect` 最近返回的值。不匹配返回 `generation_conflict`（退出码 5），先 `inspect` 再重试
-- `bundle_locked` 说明有别的写入者在跑，等它结束
-- 默认从工作目录里冻结的设置快照恢复，**忽略**之后环境变量、dotenv、持久设置的漂移；显式覆盖会产生新 generation 并追加证据，旧历史不变
-- 待处理的复核 / 修正 / 歧义动作**不会**被 `resume` 消费掉——必须走对应的 `record` 命令
+旧任务不自动迁移。对 Agent 说：
 
-**付费重试为什么要显式确认**：Doc2X 任务按次计费，而「提交结果不明」意味着上游可能已经建了任务并已计费。此时自动重试等于替用户承担一次未经同意的扣费。所以这些情况一律停住并返回一个绑定的一次性动作，只有 `record conversion --decision retry --basis <理由>` 能授权新的一次付费尝试；它追加一条新 attempt，绝不改写旧的。`auto` 模式下这些情况同样停住，不会有隐式的第二次扣费。
+> 这是一份未完成的 pdf2markdown 1.x 任务，请从同一仓库的固定标签 pdf2markdown/v1.3.0 获取独立安装，用它完成原任务，保留现有安装和任务文件。若已有 Doc2X ZIP，也可以用 2.0.0 新建核验任务，避免再次转换。
 
-已经付过钱的产物不会因为后续步骤失败而丢弃：即使 ZIP 的 Markdown 版式不符合预期（`unexpected_result_layout`），通过安全校验的 ZIP 和原始树仍然被采纳保存，只是不声称 `raw_markdown` 产物。
+已发布的 [1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv1.3.0) 是旧流程的获取入口；不能用新版直接改写旧检查点。
 
-## 退出码
+## 更新
 
-| 码 | 含义 |
-|---|---|
-| `0` | 命令完成——看 `outcome` / `conversion_state` / `action_required` / `errors` 判断实际进展 |
-| `2` | 命令参数错 |
-| `3` | 来源不合格：给一个可解析的本地 PDF 或满足安全约束的公开 HTTPS PDF |
-| `4` | 工作目录完整性 / schema 失败——停下来修复或恢复，不要绕过 |
-| `5` | generation 过期或有并发写入者 |
-| `6` | 持久设置无效或显式覆盖无效 |
-| `7` | 下载来源时持续网络故障（DNS 解析失败 / 连接超时或失败 / 读超时或读失败），已按 ADR 0006 重试 3 次仍不成功。**来源本身可能完全没问题**——`action_required` 是 `retry_after_network_recovery`，恢复网络后重跑同一条命令，不要换 URL |
+每次调用先自动检查更新，检查失败可继续当前任务，安装更新须你逐次确认。Git 检出使用系统对应的 Bash / PowerShell 适配器；WorkBuddy 等复制安装使用随包 `update.json` 定位此 Skill 的稳定标签和固定提交，缺少可靠更新能力时报告原因并继续工作。
 
-`3` 与 `7` 的分界：`3` 是「这个来源不行」（需要鉴权、非 200、不是 PDF、超出体积上限、对端地址不匹配、重定向异常），换来源才有用；`7` 是「网络这会儿不通」，换来源没有意义。
-
-## references
-
-| 文档 | 管什么 |
-|---|---|
-| [api-guide.md](references/api-guide.md) | AIHub 来源暂存与 Doc2X 的上游合同：哪些是已验证的上游事实、哪些是本地的保守策略，以及结果采纳合同 |
-| [preflight-contract.md](references/preflight-contract.md) | 页基线与 preflight：依赖用途、渲染与资源上限、source inventory 字段、Agent 提交记录的 schema |
-| [review-contract.md](references/review-contract.md) | 复核与修正：复核证据格式、复核记录、歧义决策、修正记录——**构造任何复核 / 决策 / 修正输入前必读** |
-| [security-limits.md](references/security-limits.md) | 公开 HTTPS 来源下载与 Doc2X 结果下载的安全边界与固定上限 |
-
-## 网络抖动处理（ADR 0006）
-
-| 调用 | 幂等性 | 策略 |
-|---|---|---|
-| 来源 PDF 下载（`pdf_source.download_https_pdf`） | 幂等 GET | 瞬时故障（DNS 失败、连接超时/失败、读超时/读失败）重试 3 次，退避 1s、2s；穷尽后退出码 `7` |
-| Doc2X 结果 ZIP 下载（`result_archive.download_and_prepare`） | 幂等 GET | 同上；重试前先删掉半截 `result.zip`（`O_EXCL` 创建，残留会让下一次直接失败）；穷尽后才落 `recoverable_error`，拿新 generation 重跑 |
-| 任务轮询（`doc2x.poll_task`） | 幂等 GET | **单次逻辑轮询内部**先重试 3 次瞬时网络故障，全失败才返回 `poll_transient` 消耗一格轮询预算——一次抖动不会白耗预算。HTTP 5xx / 非 200 仍由外层轮询循环按其间隔重试 |
-| 创建 Doc2X 任务、AIHub 来源上传 | 计费写 | **不重试**。提交结果不明一律进 `uncertain` 终态，必须 `record conversion --decision retry --basis <理由>` 显式授权新的一次付费尝试（见上文「付费重试为什么要显式确认」） |
-
-重试都会在 stderr 打一行 `[pdf2markdown] ... retry n/3 ...`（第几次 / 共几次、等待秒数、错误码）。日志不含 URL query、结果 URL 或凭证。
-
-## 安全边界
-
-来源下载和结果下载走同一套保护：校验每一次重定向、所有解析出的 A/AAAA 地址、已连接的 TLS 对端，限制响应时间与字节数，校验 `application/pdf` 与 `%PDF-` 签名。全程不发送 `AIHUB_API_KEY`、Cookie、Referer、代理凭证或浏览器状态到来源地址。URL 的 query 和 fragment 按敏感数据处理：query 只发给已验证的目标，fragment 从不发送，落盘的只有去掉 query 的 URL 加上完整原始 URL 的 SHA-256。
-
-ZIP 采纳只接受普通文件和目录、仅 stored / deflated 压缩。加密条目、符号链接、设备文件、绝对路径、逃逸路径、反斜杠、盘符、NUL 文件名、重复项、Unicode/casefold 冲突、文件与目录前缀冲突一律拒绝。从不调用 `extractall`；通过 no-follow 目录描述符以 `0700` / `0600` 创建，逐项校验 CRC、声明大小、EOF、文件哈希和整树哈希。
-
-## 测试
-
-```bash
-uv run --project <skill> --group dev python -m pytest -q
-```
-
-测试不读真实 key、不发网络请求。
-
-## 范围边界
-
-当前实现**不做**：制定或执行发布计划、调用外部图片上传器、生成引用在线资源的 Markdown。也不要在本流程内改用`upload-for-url` 或 `s3-upload` 替代其中任何一步。
+“关闭 pdf2markdown 的自动检查更新”会只修改全局文件中的 `AUTO_UPDATE_CHECK=0`。这个非敏感开关只读取该全局文件，不走业务配置的项目层，也不受全局 Key 启用选项控制。

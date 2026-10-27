@@ -21,15 +21,40 @@ def test_skill_credential_locator_can_be_resumed_without_reselecting(tmp_path):
     assert config.resolve_api_key(environ={}, **kwargs).value == "local-key"
 
 
-def test_skill_settings_layer_survives_snapshot_validation(tmp_path):
-    (tmp_path / ".env.pdf2markdown").write_text("PDF2MARKDOWN_INTERACTION_MODE=auto\nPDF2MARKDOWN_PUBLISH_MODE=''\nPDF2MARKDOWN_OUTPUT_DIR=skill-output\n")
-    (tmp_path / ".env.local").write_text("PDF2MARKDOWN_INTERACTION_MODE=confirm\nPDF2MARKDOWN_PUBLISH_MODE=skip\n")
+def test_output_directory_follows_the_same_layers(tmp_path):
+    (tmp_path / ".env.pdf2markdown").write_text("PDF2MARKDOWN_OUTPUT_DIR=skill-output\n")
+    (tmp_path / ".env.local").write_text("PDF2MARKDOWN_OUTPUT_DIR=local-output\n")
     kwargs = dict(environ={}, cwd=tmp_path, config_home=tmp_path / "home", use_local_key=False)
-    result = settings.resolve(None, cli={}, **kwargs)
-    assert result["interaction_mode"] == "auto"
-    assert result["sources"]["interaction_mode"] == "cwd_dotenv_skill"
-    assert result["sources"]["publishing.mode"] == "cwd_dotenv_local"
     assert settings.resolve_variable("PDF2MARKDOWN_OUTPUT_DIR", **kwargs) == "skill-output"
-    status = settings.status(tmp_path / "home/settings.json", cli={}, environ={}, cwd=tmp_path, config_home=tmp_path / "home", home_config_authorized=False)
-    snapshot = settings.snapshot(status, cwd=tmp_path)
-    settings.validate_snapshot(snapshot)
+    (tmp_path / ".env.pdf2markdown").write_text("PDF2MARKDOWN_OUTPUT_DIR=''\n")
+    assert settings.resolve_variable("PDF2MARKDOWN_OUTPUT_DIR", **kwargs) == "local-output"
+    kwargs["environ"] = {"PDF2MARKDOWN_OUTPUT_DIR": "process-output"}
+    assert settings.resolve_variable("PDF2MARKDOWN_OUTPUT_DIR", **kwargs) == "process-output"
+
+
+def test_parent_and_other_skill_configs_are_not_read_and_home_requires_flag(tmp_path):
+    import pytest
+    project = tmp_path / "project"
+    project.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (tmp_path / ".env").write_text("AIHUB_API_KEY=parent-key\n")
+    (project / ".env.other").write_text("AIHUB_API_KEY=other-key\n")
+    (home / ".env").write_text("AIHUB_API_KEY=home-key\n")
+    kwargs = dict(environ={}, cwd=project, config_home=home)
+    with pytest.raises(config.ConfigError):
+        config.resolve_api_key(use_local_key=False, **kwargs)
+    key = config.resolve_api_key(use_local_key=True, **kwargs)
+    assert key.value == "home-key"
+    with pytest.raises(config.ConfigError, match="not authorized"):
+        config.read_exact_api_key(key.public_identity, environ={}, config_home=home, use_local_key=False)
+
+
+def test_config_report_never_contains_secret(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("AIHUB_API_KEY", "fake-secret-do-not-print")
+    report = config.configuration_report(cwd=tmp_path)
+    assert report["AIHUB_API_KEY"]["configured"] is True
+    assert report["AIHUB_API_KEY"]["source"] == "process_environment:AIHUB_API_KEY"
+    assert "fake-secret" not in json.dumps(report)
+    assert report["online_auth_checked"] is False

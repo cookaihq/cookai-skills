@@ -15,9 +15,11 @@
 """
 
 import os
+import importlib
 import shlex
 import subprocess
 import sys
+import time
 
 # 一次性再入护栏：exec 之后仍不在目标 venv，说明 venv 目录本身坏了（例如
 # bin/python 在但不是该 venv 的解释器）。没有这个标记会无限 execv 且零输出。
@@ -26,7 +28,8 @@ import sys
 # 天然区分开。
 REEXEC_ENV = "PDF2MARKDOWN_BOOTSTRAP_REEXEC"
 
-UV_INSTALL_HINT = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+UV_INSTALL_HINT = ("winget install --id astral-sh.uv -e" if os.name == "nt"
+                   else "curl -LsSf https://astral.sh/uv/install.sh | sh")
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -35,7 +38,11 @@ SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # `UV_PROJECT_ENVIRONMENT=.venv` 时把进程 exec 进用户项目的 venv。
 # 绝对值不受影响：os.path.join 遇到绝对路径直接返回它。
 VENV_DIR = os.path.join(SKILL_DIR, os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
-VENV_PY = os.path.join(VENV_DIR, "bin", "python")
+def venv_python(venv_dir, platform):
+    return os.path.join(venv_dir, "Scripts", "python.exe") if platform == "nt" else os.path.join(venv_dir, "bin", "python")
+
+
+VENV_PY = venv_python(VENV_DIR, os.name)
 
 
 def _fail(msg):
@@ -46,9 +53,8 @@ def _fail(msg):
 def _manual_rebuild_hint():
     # 必须 shell 引用：路径含空格时，未引用的 `rm -rf /tmp/sp ace/.venv` 被照抄
     # 执行会删掉两个无关路径。
-    return "rm -rf %s && uv sync --project %s --no-dev" % (
-        shlex.quote(VENV_DIR), shlex.quote(SKILL_DIR)
-    )
+    project = "'" + SKILL_DIR.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(SKILL_DIR)
+    return "uv sync --frozen --project %s --no-dev --reinstall" % project
 
 
 def _venv_is_valid():
@@ -80,29 +86,46 @@ def _require_uv():
         _fail("uv 版本过低（需 >= 0.8，当前 %s）。请执行：uv self update" % found)
 
 
-def _sync():
+def _sync(reinstall=False):
     """按 uv.lock 冻结重建 skill 自有环境（ADR 0007 §4.1：自动修复）。"""
     sys.stderr.write("[bootstrap] 运行环境缺失，正在按 uv.lock 重建 %s ...\n" % VENV_DIR)
-    try:
-        # `--no-dev`：这里重建的是**运行时**环境。不加的话 uv 会把 dev 组
-        # （pytest 等）一并装进 .venv，让运行时环境带上只有跑测试才需要的包。
-        # 跑测试时显式用 `uv sync --project <dir> --group dev`。
-        sync = subprocess.run(["uv", "sync", "--project", SKILL_DIR, "--no-dev"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              timeout=600)  # 网络调用必设总预算（ADR 0006）
-    except subprocess.TimeoutExpired:
-        _fail("uv sync 超过 600 秒未完成，疑似网络异常。请手工执行："
-              + _manual_rebuild_hint())
-    if sync.returncode != 0 or not _venv_is_valid():
-        _fail("uv sync 失败，无法重建运行环境（请手工执行：%s）：\n%s"
-              % (_manual_rebuild_hint(),
-                 sync.stdout.decode("utf-8", "replace")))
+    command = ["uv", "sync", "--frozen", "--project", SKILL_DIR, "--no-dev"]
+    if reinstall:
+        command.append("--reinstall")
+    deadline = time.monotonic() + 600
+    for attempt in range(3):
+        try:
+            sync = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=max(0.01, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            _fail("uv sync 超过 600 秒未完成。请手工执行：" + _manual_rebuild_hint())
+        output = sync.stdout.decode("utf-8", "replace")
+        if sync.returncode == 0 and _venv_is_valid():
+            return
+        transient = any(word in output.lower() for word in (
+            "timed out", "timeout", "connection reset", "dns", "502", "503", "504", "429"))
+        delay = 2 ** attempt
+        if not transient or attempt == 2 or time.monotonic() + delay >= deadline:
+            _fail("uv sync 失败（请手工执行：%s）：\n%s" % (_manual_rebuild_hint(), output))
+        sys.stderr.write("[bootstrap] retry %s/3 in %ss (network)\n" % (attempt + 2, delay))
+        time.sleep(delay)
 
 
 def ensure():
     """确保当前进程运行在目标 venv 里；不是则 exec 拉回去，缺失则先重建。"""
     target = os.path.realpath(VENV_DIR)
     if os.path.realpath(sys.prefix) == target:
+        try:
+            for name in ("fitz", "lxml.html", "nh3"):
+                importlib.import_module(name)
+        except Exception as exc:
+            if os.environ.get(REEXEC_ENV) == target:
+                _fail("依赖修复后仍无法导入（%s: %s）" % (type(exc).__name__, exc))
+            sys.stderr.write("[bootstrap] dependency import failed (%s: %s)\n" % (type(exc).__name__, exc))
+            _require_uv()
+            _sync(reinstall=True)
+            os.environ[REEXEC_ENV] = target
+            os.execv(VENV_PY, [VENV_PY] + sys.argv)
         # 已在目标 venv：清掉本轮标记，避免派生的子进程继承后误判。
         if os.environ.get(REEXEC_ENV) == target:
             os.environ.pop(REEXEC_ENV, None)

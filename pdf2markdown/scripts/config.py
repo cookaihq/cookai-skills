@@ -58,6 +58,7 @@ def _read_bounded_dotenv(path: Path) -> dict[str, str]:
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NONBLOCK", 0)
         | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
     )
     try:
         before = os.stat(path, follow_symlinks=False)
@@ -241,3 +242,16 @@ def mask_key(value: str) -> str:
     if len(value) <= 8:
         return "****"
     return f"{value[:4]}****{value[-4:]}"
+
+
+def configuration_report(*, cwd: Path, use_local_key: bool = False) -> dict:
+    """Read the real loader and report presence/source without exposing values."""
+    try:
+        key = resolve_api_key(environ=dict(os.environ), cwd=cwd,
+                              config_home=Path.home() / ".config/pdf2markdown",
+                              use_local_key=use_local_key)
+    except ConfigError as exc:
+        return {"cwd": str(cwd), "AIHUB_API_KEY": {"configured": False,
+                "code": exc.code, "message": str(exc)}, "online_auth_checked": False}
+    return {"cwd": str(cwd), "AIHUB_API_KEY": {"configured": True,
+            "source": key.source_id}, "online_auth_checked": False}

@@ -1,198 +1,22 @@
-# AIHub Source Staging And Doc2X Contract
+# AIHub 请求与恢复
 
-This reference covers the built-in temporary upload and the Doc2X create/poll
-contract used by the core conversion workflow. It does not describe image
-publication.
+当前实现沿用已有 AIHub Doc2X 请求合同：
 
-## Verified Upstream Contract
+| 调用 | 输入／行为 |
+|---|---|
+| `POST https://api.aihubmax.com/v1/files/upload/stream` | multipart 上传冻结 `source.pdf`，`auto_cleanup=false`，Bearer `AIHUB_API_KEY`；不跟随重定向、不自动重放。 |
+| `POST https://api.aihubmax.com/v1/run/generations` | `model=doc2x-v3`、`pdf_url`、本机读取的 `page_count`、`convert_mode=md`、`formula_mode=dollar`、按源哈希命名的 `filename`、`merge_cross_page_forms`。 |
+| `GET https://api.aihubmax.com/v1/tasks/{id}?sync_upstream=true` | 只查询已保存的任务 ID，Key 必须与上传时的来源及指纹一致。 |
+| 结果 ZIP 与图片 GET | 公开 HTTPS 下载，不发送 API Key；ZIP 解压前检查路径、文件类型和资源上限。 |
 
-- Source: `https://docs.aihubmax.com/openapi/zh/upload-stream.json`
-- OpenAPI version: `1.0`
-- Retrieved: `2026-07-22`
-- Server: `https://api.aihubmax.com`
-- Operation: `POST /v1/files/upload/stream`
-- Authentication: global Bearer authentication
-- Request: `multipart/form-data`; `file` is required, while `file_name` and the
-  boolean `auto_cleanup` are optional.
-- Cleanup: `auto_cleanup` defaults to `true`; when it is `false`, insufficient
-  storage returns HTTP 403 instead of deleting an older upload.
-- Success schema: HTTP 200 may contain `id`, `filename`, `url`, `size`, and
-  `created`. The schema does not mark those response properties as required.
-- Documented response statuses include 400, 401, 403, 413, 429, and 500.
+跨页表合并开关来自源结构清单：相邻两页的表格分别到达前页末端和后页开头才启用。阈值与证据由脚本计算并保存，不由 Agent 猜参数。
 
-The upstream contract does not define a file-size limit, transport timeout,
-multipart framing implementation, redirect behavior, retry behavior, or a
-required error-body shape. Do not invent values or infer whether a remote file
-was written from an undocumented response body.
+创建请求前，程序先把已尝试提交的状态持久化。无法得到有效任务 ID 时返回 `submission_unknown`，后续 `resume` 不能再次 POST。有效任务至少验证 `id`、`model`、`type=document` 与状态；完成结果必须有唯一 ZIP URL。
 
-## pdf2markdown Interpretation
+轮询每个调用窗口最多 120 次 GET、600 秒，间隔至少 5 秒。瞬时网络错误、429、5xx 在窗口内重试；429 的 `Retry-After` 最多等待 60 秒。窗口耗尽可恢复同一个任务，不能据此判定任务失败并重新付费。下载默认总尝试 3 次，退避 1、2 秒，确定性 4xx 立即停止。
 
-The workflow always sends the already frozen `01-source/source.pdf` as the
-`file` part with filename `source.pdf`, plus `auto_cleanup=false`. It uses only
-the fixed server and operation above.
+上传后的 72 小时是沿用的本地有效期限制，只在尚未创建任务时检查。结果 ZIP URL 不推测到期时间。真实上游 URL 只保存在私有检查点，命令结果不输出。
 
-`source_upload_ready` requires all of the following:
+源 PDF 上限 256 MiB、2,000 页；每页按 144 DPI 渲染，最长边 8,192 像素、面积 40,000,000 像素。ZIP 压缩上限 512 MiB、展开上限 768 MiB、单成员 256 MiB、展开比 200:1。完整常量见 `scripts/pdf2markdown/sourcefreeze.py` 与 `zipsafe.py`。
 
-- exactly one HTTP 200 response to the POST;
-- a strict JSON object response with no duplicate keys;
-- a non-empty absolute HTTPS `url` without URL userinfo; and
-- confirmation that the streamed file bytes hash to the work-bundle source
-  SHA-256.
-
-The workflow records `expires_at` as 72 hours after the local time at which it
-validated the ready response. It does not depend on optional upstream
-`created`, and expiry never proves that the remote object was deleted.
-
-For this fixed request, HTTP 403 is the only current rejected allowlist entry:
-the official operation describes it as insufficient storage when cleanup is
-disabled. HTTP 400, 401, 413, 429, 500, other 5xx responses, redirects,
-unexpected 2xx responses, malformed responses, and transport interruption are
-`source_upload_unknown` because the current contract does not prove that no
-remote write occurred.
-
-The POST has no automatic redirect, transport retry, or key fallback. Each
-durably recorded staging intent can send at most one POST.
-
-## Verified Doc2X Contract
-
-- Source: `https://docs.aihubmax.com/openapi/zh/doc2x-v3.json`
-- Retrieved: `2026-07-22`
-- Server: `https://api.aihubmax.com`
-- Create: `POST /v1/run/generations` with global Bearer authentication.
-- Required create fields: `model`, `pdf_url`, and `page_count`.
-- Query: `GET /v1/tasks/{task_id}?sync_upstream=true` with the same Bearer
-  authentication.
-- Query statuses: `pending`, `processing`, `completed`, and `failed`.
-- Document results are ZIP references represented as `results[].url`.
-- Result URLs are documented as lasting 24 hours, but the contract does not
-  define when that window starts.
-
-The generic task OpenAPI schema does not fully describe the document-task
-shape, and its fields are not consistently marked required. The workflow
-therefore parses only `status`, `results[].url`, and `error`, while ignoring
-unknown additional fields. This does not relax the result URL rules below.
-
-## pdf2markdown Doc2X Interpretation
-
-The normalized create body always uses:
-
-```json
-{
-  "model": "doc2x-v3",
-  "pdf_url": "<private staged URL>",
-  "page_count": 1,
-  "filename": "document-<source-sha256-8>",
-  "convert_mode": "md",
-  "formula_mode": "dollar",
-  "merge_cross_page_forms": false
-}
-```
-
-`page_count` is the locally verified value, not a caller guess. The merge flag
-is true only for saved `cross_page_table` preflight evidence. The filename is
-stable and remains below the upstream 50-character bound.
-
-Only HTTP 200 with a strict JSON object and an `id` matching
-`[A-Za-z0-9][A-Za-z0-9._:-]{0,255}` becomes `submitted`. Unexpected 2xx
-responses, all non-200 responses, malformed or duplicate-key JSON, unsafe IDs,
-and network interruption are `submission_unknown`. The create POST has no
-redirect, transport retry, or key fallback, and each durably recorded
-conversion attempt can send it at most once.
-
-Polling rereads the exact credential locator and fingerprint saved by create.
-It never reruns first-found-wins or searches another account. Local source
-missing, local fingerprint drift, HTTP 401, and HTTP 404 are separate
-recoverable reasons. HTTP 403, network errors, 429, 5xx, invalid JSON, and unknown task
-shapes are `poll_transient`; a later command can only poll the same task.
-
-The upstream guidance recommends exponential backoff but does not prescribe a
-local interval, retry count, or deadline. After `task_unavailable` or
-`poll_transient`, this workflow persists the consecutive transient count and
-`next_poll_at`, starting at 8 seconds and doubling without an additional local
-cap; the current polling deadline remains the upper bound. A command before
-`next_poll_at` performs no request and keeps the same task.
-
-Pending and processing results use a persisted 720-second local polling
-window. A completed task whose `results` is null or an empty list uses a
-separate 720-second result-pending window. The 8-second base and 720-second
-windows are local, pending-validation precedent derived from the verified
-retired `pdf2md_docx` defaults of an 8-second interval and 90 attempts (historical
-source: repository commit `80939f57823ecbd1e7750dc7b8c09fa5d3da16a5`,
-`pdf2md_docx/scripts/convert.py`). They are
-not upstream service guarantees. Reaching either deadline stops the current
-window without claiming the task or result is permanently unavailable; a
-later invocation can continue querying the same task.
-
-For `completed`, every present array item must contain a non-empty absolute
-HTTPS `url` without userinfo. Missing, empty, non-string, malformed, or non-HTTPS
-entries are `unsafe_result_url`. Exact duplicate full URL strings are
-deduplicated. Zero URLs are result-pending, one distinct URL is `result_ready`,
-and multiple distinct URLs are `unexpected_result_count`.
-
-The full staged URL and result URL exist only in `.state/private.json` with mode
-`0600`. Public state and history keep hashes and non-secret identity evidence.
-For result URLs, `observed_at` and `validity_window_hours: 24` are recorded, but
-`expires_at` stays null because the upstream validity-window start is undefined.
-
-## Local Result Adoption Contract
-
-The verified upstream contract establishes that a document result is a ZIP
-reference, but it does not define archive byte limits, member-count limits,
-compression methods, internal tree layout, main-Markdown naming, redirect
-behavior, or extraction safety. The workflow therefore treats `result_ready`
-as an intermediate state and applies a separate conservative local contract.
-Those limits and their sources are recorded in
-[`security-limits.md`](security-limits.md); they are not upstream quotas.
-
-Before the result `GET`, the workflow verifies that a random staging name, its
-sibling owner-marker name, and the final attempt name are all absent, then
-durably binds a reservation to the existing conversion attempt ID, task ID,
-result URL SHA-256, and complete limits record. It creates and fsyncs an
-exclusive `0600` marker containing the reservation hash before creating and
-fsyncing the `0700` staging directory. The next durable intent binds that
-directory's device/inode identity; only then is the marker removed and the
-parent fsynced again. Reservation-only recovery may recreate the marker only
-while both marker and staging are absent. Once staging exists, the exact marker
-must match and the directory must be empty. Unreserved, preseeded, foreign, or
-replaced paths are never adopted. The workflow reads the full URL only from
-`.state/private.json`. The GET
-uses public-address and TLS-peer pinning on every hop and carries no AIHub
-Bearer credential, Cookie, Referer, proxy credential, or browser state.
-
-Only a completely parsed and streamed ZIP becomes a candidate raw conversion.
-The workflow accepts ordinary files and directories using stored or deflated
-compression, creates all output through no-follow directory descriptors, and
-verifies CRC, declared and actual size, EOF, per-file hashes, and a tree hash
-that includes explicit and implicit directories. Unsupported types,
-non-canonical `.` or `..` components, unsafe paths, conflicting explicit or
-implicit NFC/casefold namespace entries, encryption, malformed structure, and
-resource-limit violations are saved as deterministic rejection reasons without
-creating a formal final attempt directory.
-
-The ZIP and raw tree are prepared together. The workflow fsyncs the archive,
-all files, all explicit and implicit directories, the raw root, and the attempt
-root before the prepared event. The whole attempt directory is then renamed
-once, and the attempts parent is fsynced before manifest/private commit,
-including recovery from a rename boundary. A complete local ZIP is revalidated
-and locally extracted even if the signed URL is no longer usable. Without a
-complete ZIP, result HTTP 401/403/404 closes that raw operation as recoverable;
-a later resume polls only the same task with its bound credential and stores a
-replacement URL only in private state. That recoverable closure holds only
-while the task keeps offering a different URL: if the same task instead
-answers with the exact URL already rejected as unavailable, the raw operation
-closes for good as `terminal_error` with reason `result_url_not_renewed` (rc
-`0`, `action_required: null`), and further `resume` calls only report that
-same outcome without polling again. Prepared recovery accepts exactly one
-identity- and hash-matching staging or final path.
-
-Main Markdown selection is a local deterministic policy pending live Doc2X
-layout validation. Exactly one recursive basename matching
-`<request-filename>.md` wins. Without an exact match, the whole tree must have
-exactly one lowercase `.md` member. Ambiguous or absent candidates produce
-`unexpected_result_layout`; the verified ZIP and tree remain adopted for
-diagnosis, but no main-Markdown artifact is claimed. Confirm mode exposes a
-bound decision that must explicitly accept a new conversion charge before a
-new attempt is appended; auto mode stops. Raw operation history is append-only,
-so every earlier attempt ZIP/tree remains independently addressable. A
-successful adoption produces `conversion_state: converted`, which is an
-immutable upstream baseline rather than a completed content-semantic review.
+API 资料入口：[AIHub 文档](https://docs.aihubmax.com/)。具体参数和响应判定以本 Skill 已实现的请求结构为准；不把 Doc2X 原生 API 与 AIHub 代理 API 混用。

@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "pdf2markdown",
+  "channel": "stable",
+  "tag_prefix": "pdf2markdown/v",
+  "ref_type": "tag"
+}
