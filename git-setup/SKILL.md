@@ -1,8 +1,8 @@
 ---
 name: git-setup
 metadata:
-  version: "0.4.0"
-description: v0.4.0｜检查项目 Git 配置与 Harness，为当前项目接入仓库 URL，按选择生成可独立运行的 Git 脚本；也支持明确请求的发布、单向同步和项目本地/GitHub Issue 规则。
+  version: "0.5.0"
+description: v0.5.0｜检查项目 Git 配置与 Harness，为当前项目接入仓库 URL，按选择生成可独立运行的 Git 脚本；也支持明确请求的发布、单向同步和项目本地/GitHub Issue 规则。
 compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Claude Code, Codex and WorkBuddy; gh is optional for GitHub authentication.
 ---
 
@@ -33,6 +33,8 @@ node <skill>/scripts/git-setup/cli.mjs check --project <用户项目>
 管理仓、主检出、当前检出和登记来源以共同解析结果为准；旧 JSON 与本机 `gitsetup.repository` 不构成关系依据。多管理仓候选须明确选择。
 
 每次调用都先读 [标准 Harness](references/harness.md) 并检查实际项目，包括 URL、发布、同步和 Issue 请求。公开 check 提供事实，不代表脚本已理解规则；其他业务命令不再附带完整 Skill 检查。只输入 Skill 时默认完成 Harness 与 Git 配置来源检查，报告符合项、具体问题和来源、待选项及未知项，不先索要 URL 或只给帮助。读取候选脚本及其真实 hooks/CI 调用链，比较标准行为；指纹不代替语义比较。分别取得“是否采用标准”和“重新实现哪些独有功能”的决定，按实际规则和授权把 `directory`、`ruleFiles` 交给公开计划入口，生成并登记真实项目入口；不预设脚本目录。事实未变时沿用同范围明确选择。检查本身不授权写入，也不扩大本次任务。 升级先列出生成、保留和明确修改的文件。扩展优先放在所选 Harness 的 `extensions/`，旧目录外扩展继续有效；省略策略保留原值，明确空扩展列表仅停用、不删除项目文件。配置语义不变时保留原字节和权限。只有核对新目标并获同范围授权后，才传 `refreshTargets: true` 刷新根仓目标身份。具体维护和恢复规则见同一参考文档。
+
+初检发现**当前项目的 `origin` 不指向 GitHub，且已有将提交同步到 GitHub 的机制**时，按 [GitHub origin 与 Orca Issue 提醒](references/git.md#github-origin-与-orca-issue-提醒) 展示现有地址、GitHub 目标和同步依据，询问是否把 `origin` 改指该 GitHub 仓库。明确说明：**只有项目的 `origin` 指向 GitHub 仓库，Orca Workflow 的任务中才能显示当前项目的 Issue。** 已知用户使用 Orca 时直接指出当前影响；其他环境以“如果使用 Orca”说明。仅有 GitHub remote 不证明存在同步机制。此项由 Agent 根据实际调用链判断，不由 `check` JSON 自动决定；已有同范围明确选择且事实未变时沿用，不自动改绑，也不因等待选择阻塞无关已授权操作。
 
 所有业务命令输出 JSON。写入命令要求 `--apply`；这只是执行开关，Agent 应依据用户本次具体请求传入，不把它变成重复确认。状态不明、部分完成和检查未完成不能报告成功。鉴权来源使用 `auth-info`，仅输出字段是否填写及来源；选择低层 Issue CLI 时使用 `issue-resolve --input -` 验证本次输入；普通本地事项按第 4 节处理。
 
@@ -67,7 +69,7 @@ node <skill>/scripts/git-setup/cli.mjs setup --project <项目目录> --url <完
 1. 明确本次是初始化、仅增加远端、发布已有提交或配置同步。分别核对提交作者与推送身份；作者正确不证明访问账号正确。沿用项目明确作者，否则展示生效作者并取得选择。暂存区和其他未提交文件保持现状。
 2. 无 Git 时明确初始分支和作者，调用 `init`。不制造占位文件或空提交。需要首次提交时，检查忽略规则、用户批准的文件范围与暂存区，使用 Git 的显式文件清单提交；不以“设置 Git”为理由自动 `git add -A`。空目录仅完成初始化并报告尚无提交。
 3. 目标已存在时核对完整地址，调用 `remote-add`；不替换已有同名远端。创建 GitHub 仓库另读 [GitHub](references/github.md)，所有者、名称、可见性明确且用户委托创建后才调用 `repo-create`。CNB 等平台首版接入已有 Git 仓库，不调用其仓库管理 API。
-4. 用户采用标准时按 Harness 参考生成项目脚本和非敏感同步配置，保存明确的目标身份与 refs。独立仓登记只写实际 Harness 的 `repos.conf`；子模块按 Git 登记核对。Git 与 Issue 均不消费旧项目 JSON，缺 Harness 策略时停止同步；不自动迁移或删除旧文件。实际 remote 只由 Git 配置提供。恢复记录放已忽略的 `data/git-setup/`，新增忽略规则须属于实际设置授权；已跟踪秘密不能自动移出索引。
+4. 用户采用标准时按 Harness 参考生成项目脚本和非敏感同步配置，保存明确的目标身份与 refs。独立仓登记只写实际 Harness 的 `repos.conf`；子模块按 Git 登记核对。Git 与 Issue 均不消费旧项目 JSON，缺 Harness 策略时停止同步；不自动迁移或删除旧文件。实际 remote 只由 Git 配置提供。恢复记录放已忽略的 `data/git-setup/`，新增忽略规则须属于实际设置授权；已跟踪秘密不能自动移出索引。本次新建或调整 GitHub 同步机制后，按第 1 节重新核对 `origin` 提醒条件，不能仅因初检时尚无同步而漏掉提示。
 5. 首次发布前检查将提交文件及历史。`audit --ref refs/heads/<分支>` 会扫描所有可达 blob 的已知秘密模式及大文件；`publish`内置同一检查，检查发现或预算不完整会停止。发现只报告对象 SHA 和类别，不输出秘密。此检查不保证识别所有秘密。修复历史需单独明确处理决定，不能自行重写。
 6. 从外仓操作时明确 repository（登记路径，外仓自身为 .）和可选 checkout，交给共同关系解析；公开 CLI 的 project 是 Harness 管理仓。先核对该仓自己的 targets/sync、实际检出和鉴权，不套用外仓策略，也不批量执行。已采用标准时，先从项目入口生成发布计划，再以同参数和指纹执行；选中的 after-publish 扩展在发布全部成功后执行；event: explicit 仅登记，通过生成入口 project-entries 核对后按项目命令说明明确调用，不随普通发布或同步执行。未采用标准的旧项目使用 `publish --remote <主要远端> --ref <完整引用> --apply` 发布指定本地引用；只有已批准提交可发布。GitHub/CNB HTTPS 按每个完整目标读取已选文件或 gh 账号，并核对持久绑定；不回退其他账号。旧显式配置的 `--github-auth` 兼容方式见鉴权文档。其他地址保留已验证的 Git/SSH 鉴权。Token 只进入实际认证进程，不进入 remote、argv 或 Git config。
 7. `sync` 只读取已登记 Harness 策略，不读取旧共享 JSON。先不带 `--apply` 比较来源和各目标；标准项目执行时另传计划指纹及自动扩展所需 operation-id，缺少 Harness 策略时停止并先明确安装计划。脚本在读取来源对象后、任何目标写入前执行同一历史检查。来源是主要远端已经发布的引用，未发布本地分支/标签不加入。目标独有引用保留，不 force、mirror、prune；分叉、标签冲突、保护分支按实际结果报告，必要时沿项目既有 PR 流程处理。
