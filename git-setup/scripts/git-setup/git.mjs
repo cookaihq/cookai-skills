@@ -4,6 +4,7 @@ import { resolve, join, relative, isAbsolute } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { devNull } from 'node:os';
 import { auditSnapshot } from './audit.mjs';
+import { gitConfiguration } from './git-trust.mjs';
 
 const LOCAL_TIMEOUT = 15_000;
 const READ_TIMEOUT = 60_000;
@@ -33,7 +34,7 @@ async function command(project, args, { timeout = LOCAL_TIMEOUT, env = {}, netwo
   // Ambient repository selectors can silently redirect `git -C` to another tree.
   const ambient = { ...process.env };
   for (const key of Object.keys(ambient)) if (/^GIT_(?:CONFIG|TRACE|CURL_VERBOSE)/.test(key)) delete ambient[key];
-  const childEnv = { ...ambient, ...env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GCM_INTERACTIVE: 'never', LC_ALL: 'C', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull };
+  const childEnv = { ...ambient, ...gitConfiguration(), ...env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GCM_INTERACTIVE: 'never', LC_ALL: 'C', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull };
   for (const key of Object.keys(childEnv)) if (/^GIT_(?:TRACE|CURL_VERBOSE|CONFIG_PARAMETERS)/.test(key)) delete childEnv[key];
   for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_SHALLOW_FILE']) delete childEnv[key];
   const once = () => new Promise((done) => {
@@ -66,9 +67,9 @@ async function command(project, args, { timeout = LOCAL_TIMEOUT, env = {}, netwo
     const result = await once();
     if (result.unavailable) throw failure('git_unavailable', 'Git 无法执行。请按实际系统安装 Git：macOS 使用 xcode-select --install；Windows 使用 winget install --id Git.Git -e；Debian/Ubuntu 使用 sudo apt-get install git。');
     if (!networkRead || !transient(result) || attempt === 3 || result.code === 0) {
-      if (result.code !== 0 && authMetadata?.binding) {
-        const binding = authMetadata.binding;
-        result.stderr += `\n目标：${binding.target.url}；已选来源：${binding.file || (binding.method === 'gh' ? `gh:${binding.account}` : binding.source)}。`;
+      if (result.code !== 0 && authMetadata?.source) {
+        const source = authMetadata.source;
+        result.stderr += `\n目标：${source.target.url}；已选来源：${source.file || (source.method === 'gh' ? `gh:${source.account}` : 'environment')}。`;
       }
       return result;
     }

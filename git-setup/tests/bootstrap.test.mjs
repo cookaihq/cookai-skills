@@ -9,6 +9,7 @@ import https from 'node:https';
 import http from 'node:http';
 import net from 'node:net';
 import { prepareAuth, authSelection } from '../scripts/git-setup/auth.mjs';
+import { inspectRemote } from '../scripts/git-setup/git.mjs';
 import { setup } from '../scripts/git-setup/setup.mjs';
 
 const exec = promisify(execFile);
@@ -16,7 +17,6 @@ const skill = fileURLToPath(new URL('../', import.meta.url));
 const owner = execFileSync('git', ['-C', skill, 'rev-parse', '--show-superproject-working-tree'], { encoding: 'utf8' }).trim() || skill;
 const base = resolve(process.env.GIT_SETUP_TEST_ROOT || join(owner, 'tmp/git-setup/bootstrap-tests'));
 execFileSync('git', ['-C', owner, 'check-ignore', '-q', base]);
-const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 const cli = join(skill, 'scripts/git-setup/cli.mjs');
 const token = 'bootstrap-fixture-only';
 const identity = async () => ({ status: 200, data: { login: 'fixture-account', id: 1234 }, headers: {} });
@@ -25,15 +25,16 @@ const git = async (root, ...args) => (await exec('git', ['-C', root, '-c', 'comm
 async function fixture(t, { cnb = false, populated = true } = {}) {
   await mkdir(base, { recursive: true });
   const root = await mkdtemp(join(base, 'bootstrap-'));
-  const bin = join(root, 'bin'); await mkdir(bin);
-  // Keep fixtures inside the worktree while making their Git discovery boundary explicit.
-  // Production config inspection deliberately strips ambient ceiling variables. This test shim
-  // restores only that boundary and delegates every operation, including HTTPS, to real Git.
-  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-  await writeFile(join(bin, 'git'), `#!/bin/sh\nGIT_CEILING_DIRECTORIES=${quote(root)}\nexport GIT_CEILING_DIRECTORIES\nexec ${quote(realGit)} "$@"\n`, { mode: 0o755 });
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}:${previousPath}`;
-  t.after(() => { process.env.PATH = previousPath; });
+  // A metadata boundary keeps uninitialized projects from discovering the enclosing
+  // development repository, including inspection that ignores ambient Git ceilings.
+  // Unlike a POSIX executable shim this still runs native Git on Windows.
+  await writeFile(join(root, '.git'), `gitdir: ${join(root, 'uninitialized.git').replaceAll('\\', '/')}\n`);
+  const previousCeiling = process.env.GIT_CEILING_DIRECTORIES;
+  process.env.GIT_CEILING_DIRECTORIES = root;
+  t.after(() => {
+    if (previousCeiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = previousCeiling;
+  });
   const project = join(root, 'project'); await mkdir(project);
   const path = cnb ? 'group/sub/project.git' : 'example/project.git';
   const url = `https://${cnb ? 'cnb.cool' : 'github.com'}/${path}`;
@@ -84,16 +85,16 @@ async function fixture(t, { cnb = false, populated = true } = {}) {
   const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
   const env = { https_proxy: proxyUrl, HTTPS_PROXY: proxyUrl, ALL_PROXY: '', NO_PROXY: '', no_proxy: '', GIT_SSL_NO_VERIFY: '1', GIT_TERMINAL_PROMPT: '0' };
   const method = cnb ? 'cnb-url' : 'github-token';
-  const options = { url, env, apiTransport: identity, credentialsFilled: true };
+  const options = { url, env, apiTransport: identity, authMethod: method };
   const prepare = async () => {
-    const result = await exec(process.execPath, [cli, 'auth-prepare', '--project', project, '--url', url, '--auth-method', method, '--allow-ignore', '--apply'], { encoding: 'utf8', timeout: 30000 });
+    const result = await exec(process.execPath, [cli, 'credential-prepare', '--project', project, '--url', url, '--auth-method', method, '--allow-ignore', '--apply'], { encoding: 'utf8', timeout: 30000 });
     return JSON.parse(result.stdout);
   };
   const fill = async prep => writeFile(prep.credentialFile, cnb ? `https://cnb:${token}@cnb.cool/group/sub/project\n` : `${token}\n`);
   return { root, project, bare, seed, url, method, options, env, prepare, fill, requests };
 }
 
-test('GitHub file selection prepares metadata, resumes clone and keeps native Git on the selected file', async t => {
+test('GitHub file selection prepares metadata, resumes clone and uses current-source transport', async t => {
   const f = await fixture(t);
   const choice = await setup(f.project, { url: f.url });
   assert.deepEqual(choice.required, ['auth-method']);
@@ -105,10 +106,11 @@ test('GitHub file selection prepares metadata, resumes clone and keeps native Gi
   assert.equal(prep.status, 'awaiting_credentials');
   assert.equal(prep.initialization.stage, 'prepared');
   assert.equal(await readFile(prep.credentialFile, 'utf8'), '');
-  assert.equal((await lstat(prep.credentialFile)).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal((await lstat(prep.credentialFile)).mode & 0o777, 0o600);
+  else assert.equal((await lstat(prep.credentialFile)).isFile(), true); // Windows ACL is a separate host check.
   assert.equal(f.requests.length, 0);
   await f.fill(prep);
-  assert.deepEqual((await setup(f.project, { url: f.url })).required, ['credentials-filled']);
+  assert.deepEqual((await setup(f.project, { url: f.url })).required, ['auth-method']);
   assert.equal(f.requests.length, 0);
   const plan = await setup(f.project, f.options);
   assert.equal(plan.kind, 'clone');
@@ -132,8 +134,9 @@ test('GitHub file selection prepares metadata, resumes clone and keeps native Gi
   assert.equal(result.status, 'configured', JSON.stringify(result));
   assert.equal(result.pushed, false); assert.equal(result.committed, false);
   await assert.rejects(git(f.project, 'config', '--local', 'gitsetup.initialization'));
-  const native = await exec('git', ['-C', f.project, 'ls-remote', f.url], { env: { ...process.env, ...f.env }, encoding: 'utf8', timeout: 30000 });
-  assert.ok(native.stdout.includes(await git(f.bare, 'rev-parse', 'main')));
+  const remote = await inspectRemote(f.project, f.url, f.options);
+  assert.equal(remote.refs['refs/heads/main'], await git(f.bare, 'rev-parse', 'main'));
+  await assert.rejects(git(f.project, 'config', '--local', '--get', 'credential.helper'));
   assert.equal(await readFile(prep.credentialFile, 'utf8'), `${token}\n`);
   assert.equal(JSON.stringify(result).includes(token), false);
   assert.equal(f.requests.some(path => path.endsWith('git-receive-pack')), false);
@@ -155,7 +158,7 @@ test('CNB file preparation for a non-Git project preserves files and completes a
   assert.equal(await git(f.bare, 'for-each-ref'), '');
   assert.equal(await readFile(join(f.project, 'notes.txt'), 'utf8'), 'preserve this local file\n');
   assert.equal(await git(f.project, 'config', '--local', 'user.email'), 'bootstrap@example.invalid');
-  assert.equal(result.authentication.persistentHelper, true);
+  assert.equal(result.authentication.persistentHelper, false);
   assert.equal(f.requests.some(path => path.endsWith('git-receive-pack')), false);
 });
 
@@ -211,5 +214,5 @@ test('remote credential-directory collisions stop checkout and an interrupted fe
   const resumed = await setup(f.project, { ...args, apply: true, expectedFingerprint: next.fingerprint });
   assert.equal(resumed.status, 'needs_project_rules', JSON.stringify(resumed));
   assert.equal(await git(f.project, 'rev-parse', 'HEAD'), await git(f.bare, 'rev-parse', 'HEAD'));
-  assert.equal((await authSelection(f.project, f.url)).status, 'needs_input');
+  assert.equal((await authSelection(f.project, f.url)).status, 'selected');
 });

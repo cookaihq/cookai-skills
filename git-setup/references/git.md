@@ -14,7 +14,7 @@ Agent 先读取项目规则，用 `inspect(project)` 识别实际根目录、外
 
 这是 Agent 在 Skill 初检及本次配置同步后执行的检查，Claude Code、Codex、WorkBuddy 共用；Orca 是使用环境，不替代实际 Agent 宿主的判断。
 
-1. 核对当前选中仓库的 `origin` fetch/push 实际地址，以及同步配置、项目脚本、hooks 或 CI 中将该仓提交送到 GitHub 的有效入口、目标和触发方式。标准 Harness 的已登记同步入口和项目自有同步机制都纳入检查，不要求一定自动触发。展示具体来源；仅有 GitHub remote、未接入的候选脚本或相似仓库名不算依据。地址按实际主机及完整仓库路径判断，覆盖 HTTPS 和 SSH；有 URL 重写、SSH 别名、fetch/push 分离或多地址时先核实，不按 remote 名称猜测。无法确定的部分标为未知，不宣称满足条件或 Orca 可识别。
+1. 核对当前选中仓库的 `origin` fetch/push 实际地址，以及项目 Git 说明、明确项目策略、脚本、hooks 或 CI 中将该仓提交送到 GitHub 的有效入口、目标和触发方式，不要求一定自动触发。展示具体来源；仅有 GitHub remote、未接入的候选脚本或相似仓库名不算依据。地址按实际主机及完整仓库路径判断，覆盖 HTTPS 和 SSH；有 URL 重写、SSH 别名、fetch/push 分离或多地址时先核实，不按 remote 名称猜测。无法确定的部分标为未知，不宣称满足条件或 Orca 可识别。
 2. `origin` 已确认指向非 GitHub 仓库，且已有上述 GitHub 同步机制时，展示脱敏的原地址、GitHub 完整目标及同步依据，询问“保留现有 origin，还是把 origin 指向这个 GitHub 仓库”。多个 GitHub 同步目标先让用户选定；不能自行选第一个。已有添加/替换选择问题时合并询问。`origin` 缺失、已经指向 GitHub，或未发现有效 GitHub 同步机制时，不凭此规则建议切换。
 3. 提醒中必须明确：**只有项目的 `origin` 指向 GitHub 仓库，Orca Workflow 的任务中才能显示当前项目的 Issue。** 用户已说明使用 Orca，或当前会话有可靠的 Orca 上下文时，直接解释这项影响；其他环境使用“如果使用 Orca”的条件表达，不为了此提醒额外要求安装或检测 Orca。当前范围是 GitHub.com，不据此承诺 GitHub Enterprise 可被 Orca 识别。改绑是显示的必要条件，不证明账号权限、Issue 列表加载或界面验证已通过。
 4. 用户选择保留或尚未答复时保持绑定；事实和范围未变的明确选择继续沿用，不反复劝改。选择切换后，先按现有设置流程列出原仓库保留方式、分支跟踪/推送设置、同仓 Worktree，以及 Harness、脚本、hooks、CI 的具体影响，再执行用户已明确接受的方案。例如 `origin(CNB) → github(GitHub)` 不能只替换 origin 后变成 GitHub 向自身同步：须明确原 CNB 地址由哪个名称保留、同步来源/目标如何对应，并同步维护实际调用配置，不能擅自反转同步方向或丢弃原平台目标。远端名称及配置变化继续遵守项目规则和既有授权；暂未明确的部分先保留。
@@ -28,7 +28,7 @@ Agent 先读取项目规则，用 `inspect(project)` 识别实际根目录、外
 | --- | --- |
 | `inspect(project, options)` | 只读检查。返回实际根目录、仓库类型、HEAD、分支、upstream、作者、远端 fetch/push URL 和工作区状态；URL 凭证及常见 GitHub Token 脱敏 |
 | `inspectRemote(project, url, options)` | 实际执行 ls-remote，返回可见引用、SHA、默认 HEAD 与 empty；不安装 remote、不 fetch，不将失败或仅缺 HEAD 视为空仓 |
-| `setup(project, options)`（setup.mjs） | 读取本地 Git、远端及实际 Harness 策略并计划初始化/克隆/接入；apply 必须提供本次 expectedFingerprint。默认不提交或推送 |
+| `setup(project, options)`（setup.mjs） | 读取本地 Git、远端及明确项目策略并计划初始化/克隆/接入；apply 必须提供本次 expectedFingerprint。默认不提交或推送 |
 | `init(project, {branch, authorName, authorEmail})` | 三个字段必须明确；只初始化无 Git 的目录，并写仓库级作者。目录已属于任何 Git 仓库时拒绝，避免误建嵌套仓库 |
 | `addRemote(project, {name, url})` | 相同名称与相同 fetch/push 地址时不修改；地址冲突时停止。不替换 origin、不改变 upstream、不修改全局 Git 配置 |
 | `replaceRemote(project, options)` | 只由已选 replace 计划调用，核对 expectedFetch、expectedPush、expectedState；在 Git config.lock 内准备后原子替换选中远端 url/已有 pushurl。配置来自 include/全局/Worktree 独立文件时停止，其他设置保持原样 |
@@ -48,15 +48,15 @@ CLI 的发布入口先执行完整历史内容检查，再将检查结果的引�
 
 GitHub HTTPS 与 CNB HTTPS 的实际网络入口调用 `auth.mjs`，按完整远端读取已选来源，缺少选择或凭证时拒绝访问；首次流程见 [仓库鉴权](authentication.md)。CNB SSH 明确拒绝。其他平台与 GitHub SSH 保留已有项目鉴权。
 
-`options.authForUrl(url)` 供已经核验计划的调用方复用同一选择，返回 `{env, metadata}`。每次远端读取、fetch 和 push 前重新读取并检查来源；单次传输与持久设置共用 credential helper 协议。凭证仅通过环境交给该次 Git/helper 进程，不进入命令参数或 Git 配置；helper 校验主机和完整路径。`setup` 安装仓库级持续 helper，原生 Git 后续也读取同一来源，来源失效时拒绝回退。
+`options.authForUrl(url)` 供已经核验计划的调用方复用同一选择，返回 `{env, metadata}`。每次远端读取、fetch 和 push 前重新读取并检查来源；单次传输使用 get-only credential helper 协议。凭证仅通过环境交给该次 Git/helper 进程，不进入命令参数或 Git 配置；helper 校验主机和完整路径。helper 仅对本次进程有效；普通 Git 沿用其既有鉴权。
 
 本地 Git 命令最多 15 秒，远端引用读取每次最多 60 秒，传输每次最多 300 秒。只读网络操作只对明确瞬时错误尝试最多三次，退避为 1 秒和 2 秒，并记录脱敏重试原因。确定性鉴权、权限和仓库不存在错误不重试。脚本每项只调用一次 git push；Git/libcurl 在完全未收到 HTTP 响应时可能在该调用内重发传输，不能把脚本单次调用当成网络层只发送一次。即使超时或命令失败，也先回读实际引用。无法回读或结果不一致时报告 `uncertain`/`failed`，不重复写入。
 
-## 项目 Harness
+## 项目操作
 
-公开 CLI 与项目入口的 check/read/publish/sync 接受 `--repository <登记路径>` 和可选 `--checkout <该仓检出>`；公开 CLI 的 `--project` 指安装 Harness 的管理仓。预览列出安装位置、实际检出、登记依据、远端、完整 refs、鉴权来源和指纹。每仓读取自己的策略，未选择时只操作入口所属项目；错误选择不回退外仓。详见 [选仓流程](harness.md#从一份-harness-选择一个仓库)。
+check/read/publish/sync 接受 --repository <登记路径或 .> 和可选 --checkout。--project 为明确管理仓；没有外仓关系时是当前仓自身。每次选仓后核对真实远端、策略和来源。使用 --policy-directory 时读取指定 config.json；不提供时 publish/read 基于当前事实，sync 必须以 --input 提供本次方向与完整 refs。没有默认项目脚本生成或位置记录。
 
-仅在 Agent 明确调用 Skill 时，按 [标准 Harness](harness.md) 先读取实际宿主规则和调用链、比较标准。采用后使用项目规则登记的实际 `run.mjs`；位置由计划指定，不预设目录。发布/同步先预览，再以同参数和指纹执行，项目扩展使用稳定 operation-id。公开 CLI 的 publish/sync 使用已登记位置，也可显式传 `--harness-directory`；日常入口只核对必要运行文件、目标和来源，不调查无关说明。普通 URL 设置不读取 Issue 文档或旧项目 JSON，不维护远端地址副本；Harness 同步缺策略或损坏时停止。
+发布/同步先预览，再带同参数、--apply 和本次 --expected-fingerprint 执行。规则文档告知 Agent 如何选择对象与来源，业务命令不解析 Markdown。项目自动扩展需要稳定 operation-id；explicit 扩展由已有项目入口单独执行。文档交付见 [项目 Git 使用说明](project-document.md)。
 
 ## 同步数据流与完整性
 
@@ -80,7 +80,7 @@ GitHub HTTPS 与 CNB HTTPS 的实际网络入口调用 `auth.mjs`，按完整远
 
 Agent 使用 `setup --url <URL>` 取得 `needs_input` 或 `planned`。已有任意 remote 时先要求 `--action add|replace --name <名称>`，即使已有 URL 相同。只有用户明确作出且范围未变的选择，或明确继续中断的同一次设置，才可复用参数；自动采用 origin、selection 字段、计划记录和成功结果均不等于用户选择。没有 remote 默认 origin；完成后再次仅发送 URL 且从未明确选择时仍须询问。`--apply --expected-fingerprint <本次指纹>` 才执行写入，不继承旧计划的状态假设。
 
-替换保留名称，计划包含当前 fetch/push、所有分支 remote/merge/pushRemote 设置、remote.pushDefault、本仓和已验证管理仓中受影响的 Harness 目标及 sync、Git common config 对应 Worktree。相关 Harness 策略或其他 Worktree 受影响时需要 `--accept-effects`。该开关不授权同步、Issue 迁移或推送。旧 refs/remotes 和 remote HEAD 原样保留，本次不 fetch，不宣称历史关系已验证。多地址、mirror、非仓库本地的 URL 来源不能通过本入口替换。
+替换保留名称，计划包含当前 fetch/push、所有分支 remote/merge/pushRemote 设置、remote.pushDefault、本仓和已验证管理仓中受影响的 项目策略 目标及 sync、Git common config 对应 Worktree。相关项目策略 策略或其他 Worktree 受影响时需要 `--accept-effects`。该开关不授权同步、Issue 迁移或推送。旧 refs/remotes 和 remote HEAD 原样保留，本次不 fetch，不宣称历史关系已验证。多地址、mirror、非仓库本地的 URL 来源不能通过本入口替换。
 
 “空目录”按 `readdir` 的全部条目判定，隐藏文件也算内容。查询成功且没有任何可见引用才是 empty；HEAD-only、自定义引用、只有标签都不是空仓。clone 需要远端声明且实际存在的默认分支，或明确的 `--branch`。原地克隆后返回 `needs_project_rules`（退出 2，尚未完成设置）；Agent 先读新取得的项目规则，再沿用 `add` 和原名称重新计划，合并远端信息并完成回读。此阶段不增加用户确认，只读取并执行适用规则。
 
@@ -90,4 +90,4 @@ Agent 使用 `setup --url <URL>` 取得 `needs_input` 或 `planned`。已有任�
 
 状态记录用于查证，不自动重放。异常返回 failedStep、completedSteps 与本地回读；进程被终止时可能停在 applying，须重新读取真实状态。Git config.lock 残留时先查正在运行的操作，禁止自动删除锁。已 init/已配置远端时保留用户选择，生成新指纹补齐余下步骤；克隆中断须核对 HEAD、索引与检出文件，不能把存在 .git 视为完整成功，不能自动删除或盲重试。
 
-configured 证明本地设置和远端读取；支持的 HTTPS 目标还包含已选来源及持久 helper 核验。GitHub 账号以 `/user` 结果为准，CNB 仅验证 Git 读取。推送预检与实际推送均未执行，不暂存、提交或推送。Agent 的实际完成回复必须含“本次暂未提交和推送。”，包括同地址核验和续作。无关 Issue 文档缺失、不可读或变化均不阻塞普通 Git setup；旧 JSON 损坏和旧写锁不读取或删除；LFS/子模块内容限制继续适用。`tests/setup.test.mjs` 从 CLI 入口核验这些行为；客户端最终回复另作实际验收。
+configured 证明本地设置和远端读取；支持的 HTTPS 目标还包含已选来源及本次读取核验。GitHub 账号以 `/user` 结果为准，CNB 仅验证 Git 读取。推送预检与实际推送均未执行，不暂存、提交或推送。Agent 的实际完成回复必须含“本次暂未提交和推送。”，包括同地址核验和续作。无关 Issue 文档缺失、不可读或变化均不阻塞普通 Git setup；旧 JSON 损坏和旧写锁不读取或删除；LFS/子模块内容限制继续适用。`tests/setup.test.mjs` 从 CLI 入口核验这些行为；客户端最终回复另作实际验收。

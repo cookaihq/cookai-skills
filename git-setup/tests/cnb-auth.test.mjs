@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile,writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { repositoryFixture,cli } from './fixtures/repositories.mjs';
+import { gitService } from './fixtures/git-service.mjs';
+const url='https://cnb.cool/team/sub/project.git';
+test('CNB setup uses a single URL without installing a helper; rotation takes effect next call',async t=>{
+ const f=await repositoryFixture(),project=await f.repo('project'),targets={'team/sub/project':'fixture-token'};
+ const service=await gitService(t,f,targets);
+ const p=await f.run(cli,['credential-prepare','--project',project,'--url',url,'--apply']);
+ assert.equal(p.status,'awaiting_credentials',JSON.stringify(p));
+ await writeFile(p.credentialFile,'https://cnb:fixture-token@cnb.cool/team/sub/project\n');
+ const args=['--project',project,'--url',url];
+ const plan=await f.run(cli,['setup',...args]);assert.equal(plan.status,'planned',JSON.stringify(plan));
+ const done=await f.run(cli,['setup',...args,'--apply','--expected-fingerprint',plan.fingerprint]);assert.equal(done.status,'configured',JSON.stringify(done));
+ assert.equal(done.authentication.persistentHelper,false);
+ assert.equal(await f.git(project,'remote','get-url','origin'),url);
+ assert.ok(!(await readFile(join(project,'.git/config'),'utf8')).includes('gitsetup.auth-'));
+ assert.ok(!(await readFile(join(project,'.git/config'),'utf8')).includes('credential'));
+ targets['team/sub/project']='rotated-token';await writeFile(p.credentialFile,'https://cnb:rotated-token@cnb.cool/team/sub/project');
+ const verified=await f.run(cli,['credential-check',...args]);assert.equal(verified.status,'verified',JSON.stringify(verified));assert.ok(!JSON.stringify(verified).includes('rotated-token'));
+ await writeFile(p.credentialFile,url+'\nToken:rotated-token');
+ assert.equal((await f.run(cli,['credential-check',...args])).code,'auth_file_format');
+});
+test('CNB rejection never erases the original credential file',async t=>{
+ const f=await repositoryFixture(),project=await f.repo('project');await gitService(t,f,{'team/sub/project':'expected'});
+ const p=await f.run(cli,['credential-prepare','--project',project,'--url',url,'--apply']);
+ const content='https://cnb:wrong-fixture@cnb.cool/team/sub/project';await writeFile(p.credentialFile,content);
+ const result=await f.run(cli,['credential-check','--project',project,'--url',url]);assert.notEqual(result.status,'verified');assert.equal(await readFile(p.credentialFile,'utf8'),content);assert.ok(!JSON.stringify(result).includes('wrong-fixture'));
+});

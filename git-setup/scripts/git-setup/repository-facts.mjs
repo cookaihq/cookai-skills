@@ -3,12 +3,14 @@ import { realpath } from 'node:fs/promises';
 import path, { resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { gitConfiguration } from './git-trust.mjs';
 
 const exec = promisify(execFile);
 export const authFail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 export function localEnvironment(extra = {}) {
   const env = { ...process.env, ...extra, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', LC_ALL: 'C' };
   for (const key of Object.keys(env)) if (/^GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|CONFIG|TRACE|CURL_VERBOSE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES)/.test(key)) delete env[key];
+  Object.assign(env, gitConfiguration());
   delete env.GH_TOKEN; delete env.GITHUB_TOKEN;
   return env;
 }

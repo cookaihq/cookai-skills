@@ -8,88 +8,65 @@ import { gitService } from './fixtures/git-service.mjs';
 
 test('public check and auth use the registered independent repository and its primary checkout', async () => {
   const f = await repositoryFixture(), outer = await f.repo('outer'), child = await f.repo('outer/children/api');
-  await f.install(outer);
+  await f.configure(outer);
   await assert.rejects(lstat(join(outer, 'vcs/repos.conf')), { code: 'ENOENT' });
   await writeFile(join(outer, 'vcs/repos.conf'), 'children/api\n');
   const checkout = join(f.root, 'api-worktree');
   await f.git(child, 'worktree', 'add', '-b', 'fixture-worktree', checkout);
-  const args = ['--project', checkout, '--workspace', outer, '--harness-directory', 'vcs'];
+  const args = ['--project', checkout, '--workspace', outer, '--policy-directory', 'vcs'];
   const checked = await f.run(cli, ['check', ...args]);
   assert.equal(checked.relationship?.registration.kind, 'independent', JSON.stringify(checked));
   assert.equal(checked.relationship.project.root, checkout);
   assert.equal(checked.relationship.project.main, child);
   assert.equal(checked.relationship.management.main, outer);
-  const prepared = await f.run(cli, ['auth-prepare', ...args, '--url', 'https://cnb.cool/team/api', '--auth-method', 'cnb-url', '--apply']);
+  const prepared = await f.run(cli, ['credential-prepare', ...args, '--url', 'https://cnb.cool/team/api', '--auth-method', 'cnb-url', '--apply']);
   assert.equal(prepared.status, 'awaiting_credentials', JSON.stringify(prepared));
   assert.equal(prepared.credentialFile, join(outer, '.credentials/repositories/team--api.cnb-url'));
   assert.equal(await readFile(prepared.credentialFile, 'utf8'), '');
-  const choice = await f.run(cli, ['auth-info', '--project', checkout, '--url', 'https://cnb.cool/team/api']);
+  const choice = await f.run(cli, ['credential-info', ...args, '--url', 'https://cnb.cool/team/api']);
   assert.deepEqual(choice.required, ['credentials-filled']);
-  const resumedCheck = await f.run(cli, ['check', '--project', checkout]);
+  const resumedCheck = await f.run(cli, ['check', ...args]);
   assert.equal(resumedCheck.relationship?.management.main, outer, JSON.stringify(resumedCheck));
   await writeFile(join(outer, 'vcs/repos.conf'), '');
-  const removed = await f.run(cli, ['auth-info', '--project', checkout, '--url', 'https://cnb.cool/team/api']);
-  assert.equal(removed.exit, 1);
+  const removed = await f.run(cli, ['credential-info', ...args, '--url', 'https://cnb.cool/team/api']);
+  assert.equal(removed.status, 'invalid');
   assert.equal(removed.code, 'WORKSPACE_UNREGISTERED');
 });
 
 test('regenerating a registered manager preserves its independent repository list', async () => {
   const f = await repositoryFixture(), outer = await f.repo('outer');
   await f.repo('outer/child');
-  await f.install(outer);
+  await f.configure(outer);
   const registry = '# Owned by this project\nchild\n';
   await writeFile(join(outer, 'vcs/repos.conf'), registry);
   const checked = await f.run(cli, ['check', '--project', outer]);
-  assert.equal(checked.harness.installed.status, 'installed', JSON.stringify(checked));
-  await f.install(outer);
+  assert.equal(checked.status, 'checked', JSON.stringify(checked));
+  await f.configure(outer);
   assert.equal(await readFile(join(outer, 'vcs/repos.conf'), 'utf8'), registry);
-  assert.equal((await f.run(cli, ['check', '--project', join(outer, 'child'), '--workspace', outer])).relationship.registration.kind, 'independent');
-  const key = await f.git(outer, 'config', '--name-only', '--get-regexp', '^gitsetup.harness-');
-  await f.git(outer, 'config', '--unset-all', key);
+  assert.equal((await f.run(cli, ['check', '--project', join(outer, 'child'), '--workspace', outer,'--policy-directory','vcs'])).relationship.registration.kind, 'independent');
+  await assert.rejects(f.git(outer, 'config', '--name-only', '--get-regexp', '^gitsetup.harness-'));
   const operation = await issueInput(outer);
   operation.initiatingProject = join(outer, 'child');
-  operation.relationship = { workspace: outer, kind: 'independent', path: 'child', harnessDirectory: 'vcs' };
+  operation.relationship = { workspace: outer, kind: 'independent', path: 'child', policyDirectory: 'vcs' };
   operation.target.scope = 'outer';
   const resolved = await f.run(cli, ['issue-resolve', '--project', operation.initiatingProject, '--input', await inputFile(f, operation)]);
   assert.equal(resolved.local?.root, outer, JSON.stringify(resolved));
 });
 
-test('public setup installs independent sources for native ls-remote, fetch and push after the Skill moves', async t => {
-  const f = await repositoryFixture(), outer = await f.repo('outer'), first = await f.repo('outer/first'), second = await f.repo('outer/second');
-  await f.install(outer);
-  await writeFile(join(outer, 'vcs/repos.conf'), 'first\nsecond\n');
-  const service = await gitService(t, f, { 'team/first': 'first-fixture-token', 'team/second': 'second-fixture-token' });
-  const copy = join(f.root, 'skill-copy'); await cp(skill, copy, { recursive: true });
-  const entry = join(copy, 'scripts/git-setup/cli.mjs');
-  const sources = [];
-  for (const [project, name, token] of [[first, 'first', 'first-fixture-token'], [second, 'second', 'second-fixture-token']]) {
-    const url = `https://cnb.cool/team/${name}.git`;
-    const prepared = await f.run(entry, ['auth-prepare', '--project', project, '--workspace', outer, '--url', url, '--auth-method', 'cnb-url', '--apply']);
-    assert.equal(prepared.status, 'awaiting_credentials', JSON.stringify(prepared));
-    sources.push(prepared.credentialFile);
-    await writeFile(prepared.credentialFile, `https://cnb:${token}@cnb.cool/team/${name}\n`);
-    const args = ['--project', project, '--url', url, '--credentials-filled'];
-    const plan = await f.run(entry, ['setup', ...args]);
-    assert.equal(plan.status, 'planned', JSON.stringify(plan));
-    assert.equal(plan.relationship.management.main, outer);
-    const result = await f.run(entry, ['setup', ...args, '--apply', '--expected-fingerprint', plan.fingerprint]);
-    assert.equal(result.status, 'configured', JSON.stringify(result));
-    assert.equal(result.pushed, false); assert.equal(result.committed, false);
-  }
-  assert.notEqual(sources[0], sources[1]);
-  await rename(copy, `${copy}-removed`);
-  for (const [project, name] of [[first, 'first'], [second, 'second']]) {
-    assert.equal(await f.git(project, 'ls-remote', 'origin'), '');
-    await f.git(project, 'fetch', 'origin');
-    await f.git(project, 'push', 'origin', 'refs/heads/main:refs/heads/main');
-    assert.equal(await f.git(service.repositories[`team/${name}`], 'rev-parse', 'main'), await f.git(project, 'rev-parse', 'main'));
-  }
-  const count = service.requests.length;
-  await writeFile(join(outer, 'vcs/repos.conf'), 'second\n');
-  await assert.rejects(f.git(first, 'ls-remote', 'origin'));
-  assert.equal(service.requests.length, count);
-  assert.ok((await f.git(second, 'ls-remote', 'origin')).includes(await f.git(second, 'rev-parse', 'main')));
-  assert.equal((await readFile(join(first, '.git/config'), 'utf8')).includes('first-fixture-token'), false);
+test('independent repositories select their own current credential files',async t=>{
+ const f=await repositoryFixture(),outer=await f.repo('outer'),first=await f.repo('outer/first'),second=await f.repo('outer/second');
+ await f.configure(outer);await writeFile(join(outer,'vcs/repos.conf'),'first\nsecond\n');
+ await gitService(t,f,{'team/first':'first-fixture','team/second':'second-fixture'});
+ for(const [project,name] of [[first,'first'],[second,'second']]){
+  const url='https://cnb.cool/team/'+name+'.git';await f.git(project,'remote','add','origin',url);
+  const p=await f.run(cli,['credential-prepare','--project',project,'--workspace',outer,'--policy-directory','vcs','--url',url,'--apply']);
+  await writeFile(p.credentialFile,'https://cnb:'+name+'-fixture@cnb.cool/team/'+name);
+ }
+ await f.configure(outer,{repositories:{first:{sync:null},second:{sync:null}}});
+ for(const name of ['first','second'])assert.equal((await f.command(outer,['read','--repository',name,'--remote','origin'])).status,'read');
+ await writeFile(join(outer,'vcs/repos.conf'),'second\n');
+ assert.equal((await f.command(outer,['read','--repository','first','--remote','origin'])).code,'WORKSPACE_UNREGISTERED');
+ assert.equal((await f.command(outer,['read','--repository','second','--remote','origin'])).status,'read');
 });
 
 test('public relationship checks reject legacy registration, duplicate paths and same-URL clones', async () => {
@@ -98,13 +75,13 @@ test('public relationship checks reject legacy registration, duplicate paths and
   await f.git(outer, 'config', '--add', 'gitsetup.repository', 'child');
   await mkdir(join(outer, '.git-setup'));
   await writeFile(join(outer, '.git-setup/project.json'), JSON.stringify({ schemaVersion: 1, workspace: { repositories: [{ path: 'child', issues: 'inherit' }] } }));
-  const args = ['--workspace', outer];
+  const args = ['--workspace', outer,'--policy-directory','vcs'];
   assert.equal((await f.run(cli, ['check', '--project', child, ...args])).code, 'WORKSPACE_UNREGISTERED');
-  await f.install(outer);
+  await f.configure(outer);
   await writeFile(join(outer, 'vcs/repos.conf'), 'child\n');
   assert.equal((await f.run(cli, ['check', '--project', clone, ...args])).code, 'WORKSPACE_UNREGISTERED');
   await writeFile(join(outer, 'vcs/repos.conf'), 'child\nchild\n');
-  assert.equal((await f.run(cli, ['auth-prepare', '--project', child, ...args, '--url', 'https://cnb.cool/team/shared', '--auth-method', 'cnb-url', '--apply'])).code, 'WORKSPACE_DUPLICATE');
+  assert.equal((await f.run(cli, ['credential-prepare', '--project', child, ...args, '--url', 'https://cnb.cool/team/shared', '--auth-method', 'cnb-url', '--apply'])).code, 'WORKSPACE_DUPLICATE');
   await assert.rejects(lstat(join(outer, '.credentials')), { code: 'ENOENT' });
   await writeFile(join(outer, 'vcs/repos.conf'), 'missing\n');
   assert.equal((await f.run(cli, ['check', '--project', child, ...args])).code, 'WORKSPACE_UNREGISTERED');
@@ -131,8 +108,8 @@ test('public submodule checks require registration, gitlink and actual Git metad
   assert.equal(checked.relationship.registration.gitlink, await f.git(child, 'rev-parse', 'HEAD'));
   const linked = join(f.root, 'linked');
   await f.git(child, 'worktree', 'add', '-b', 'linked-module', linked);
-  const worktree = await f.run(cli, ['auth-prepare', '--project', linked, '--url', 'https://cnb.cool/team/module', '--auth-method', 'cnb-url']);
-  assert.equal(worktree.binding?.owner.main, outer, JSON.stringify(worktree));
+  const worktree = await f.run(cli, ['credential-prepare', '--project', linked, '--url', 'https://cnb.cool/team/module', '--auth-method', 'cnb-url']);
+  assert.equal(worktree.credentialFile, join(outer,'.credentials/repositories/team--module.cnb-url'), JSON.stringify(worktree));
   await f.git(outer, 'rm', '--cached', 'module');
   assert.equal((await f.run(cli, ['check', '--project', child])).code, 'WORKSPACE_SUBMODULE_INVALID');
   await f.git(outer, 'update-index', '--add', '--cacheinfo', `160000,${await f.git(child, 'rev-parse', 'HEAD')},module`);
@@ -153,9 +130,10 @@ test('multiple verified managers require a choice and setup rejects a removed re
   assert.equal(chosen.relationship.registration.kind, 'submodule-chain');
 
   const manager = await f.repo('manager'), child = await f.repo('manager/child');
-  await f.install(manager); await writeFile(join(manager, 'vcs/repos.conf'), 'child\n');
+  await f.configure(manager); await writeFile(join(manager, 'vcs/repos.conf'), 'child\n');
+  await f.configure(manager);
   const target = join(f.root, 'target.git'); await f.git(f.root, 'init', '--bare', '-q', target);
-  const args = ['--project', child, '--workspace', manager, '--url', target];
+  const args = ['--project', child, '--workspace', manager, '--policy-directory','vcs','--url', target];
   const plan = await f.run(cli, ['setup', ...args]);
   assert.equal(plan.status, 'planned', JSON.stringify(plan));
   const before = await readFile(join(child, '.git/config'));

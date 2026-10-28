@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { hostname } from 'node:os';
 import { validateGitHubTarget } from './github.mjs';
+import { gitConfiguration } from './git-trust.mjs';
 
 export class IssueError extends Error {
   constructor(code, message, details = {}) { super(message); this.name = 'IssueError'; this.code = code; Object.assign(this, details); }
@@ -51,9 +52,9 @@ async function safeDirectory(root, relative, create = false) {
 }
 async function regularText(file, root) {
   const absoluteRoot = await realpath(root);
-  const relative = path.relative(absoluteRoot, path.resolve(file));
+  const relative = path.relative(absoluteRoot, path.resolve(file)).split(path.sep).join('/');
   relativeSafe(relative);
-  await safeDirectory(absoluteRoot, path.dirname(relative));
+  await safeDirectory(absoluteRoot, path.posix.dirname(relative));
   const stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new IssueError('unsafe-file', '要求项目内普通文件，不能通过符号链接读取。');
   const handle = await open(file, constants.O_RDONLY | noFollow);
@@ -66,6 +67,7 @@ async function journalDirectory(projectRoot) {
   const root = await realpath(projectRoot);
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
   for (const key of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|CONFIG|CEILING_DIRECTORIES)/.test(key)) delete env[key];
+  Object.assign(env, gitConfiguration());
   const git = args => execFileSync('git', ['-C', root, ...args], { env, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   let top;
   try { top = await realpath(git(['rev-parse', '--show-toplevel'])); }
@@ -287,7 +289,7 @@ export async function editLocalIssue({ resolution, content, operationId, authori
       record.pendingPath = `${filePath}.${operationId}.tmp`;
       await journal.save(record);
       await validate();
-      await safeDirectory(config.root, path.relative(config.root, path.dirname(filePath)));
+      await safeDirectory(config.root, path.relative(config.root, path.dirname(filePath)).split(path.sep).join('/') || '.');
       const temporary = await open(record.pendingPath, 'wx', (await lstat(filePath)).mode & 0o777);
       try { await temporary.writeFile(output); await temporary.sync(); } finally { await temporary.close(); }
       await validate();

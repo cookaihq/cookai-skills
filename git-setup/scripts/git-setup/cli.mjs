@@ -11,9 +11,9 @@ if (Number(process.versions.node.split('.')[0]) < minimum) {
   process.exit(1);
 }
 
-const boolean = new Set(['apply', 'use-global-config', 'help', 'github-auth', 'accept-effects', 'credentials-filled', 'allow-ignore', 'replace-auth', 'api-only']);
+const boolean = new Set(['apply', 'use-global-config', 'help', 'accept-effects', 'allow-ignore', 'api-only']);
 const repeated = new Set(['ref']);
-const valued = new Set(['project', 'repository', 'checkout', 'harness-directory', 'workspace', 'input', 'branch', 'author-name', 'author-email', 'name', 'url', 'remote', 'operation-id', 'expected-fingerprint', 'owner', 'visibility', 'action', 'plan-file', 'auth-method', 'gh-user', 'credential-workspace', 'credential-file']);
+const valued = new Set(['project', 'repository', 'checkout', 'policy-directory', 'workspace', 'input', 'branch', 'author-name', 'author-email', 'name', 'url', 'remote', 'operation-id', 'expected-fingerprint', 'owner', 'visibility', 'action', 'plan-file', 'auth-method', 'gh-user', 'credential-file']);
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 function parse(args) {
   const options = {};
@@ -52,145 +52,100 @@ function scrub(text) {
   return text.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1***@').replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g, '[REDACTED]');
 }
 const help = `git-setup ${pkg.version} — node <skill>/scripts/git-setup/cli.mjs <command> [options]
-所有命令：--project <path>（默认当前目录），--use-global-config（显式启用个人全局业务配置）
---input - 从标准输入接收本次 JSON，无需创建临时参数文件。
-inspect                                      读取 Git 状态
-check                                        只读事实检查（无参数默认）；Agent 另读实际宿主规则
-      [--harness-directory <项目内实际目录>]  没有本机位置记录时显式提供，不猜测目录
-harness-plan --input <含 choice/directory/ruleFiles/比较的 JSON> [--plan-file <ignored-json>]
-harness-apply [--input <同一选择.json|->] --plan-file <ignored-json> --expected-fingerprint <指纹> --apply
-      已保存计划可省略 --input；choice=keep 无需 --plan-file。
-harness-recover --plan-file <原记录> [--apply --expected-fingerprint <恢复检查指纹>]
-setup --url <url>                            检查当前项目并生成接入计划，不提交或推送
-      [--action add|replace --name <remote>] [--branch <name>]
-      [--author-name <name> --author-email <email>] [--accept-effects]
-      [--plan-file <ignored-json>] [--workspace <outer>] [--github-auth]
-      [--apply --expected-fingerprint <plan fingerprint>]
-audit --ref <full-ref> [--ref ...]             检查所有可达历史对象中的已知秘密模式及大文件
+所有命令：--project <path>（默认当前目录）；--input - 接收本次 JSON（不含凭证）。
+check | inspect                             只读现状，Agent 另读项目规则
+setup --url <url>                            接入计划；apply + expected-fingerprint 执行
+     [--action add|replace --name <remote>] [--branch <name>]
+     [--author-name <name> --author-email <email>] [--accept-effects] [--plan-file <ignored-json>]
+document-plan | document-write --input -     {path,content,ruleFiles}；write 需 apply + expected-fingerprint
+credential-info --url <url>                  无值来源报告
+credential-prepare --url <url>               准备被忽略的空文件；写入需 apply [--allow-ignore]
+credential-check --url <url> [--api-only]     当前值验证，不安装 helper
+source-save --input - [--apply --allow-ignore]  记住所选非敏感 {url,method,file?,account?}
+鉴权选项：--auth-method gh|github-token|cnb-url|environment，--gh-user <login>，--credential-file <path>
+管理关系：--workspace <root> [--policy-directory <明确项目策略目录>]
+check/read/publish/sync 支持 --repository <登记路径或 .> [--checkout <该仓检出>]
+read --remote <name>                         读取指定远端
+publish --remote <name> --ref <完整ref>       预览；apply + expected-fingerprint 执行
+sync --input -                              {sync:{source,targets,refs},sources?:[...]}；或明确项目策略
+操作 --input 还可提供 sources:[{url,method,file?,account?}]，每个目标独立选来源。
+audit --ref <完整ref> [--ref ...]             可达历史检查
 init --branch <name> --author-name <name> --author-email <email> --apply
 remote-add --name <remote> --url <url> --apply
-publish --remote <name> --ref <full-ref> [--ref ...] --apply [--github-auth]
-sync [--apply --expected-fingerprint <指纹>]  只读已登记 Harness 同步策略，无旧 JSON 回退
-read --remote <name>                       通过已登记 Harness 读取选中目标
-check/read/publish/sync 可用 --repository <登记路径或 .> [--checkout <该仓检出>]。
---project 是 Harness 管理仓；各仓使用独立策略，错误选择不回退外仓。
-可用 --harness-directory <项目内实际目录>；项目日常入口不执行 Skill 完整比较
-auth-info [--url <url>]                      显示来源及选择/填写缺项，不输出凭证
-auth-cleanup [--apply --expected-fingerprint <指纹>]  显式检查或清理本仓未引用的旧 helper 运行包
-auth-prepare --url <url> --auth-method gh|github-token|cnb-url [--gh-user <login>]
-             [--credential-workspace <outer>] [--credential-file <existing-file>]
-             [--allow-ignore] [--replace-auth] [--apply]
-auth-verify --url <url> [--credentials-filled] [--api-only] [--apply --expected-fingerprint <fingerprint>]
-setup 另接受 --auth-method、--gh-user、--credential-workspace、--credential-file、--credentials-filled。
---workspace 与 --credential-workspace 指定同一管理关系；同时提供时必须一致。
-管理关系核对 Git 子模块登记及元数据，或实际 Harness 目录内的 repos.conf；不读取旧 JSON 登记。
---harness-directory 指管理仓内实际位置；已保存的鉴权选择仍须通过当前登记核验。
-issue-resolve --input <本次完整输入.json>      验证规则实体、关系、目标、模板及所选鉴权
-issue-create|issue-update|issue-comment --input <同一输入.json>
-             [--apply --expected-fingerprint <本次计划指纹>]
-issue-recover --input <原输入.json>           回读同一操作结果，不重复创建或回复
+issue-resolve | issue-create | issue-update | issue-comment | issue-recover --input -
 repo-create --owner <login> --name <repo> --visibility private|public --operation-id <id> --apply
-Issue 输入契约见 references/configuration.md；Agent 解释现有规则，CLI 不解析 Markdown 语义。
-旧 config-check/config-write/install-rules 已退出，不读取或重建旧项目 JSON/routing。
-Git 和 Issue 不自动 commit。
+--use-global-config 显式启用个人全局环境配置，仅 auth-method=environment 消费业务 Token。
+Git 操作不自动 commit。普通 Git/IDE/CI 不会自动读取自定义凭证目录。
 `;
 
 async function main() {
   const [command = 'check', ...args] = process.argv.slice(2);
   const options = parse(args);
   if (command === 'help' || options.help) { process.stdout.write(help); return; }
-  if (['config-check', 'config-write', 'install-rules'].includes(command)) fail('legacy_command_removed', '旧项目配置和 Issue routing 已退出；Issue 使用现有规则及本次 --input，真实 Harness 入口通过 harness-plan/apply 登记。');
   const project = resolve(options.project || process.cwd());
-  if ((options.repository !== undefined || options.checkout !== undefined) && !['check', 'read', 'publish', 'sync'].includes(command)) fail('invalid_argument', 'repository/checkout 只用于项目 Harness 的 check/read/publish/sync。');
+  if ((options.repository !== undefined || options.checkout !== undefined) && !['check', 'read', 'publish', 'sync', 'credential-info', 'credential-prepare', 'credential-check', 'source-save'].includes(command)) fail('invalid_argument', 'repository/checkout 只用于项目 的 check/read/publish/sync。');
   if (options.checkout !== undefined && options.repository === undefined) fail('missing_argument', 'checkout 必须与明确的 repository 一起提供。');
-  if (options.repository !== undefined && [options.workspace, options['credential-workspace']].some(value => value !== undefined && resolve(value) !== project)) fail('WORKSPACE_CONFLICT', '选仓操作的 project 是 Harness 管理仓；其他管理仓参数不能重定向该入口。');
-  const operationOptions = { directory: options['harness-directory'], repository: options.repository, checkout: options.checkout, remote: options.remote, refs: options.ref || [], apply: Boolean(options.apply), 'expected-fingerprint': options['expected-fingerprint'], 'operation-id': options['operation-id'] };
+  if (options.repository !== undefined && [options.workspace].some(value => value !== undefined && resolve(value) !== project)) fail('WORKSPACE_CONFLICT', '选仓操作的 project 是 管理仓；其他管理仓参数不能重定向该入口。');
+  const input = options.input ? await json(options.input) : undefined;
+  const operationOptions = { directory: options['policy-directory'], repository: options.repository, checkout: options.checkout, remote: options.remote, refs: options.ref || [], apply: Boolean(options.apply), 'expected-fingerprint': options['expected-fingerprint'], 'operation-id': options['operation-id'] };
   const config = await import('./config.mjs');
   const authModule = await import('./auth.mjs');
-  const authenticationOptions = { workspace: options.workspace && resolve(options.workspace), harnessDirectory: options['harness-directory'], authMethod: options['auth-method'], ghUser: options['gh-user'], credentialWorkspace: options['credential-workspace'], credentialFile: options['credential-file'], credentialsFilled: Boolean(options['credentials-filled']), githubAuth: Boolean(options['github-auth']), useGlobalConfig: Boolean(options['use-global-config']) };
+  const authenticationOptions = { workspace: options.workspace && resolve(options.workspace), policyDirectory: options['policy-directory'], authMethod: options['auth-method'], ghUser: options['gh-user'], credentialFile: options['credential-file'], useGlobalConfig: Boolean(options['use-global-config']) };
+  authenticationOptions.sources = input?.sources;
+  Object.assign(operationOptions, authenticationOptions, { sync: input?.sync });
+  let authProject = project;
+  if (options.repository !== undefined && ['credential-info', 'credential-prepare', 'credential-check', 'source-save'].includes(command)) {
+    const { selectRepository } = await import('./repository-relationship.mjs');
+    authProject = (await selectRepository(project, { repository: options.repository, checkout: options.checkout, policyDirectory: options['policy-directory'] })).project.root;
+    authenticationOptions.workspace = project;
+  }
   let result;
   if (command === 'read' || (command === 'check' && options.repository !== undefined)) {
-    const { projectOperation } = await import('./project-entry.mjs');
+    const { projectOperation } = await import('./project-operations.mjs');
     result = await projectOperation(project, command, operationOptions);
   }
   else if (command === 'check') {
     const { entryCheck } = await import('./entry-check.mjs');
-    result = await entryCheck(project, { useGlobalConfig: Boolean(options['use-global-config']), directory: options['harness-directory'], ...authenticationOptions });
+    result = await entryCheck(project, { useGlobalConfig: Boolean(options['use-global-config']), directory: options['policy-directory'], ...authenticationOptions });
   }
-  else if (command === 'auth-cleanup') {
-    const { cleanupRuntimes } = await import('./runtime-cleanup.mjs');
-    result = await cleanupRuntimes(project, { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
-  }
-  else if (command === 'harness-recover') {
-    const { recoverHarness } = await import('./harness-transaction.mjs');
-    result = await recoverHarness(project, required(options['plan-file'], '--plan-file'), { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
-  }
-  else if (['harness-plan', 'harness-apply'].includes(command)) {
-    const harness = await import('./harness.mjs');
-    let input;
-    if (options.input) input = await json(options.input);
-    else if (command === 'harness-apply' && options['plan-file']) {
-      const saved = await json(options['plan-file']);
-      if (saved.transaction || saved.result?.status !== 'planned' || saved.request?.project !== project || !saved.request.input) fail('harness_record_invalid', '需要本项目尚未执行的原计划；已开始的操作使用 harness-recover。');
-      input = saved.request.input;
-    } else required(options.input, '--input');
-    if (command === 'harness-apply') {
-      apply(options);
-      result = await harness.applyHarness(project, input, { expectedFingerprint: options['expected-fingerprint'], planFile: options['plan-file'] });
-    } else {
-      const plan = await harness.planHarness(project, input);
-      result = { ...plan, files: undefined, edits: plan.edits.map(({ content, ...edit }) => edit) };
-      if (options['plan-file']) {
-        const { saveHarnessPreview } = await import('./harness-transaction.mjs');
-        if (options.input !== '-' && resolve(options.input) === resolve(options['plan-file'])) fail('harness_record_path', '选择输入与恢复记录必须使用不同文件。');
-        await saveHarnessPreview(options['plan-file'], result);
-      }
-    }
+  else if (['document-plan', 'document-write'].includes(command)) {
+    const { planDocument, writeDocument } = await import('./project-document.mjs');
+    required(input, '--input');
+    if (command === 'document-write') { apply(options); result = await writeDocument(project, input, { apply: true, expectedFingerprint: options['expected-fingerprint'] }); }
+    else result = await planDocument(project, input);
   } else if (command === 'setup') {
     const { setup } = await import('./setup.mjs');
     result = await setup(project, { url: required(options.url, '--url'), action: options.action, name: options.name, apply: options.apply, branch: options.branch, authorName: options['author-name'], authorEmail: options['author-email'], expectedFingerprint: options['expected-fingerprint'], acceptEffects: options['accept-effects'], planFile: options['plan-file'], ...authenticationOptions });
-  } else if (['auth-info', 'auth-prepare', 'auth-verify'].includes(command)) {
-    const { authCommand } = await import('./auth-command.mjs');
-    result = await authCommand(project, command, options);
+  } else if (['credential-info', 'credential-prepare', 'credential-check', 'source-save'].includes(command)) {
+    if (command === 'source-save') result = await authModule.rememberSource(authProject, required(input, '--input'), { ...authenticationOptions, apply: Boolean(options.apply), allowIgnore: Boolean(options['allow-ignore']) });
+    else {
+      const url = required(options.url, '--url');
+      if (command === 'credential-info') result = await authModule.inspectAuth(authProject, url, authenticationOptions);
+      if (command === 'credential-prepare') result = await authModule.prepareAuth(authProject, url, { ...authenticationOptions, apply: Boolean(options.apply), allowIgnore: Boolean(options['allow-ignore']) });
+      if (command === 'credential-check') result = await authModule.verifyAuth(authProject, url, { ...authenticationOptions, apiOnly: Boolean(options['api-only']) });
+    }
   } else if (['issue-resolve', 'issue-create', 'issue-update', 'issue-comment', 'issue-recover'].includes(command)) {
-    for (const key of Object.keys(options)) if (!['project', 'input', 'apply', 'expected-fingerprint', 'use-global-config'].includes(key)) fail('invalid_argument', 'Issue 操作仅消费 --input 中的完整本次输入，旧目标覆盖参数已退出。');
     const { issueOperation } = await import('./issue-operation.mjs');
-    result = await issueOperation(project, command, await json(required(options.input, '--input')), { apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'], useGlobalConfig: Boolean(options['use-global-config']) });
+    result = await issueOperation(project, command, required(input, '--input'), { ...authenticationOptions, apply: Boolean(options.apply), expectedFingerprint: options['expected-fingerprint'] });
   }
   else if (command === 'audit') {
     const { auditHistory } = await import('./audit.mjs');
     result = auditHistory(project, required(options.ref, '--ref'));
   } else if (['inspect', 'init', 'remote-add', 'publish', 'sync'].includes(command)) {
     const git = await import('./git.mjs');
-    const auth = ['publish', 'sync'].includes(command) ? authModule.gitAuthentication((await config.inspectProject(project)).root, authenticationOptions) : {};
     if (command === 'inspect') result = await git.inspect(project);
     if (command === 'init') { apply(options); result = await git.init(project, { branch: required(options.branch, '--branch'), authorName: required(options['author-name'], '--author-name'), authorEmail: required(options['author-email'], '--author-email') }); }
     if (command === 'remote-add') { apply(options); result = await git.addRemote(project, { name: required(options.name, '--name'), url: required(options.url, '--url') }); }
-    if (command === 'publish') {
-      const refs = required(options.ref, '--ref');
-      const { readHarnessConfig } = await import('./harness-config.mjs');
-      if (options.repository !== undefined || (await readHarnessConfig(project, options['harness-directory'])).exists) {
-        const { projectOperation } = await import('./project-entry.mjs');
-        result = await projectOperation(project, 'publish', { ...operationOptions, remote: required(options.remote, '--remote'), refs });
-      } else {
-        apply(options);
-        const { auditHistory } = await import('./audit.mjs');
-        const audit = auditHistory(project, refs);
-        if (!audit.complete) result = { status: 'audit_blocked', complete: false, audit };
-        else result = { ...await git.publish(project, { remote: required(options.remote, '--remote'), refs, expectedRefs: audit.snapshot, ...auth }), audit };
-      }
+    if (command === 'publish' || command === 'sync') {
+      const { projectOperation } = await import('./project-operations.mjs');
+      result = await projectOperation(project, command, operationOptions);
     }
-    if (command === 'sync') {
-      const { projectOperation } = await import('./project-entry.mjs');
-      result = { ...await projectOperation(project, 'sync', operationOptions), configurationSource: 'harness' };
-    }
-    if (auth.authReports && !result.authentication) result.authentication = { sources: auth.authReports, pushPreflight: 'not_performed', actualPush: options.apply ? 'see_per_ref_results' : 'not_performed' };
   } else if (command === 'repo-create') {
     apply(options);
     if (!['private', 'public'].includes(options.visibility)) fail('visibility_required', '明确指定 --visibility private 或 public。');
     const { createRemoteRepository } = await import('./issues.mjs');
     const owner = required(options.owner, '--owner'), name = required(options.name, '--name');
-    const client = await authModule.boundGitHubClient((await config.inspectProject(project)).root, { host: 'github.com', repository: `${owner}/${name}` }, authenticationOptions);
+    const client = await authModule.selectedGitHubClient((await config.inspectProject(project)).root, { host: 'github.com', repository: `${owner}/${name}` }, authenticationOptions);
     result = await createRemoteRepository({ projectRoot: project, owner, name, private: options.visibility === 'private', operationId: required(options['operation-id'], '--operation-id'), client, authorized: true });
   } else fail('unknown_command', `未知命令：${command}`);
   process.stdout.write(`${scrub(JSON.stringify(result, null, 2))}\n`);

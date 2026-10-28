@@ -2,8 +2,8 @@ import { readFile, lstat, readlink, realpath } from 'node:fs/promises';
 import { resolve, join, isAbsolute, dirname } from 'node:path';
 import { mainCheckout } from './repository-facts.mjs';
 import { resolveRepository } from './repository-relationship.mjs';
-import { portablePath, publicText } from './harness-location.mjs';
-import { digest, safePath } from './runtime-bundle.mjs';
+import { portablePath, publicText } from './validation.mjs';
+import { digest, safePath } from './validation.mjs';
 import { validateGitHubTarget } from './github.mjs';
 import { contentFields, validateLocalRules } from './issues.mjs';
 
@@ -66,9 +66,9 @@ export async function resolveIssueInput(project, input) {
   if (input.schemaVersion !== 1 || !['create', 'update', 'comment'].includes(input.action) || !/^[A-Za-z0-9][A-Za-z0-9_-]{7,79}$/.test(input.operationId)) fail('issue_input_invalid', '需要 schemaVersion=1、明确动作及稳定的 8–80 位 operationId。');
   const initiating = await repository(input.initiatingProject);
   if (resolve(project) !== initiating.root) fail('issue_project_mismatch', '--project 与本次输入的发起检出不一致。');
-  fields(input.relationship, ['workspace', 'kind', 'path', 'harnessDirectory'], '仓库关系');
+  fields(input.relationship, ['workspace', 'kind', 'path', 'policyDirectory'], '仓库关系');
   await repository(input.relationship.workspace);
-  const relationship = await resolveRepository(initiating.root, { workspace: input.relationship.workspace, harnessDirectory: input.relationship.harnessDirectory });
+  const relationship = await resolveRepository(initiating.root, { workspace: input.relationship.workspace, policyDirectory: input.relationship.policyDirectory });
   if (relationship.registration.kind !== input.relationship.kind || relationship.registration.path !== input.relationship.path) fail('issue_relationship_changed', '本次声明的仓库关系与实际登记不符。');
   fields(input.target, ['scope', 'project', 'backend', 'local', 'github'], '完整目标');
   const target = await repository(input.target.project);
