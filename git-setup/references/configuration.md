@@ -4,6 +4,8 @@ Git remote 来自当前实际 Git 配置；项目共同政策由 Git 使用说�
 
 仓库关系共同解析 .gitmodules、gitlink 和 Git 元数据，独立仓使用明确项目策略目录的 repos.conf。Worktree 按 Git common directory 归属；登记不决定 Issue 目标或账号共享。
 
+所有 GitHub 入口按[仓库鉴权](authentication.md)默认使用项目目标 Token；全局 gh 仅在用户明确选择后使用指定账号。项目规则中的自定义文件由 Agent 传入 sources 或参数，同范围既有选择可复用。项目 Token 问题不触发全局回退。
+
 ## 默认复用项目流程
 
 普通本地 Markdown Issue 由 Agent 读取项目现有 tracker、模板和状态约定，沿已初始化的 matt-pocock-skills 流程直接写入并回读正式事项。不要求 JSON、operationId、额外模板或 git-setup 恢复记录；不重新初始化已有工程规则。Git 设置本身不强制安装 matt-pocock-skills。

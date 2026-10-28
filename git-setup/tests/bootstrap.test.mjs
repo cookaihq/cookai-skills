@@ -85,7 +85,7 @@ async function fixture(t, { cnb = false, populated = true } = {}) {
   const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
   const env = { https_proxy: proxyUrl, HTTPS_PROXY: proxyUrl, ALL_PROXY: '', NO_PROXY: '', no_proxy: '', GIT_SSL_NO_VERIFY: '1', GIT_TERMINAL_PROMPT: '0' };
   const method = cnb ? 'cnb-url' : 'github-token';
-  const options = { url, env, apiTransport: identity, authMethod: method };
+  const options = { url, env, apiTransport: identity };
   const prepare = async () => {
     const result = await exec(process.execPath, [cli, 'credential-prepare', '--project', project, '--url', url, '--auth-method', method, '--allow-ignore', '--apply'], { encoding: 'utf8', timeout: 30000 });
     return JSON.parse(result.stdout);
@@ -97,7 +97,7 @@ async function fixture(t, { cnb = false, populated = true } = {}) {
 test('GitHub file selection prepares metadata, resumes clone and uses current-source transport', async t => {
   const f = await fixture(t);
   const choice = await setup(f.project, { url: f.url });
-  assert.deepEqual(choice.required, ['auth-method']);
+  assert.deepEqual(choice.required, ['credential-prepare']);
   assert.deepEqual(await readdir(f.project), []);
   const preview = await prepareAuth(f.project, f.url, { authMethod: f.method });
   assert.equal(preview.initialization.originalEmpty, true);
@@ -109,9 +109,9 @@ test('GitHub file selection prepares metadata, resumes clone and uses current-so
   if (process.platform !== 'win32') assert.equal((await lstat(prep.credentialFile)).mode & 0o777, 0o600);
   else assert.equal((await lstat(prep.credentialFile)).isFile(), true); // Windows ACL is a separate host check.
   assert.equal(f.requests.length, 0);
-  await f.fill(prep);
-  assert.deepEqual((await setup(f.project, { url: f.url })).required, ['auth-method']);
+  assert.deepEqual((await setup(f.project, { url: f.url })).required, ['credentials-filled']);
   assert.equal(f.requests.length, 0);
+  await f.fill(prep);
   const plan = await setup(f.project, f.options);
   assert.equal(plan.kind, 'clone');
   const cloned = await setup(f.project, { ...f.options, apply: true, expectedFingerprint: plan.fingerprint });
