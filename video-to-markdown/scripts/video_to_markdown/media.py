@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import http.client
+import math
+from email.utils import parsedate_to_datetime
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -21,6 +26,10 @@ DOWNLOAD_TIMEOUT_SECONDS = 120
 
 
 class MediaError(ValueError):
+    pass
+
+
+class IncompleteDownload(ConnectionError):
     pass
 
 
@@ -91,6 +100,8 @@ def probe_video(path: Path, ffprobe_bin: str) -> dict:
     )
     duration = None
     for value in duration_values:
+        if value is None:
+            continue
         try:
             candidate = float(value)
         except (TypeError, ValueError):
@@ -125,7 +136,23 @@ def _copy_atomic(source: Path, destination: Path) -> None:
 def _transient_download(exc: Exception) -> bool:
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code == 429 or 500 <= exc.code <= 599
-    return isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead))
+
+
+def _download_retry_delay(exc: Exception, attempt: int) -> float:
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+        raw = exc.headers.get("Retry-After")
+        if raw:
+            try:
+                delay = float(raw)
+            except ValueError:
+                try:
+                    delay = parsedate_to_datetime(raw).timestamp() - time.time()
+                except (ValueError, TypeError, OverflowError):
+                    delay = float("nan")
+            if math.isfinite(delay) and delay >= 0:
+                return min(delay, 60.0)  # ADR 0006's cap for this Skill.
+    return float(2 ** (attempt - 1))
 
 
 def download_video(
@@ -152,12 +179,23 @@ def download_video(
                             "URL returned %s, not a directly downloadable video"
                             % content_type
                         )
+                    raw_length = response.headers.get("Content-Length")
+                    try:
+                        expected_size = int(raw_length) if raw_length is not None else None
+                    except ValueError as exc:
+                        raise MediaError("download response has an invalid Content-Length") from exc
+                    if expected_size is not None and expected_size < 0:
+                        raise MediaError("download response has a negative Content-Length")
+                    received_size = 0
                     with temporary.open("xb") as output:
                         while True:
                             chunk = response.read(1024 * 1024)
                             if not chunk:
                                 break
                             output.write(chunk)
+                            received_size += len(chunk)
+                        if expected_size is not None and received_size != expected_size:
+                            raise IncompleteDownload("incomplete response body")
                         output.flush()
                         os.fsync(output.fileno())
                 if temporary.stat().st_size == 0:
@@ -174,9 +212,14 @@ def download_video(
                     pass
                 if not _transient_download(exc) or attempt == DOWNLOAD_ATTEMPTS:
                     break
-                wait = 2 ** (attempt - 1)
+                wait = _download_retry_delay(exc, attempt)
+                print("video download attempt %d/%d failed (%s); retry in %.1fs"
+                      % (attempt, DOWNLOAD_ATTEMPTS, type(exc).__name__, wait), file=sys.stderr)
                 sleep(wait)
-        raise MediaError("video download failed after 3 attempts: %s" % last_error)
+        reason = "incomplete response body" if isinstance(last_error, (IncompleteDownload, http.client.IncompleteRead)) else (
+            "HTTP %d" % last_error.code if isinstance(last_error, urllib.error.HTTPError) else type(last_error).__name__
+        )
+        raise MediaError("video download failed after %d attempt(s): %s" % (attempt, reason))
     finally:
         try:
             temporary.unlink()
@@ -214,7 +257,9 @@ def prepare_source(
     digest, size = state.sha256_file(destination)
     return destination.resolve(), {
         "kind": "url" if remote else "local",
-        "origin": video,
+        "origin": "%s://%s" % (urllib.parse.urlsplit(video).scheme, urllib.parse.urlsplit(video).hostname)
+        if remote else video,
+        "origin_is_private": remote,
         "original_filename": filename,
         "managed": managed,
         "physical_path": str(destination.resolve()),
@@ -233,9 +278,29 @@ def verify_source(source_record: dict) -> Path:
     return path
 
 
-def extract_audio(source: Path, destination: Path, ffmpeg_bin: str) -> dict:
+def verify_audio(task_dir: Path, audio_record: dict) -> Path:
+    relative = Path(audio_record.get("path", ""))
+    path = (task_dir / relative).resolve()
+    if relative.is_absolute() or not path.is_relative_to(task_dir.resolve()):
+        raise MediaError("prepared audio path is outside the task directory")
+    if not path.is_file():
+        raise MediaError("prepared audio is missing; restore the original audio before resuming")
+    digest, size = state.sha256_file(path)
+    if digest != audio_record.get("sha256") or size != audio_record.get("size_bytes"):
+        raise MediaError("prepared audio changed; restore the original audio before resuming")
+    return path
+
+
+def extract_audio(source: Path, destination: Path, ffmpeg_bin: str, *, ffprobe_bin: str = "ffprobe", source_record: dict | None = None) -> dict:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.parent / (".%s.%s.flac" % (destination.name, uuid.uuid4().hex))
+    temporary = destination.parent / (".%s.%s.mp3" % (destination.name, uuid.uuid4().hex))
+    streams = (source_record or {}).get("streams", [])
+    audio_stream: dict = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
+    if source_record is not None and not audio_stream:
+        raise MediaError("video has no audio track; provide a timestamped transcript")
+    # Keep the first audio track and its offset on the source video timeline.
+    video_start = float((source_record or {}).get("format", {}).get("start_time", 0) or 0)
+    offset_ms = round((float(audio_stream.get("start_time", video_start) or 0) - video_start) * 1000)
     try:
         _run(
             [
@@ -252,9 +317,10 @@ def extract_audio(source: Path, destination: Path, ffmpeg_bin: str) -> dict:
                 "-ac",
                 "1",
                 "-ar",
-                "16000",
+                "24000",
                 "-c:a",
-                "flac",
+                "libmp3lame",
+                "-b:a", "64k",
                 str(temporary),
             ],
             timeout=1800,
@@ -267,7 +333,15 @@ def extract_audio(source: Path, destination: Path, ffmpeg_bin: str) -> dict:
         except FileNotFoundError:
             pass
     digest, size = state.sha256_file(destination)
-    return {"path": str(destination), "sha256": digest, "size_bytes": size}
+    audio_probe = json.loads(_run([ffprobe_bin, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(destination)], timeout=120, operation="ffprobe extracted audio").stdout)
+    audio_duration_ms = round(float(audio_probe["format"]["duration"]) * 1000)
+    if len(audio_probe.get("streams", [])) != 1 or audio_probe["streams"][0].get("codec_type") != "audio" or audio_duration_ms <= 0:
+        raise MediaError("extracted audio is not a complete decodable audio-only file")
+    return {"path": str(destination), "sha256": digest, "size_bytes": size,
+            "codec": "mp3", "sample_rate": 24000, "channels": 1, "bitrate": 64000,
+            "track_index": audio_stream.get("index", 0), "time_offset_ms": offset_ms,
+            "duration_ms": audio_duration_ms, "encoded_start_time": audio_probe["streams"][0].get("start_time"),
+            "source_duration_ms": (source_record or {}).get("duration_ms")}
 
 
 def parse_timecode(value: str | int) -> int:

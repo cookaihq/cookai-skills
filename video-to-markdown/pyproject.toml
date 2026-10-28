@@ -1,17 +1,24 @@
 [project]
 name = "video-to-markdown"
-version = "1.1.0"
+version = "2.0.0"
 description = "Deterministic media preparation and validation for the video-to-markdown Agent Skill"
 requires-python = ">=3.11"
 dependencies = [
   "Pillow>=11.3.0,<12",
+  "pywin32==311; sys_platform == 'win32'",
 ]
 
 [dependency-groups]
 dev = [
+  "mypy==1.18.2",
   "pytest>=8.4.1,<9",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.mypy]
+check_untyped_defs = true
+ignore_missing_imports = true
+incremental = false

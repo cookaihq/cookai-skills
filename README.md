@@ -13,7 +13,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [banana-2](banana-2/) | Nano Banana 2（`gemini-3.1-flash-image-preview`）生成 / 编辑图片：文生图 / 图生图 / 图像编辑、15 种宽高比 + `512`~`4K` 画质档、可选联网搜索 / 图片搜索增强、任务完成自动下载到工作区 | [README](banana-2/README.md) · [SKILL.md](banana-2/SKILL.md) |
 | [memoji-sticker-pack](memoji-sticker-pack/) | 从一张人物照片生成一套 Apple Memoji 风格（拟我表情）表情贴纸包：先出基准头像锁定长相，再并发生成 N 个表情（默认 16），绿幕出图 + 自动抠成透明底 PNG，产出画廊 `index.html`（调用 `image-2` 生成，内置参考图上传） | [README](memoji-sticker-pack/README.md) · [SKILL.md](memoji-sticker-pack/SKILL.md) |
 | [multimodal-ask](multimodal-ask/) | 指定模型做多模态理解与文本生成：分析 / 转写音视频、让指定模型读取本地或远程图片 / PDF、对混合媒体一次性推理（异步） | [README](multimodal-ask/README.md) · [SKILL.md](multimodal-ask/SKILL.md) |
-| [video-to-markdown](video-to-markdown/) | 把本地或可直接下载的视频转成可复核、可续跑的 Markdown 文档：结合带时间戳的语音转写、关键帧截图、短 GIF、自适应补采样和全时间线覆盖检查，保留语音与画面共同承载的内容 | [SKILL.md](video-to-markdown/SKILL.md) |
+| [video-to-markdown](video-to-markdown/) | 把本地或可直接下载的视频转成可复核、可续跑的 Markdown 文档：结合带时间戳的语音转写、关键帧截图、短 GIF、自适应补采样和全时间线覆盖检查，保留语音与画面共同承载的内容 | [README](video-to-markdown/README.md) · [SKILL.md](video-to-markdown/SKILL.md) |
 | [pdf2markdown](pdf2markdown/) | 把一个 PDF（本地文件或公开 HTTPS 链接）转成可复核的 Markdown 工作目录：preflight 门禁、一次一个 Doc2X 转换任务（创建 + 轮询 + 原子采纳结果 ZIP 为不可变原始产物）、逐处证据绑定的人工复核与修正、原始产物全程保留，中断后可从任意阶段续跑；付费重试必须显式确认 | [README](pdf2markdown/README.md) · [SKILL.md](pdf2markdown/SKILL.md) |
 | [s3-upload](s3-upload/) | 把本地文件持久写入用户自己的 S3 兼容 bucket（AWS S3 / Cloudflare R2 / custom，OSS / COS experimental）：严格 JSON Object Reference + public/presigned URL、`--collision reject` 原子 no-overwrite 与同内容采纳、17 键闭合 result 合同与 `--result-out` 跨进程 handoff、checkpoint 只读对账恢复 | [README](s3-upload/README.md) · [SKILL.md](s3-upload/SKILL.md) |
 | [preview-share](preview-share/) | 把本地 HTML 页面（或任意本地文件）传到线上预览并拿到可分享 URL，自动识别并一并上传相对路径引用的图片 / CSS / JS | [README](preview-share/README.md) · [SKILL.md](preview-share/SKILL.md) |
@@ -41,7 +41,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | preview-share | 1.3.0 | [preview-share/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.3.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | template-preview | 1.3.0 | [template-preview/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.3.0) |
-| video-to-markdown | 1.1.0 | [video-to-markdown/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv1.1.0) |
+| video-to-markdown | 2.0.0 | [video-to-markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv2.0.0) |
 <!-- release-table:end -->
 
 ## 安装

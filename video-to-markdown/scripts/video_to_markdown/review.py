@@ -202,13 +202,13 @@ def validate_task(task_dir: Path, manifest: dict) -> dict:
         blockers,
     )
     transcript_ids = {
-        item.get("segment_id")
+        item["segment_id"]
         for item in transcript_doc.get("segments") or []
         if isinstance(item, dict) and isinstance(item.get("segment_id"), str)
     }
     latest_visual = observations.latest_observations(visual_doc)
     observation_ids = {
-        item.get("observation_id")
+        item["observation_id"]
         for item in latest_visual
         if isinstance(item.get("observation_id"), str)
     }
@@ -320,6 +320,8 @@ def validate_task(task_dir: Path, manifest: dict) -> dict:
         else None,
     }
     manifest["validation"] = result
+    if result["complete"] or manifest.get("stage") == "complete":
+        manifest["completed_once"] = True
     manifest["stage"] = "complete" if result["complete"] else "blocked_validation"
     state.save_manifest(task_dir, manifest)
     return result

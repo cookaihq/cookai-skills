@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -29,10 +30,10 @@ def run_workflow(cwd: Path, *arguments: str, expect: int = 0) -> dict:
 
 
 def make_video(tmp_path: Path) -> Path:
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+    ffmpeg = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
+    ffprobe = os.environ.get("FFPROBE_BIN") or shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
         pytest.skip("ffmpeg and ffprobe are required")
-    if shutil.which("say") is None:
-        pytest.skip("macOS say is required for the generated-speech fixture")
     frames = tmp_path / "frames"
     frames.mkdir()
     for index in range(60):
@@ -50,16 +51,10 @@ def make_video(tmp_path: Path) -> Path:
             fill="#1261a0" if first_scene else "#38a169",
         )
         image.save(frames / ("frame-%03d.png" % index))
-    speech = tmp_path / "speech.aiff"
-    subprocess.run(
-        ["say", "-o", str(speech), "Opening title. The square moves. Second scene."],
-        check=True,
-        timeout=30,
-    )
     video = tmp_path / "sample-video.mp4"
     subprocess.run(
         [
-            "ffmpeg",
+            ffmpeg,
             "-nostdin",
             "-hide_banner",
             "-loglevel",
@@ -68,10 +63,10 @@ def make_video(tmp_path: Path) -> Path:
             "10",
             "-i",
             str(frames / "frame-%03d.png"),
+            "-f",
+            "lavfi",
             "-i",
-            str(speech),
-            "-af",
-            "apad",
+            "sine=frequency=440:duration=6",
             "-t",
             "6",
             "-c:v",
@@ -190,6 +185,11 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
     )
     assert recorded["observations"][0]["revision"] == 2
 
+    run_workflow(
+        tmp_path, "adaptive-review", "--task-dir", str(task_dir),
+        "--reason", "The additional frames explain the moving square and title change.",
+    )
+
     motion = run_workflow(
         tmp_path,
         "make-gif",
@@ -252,3 +252,10 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
     resumed = run_workflow(tmp_path, "resume", "--task-dir", str(task_dir))
     assert resumed["stage"] == "complete"
     assert resumed["next_action"] == "ask_rename_questions"
+
+    (task_dir / "document.md").unlink()
+    resumed = run_workflow(tmp_path, "resume", "--task-dir", str(task_dir), expect=1)
+    assert resumed["stage"] == "blocked_validation"
+    assert resumed["next_action"] == "repair_artifacts"
+    assert "document Markdown is missing or unsafe" in resumed["validation"]["blockers"]
+    assert not (task_dir / "document.md").exists()

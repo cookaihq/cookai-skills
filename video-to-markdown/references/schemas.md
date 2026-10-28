@@ -2,6 +2,8 @@
 
 The runtime performs strict structural and referential validation. Times are integer milliseconds from the beginning of the source video.
 
+The manifest and private task state use schema version 2. Transcript/observation/review artifacts retain their individual schema version 1. Old task state is not silently migrated. The private directory contains operation intents, raw receipts, provider run records and Feishu identity confirmation; do not publish it.
+
 ## Transcript Timing
 
 The workflow writes `transcript.json`; do not edit it by hand. Each segment contains:
@@ -27,6 +29,8 @@ The workflow writes `transcript.json`; do not edit it by hand. Each segment cont
 ```
 
 `raw_start` and `raw_end` preserve the upstream values and units. `start_ms` and `end_ms` are the normalized values used for batch matching and review; timed segments must satisfy `0 <= start_ms <= end_ms <= duration_ms`. `timing_adjustments` is omitted when no boundary adjustment was needed. Its `reason` is `before_video_start` or `after_video_end`.
+
+The example above is a supplied subtitle with a recorded boundary adjustment. New provider transcripts instead reject missing, reversed or out-of-video intervals. `time_mapping.offset_ms` maps the extracted audio's start to the video timeline; raw times remain unchanged. `source.timing_granularity` is `segment`, `word`, `missing` or `mixed`; source files are referenced under `.state/` instead of embedding raw provider metadata or temporary URLs in the public artifact. Real word times may appear under each segment's `words`. Do not split a word or segment into invented per-character intervals.
 
 ## Observation Input
 

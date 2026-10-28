@@ -8,16 +8,56 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
+
+from . import __version__, private_files
 
 
 SCHEMA_VERSION = 1
-SKILL_VERSION = "1.0.0"
+TASK_SCHEMA_VERSION = 2
+SKILL_VERSION = __version__
 MANIFEST_NAME = "manifest.json"
 PRIVATE_RELATIVE = Path(".state") / "private.json"
 
 
 class StateError(ValueError):
     pass
+
+
+@contextmanager
+def task_lock(task_dir: Path):
+    """Lock before reading mutable task state; the OS releases it after a crash."""
+    if os.name == "nt":
+        import win32api
+        import win32event
+        identity = hashlib.sha256(os.path.normcase(str(task_dir.resolve())).encode()).hexdigest()
+        handle = win32event.CreateMutex(None, False, "Local\\video-to-markdown-" + identity)
+        acquired = False
+        try:
+            acquired = win32event.WaitForSingleObject(handle, 0) in (0, 0x80)
+            if not acquired:
+                raise StateError("task is already running in another process")
+            yield
+        finally:
+            if acquired:
+                win32event.ReleaseMutex(handle)
+            win32api.CloseHandle(handle)
+    else:
+        import importlib
+        fcntl = importlib.import_module("fcntl")
+        # Check the schema without mutating legacy tasks. Mutable data is re-read
+        # by the command after acquiring the lock.
+        if read_json(task_dir / MANIFEST_NAME).get("schema_version") != TASK_SCHEMA_VERSION:
+            raise StateError("old tasks are preserved but cannot resume in v2; no transcription was resubmitted")
+        with (task_dir / ".state" / "task.lock").open("a+b") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise StateError("task is already running in another process") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def utc_now() -> str:
@@ -33,28 +73,25 @@ def canonical_json(value: Any) -> bytes:
 def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.parent.name == ".state":
-        os.chmod(path.parent, 0o700)
+        private_files.protect(path.parent, 0o700)
     temporary = path.parent / (".%s.%s.%s" % (path.name, os.getpid(), uuid.uuid4().hex))
     descriptor = None
     try:
         descriptor = os.open(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
             mode,
         )
         os.fchmod(descriptor, mode)
+        if os.name == "nt" and mode == 0o600:
+            private_files.protect(temporary, mode)
         offset = 0
         while offset < len(data):
             offset += os.write(descriptor, data[offset:])
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        private_files.replace_file(temporary, path)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -111,11 +148,11 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict) -> tuple[dict, d
         ".state/batches",
     ):
         (task_dir / relative).mkdir(parents=True, exist_ok=True)
-    os.chmod(task_dir / ".state", 0o700)
+    private_files.protect(task_dir / ".state", 0o700)
     task_id = str(uuid.uuid4())
     created = utc_now()
     manifest = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": TASK_SCHEMA_VERSION,
         "skill_version": SKILL_VERSION,
         "task_id": task_id,
         "task_dir_name": task_dir.name,
@@ -125,7 +162,7 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict) -> tuple[dict, d
         "source": None,
         "settings": settings_snapshot,
         "asr": {
-            "model": settings_snapshot["asr_model"],
+            "provider": settings_snapshot.get("asr_provider", "aihub-audio"),
             "state": "not_started",
             "file_id": None,
             "uploaded_at": None,
@@ -142,30 +179,13 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict) -> tuple[dict, d
         "validation": {"complete": False, "checked_at": None, "blockers": []},
     }
     private = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": TASK_SCHEMA_VERSION,
         "task_id": task_id,
         "generation": 1,
-        "credential_source": settings_snapshot["sources"].get("api_key"),
-        "upload": {
-            "state": "not_started",
-            "intent_audio_sha256": None,
-            "temporary_url": None,
-            "response": None,
-        },
-        "asr_create": {
-            "state": "not_started",
-            "intent_fingerprint": None,
-            "response": None,
-        },
-        "asr_terminal": {
-            "state": "not_started",
-            "task_id": None,
-            "response": None,
-        },
-        "asr_transcription": {
-            "state": "not_started",
-            "url_fingerprint": None,
-            "response": None,
+        "transcription": {
+            "default_provider": settings_snapshot.get("asr_provider", "aihub-audio"),
+            "provider": settings_snapshot.get("asr_provider", "aihub-audio"),
+            "status": "new", "attempted": [], "automatic_switches": 0, "providers": {},
         },
     }
     atomic_write_json(task_dir / MANIFEST_NAME, manifest)
@@ -175,19 +195,21 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict) -> tuple[dict, d
 
 def load_task(task_dir_value: str | os.PathLike[str]) -> tuple[Path, dict, dict]:
     task_dir = Path(task_dir_value).expanduser().resolve()
+    try:
+        private_files.verify_private(task_dir / ".state", 0o700)
+        private_files.verify_private(task_dir / PRIVATE_RELATIVE, 0o600)
+    except (OSError, ValueError) as exc:
+        raise StateError(str(exc)) from exc
     manifest = read_json(task_dir / MANIFEST_NAME)
     private = read_json(task_dir / PRIVATE_RELATIVE)
     if not isinstance(manifest, dict) or not isinstance(private, dict):
         raise StateError("task state must be JSON objects")
-    if manifest.get("schema_version") != SCHEMA_VERSION:
-        raise StateError("unsupported manifest schema")
-    if private.get("schema_version") != SCHEMA_VERSION:
+    if manifest.get("schema_version") != TASK_SCHEMA_VERSION:
+        raise StateError("unsupported task schema: old tasks are preserved but cannot resume in v2; no transcription was resubmitted")
+    if private.get("schema_version") != TASK_SCHEMA_VERSION:
         raise StateError("unsupported private state schema")
     if manifest.get("task_id") != private.get("task_id"):
         raise StateError("manifest and private state task IDs differ")
-    private_mode = stat.S_IMODE((task_dir / PRIVATE_RELATIVE).stat().st_mode)
-    if private_mode != 0o600:
-        raise StateError(".state/private.json must have mode 0600")
     return task_dir, manifest, private
 
 

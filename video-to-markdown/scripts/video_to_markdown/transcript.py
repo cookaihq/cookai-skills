@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,7 @@ def parse_subtitle(
         kind = "srt"
     else:
         kind = "timestamped_transcript"
-    segments = []
+    segments: list[dict] = []
     if kind in {"srt", "vtt"}:
         for block in re.split(r"\n\s*\n", raw.strip()):
             lines = [line.strip("\ufeff\r") for line in block.splitlines()]
@@ -132,8 +133,10 @@ def _number_precision_ms(value: Any) -> int | None:
 
 def _seconds_to_ms(value: Any) -> int | None:
     try:
+        if isinstance(value, bool) or not math.isfinite(float(value)):
+            return None
         return int(round(float(value) * 1000))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -174,14 +177,14 @@ def _limit_segment_times(segments: list[dict], duration_ms: int | None) -> None:
 
 
 def _word_cues(words: list[dict]) -> list[dict]:
-    usable = []
+    usable: list[dict] = []
     for word in words:
         if not isinstance(word, dict):
-            continue
+            raise TranscriptError("invalid word record; complete raw result preserved")
         start_ms = _seconds_to_ms(word.get("start"))
         end_ms = _seconds_to_ms(word.get("end"))
-        if start_ms is None or end_ms is None:
-            continue
+        if start_ms is None or end_ms is None or start_ms < 0 or end_ms <= start_ms:
+            raise TranscriptError("incomplete word timing; complete raw result preserved")
         usable.append(
             {
                 "raw": word,
@@ -196,7 +199,7 @@ def _word_cues(words: list[dict]) -> list[dict]:
             }
         )
     cues = []
-    current = []
+    current: list[dict] = []
 
     def flush() -> None:
         if not current:
@@ -211,6 +214,11 @@ def _word_cues(words: list[dict]) -> list[dict]:
                     "end_ms": current[-1]["end_ms"],
                     "timestamp_precision_ms": max(item["precision"] for item in current),
                     "text": re.sub(r"\s+", " ", text),
+                    "timing_granularity": "word",
+                    "speaker": current[0]["speaker"],
+                    "words": [{"text": item["text"], "start_ms": item["start_ms"], "end_ms": item["end_ms"],
+                               "raw_start": item["raw"].get("start"), "raw_end": item["raw"].get("end"),
+                               "speaker": item["speaker"]} for item in current],
                 }
             )
         current.clear()
@@ -246,7 +254,7 @@ def _redact_urls(value: Any) -> Any:
 def _paraformer_sentences(response: dict | None) -> list[dict]:
     if not isinstance(response, dict):
         return []
-    normalized = []
+    normalized: list[dict] = []
     transcripts = response.get("transcripts")
     if not isinstance(transcripts, list):
         return normalized
@@ -288,7 +296,7 @@ def _paraformer_sentences(response: dict | None) -> list[dict]:
     return normalized
 
 
-def normalize_aihub(
+def _normalize_aihub_result(
     task_response: dict,
     *,
     model: str,
@@ -310,6 +318,7 @@ def normalize_aihub(
             continue
         segments = result.get("segments")
         if isinstance(segments, list):
+            previous_count = len(normalized)
             for item in segments:
                 if not isinstance(item, dict) or not str(item.get("text") or "").strip():
                     continue
@@ -328,7 +337,7 @@ def normalize_aihub(
                         "text": re.sub(r"\s+", " ", str(item.get("text"))).strip(),
                     }
                 )
-            if normalized:
+            if len(normalized) > previous_count:
                 continue
         text = str(result.get("text") or "").strip()
         if text:
@@ -376,3 +385,40 @@ def normalize_aihub(
 
 def write_transcript(task_dir: Path, value: dict) -> None:
     state.atomic_write_json(task_dir / "transcript.json", value)
+
+
+def normalize_aihub_files(documents: list, *, model: str | None, language: str | None) -> dict:
+    segments = []
+    for raw in documents:
+        if isinstance(raw, dict) and "transcripts" in raw:
+            normalized = _paraformer_sentences(raw)
+        else:
+            results = raw if isinstance(raw, list) else raw.get("results", [raw]) if isinstance(raw, dict) else []
+            value = _normalize_aihub_result({"results": results}, model=model or "unknown", language=language)
+            normalized = value["segments"]
+        segments.extend(normalized)
+    if not segments:
+        raise TranscriptError("AIhub Audio saved no complete transcription")
+    for index, segment in enumerate(segments, 1):
+        segment["segment_id"] = "segment-%06d" % index
+        segment.setdefault("timing_granularity", "segment" if segment.get("start_ms") is not None else "missing")
+    granularities = {segment["timing_granularity"] for segment in segments}
+    granularity = next(iter(granularities)) if len(granularities) == 1 else "mixed"
+    return {"schema_version": 1, "source": {"kind": "aihub-audio", "model": model, "timing_granularity": granularity},
+            "language": language, "segments": segments}
+
+
+def apply_timeline(value: dict, manifest: dict) -> None:
+    offset = manifest["audio_for_asr"]["time_offset_ms"]
+    duration = manifest["source"]["duration_ms"]
+    value["time_mapping"] = {"offset_ms": offset, "source": "selected_audio_track"}
+    for item in value["segments"]:
+        start, end = item.get("start_ms"), item.get("end_ms")
+        if type(start) is not int or type(end) is not int or start < 0 or end <= start:
+            raise TranscriptError("transcription has missing or invalid timing; raw result preserved")
+        item["start_ms"], item["end_ms"] = start + offset, end + offset
+        if item["start_ms"] < 0 or item["end_ms"] > duration:
+            raise TranscriptError("transcription lies outside the video timeline; raw result preserved")
+        for word in item.get("words", []):
+            word["start_ms"] += offset
+            word["end_ms"] += offset
