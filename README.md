@@ -19,11 +19,13 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [preview-share](preview-share/) | 把本地 HTML 页面（或任意本地文件）传到线上预览并拿到可分享 URL，自动识别并一并上传相对路径引用的图片 / CSS / JS | [README](preview-share/README.md) · [SKILL.md](preview-share/SKILL.md) |
 | [template-preview](template-preview/) | 把「一批图片 + 文案」的文件夹渲染成模仿知名 App UI 的展示页（v1 内置小红书个人主页模板），产出自包含的 `index.html` + assets，可交给 preview-share 上传 | [README](template-preview/README.md) · [SKILL.md](template-preview/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
-| [frpc-launch](frpc-launch/) | 本地一键启动/管理 frpc 内网穿透：双模式（自部署 FRPS / 宝塔 frps 用官方 frpc，樱花FRP 用其定制客户端）、无配置时引导配置、二进制自动下载校验、后台常驻 + status/stop/logs、凭证全程掩码 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
+| [frpc-launch](frpc-launch/) | 使用已有自部署/宝塔或樱花 FRP；按项目复用连接、固定域名并隔离代理、进程和日志，支持检查与独立停止 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
 
 ## 版本与 Release
 
 各目标的当前版本与对应 Release 地址（表格由 `harness/repo-harness/release-on-push.sh --table` 生成，升版本的提交须同步更新，约定见外层仓 `docs/adr/0009`）：
+
+表格随源码版本生成；对应版本完成发布后 Release 链接才可用。
 
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
@@ -32,7 +34,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | feishu-use | 1.2.0 | [feishu-use/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.2.0) |
-| frpc-launch | 1.3.1 | [frpc-launch/v1.3.1](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.3.1) |
+| frpc-launch | 1.4.0 | [frpc-launch/v1.4.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.4.0) |
 | git-setup | 0.4.0 | [git-setup/v0.4.0](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv0.4.0) |
 | image-2 | 1.3.0 | [image-2/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.3.0) |
 | memoji-sticker-pack | 1.3.0 | [memoji-sticker-pack/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.3.0) |

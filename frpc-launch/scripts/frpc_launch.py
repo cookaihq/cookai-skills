@@ -23,7 +23,8 @@ import sys
 # 变量被外部环境 export 时值不匹配，就不算本轮的再入，仍照常自动重建。
 REEXEC_ENV = "FRPC_LAUNCH_BOOTSTRAP_REEXEC"
 
-UV_INSTALL_HINT = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+UV_INSTALL_HINT = ("winget install --id astral-sh.uv" if os.name == "nt"
+                   else "curl -LsSf https://astral.sh/uv/install.sh | sh")
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
@@ -32,7 +33,8 @@ SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
 # 相对值按项目根解析，按 CWD 解析会在用户自己的项目目录里设了相对值时把进程 exec
 # 进用户项目的 venv。绝对值不受影响：os.path.join 遇到绝对路径直接返回它。
 VENV_DIR = os.path.join(SKILL_DIR, os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
-VENV_PY = os.path.join(VENV_DIR, "bin", "python")
+VENV_PY = os.path.join(VENV_DIR, "Scripts", "python.exe") if os.name == "nt" \
+    else os.path.join(VENV_DIR, "bin", "python")
 
 
 def _bootstrap_fail(msg):
@@ -41,9 +43,11 @@ def _bootstrap_fail(msg):
 
 
 def _manual_rebuild_hint():
+    if os.name == "nt":
+        return "uv sync --frozen --project '%s' --no-dev --reinstall" % SKILL_DIR.replace("'", "''")
     # 必须 shell 引用：路径含空格时，未引用的 `rm -rf /tmp/sp ace/.venv` 被照抄
     # 执行会删掉两个无关路径。
-    return "rm -rf %s && uv sync --project %s --no-dev" % (
+    return "rm -rf %s && uv sync --frozen --project %s --no-dev" % (
         shlex.quote(VENV_DIR), shlex.quote(SKILL_DIR)
     )
 
@@ -78,14 +82,17 @@ def _require_uv():
                         % found)
 
 
-def _sync_runtime():
+def _sync_runtime(reinstall=False):
     """按 uv.lock 冻结重建 skill 自有环境（ADR 0007 §4.1：自动修复）。"""
     sys.stderr.write("[bootstrap] 运行环境缺失，正在按 uv.lock 重建 %s ...\n" % VENV_DIR)
     try:
         # `--no-dev`：这里重建的是**运行时**环境。不加的话 uv 会把 dev 组
         # （pytest 等）一并装进 .venv，让运行时环境带上只有跑测试才需要的包。
         # 跑测试时显式用 `uv sync --project <dir> --group dev`。
-        sync = subprocess.run(["uv", "sync", "--project", SKILL_DIR, "--no-dev"],
+        command = ["uv", "sync", "--frozen", "--project", SKILL_DIR, "--no-dev"]
+        if reinstall:
+            command += ["--reinstall-package", "tomlkit"]
+        sync = subprocess.run(command,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               timeout=600)  # 网络调用必设总预算（ADR 0006 §5）
     except subprocess.TimeoutExpired:
@@ -101,6 +108,15 @@ def _ensure_runtime():
     """确保当前进程运行在目标 venv 里；不是则 exec 拉回去，缺失则先重建。"""
     target = os.path.realpath(VENV_DIR)
     if os.path.realpath(sys.prefix) == target:
+        try:
+            import tomlkit  # real import: presence alone cannot detect a broken install
+        except Exception as exc:
+            if os.environ.get(REEXEC_ENV) == target:
+                _bootstrap_fail("依赖重建后仍无法导入 tomlkit: %s" % exc)
+            _require_uv()
+            _sync_runtime(reinstall=True)
+            os.environ[REEXEC_ENV] = target
+            os.execv(VENV_PY, [VENV_PY] + sys.argv)
         # 已在目标 venv：清掉本轮标记，避免派生的子进程继承后误判。
         if os.environ.get(REEXEC_ENV) == target:
             os.environ.pop(REEXEC_ENV, None)
@@ -126,6 +142,7 @@ import argparse  # noqa: E402
 import dataclasses  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import platform  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
@@ -137,6 +154,8 @@ import urllib.parse  # noqa: E402
 import urllib.request  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
+
+import project_config as projects  # noqa: E402
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -178,8 +197,10 @@ def mask_text(text: str, secrets: list) -> str:
 def parse_env_file(path: Path) -> dict:
     try:
         raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
         return {}
+    except (OSError, UnicodeDecodeError):
+        raise FrpcLaunchError("配置文件不可读取：%s（未切换到其他来源）" % path) from None
     result = {}
     for line in raw.splitlines():
         stripped = line.strip()
@@ -589,10 +610,28 @@ def write_pid_record(path: Path, record: dict) -> None:
 
 
 def read_pid_record(path: Path) -> dict:
-    return read_meta(path)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        raise FrpcLaunchError("PID 记录无法读取：%s；先核对现有进程，未自动清空或重复启动。" % path) from None
+    if not isinstance(record, dict) or not isinstance(record.get("pid"), int) or record["pid"] <= 0:
+        raise FrpcLaunchError("PID 记录格式无效：%s；未发送信号。" % path)
+    return record
 
 
 def pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        raise FrpcLaunchError("Windows 原生进程管理未实现；只可使用本地项目配置与来源检查。")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        state = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()[0]
+        if state == "Z":
+            return False
+    except (OSError, IndexError):
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -605,18 +644,62 @@ def pid_alive(pid: int) -> bool:
 def process_command(pid: int) -> str:
     # -ww：禁止按终端宽度截断（macOS 与 procps 均支持），防止长路径身份核对恒失败
     r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=5)
     if r.returncode != 0:
         return ""
     return r.stdout.strip()
 
 
-def pid_identity_ok(record: dict) -> bool:
+def process_started(pid: int) -> str:
+    try:
+        fields = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        return "proc:" + fields[19]
+    except (OSError, IndexError):
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="],
+                                capture_output=True, text=True, timeout=5)
+        return "ps:" + result.stdout.strip() if result.returncode == 0 else ""
+
+
+def pid_identity_ok(record: dict, expected_project: str = "", expected_mode: str = "") -> bool:
+    if expected_project and record.get("project_id") != expected_project:
+        return False
+    if expected_mode and record.get("mode") != expected_mode:
+        return False
     pid = record.get("pid")
     if not isinstance(pid, int) or not pid_alive(pid):
         return False
     exe = record.get("exe", "")
+    if "process_start" in record:
+        if not record["process_start"] or record["process_start"] != process_started(pid):
+            return False
+        expected = record.get("identity_args", [])
+        if not expected:
+            return False
+        try:
+            actual = (Path("/proc") / str(pid) / "cmdline").read_bytes().decode().rstrip("\0").split("\0")
+            return actual == expected
+        except OSError:
+            return process_command(pid) == " ".join(expected)
     return bool(exe) and exe in process_command(pid)
+
+
+def runtime_root(args):
+    return projects.runtime_home(args.project, args.home) if args.project else args.home
+
+
+def expected_project(args):
+    return projects.project_id(args.project) if args.project else ""
+
+
+def signal_record(record, sig):
+    if record.get("process_start") and not pid_identity_ok(record):
+        raise FrpcLaunchError("进程身份已变化，未发送信号。")
+    if record.get("process_group"):
+        if os.getpgid(record["pid"]) != record["pid"]:
+            raise FrpcLaunchError("进程组身份异常，未发送信号。")
+        os.killpg(record["pid"], sig)
+    else:
+        os.kill(record["pid"], sig)
 
 
 def config_digest_official(config_path: Path, binary: Path) -> str:
@@ -678,6 +761,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="frpc_launch", description="本地一键启动/管理 frpc")
     p.add_argument("--home", type=Path, default=DEFAULT_HOME,
                    help="受管目录（默认 ~/.config/frpc-launch，测试/诊断用）")
+    p.add_argument("--project", type=Path, default=None,
+                   help="当前项目目录；隔离代理、PID 和日志，--home 仅提供共享默认与二进制")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果（供 Agent 解析）")
     sub = p.add_subparsers(dest="command")
     for name, desc in [
@@ -685,6 +770,8 @@ def build_parser() -> argparse.ArgumentParser:
         ("status", "查看运行状态"), ("logs", "查看受管日志"),
         ("install", "安装受管二进制"), ("update", "显式升级受管二进制"),
         ("guide-init", "引导流程写配置（由 SKILL.md 编排调用）"),
+        ("project-config", "保存项目连接、固定域名或定点更新代理；不启动隧道"),
+        ("project-info", "只读报告项目配置来源和完整路由映射；不回显连接值"),
     ]:
         sp = sub.add_parser(name, help=desc)
         if name in ("start", "stop", "status", "logs", "install", "update"):
@@ -710,6 +797,20 @@ def build_parser() -> argparse.ArgumentParser:
                                  "locations=/api/（locations 仅 HTTP；可重复 --proxy）")
             sp.add_argument("--allow-tracked", action="store_true",
                             help="显式允许写入未被 git 忽略的 Secret 文件")
+        if name == "project-config":
+            sp.add_argument("--server-addr", default="")
+            sp.add_argument("--server-port", type=int, default=0)
+            sp.add_argument("--domain-suffix", default="")
+            sp.add_argument("--domain", default="")
+            sp.add_argument("--replace-domain", action="store_true")
+            sp.add_argument("--local-port", type=int, default=None)
+            sp.add_argument("--local-ip", default="")
+            sp.add_argument("--proxy-name", default="")
+            sp.add_argument("--proxy-type", choices=("http", "https"), default="")
+            sp.add_argument("--route-mode", choices=("customDomains", "subdomain"), default="")
+            sp.add_argument("--subdomain-host", default="")
+            sp.add_argument("--location", action="append", dest="locations", default=None)
+            sp.add_argument("--proxy", action="append", dest="proxies", default=[])
     return p
 
 
@@ -855,8 +956,10 @@ def _git_secret_check(cwd: Path, target: Path, allow_tracked: bool):
 
 
 def cmd_guide_init(args) -> int:
+    if args.project and args.source != "sakura":
+        raise FrpcLaunchError("项目 official 配置请使用 project-config；guide-init 是完整原生配置入口。")
     home = args.home
-    cwd = Path.cwd()
+    cwd = args.project or Path.cwd()
     layered = resolve_layered(dict(os.environ), cwd, home)
     written = []
     token_masked = ""
@@ -906,10 +1009,13 @@ def cmd_guide_init(args) -> int:
             target = home / ".env"
         else:
             target = cwd / ".env.local"
-            ok, reason = _git_secret_check(cwd, target, args.allow_tracked)
-            if not ok:
-                print("错误: %s" % reason, file=sys.stderr)
-                return 6
+            if args.project:
+                projects.secret_target_check(cwd, target)
+            else:
+                ok, reason = _git_secret_check(cwd, target, args.allow_tracked)
+                if not ok:
+                    print("错误: %s" % reason, file=sys.stderr)
+                    return 6
         update_env_file(target, updates)
         written.append(str(target))
     _emit(args, {"written": written, "scope": args.scope, "source": args.source,
@@ -940,7 +1046,7 @@ def _collect_secrets(layered: dict, home: Path) -> list:
 def cmd_stop(args) -> int:
     import signal
     import time as _time
-    home = args.home
+    home = runtime_root(args)
     modes = [args.mode] if args.mode else ["official", "sakura"]
     results = {}
     for mode in modes:
@@ -949,7 +1055,7 @@ def cmd_stop(args) -> int:
         if not record:
             results[mode] = {"result": "not_running"}
             continue
-        if not pid_identity_ok(record):
+        if not pid_identity_ok(record, expected_project(args), mode):
             pid_file.unlink(missing_ok=True)
             if isinstance(record.get("pid"), int) and not pid_alive(record["pid"]):
                 detail = "进程已退出，仅清理残留 pid 文件"
@@ -959,12 +1065,12 @@ def cmd_stop(args) -> int:
             results[mode] = {"result": "stale_pid_cleaned", "detail": detail}
             continue
         pid = record["pid"]
-        os.kill(pid, signal.SIGTERM)
+        signal_record(record, signal.SIGTERM)
         deadline = _time.monotonic() + 10
         while pid_alive(pid) and _time.monotonic() < deadline:
             _time.sleep(0.2)
         if pid_alive(pid):
-            os.kill(pid, signal.SIGKILL)
+            signal_record(record, signal.SIGKILL)
         pid_file.unlink(missing_ok=True)
         results[mode] = {"result": "stopped", "pid": pid}
     human = "; ".join("%s: %s" % (m, r["result"]) for m, r in results.items())
@@ -973,6 +1079,8 @@ def cmd_stop(args) -> int:
 
 
 def cmd_status(args) -> int:
+    if args.project:
+        return cmd_project_status(args)
     home = args.home
     layered = resolve_layered(dict(os.environ), Path.cwd(), home)
     secrets = _collect_secrets(layered, home)
@@ -1014,6 +1122,12 @@ def cmd_status(args) -> int:
 
 
 def cmd_logs(args) -> int:
+    if args.project:
+        payload = {mode: read_log_tail(pid_paths(runtime_root(args), mode)[1], args.lines)
+                   for mode in ([args.mode] if args.mode else ["official", "sakura"])}
+        _emit(args, {"project": str(args.project), "runtime_dir": str(runtime_root(args)), "modes": payload},
+              "\n".join(payload.values()))
+        return 0
     home = args.home
     layered = resolve_layered(dict(os.environ), Path.cwd(), home)
     secrets = _collect_secrets(layered, home)
@@ -1081,6 +1195,22 @@ _SECRET_KEY_RE = re.compile(
 
 
 def _extract_official_secrets(toml_text: str) -> list:
+    try:
+        parsed = projects.tomlkit.parse(toml_text)
+        values = []
+        def collect(item):
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    if key in ("token", "clientSecret", "password") and isinstance(value, str) and value:
+                        values.extend([value, json.dumps(value, ensure_ascii=False)[1:-1]])
+                    collect(value)
+            elif isinstance(item, list):
+                for value in item:
+                    collect(value)
+        collect(parsed)
+        return list(dict.fromkeys(values))
+    except Exception:
+        pass
     result = []
     for groups in _SECRET_KEY_RE.findall(toml_text):
         value = next((g for g in groups if g), "")
@@ -1092,14 +1222,18 @@ def _extract_official_secrets(toml_text: str) -> list:
 def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> dict:
     home = args.home
     ensure_home_layout(home)
-    pid_file, log_file = pid_paths(home, mode)
+    run_home = runtime_root(args)
+    (run_home / "run").mkdir(parents=True, exist_ok=True)
+    os.chmod(run_home, 0o700)
+    os.chmod(run_home / "run", 0o700)
+    pid_file, log_file = pid_paths(run_home, mode)
     secrets = []
     if mode == "official":
         config_path, config_source = decision.official
         if config_path is None:
             raise FrpcLaunchError("official 模式配置无效或缺失")
         try:
-            secrets = _extract_official_secrets(config_path.read_text(encoding="utf-8"))
+            secrets = _extract_official_secrets(getattr(args, "effective_config", "") or config_path.read_text(encoding="utf-8"))
         except OSError:
             pass
         binary, origin = resolve_official_binary(layered, home)
@@ -1109,7 +1243,10 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
                   file=sys.stderr)
             binary, origin = resolve_official_binary(layered, home)
         try:
-            verify = subprocess.run([str(binary), "verify", "-c", str(config_path)],
+            env = dict(os.environ)
+            if args.project:
+                env[projects.RUNTIME_ENV] = args.effective_config
+            verify = subprocess.run([str(binary), "verify", "-c", str(config_path)], env=env,
                                     capture_output=True, text=True, timeout=30)
         except subprocess.TimeoutExpired:
             raise FrpcLaunchError("frpc verify 超时（30s），二进制可能异常: %s" % binary)
@@ -1117,9 +1254,9 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
             raise FrpcLaunchError(
                 "frpc verify 未通过:\n%s" % mask_text(
                     (verify.stdout or "") + (verify.stderr or ""), secrets))
-        digest = config_digest_official(config_path, binary)
+        digest = hashlib.sha256((args.effective_config + "\0" + str(binary)).encode()).hexdigest() \
+            if args.project else config_digest_official(config_path, binary)
         argv = [str(binary), "-c", str(config_path)]
-        env = dict(os.environ)
         success_markers, failure_markers = OFFICIAL_SUCCESS_MARKERS, OFFICIAL_FAILURE_MARKERS
     else:
         s_cfg, config_source = decision.sakura
@@ -1143,7 +1280,7 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
     tail_now = mask_text(read_log_tail(log_file, 20), secrets)
     record = read_pid_record(pid_file)
     if record:
-        if pid_identity_ok(record):
+        if pid_identity_ok(record, expected_project(args), mode):
             if record.get("config_digest") == digest:
                 # review M2：timeout 写入的记录标记 verified=false；
                 # 二次 start 必须复核成功证据，不得把未登录成功的进程报成 0
@@ -1178,8 +1315,27 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
         pid_file.unlink(missing_ok=True)
         print("发现 stale pid 记录（进程身份核对不通过），已清理 pid 文件", file=sys.stderr)
 
-    log_file.write_text("")
+    _write_private(log_file, "")
+    if args.project:
+        env["FRPC_LAUNCH_RUNTIME_SECRETS"] = json.dumps(secrets)
+        argv = [sys.executable, str(Path(__file__).with_name("project_runner.py")),
+                "--instance", str(run_home), "--mode", mode, "--binary", str(binary),
+                "--log", str(log_file)] + (["--config", str(config_path)] if mode == "official" else [])
     pid = spawn_daemon(argv, env, log_file)
+    record = {"pid": pid, "exe": argv[0], "mode": mode, "config_source": config_source,
+              "config_digest": digest, "verified": False,
+              "binary_version": meta_now.get("version", ""),
+              "started_at": datetime.now(timezone.utc).isoformat()}
+    if args.project:
+        record.update({"process_start": process_started(pid), "identity_args": argv,
+                       "project_id": expected_project(args), "process_group": True})
+    # Persist ownership before waiting. An interrupted caller can safely resume.
+    try:
+        write_pid_record(pid_file, record)
+    except Exception:
+        import signal
+        signal_record(record, signal.SIGTERM)
+        raise
     state, tail = wait_for_ready(pid, log_file, success_markers, failure_markers,
                                  timeout=args.wait)
     meta = read_meta(binary.with_name(binary.name + ".meta.json"))
@@ -1188,10 +1344,8 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
               "binary_version": meta.get("version", ""),
               "log_tail": mask_text(tail, secrets)}
     if state == "ok":
-        write_pid_record(pid_file, {
-            "pid": pid, "exe": str(binary), "mode": mode,
-            "config_digest": digest, "verified": True,
-            "started_at": datetime.now(timezone.utc).isoformat()})
+        record["verified"] = True
+        write_pid_record(pid_file, record)
         result["exit_code"] = 0
     else:
         result["exit_code"] = 1
@@ -1199,23 +1353,151 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
             # 启动验证已判失败：清理刚拉起的进程，不留孤儿（该 pid 是本次 spawn 的，可安全终止）
             import signal
             import time as _time
-            os.kill(pid, signal.SIGTERM)
+            signal_record(record, signal.SIGTERM)
             deadline = _time.monotonic() + 5
             while pid_alive(pid) and _time.monotonic() < deadline:
                 _time.sleep(0.1)
             if pid_alive(pid):
-                os.kill(pid, signal.SIGKILL)
+                signal_record(record, signal.SIGKILL)
             result["detail"] = "启动验证失败，已终止本次拉起的进程"
+        if state in ("failed", "exited"):
+            pid_file.unlink(missing_ok=True)
         if state == "timeout" and pid_alive(pid):
-            write_pid_record(pid_file, {
-                "pid": pid, "exe": str(binary), "mode": mode,
-                "config_digest": digest, "verified": False,
-                "started_at": datetime.now(timezone.utc).isoformat()})
             result["detail"] = "进程存活但未见成功证据（超时）；已保留进程与 pid 记录"
     return result
 
 
+def project_layers(args):
+    layered = resolve_layered(dict(os.environ), args.project, args.home)
+    if "FRPC_LAUNCH_CONFIG" in layered:
+        raise projects.ProjectError("当前项目仍配置 FRPC_LAUNCH_CONFIG 整份原生文件；"
+                                    "请明确迁移，或继续使用原来的完整配置入口。",
+                                    code="native_config_present", source=layered["FRPC_LAUNCH_CONFIG"][1])
+    return layered
+
+
+def cmd_project_config(args):
+    project_layers(args)
+    result = projects.configure(args, dict(os.environ), parse_proxy_spec)
+    _emit(args, result, "项目配置已保存；域名：%s；连接来源：%s；未启动隧道。" % (
+        result["domain"] or "尚未确定", result["config_source"]))
+    return 0
+
+
+def cmd_project_info(args):
+    project_layers(args)
+    connection = projects.resolve_connection(dict(os.environ), args.project, args.home)
+    document = projects.load_project(args.project)
+    result = projects.project_report(args.project, args.home, connection, document)
+    result["result"] = "configured"
+    result["has_proxy"] = bool(document["client"].get("proxies"))
+    _emit(args, result, "项目：%s；连接来源：%s；域名：%s；公网未检查。" % (
+        args.project, connection.source, result["domain"] or "尚未确定"))
+    return 0
+
+
+def cmd_project_start(args):
+    layered = project_layers(args)
+    explicit = args.mode or layered.get("FRPC_LAUNCH_MODE", ("", ""))[0]
+    if explicit and explicit not in ("official", "sakura"):
+        raise FrpcLaunchError("FRPC_LAUNCH_MODE/--mode 只接受 official / sakura。")
+    s_cfg, s_source = sakura_config(layered)
+    connection = None
+    if explicit != "sakura":
+        try:
+            connection = projects.resolve_connection(dict(os.environ), args.project, args.home)
+        except projects.ProjectError as exc:
+            if exc.code != "unconfigured" or explicit == "official" or not s_cfg:
+                raise
+    if not explicit and connection and s_cfg:
+        _emit(args, {"result": "ambiguous", "modes": ["official", "sakura"], "exit_code": 3},
+              "official 与 sakura 配置同时存在，请指定 --mode。")
+        return 3
+    mode = explicit or ("official" if connection else "sakura")
+    info = {"project": str(args.project), "project_id": expected_project(args),
+            "runtime_dir": str(runtime_root(args))}
+    decision = ModeDecision("explicit", [mode], (None, ""), (s_cfg, s_source))
+    if mode == "official":
+        if os.environ.get("FRPC_LAUNCH_INIT_TOKEN"):
+            raise projects.ProjectError("本次连接输入请先交给 project-config 完整保存，不能只在 start 注入 Token。",
+                                        code="connection_not_saved", source="request", exit_code=4)
+        if connection.source == "env":
+            saved = projects.connection_group(projects.parse_env(projects.read_text(args.project / ".env.local")),
+                                               str(args.project / ".env.local"))
+            if not saved or (saved.addr, saved.port, saved.token) != (connection.addr, connection.port, connection.token):
+                raise projects.ProjectError("本次连接尚未保存到项目；先运行 project-config，确认下次可以复用。",
+                                            code="connection_not_saved", source="env", exit_code=4)
+        document = projects.load_project(args.project)
+        if document.get("domain"):
+            with projects.operation_lock(args.home / "domains.lock"):
+                registry = projects.read_registry(args.home)
+                original = dict(registry)
+                projects.select_domain(document, args.project, "", "", registry)
+                if original != registry:
+                    projects.atomic_write(args.home / "domains.json", json.dumps(registry, indent=2) + "\n")
+        info.update(projects.project_report(args.project, args.home, connection, document))
+        args.effective_config = projects.effective_config(connection, document)
+        template = runtime_root(args) / "run" / "official.toml"
+        projects.atomic_write(template, projects.RUNTIME_TEMPLATE)
+        decision.official = (template, connection.source)
+    elif not s_cfg:
+        raise projects.ProjectError("sakura 配置缺少访问密钥或隧道 ID。", code="unconfigured", exit_code=4)
+    result = _start_one_mode(args, mode, decision, layered)
+    code = result.pop("exit_code")
+    result.update(info)
+    result["verification_scope"] = "startup_log"
+    result["public_endpoint"] = "not_checked"
+    _emit(args, result, "项目 %s：%s；公网与业务状态未检查。%s" % (
+        args.project.name, result["result"], "使用了全局连接默认。" if info.get("uses_global_connection") else ""))
+    return code
+
+
+def cmd_project_status(args):
+    result = {"project": str(args.project), "project_id": expected_project(args),
+              "runtime_dir": str(runtime_root(args)), "modes": {}}
+    desired_source, desired_digest = "", ""
+    try:
+        project_layers(args)
+        connection = projects.resolve_connection(dict(os.environ), args.project, args.home)
+        document = projects.load_project(args.project)
+        result.update(projects.project_report(args.project, args.home, connection, document))
+        desired_source = connection.source
+        config = projects.effective_config(connection, document)
+    except projects.ProjectError as exc:
+        result["configuration_error"] = exc.report()
+        config = ""
+    except FrpcLaunchError as exc:
+        result["configuration_error"] = {"result": "invalid_config", "detail": str(exc)}
+        config = ""
+    for mode in ([args.mode] if args.mode else ["official", "sakura"]):
+        pid_file, log_file = pid_paths(runtime_root(args), mode)
+        record = read_pid_record(pid_file)
+        running = bool(record) and pid_identity_ok(record, expected_project(args), mode)
+        if mode == "official" and config and record:
+            argv = record.get("identity_args", [])
+            if "--binary" in argv:
+                binary = argv[argv.index("--binary") + 1]
+                desired_digest = hashlib.sha256((config + "\0" + binary).encode()).hexdigest()
+        result["modes"][mode] = {
+            "running": running, "pid": record.get("pid") if running else None,
+            "verified": record.get("verified") if running else None,
+            "config_source": record.get("config_source", "") if running else desired_source,
+            "current_config_source": desired_source,
+            "config_changed": (record.get("config_digest") != desired_digest) if running and desired_digest else None,
+            "binary_version": record.get("binary_version", ""),
+            "verification_scope": "startup_log", "public_endpoint": "not_checked",
+            "log_tail": read_log_tail(log_file, 5)}
+    _emit(args, result, "\n".join("%s: %s" % (mode, "运行中；公网未检查" if item["running"] else "未运行")
+                                  for mode, item in result["modes"].items()))
+    return 0
+
+
 def cmd_start(args) -> int:
+    if not math.isfinite(args.wait) or args.wait < 0:
+        raise FrpcLaunchError("--wait 必须是非负有限秒数。")
+    detect_platform()
+    if args.project:
+        return cmd_project_start(args)
     layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
     decision = decide_mode(layered, args.home, args.mode)
     if decision.decision == "none":
@@ -1278,7 +1560,7 @@ def cmd_install(args) -> int:
         print("用法错误: sakura 模式版本由上游 API 决定，不支持 --version", file=sys.stderr)
         return 2
     if mode == "official":
-        layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
+        layered = resolve_layered(dict(os.environ), args.project or Path.cwd(), args.home)
         try:
             binary, origin = resolve_official_binary(layered, args.home)
         except FrpcLaunchError as e:
@@ -1296,7 +1578,7 @@ def cmd_install(args) -> int:
         _emit(args, {"result": "installed", "meta": meta},
               "已安装官方 frpc v%s（sha256 校验通过）" % meta["version"])
         return 0
-    layered = resolve_layered(dict(os.environ), Path.cwd(), args.home)
+    layered = resolve_layered(dict(os.environ), args.project or Path.cwd(), args.home)
     try:
         binary, origin = resolve_sakura_binary(layered, args.home)
     except FrpcLaunchError as e:
@@ -1332,6 +1614,11 @@ def cmd_update(args) -> int:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    args.home = args.home.expanduser().resolve()
+    if args.command in ("project-config", "project-info") and args.project is None:
+        args.project = Path.cwd()
+    if args.project:
+        args.project = args.project.expanduser().resolve()
     if args.command is None:
         build_parser().print_help()
         return 0
@@ -1343,17 +1630,27 @@ def main(argv=None) -> int:
         "install": cmd_install,
         "update": cmd_update,
         "guide-init": cmd_guide_init,
+        "project-config": cmd_project_config,
+        "project-info": cmd_project_info,
     }
     handler = handlers.get(args.command)
     if handler is None:
         print("NOT_IMPLEMENTED: %s" % args.command, file=sys.stderr)
         return 2
     try:
+        if args.project and not args.project.is_dir():
+            raise projects.ProjectError("项目目录不存在：%s" % args.project, exit_code=2)
+        if args.project and args.command in ("start", "stop"):
+            with projects.operation_lock(runtime_root(args) / "operation.lock"):
+                return handler(args)
         return handler(args)
+    except projects.ProjectError as e:
+        _emit(args, e.report(), str(e))
+        return e.exit_code
     except FrpcLaunchError as e:
         print("错误: %s" % e, file=sys.stderr)
         return 1
-    except OSError as e:
+    except (OSError, subprocess.SubprocessError) as e:
         # 兜底：外部命令缺失（xattr/ps/git）等环境性错误不吐裸堆栈
         print("错误: 环境调用失败: %s" % e, file=sys.stderr)
         return 1

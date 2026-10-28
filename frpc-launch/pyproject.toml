@@ -1,20 +1,21 @@
-# frpc-launch 运行时环境（ADR 0007 §1.1/§1.2）。
-# scripts/frpc_launch.py 只用标准库；这里的作用是**钉死解释器版本**，纯 stdlib
-# skill 同样不例外（ADR 0007 §1.2）。
-# 重建环境：uv sync --project <本目录> --no-dev（venv 落 <本目录>/.venv，ADR 0007 §1.3）；
+# frpc-launch 运行时环境（ADR 0007）：TOML 定点更新保留注释与高级字段。
+# 重建环境：uv sync --frozen --project <本目录> --no-dev（venv 落 <本目录>/.venv，ADR 0007 §1.3）；
 # 入口 scripts/frpc_launch.py 的 bootstrap 在 venv 缺失时也会按 uv.lock 自动重建。
 # requires-python 下限 3.9：脚本与其 bootstrap 段只用 3.9 兼容语法（无 walrus、
-# 无 match、无 3.10+ 联合类型语法），与 README「Python ≥ 3.9」一致。
+# 无 match、无 3.10+ 联合类型语法）；实际运行解释器由下述版本文件选择。
 # 解释器版本由同目录 `.python-version`（3.13）钉死，uv 原生读取并据此选定 /
 # 下载解释器（ADR 0007 §1.2 + 沿革 1）。下面的 requires-python 只是**下限**，
 # 单靠它 uv 会在不同机器选中不同解释器——本机 3.13、只有系统 3.9 的机器则 3.9，
 # 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
 [project]
 name = "frpc-launch"
-version = "1.3.1"
-description = "frpc 内网穿透启动 skill 的运行时解释器锁定（零第三方依赖）"
+version = "1.4.0"
+description = "frpc 项目配置与进程管理的锁定运行环境"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["tomlkit==0.13.3"]
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
 
 [tool.uv]
 # 本 skill 的脚本直接运行，不作为可安装包构建。

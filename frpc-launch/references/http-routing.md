@@ -27,14 +27,14 @@ Nginx 位于 frps 前面时，检查已经生效的 `proxy_pass` 是否指向正
 
 逐条填写：`公网协议/主机/端口/路径 → 代理名与 type → customDomains/subdomain + locations → localIP:localPort → 预期响应`。同一域名可能把 `/`、API 路径和校验文件交给不同本地端口；不能因为根页面可达就推断全部路径可达，也不能把已有特定路径改成 `/`。
 
-仅在**新建完整配置**且作用域已授权时，可重复传 `--proxy`：
+项目流程的 `project-config` 可重复传 `--proxy`，按名称定点合并并保留其他代理；完整原生接口的 `guide-init` 仅用于新建整份配置：
 
 ```text
 --proxy "name=web;type=http;localIP=127.0.0.1;localPort=8080;customDomains=app.example.com;locations=/"
 --proxy "name=api;type=http;localIP=127.0.0.1;localPort=8081;customDomains=app.example.com;locations=/api/"
 ```
 
-这是同一个前置 HTTPS 域名通过 HTTP vhost 转发到两个本地 HTTP 服务的示例。`locations` 是 HTTP 路径路由，不支持 HTTPS 代理；它不表示去掉路径前缀。本地服务必须能处理实际收到的路径。简写只支持 SKILL.md 列出的字段；原生插件、`subdomain` 等高级字段保留在原生 TOML 中。
+这是同一个前置 HTTPS 域名通过 HTTP vhost 转发到两个本地 HTTP 服务的示例。`locations` 是 HTTP 路径路由，不支持 HTTPS 代理；它不表示去掉路径前缀。本地服务必须能处理实际收到的路径。简写支持范围见[项目配置协议](projects.md)；项目网站快捷入口可用 `--route-mode subdomain --subdomain-host <已核实父域>`。原生插件等高级字段保留在项目 `client` 配置或已有完整原生 TOML 中。
 
 ## 逐层定位失败，交付原始入口
 
