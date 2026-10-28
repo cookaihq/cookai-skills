@@ -61,6 +61,28 @@ def test_start_success_reports_global_source(tmp_path):
         run_cli(home, cwd, "stop")
 
 
+def test_explicit_complete_config_keeps_managed_home_and_log_contract(tmp_path):
+    home, cwd = _setup(tmp_path, FAKE_FRPC_OK)
+    config = cwd / "complete.toml"
+    config.write_text('serverAddr="explicit.example.test"\nserverPort=8000\n'
+                      'auth.token="synthetic-native-token"\n'
+                      '[[proxies]]\nname="existing"\ntype="tcp"\nlocalPort=3000\nremotePort=9000\n')
+    original = config.read_bytes()
+    (cwd / ".env.local").write_text("FRPC_LAUNCH_CONFIG=" + str(config) + "\n")
+    try:
+        started = run_cli(home, cwd, "start", "--wait", "5")
+        assert started.returncode == 0, started.stderr
+        assert json.loads(started.stdout)["config_source"] != "global"
+        assert (home / "run/official.pid").exists()
+        assert "login to server success" in (home / "run/official.log").read_text()
+        assert config.read_bytes() == original
+        assert not (home / "projects").exists()
+        status = json.loads(run_cli(home, cwd, "status").stdout)["modes"]["official"]
+        assert status["running"] is True
+    finally:
+        assert run_cli(home, cwd, "stop").returncode == 0
+
+
 def test_start_login_failure_not_reported_as_success(tmp_path):
     home, cwd = _setup(tmp_path, FAKE_FRPC_LOGIN_FAIL)
     r = run_cli(home, cwd, "start", "--wait", "10")

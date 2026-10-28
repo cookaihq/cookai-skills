@@ -1,129 +1,82 @@
 ---
 name: frpc-launch
 metadata:
-  version: "1.3.1"
-description: v1.3.1｜本地启动、检查或停止 frpc，将本地服务通过既有 FRPS 公网入口转发；支持自部署/宝塔 frps 和樱花 FRP。适用于“启动 frpc”“把本地端口通过这个域名访问”“FRP 连不上”。先核对已有入口、域名/路径与本地端口，再配置和验证。不负责部署 frps、修改服务器/Nginx/DNS/证书或注册开机自启；Windows 原生运行未实现。
-compatibility: Claude Code, Codex or WorkBuddy with a local shell; macOS/Linux, uv >= 0.8. Native Windows is not supported; host acceptance status is listed in README.md.
+  version: "1.4.0"
+description: v1.4.0｜通过已有 FRPS 入口启动、检查或停止本地 frpc。支持自部署/宝塔和樱花 FRP；按项目复用连接、固定域名并隔离代理与进程。适用于“把这个项目的 3000 端口透传出去”“启动 frpc”“FRP 连不上”。先核对已有域名、路由与本地服务。不修改远端服务器、DNS、证书或开机自启；Windows 原生仅支持本地配置检查与准备。
+compatibility: Claude Code, Codex or WorkBuddy with a local shell and uv >= 0.8. Process management requires macOS/Linux; native Windows supports project configuration only. Host acceptance status is in README.md.
 ---
 
 # frpc-launch
 
-## Overview
+使用已有 FRP 服务，管理当前项目的本地 frpc。`official` 用于自部署或宝塔安装的标准 frps；`sakura` 使用樱花定制客户端及面板隧道。三宿主共用此流程，保留自然语言隐式触发。
 
-本地一键启动/管理 frpc，双模式覆盖三类接入来源：
+## 0. 检查更新
 
-| 模式 | 覆盖来源 | 客户端 | 配置载体 | 启动方式 |
-|---|---|---|---|---|
-| `official` | 自部署 FRPS、宝塔面板安装的 frps（同构） | 官方 fatedier/frp 的 frpc（自动下载 + SHA-256 校验） | 原生 `frpc.toml` | `frpc -c <toml>` |
-| `sakura` | 樱花FRP（natfrp.com） | 樱花定制 frpc（官方免鉴权 API 自动下载 + size/hash 校验） | `.env` 三变量 | 环境变量 `NATFRP_TOKEN`/`NATFRP_TARGET` 注入 |
+每次使用先按安装形态检查，失败不阻断当前任务：
 
-受管目录 `~/.config/frpc-launch/`：
+- Git 检出：运行本 Skill 的 `scripts/check_update.sh`，PowerShell 用 `scripts/check_update.ps1`。退出 `0` 直接继续，不复述输出；退出 `10` 原样转述报告并询问是否更新。用户同意后 Bash 用 `--pull`，PowerShell 用 `-Pull`；拒绝、不答复或更新失败均继续当前版本，同一任务不再追问。仅在 main、工作树干净且可 fast-forward 时应用更新。
+- 复制安装：读取 [更新协议](references/update.md) 和 `update.json`，确定稳定 tag 对应的精确 commit SHA。用户确认后才下载、校验、原子替换并回读。WorkBuddy 没有已核实的替换入口时报告 `not-applicable`，继续业务，不臆测更新 API。
+- 关闭自动检查更新只修改 `~/.config/frpc-launch/.env` 的 `AUTO_UPDATE_CHECK=0`，保留其他设置。该开关不读取项目文件。
 
-```
-frpc.toml            # official 全局配置（原生格式，可手改，frpc verify 可校验）
-.env                 # sakura 全局配置（FRPC_LAUNCH_SAKURA_KEY / _TUNNELS / 可选 _FRPC）
-bin/{macos,linux,windows}/   # 受管二进制按 OS 分层（windows 预留），旁存 *.meta.json 版本锁定
-run/                 # {official,sakura}.pid / .log
-```
+## 1. 确定项目和连接
 
-**配置分层**（每变量独立取首个非空来源）：进程环境变量 → `$PWD/.env.frpc-launch` → `$PWD/.env.local` → `$PWD/.env` → 全局受管目录。`guide-init` 的 `FRPC_LAUNCH_INIT_TOKEN`、`FRPC_LAUNCH_SAKURA_KEY` 与 `FRPC_LAUNCH_SAKURA_TUNNELS` 也按相同顺序读取，写入仍由显式 `--scope` 决定。`FRPC_LAUNCH_CONFIG` 可指向项目级 frpc.toml；`FRPC_LAUNCH_MODE=official|sakura` 显式指定模式。**使用全局配置启动时必须向用户报告「使用了全局配置」及具体来源**（脚本输出已含 `config_source`，转述给用户）。
+先确认调用工作文件夹，后续始终显式使用同一个 `--project <绝对路径>`。它不是 Skill 安装目录，也不向父目录查配置。统一入口，Agent 一律加 `--json`：
 
-## 第 0 步：检查更新（每次运行都做）
-
-Git 检出先在本 Skill 目录下运行 Bash 适配器（PowerShell 宿主用随包 `scripts/check_update.ps1`，不表示业务脚本支持 Windows）：
-
-```bash
-scripts/check_update.sh
+```text
+uv run --frozen --project <skill> <skill>/scripts/frpc_launch.py --project <项目> --json <子命令>
 ```
 
-- 退出码 `0`：直接进入下一步，**不要**向用户复述脚本输出。
-- 退出码 `10`：把脚本打印的报告**原样转述给用户**，并询问是否现在拉取。
-  - 用户同意 → 运行 `scripts/check_update.sh --pull`，成功后按新版本继续；失败时把脚本给出的拒绝原因转述给用户，然后**按当前版本继续本次任务**，不要卡在更新上。
-  - 用户拒绝或不理会 → 按当前版本继续，本次任务内不再提更新。
-- 用户说「关掉自动检查更新」→ 往 `~/.config/frpc-launch/.env` 写 `AUTO_UPDATE_CHECK=0`（该文件已存在则只改 / 追加这一行，不动其他行）。
+先运行 `project-info` 和 `status`。前者只读报告实际来源、字段是否配置、固定域名、代理和运行目录，不回显连接值、不联网。Windows 原生可做配置准备；进程管理须使用已支持的 macOS/Linux 环境，不自动跨到 WSL 或读取另一环境的配置。
 
-**更新检查永远不是任务的阻塞项**：检查失败、拉取失败、用户不理会，一律落到「按当前版本继续干活」。
+official 连接整组读取：**本次完整输入 → 进程环境 → 项目 `.env.frpc-launch` → `.env.local` → `.env` → 全局 `.env` → 全局 `frpc.toml`**。地址、端口、Token 必须同源完整；高层半组配置返回 `incomplete_connection`，不得从另一层补 Token。使用全局只读回退时明确告诉用户具体来源。
 
-复制安装按 [更新协议](references/update.md) 读取 `update.json`，查询本 Skill 稳定 tag 的版本和精确 commit SHA，确认后才替换。非 Git 检出的退出码 0 不表示已是最新。WorkBuddy 未提供可核实的安装/替换能力时报告 `not-applicable`，继续本次任务。
+用户提供新连接并要求保存时，用 `project-config` 保存到当前项目 `.env.local`；地址、端口通过参数，Token 只经进程环境 `FRPC_LAUNCH_INIT_TOKEN` 注入。只给部分新连接时补齐确认，不默认沿用另一套 Token。执行前读取 [项目配置协议](references/projects.md)，核对字段、保存和原生接口边界。
 
-## 第 1 步：确定已有入口与本地目标
+- 首次新增沿用已确认的项目保存选择，实际写入仍须有保存授权。Git 内的 `.env.local` 必须未跟踪且被忽略；不满足时先修正安全条件，不绕过、不改索引，也不同时改写全局默认。
+- 首次缺项或有证据的错误，沿用已有管理方式；否则提供“修改本机配置 / 从 secret-book 选择并保存”。真实字段与关联组见项目配置协议。修复实际来源，高层遮蔽时不能另写低层文件假装修复。
+- **仅保存连接不需要本地服务端口，也不启动隧道。** 安装和首次配置时不强求代理。
+- 现有 `FRPC_LAUNCH_CONFIG` 整份原生配置不会自动合入项目。先核对现有调用方式；继续使用原生接口时按项目配置协议操作，迁移不自动复制或删除凭证。
 
-用户说“使用这个 FRP 域名”时，先核对现有配置和当前进程；不能直接按新建服务器部署处理。HTTP/HTTPS、自定义域名或按路径转发时，读取 [入口与路由核对](references/http-routing.md)。
+## 2. 固定域名，核对路由和服务
 
-1. 保留用户指定的协议、域名、端口和路径，列出每个公网入口对应的代理名、`type`、`customDomains`/`subdomain`、`locations`、`localIP:localPort` 及配置来源。未知项标明待核对，不拿管理面板站点名替换访问域名。
-2. 只读核对工作文件夹、实际使用的配置文件、受管目录和本地服务响应。`status` 必须使用该进程原来的 `--home`；没有 PID 记录只表示此目录没有受管进程，不证明整台机器没有 frpc。沿项目记录核对其他已知实例，不重复启动、不按进程名批量停止。
-3. 对于已配置的公网 HTTPS → Nginx → frps HTTP 入口 → frpc → 本地 HTTP 服务，保留 `type=http`。`serverPort` 是 frpc 连接 frps 的端口；`vhostHTTPPort` 是 HTTP 代理入口，可能只由前置 Nginx 使用；公网 URL 端口由真正的监听入口决定。不能因 URL 是 HTTPS 就改用 `type=https` 或把 vhost 端口拼进 URL。
-4. 已有 DNS、TLS、Nginx 和 FRPS 路由满足目标时，在授权范围内补齐本地服务与 frpc。确有服务器端缺项才说明具体字段、证据、影响与所需授权；本 Skill 不执行服务器改动。日志策略等独立业务要求单独报告，不能描述成 FRP 转发尚未配置，也不能把已约定的业务验收要求直接删掉。
+HTTP/HTTPS、域名或路径转发，先读 [入口与路由核对](references/http-routing.md)。保留用户指定的协议、域名、端口和路径，逐条对应代理名、`type`、`customDomains/subdomain`、`locations` 和本地目标。
 
-## 第 2 步：执行本地操作并逐层验证
+首次使用本机 `FRPC_LAUNCH_DOMAIN_SUFFIX` 与规范化项目目录名生成域名；明确的 `--domain` 优先。确定后保存到 `.frpc-launch/project.toml`，以后复用，不因全局后缀变化重命名。本机已知重名会分配稳定后缀；固定域名冲突则报告具体项目，不静默换名。本地登记不证明远端未占用或 DNS/TLS/Nginx 已就绪。
 
-- 已授权启动且配置已确认时执行 `start`；已在运行先检查，只有配置需要变更才按退出码 5 的流程处理。应用未启动或仍用旧配置时报告具体应用状态，不重启无关隧道。
-- `start` 的 `ok` / `already_running` 与 `status.verified=true` **只表示启动日志证据**。输出明确给出 `verification_scope=startup_log`、`public_endpoint=not_checked`；其中 `verified` 是 PID 记录中的历史值，不是当前连通性探测。旧记录没有该字段时为 `null`，不可当作通过。官方模式目前检查登录成功，不能据此推断每条代理注册成功。
-- 核对每条目标代理的最新日志：登录成功之后，还须有该代理的 `start proxy success`，且没有更晚的失败。多代理只成功一条不能替其他代理验收。日志不足时报告未验证，不从进程存活反推成功。
-- 在授权允许请求该入口时，以有超时的只读请求检查**用户给定的完整公网 URL**，保留正常证书校验；对照相同路径的本地响应和预期内容。HTTP 200 可能是准备页，应用返回的 4xx 可能证明到达应用；状态码本身不能证明业务完成。每个域名/路径分别核对，校验文件按预期内容或哈希核对。仅为定位问题改变 Host、SNI、证书校验或绕过代理时标记“辅助诊断”，不替代原入口验收。
-- 最后先给用户实际可访问的 URL，再分别报告本地服务、FRP 登录/各代理、公网响应、业务目标；每项只写已验证结果。需要重启应用加载配置、或业务目标尚未完成时明确指出，不能只交付 PID。
+本地地址、端口取用户本次输入或项目实际运行信息。已核实 customDomains 路由时，例如：
 
-## 子命令速查
+```text
+uv run --frozen --project <skill> <skill>/scripts/frpc_launch.py --project <项目> --json project-config --local-port 3000 --route-mode customDomains
+```
 
-统一入口 `uv run --project <skill> <skill>/scripts/frpc_launch.py [--home DIR] [--json] <子命令>`；Agent 一律加 `--json` 解析结果。
+使用 `subdomain` 必须同时提供从实际 FRPS 核实的 `--subdomain-host`，不能从域名猜测 `subDomainHost` 已配置。同名代理只改本次提供的字段，保留其他代理、路径和高级字段；之后只更新本地端口不必重填域名。
 
-**必须用 `uv run --project` 起，禁止裸 `python3`**：解释器由 `<skill>/pyproject.toml` + `uv.lock` 钉死，venv 落 `<skill>/.venv`（首次运行自动创建，需要 `uv` ≥ 0.8；缺 uv 时脚本报错并给安装命令）。被裸 `python3` 起时脚本自带的 bootstrap 会把进程 exec 回该 venv。
+HTTPS 经 Nginx 解密后转 frps HTTP 入口时保留 `type=http`。`serverPort` 是控制连接端口，网站端口取真正的公网监听。前置路由满足目标时继续本地操作；未知项明确标出。Skill 不执行服务端改动，也不把独立业务要求省略成“已可用”。
 
-**网络抖动**：所有出网请求（GitHub Releases 元数据、natfrp 客户端清单、二进制下载）都是幂等 GET，统一带 30s 超时并对瞬时失败（连接/读取超时、连接重置、DNS 失败、HTTP 5xx/429/408）重试至多 3 次（退避 1s、2s；429 遵循 `Retry-After`，上限 60s），重试过程打到 stderr；确定性 4xx（404 版本不存在等）立即报错不重试。Agent 不需要自己再包一层重试。
+## 3. 执行并分层验证
 
-| 子命令 | 说明 | 常用参数 |
-|---|---|---|
-| `start` | 后台启动 + 有界启动验证（默认 15s） | `--mode`、`--wait N` |
-| `stop` | 优雅停止（SIGTERM→SIGKILL），stale pid 只清文件不误杀 | `--mode` |
-| `status` | 分模式报告进程状态、历史启动日志证据/配置来源/版本；不请求公网入口 | `--mode` |
-| `logs` | 输出受管日志尾部（已掩码） | `--mode`、`-n N` |
-| `install` | 安装受管二进制（已装则不重复下载） | `--mode`、`--version X` |
-| `update` | 显式升级二进制（唯一会替换二进制的入口） | `--mode`、`--version X` |
-| `guide-init` | 引导流程落盘配置（见下节） | `--scope`、`--source`、`--proxy` 等 |
+- 已授权启动、配置确认后执行 `start`。二进制不存在时自动下载校验；已有二进制不自动升级。两模式同时可用返回 `3`，使用用户已明确的选择，否则询问。
+- 启动、检查、日志和停止使用同一项目与同一 `--home`。项目流程的 `--home` 提供共享默认及二进制；实际运行文件在其中的 `projects/<项目标识>/run/`。停止 A 不操作 B，不按进程名批量停止。
+- 配置变化返回 `5/config_changed`，原进程继续使用原配置。说明当前项目的变化和影响，按已有重启授权或新确认执行 `stop` 再 `start`，不静默替换。
+- 调用中断后重新 `status`。等待启动前已保存 PID、进程创建时间、参数和项目身份；`timeout/running_unverified` 不等于成功。停止不依赖当前连接配置完整。
+- `ok/already_running`、`verified=true` 只代表历史启动日志证据；`verification_scope=startup_log`、`public_endpoint=not_checked` 不是公网探测。每条代理还须有最新 `start proxy success` 且没有更晚失败。
+- 获授权访问公网时，请求**用户给定的完整 URL**，与本地同路径和预期内容对照。保留 TLS 校验，设置单次超时和总预算；只对瞬时错误最多尝试 3 次。HTTP 200 可能是准备页，应用 4xx 可能证明到达应用，均不自动等于业务完成。改变 Host/SNI、直连 IP 或跳过证书校验只算辅助诊断。
 
-**退出码语义**：`0` 当前子命令完成（start 只确认启动日志）；`1` 失败（含启动验证失败与 `running_unverified`）；`2` 用法错误；`3` 模式歧义（两模式配置同存，须询问用户）；`4` 未配置（进入引导流程）；`5` 配置已变更（须确认 stop 后再 start）；`6` Git 安全拒绝（Secret 目标被跟踪或未忽略，先解决实际目标文件的安全条件，不使用 `--allow-tracked` 绕过）。
+最后交付完整 URL，以及本地服务、FRP 登录、各代理、公网响应和业务目标的分别结果。入口尚未确认时说明缺项，不编造可用 URL。应用需加载配置或业务未就绪时具体指出。
 
-## 引导流程编排（start 退出码 4 时，Agent 按序执行）
+## 子命令与边界
 
-1. **确定作用域（默认项目级，不询问）**：
-   - **默认**：写当前项目 `$PWD/.env.local`（official 另生成项目级 frpc.toml 并以 `FRPC_LAUNCH_CONFIG` 指向），即 `guide-init --scope project`。用户没有明确要求全局时一律走这条，不要把作用域问题抛给用户
-   - **仅当用户在本轮明确要求「全局」「长期保存」「多项目共用」时**，才用 `--scope global` 写 `~/.config/frpc-launch/`
-   - 落盘后必须告知用户实际写入的作用域与文件路径
-   - **注意**：项目在 git 工作树内时，须先把 `frpc.toml` 与 `.env.local` 加入 `.gitignore`，否则 guide-init 会以退出码 6 拒绝写入 Secret——这是防止凭证被提交的保护，引导用户补 `.gitignore` 后重试
-2. **询问是否需要配置帮助**：
-   - 不需要 → 告知所选作用域的文件位置与最小模板（official：`serverAddr`/`serverPort`/`auth.token` + `[[proxies]]`；sakura：`FRPC_LAUNCH_SAKURA_KEY` + `FRPC_LAUNCH_SAKURA_TUNNELS`），等用户自行配置后重试 start
-3. **需要帮助 → 三来源分支**：
-   - **自部署 FRPS**：先读已有项目记录和获授权的配置；仅补问缺失的 serverAddr、serverPort、认证方式及代理需求。客户端 `serverPort` 对应实际可达的服务端连接入口（直接连接时为 `bindPort`）；不能从公网网站端口推导。
-   - **宝塔 frps**：指引查看已安装 FRP 服务端插件的配置，核对 `bindPort`、认证、`vhostHTTPPort`/`vhostHTTPSPort`；同时核对现有反向代理是否已经终止 TLS 并保留 Host。面板路径随插件版本变化，不假定必须新增站点或逐个添加子域名。具体值只取自实际配置。
-   - **樱花FRP**：指引用户到樱花管理面板取访问密钥（用户中心）与隧道 ID（隧道列表，逗号分隔多条）。如实说明：macOS 官方更推荐其图形启动器，本 Skill 直接托管定制 frpc 属高级用法
-4. **调用 guide-init 落盘**（token/key 一律经环境变量注入，不进命令行参数）：
+| 子命令 | 用途 |
+| --- | --- |
+| `project-info` | 只读来源、固定域名与路由 |
+| `project-config` | 保存新连接或定点更新项目路由；不启动 |
+| `start --mode official/sakura --wait N` | 有界启动验证，默认 15 秒 |
+| `status` / `logs -n N` / `stop` | 检查、脱敏日志、停止当前项目 |
+| `install` / `update --version X` | 安装或明确升级二进制；樱花不接受指定版本 |
+| `guide-init --source sakura --scope project` | 保存樱花 key 与隧道 ID，按项目隔离运行 |
 
-   ```bash
-   # official（frps/baota）：
-   FRPC_LAUNCH_INIT_TOKEN=<token> uv run --project <skill> <skill>/scripts/frpc_launch.py --json \
-     guide-init --scope project --source frps \
-     --server-addr <host> --server-port <port> \
-     --proxy "name=web;type=http;localPort=8080;customDomains=a.example.com"
-   # sakura：
-   FRPC_LAUNCH_SAKURA_KEY=<密钥> FRPC_LAUNCH_SAKURA_TUNNELS=<id,id> \
-     uv run --project <skill> <skill>/scripts/frpc_launch.py --json guide-init --scope project --source sakura
-   ```
+退出码：`0` 子命令完成；`1` 失败或启动未确认；`2` 用法错误；`3` 模式歧义；`4` 缺配置/代理/路由；`5` 运行配置变化；`6` Secret 写入安全拒绝。
 
-   （只有用户明确要求全局时才把 `--scope project` 换成 `--scope global`）
+运行时由 `pyproject.toml`、`uv.lock`、`.python-version` 与入口 bootstrap 钉定。环境损坏按锁修复；缺系统 uv 时给安装办法。下载统一 30 秒超时、瞬时错误至多 3 次尝试和指数退避，确定性 4xx 立即失败。完整性校验不等于发布者签名验证，不自动换第三方镜像。
 
-5. `guide-init` 是完整配置生成器，会覆盖目标 `frpc.toml`，不是追加代理接口。已有配置应保留其他代理、认证及高级字段，在获授权后定点修改；不要为了新增路径调用它重建整份文件。支持字段为 `name/type/localIP/localPort/remotePort/customDomains/locations`，未知、重复或类型不适用字段直接失败；`locations` 只支持 HTTP。高级原生配置使用原 TOML 并执行 `frpc verify`，不扩展简写来猜参数。
-6. 已明确要求启动时继续 `start` 与第 2 步验证；只要求生成配置时交付文件与检查结果，不自动公开本地服务。`frpc verify` 只校验配置，不能替代公网验证。
-
-## 掩码规则
-
-- token / 访问密钥回显一律 `head4****tail4`（如 `tok_****1234`）；**禁止在对话、命令行参数或日志中出现完整值**
-- `guide-init` / `start` / `status` / `logs` 的输出已内置掩码；Agent 转述时不得从别处拼回完整值
-
-## CRITICAL
-
-- **start 永不自动升级二进制**；升级只能走显式 `update`
-- **两模式配置同存且未指定时（退出码 3）必须询问用户**，不得默认选择
-- **配置变更（退出码 5）必须向用户展示差异并确认 stop 后再 start**，不得静默替换运行中的进程
-- 下载失败/校验不一致：如实报错，**不自动切换第三方镜像**；可提示用户自行配置代理
-- 启动日志、各代理注册、公网响应与业务目标分别验证；`verified` 不代表公网或业务通过
-- 完整性校验（官方 SHA-256 / 樱花 size+hash）只保证下载未损坏，**不等于发布者签名验证**
+Token 不进入命令行。项目连接只存 `.env.local`，有效 frpc 配置经子进程环境交给模板，不再复制进全局运行文件。项目日志写入时脱敏，之后换 Token 也不会使旧日志回显完整值。对话与诊断不得重组完整凭证。
