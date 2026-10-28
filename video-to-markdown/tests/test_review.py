@@ -10,7 +10,7 @@ def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
     task.mkdir()
     manifest, _ = state.initialize_task(
         task,
-        settings_snapshot={"asr_model": "paraformer-v2", "sources": {}},
+        settings_snapshot={"asr_provider": "aihub-audio", "sources": {}},
     )
     source = task / "source" / "video.mp4"
     source.write_bytes(b"video")

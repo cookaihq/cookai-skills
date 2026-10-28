@@ -20,6 +20,7 @@ The invocation directory, project root, and Skill directory are separate facts:
 ## Agent Loop
 
 1. Run `start` or `resume` and inspect its JSON result.
+   If it returns a transcription action, follow [transcription.md](transcription.md) before continuing. Exit code zero alone does not mean transcription or the document is complete. Always relay default/identity save results and dependency result-check notices, including after a successful resume.
 2. Run `batch` for the next batch whose status is `ready_for_observation`.
 3. Inspect every contact sheet. Open original frames for text and small details.
 4. Record observations. A batch is not complete merely because its contact sheet was opened.

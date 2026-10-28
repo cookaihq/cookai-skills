@@ -5,9 +5,10 @@ import json
 import os
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
-from . import aihub, config, media, observations, paths, review, sampling, state, transcript
+from . import asr, config, media, observations, paths, review, sampling, state, transcript
 
 
 class WorkflowError(ValueError):
@@ -20,7 +21,7 @@ def _print(value: object) -> None:
 
 def _runtime_config(args) -> tuple[Path, config.ResolvedConfig]:
     cwd = Path.cwd().resolve()
-    resolved = config.resolve(cwd=cwd, use_home=bool(getattr(args, "use_local_key", False)))
+    resolved = config.resolve(cwd=cwd, use_home=bool(getattr(args, "use_local_key", False)) and not getattr(args, "no_global_config", False))
     return cwd, resolved
 
 
@@ -33,9 +34,12 @@ def _prepare_transcript(
     source_path: Path,
     subtitle: str | None,
     language: str | None,
-) -> None:
+    options: dict | None = None,
+) -> dict | None:
     if subtitle:
         subtitle_path = Path(subtitle).expanduser().resolve()
+        manifest["transcript_source"] = {"kind": "supplied", "path": str(subtitle_path)}
+        state.save_manifest(task_dir, manifest)
         value = transcript.parse_subtitle(
             subtitle_path,
             language=language,
@@ -48,24 +52,20 @@ def _prepare_transcript(
             "path": str(subtitle_path),
         }
         state.save_manifest(task_dir, manifest)
-        return
-    audio_path = task_dir / "source" / "audio-for-asr.flac"
-    if not audio_path.exists():
-        audio_record = media.extract_audio(source_path, audio_path, resolved.ffmpeg_bin)
+        return None
+    audio_path = task_dir / "source" / "audio-for-asr.mp3"
+    if manifest.get("audio_for_asr"):
+        audio_path = media.verify_audio(task_dir, manifest["audio_for_asr"])
+    elif audio_path.exists():
+        raise WorkflowError("prepared audio has no saved identity; refusing to reuse it")
+    else:
+        audio_record = media.extract_audio(source_path, audio_path, resolved.ffmpeg_bin, ffprobe_bin=resolved.ffprobe_bin, source_record=manifest["source"])
         manifest["audio_for_asr"] = {
-            "path": "source/audio-for-asr.flac",
-            "sha256": audio_record["sha256"],
-            "size_bytes": audio_record["size_bytes"],
+            **audio_record, "path": "source/audio-for-asr.mp3",
         }
         state.save_manifest(task_dir, manifest)
-    aihub.run_asr(
-        task_dir=task_dir,
-        manifest=manifest,
-        private=private,
-        audio_path=audio_path,
-        api_key=resolved.api_key,
-        language=language,
-    )
+    forwarded = {key: value for key, value in (options or {}).items() if key not in {"language", "task_dir"}}
+    return asr.advance(task_dir, manifest, private, resolved=resolved, audio_path=audio_path, language=language, **forwarded)
 
 
 def _finish_preparation(
@@ -90,6 +90,8 @@ def _finish_preparation(
 
 def command_start(args) -> int:
     cwd, resolved = _runtime_config(args)
+    if args.provider:
+        resolved = replace(resolved, asr_provider=args.provider, sources={**resolved.sources, "asr_provider": "task option"})
     source_policy = paths.parse_source_policy(resolved.source_video_dir)
     versions = media.preflight(resolved.ffmpeg_bin, resolved.ffprobe_bin)
     project_root = paths.detect_project_root(cwd, args.project_root)
@@ -111,8 +113,18 @@ def command_start(args) -> int:
             "source_policy": source_policy.mode,
             "runtime_versions": versions,
             "language": args.language,
+            "only_provider": args.only_provider,
+            "no_global_config": args.no_global_config,
         },
     )
+    with state.task_lock(task_dir):
+        return _start_prepared(args, task_dir, manifest, private, resolved, source_policy, name)
+
+
+def _start_prepared(args, task_dir, manifest, private, resolved, source_policy, name) -> int:
+    if paths.is_http_url(args.video):
+        private["source_origin"] = args.video
+        state.save_private(task_dir, private)
     source_path, source_record = media.prepare_source(
         args.video,
         task_dir=task_dir,
@@ -124,7 +136,7 @@ def command_start(args) -> int:
     manifest["source"] = source_record
     manifest["stage"] = "source_ready"
     state.save_manifest(task_dir, manifest)
-    _prepare_transcript(
+    pending_asr = _prepare_transcript(
         task_dir=task_dir,
         manifest=manifest,
         private=private,
@@ -132,7 +144,11 @@ def command_start(args) -> int:
         source_path=source_path,
         subtitle=args.subtitle,
         language=args.language,
+        options=vars(args),
     )
+    if pending_asr:
+        _print(pending_asr)
+        return 0
     _finish_preparation(task_dir, manifest, resolved, source_path)
     pending = [item["batch_id"] for item in manifest["batches"] if item["status"] == "ready_for_observation"]
     _print(
@@ -142,9 +158,7 @@ def command_start(args) -> int:
             "stage": manifest["stage"],
             "next_action": "inspect_batch",
             "next_batch_id": pending[0] if pending else None,
-            "legacy_key_notice": "X_API_KEY is deprecated; use AIHUB_API_KEY."
-            if resolved.api_key_name == config.LEGACY_KEY
-            else None,
+            **asr.public_status(private),
         }
     )
     return 0
@@ -159,35 +173,47 @@ def _resolved_from_manifest(manifest: dict, *, use_home: bool) -> config.Resolve
 
 def command_resume(args) -> int:
     task_dir, manifest, private = state.load_task(args.task_dir)
-    resolved = _resolved_from_manifest(manifest, use_home=args.use_local_key)
+    if args.use_local_key:
+        manifest["settings"]["use_home"] = True
+    if args.no_global_config:
+        manifest["settings"]["no_global_config"] = True
+        manifest["settings"]["use_home"] = False
+    if args.use_local_key or args.no_global_config:
+        state.save_manifest(task_dir, manifest)
+    resolved = _resolved_from_manifest(manifest, use_home=(args.use_local_key or manifest["settings"].get("use_home", False)) and not (args.no_global_config or manifest["settings"].get("no_global_config")))
     media.preflight(resolved.ffmpeg_bin, resolved.ffprobe_bin)
     source_path = media.verify_source(manifest.get("source") or {})
-    if manifest.get("stage") == "complete" and manifest.get("validation", {}).get("complete"):
+    if manifest.get("audio_for_asr"):
+        media.verify_audio(task_dir, manifest["audio_for_asr"])
+    if manifest.get("stage") == "complete" or manifest.get("completed_once"):
+        manifest["completed_once"] = True
+        validation = review.validate_task(task_dir, manifest)
         _print(
             {
                 "task_dir": str(task_dir),
-                "stage": "complete",
-                "next_action": "ask_rename_questions",
+                "stage": manifest["stage"],
+                "next_action": "ask_rename_questions" if validation["complete"] else "repair_artifacts",
+                "validation": validation,
                 "document": str(task_dir / manifest["artifacts"]["document"]),
                 "asr_task_id": manifest.get("asr", {}).get("task_id"),
+                **asr.public_status(private),
             }
         )
-        return 0
-    if manifest.get("asr", {}).get("state") in {"ambiguous_upload", "ambiguous_asr_create"}:
-        raise aihub.AmbiguousWrite(
-            "task is in %s; resume will not duplicate the remote write"
-            % manifest["asr"]["state"]
-        )
+        return 0 if validation["complete"] else 1
     if not (task_dir / "transcript.json").exists():
-        _prepare_transcript(
+        pending_asr = _prepare_transcript(
             task_dir=task_dir,
             manifest=manifest,
             private=private,
             resolved=resolved,
             source_path=source_path,
-            subtitle=None,
+            subtitle=(manifest.get("transcript_source") or {}).get("path"),
             language=manifest.get("settings", {}).get("language"),
+            options=vars(args),
         )
+        if pending_asr:
+            _print(pending_asr)
+            return 0
     _finish_preparation(task_dir, manifest, resolved, source_path)
     pending = [
         item["batch_id"]
@@ -201,6 +227,7 @@ def command_resume(args) -> int:
             "next_action": "inspect_batch" if pending else "adaptive_review",
             "next_batch_id": pending[0] if pending else None,
             "asr_task_id": manifest.get("asr", {}).get("task_id"),
+            **asr.public_status(private),
         }
     )
     return 0
@@ -382,6 +409,19 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--use-local-key", action="store_true")
     resume.set_defaults(handler=command_resume)
 
+    start.add_argument("--provider", choices=config.PROVIDERS)
+    start.add_argument("--only-provider", action="store_true")
+    for operation in (start, resume):
+        operation.add_argument("--aihub-unavailable", action="store_true", help="host verified that AIhub Audio is unavailable")
+        operation.add_argument("--aihub-plugin-dir", help="actual installed Plugin root, after the host loads AIhub Audio")
+        operation.add_argument("--no-global-config", action="store_true")
+        operation.add_argument("--choice", choices=("aihub-once", "aihub-default", "pause", "continue"))
+        operation.add_argument("--feishu-profile")
+        operation.add_argument("--confirm-feishu-identity")
+        operation.add_argument("--save-feishu-identity", action="store_true")
+        operation.add_argument("--retry-provider", action="store_true", help="retry a known rejected operation after repairing it; never retries unknown writes")
+        operation.add_argument("--request", help="the user's original task request, retained privately for AIhub Audio result checking")
+
     batch = subparsers.add_parser("batch")
     batch.add_argument("--task-dir", required=True)
     batch.add_argument("--batch-id")
@@ -430,8 +470,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if getattr(args, "task_dir", None):
+            with state.task_lock(Path(args.task_dir).expanduser().resolve()):
+                return int(args.handler(args))
         return int(args.handler(args))
     except (
+        OSError,
         WorkflowError,
         config.ConfigError,
         paths.PathError,
@@ -440,7 +484,6 @@ def main(argv: list[str] | None = None) -> int:
         transcript.TranscriptError,
         sampling.SamplingError,
         observations.ObservationError,
-        aihub.AIHubError,
         review.ReviewError,
     ) as exc:
         print("Error: %s" % exc, file=sys.stderr)

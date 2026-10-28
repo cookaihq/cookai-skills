@@ -1,27 +1,29 @@
 ---
 name: video-to-markdown
 metadata:
-  version: "1.1.0"
-description: v1.1.0｜Turn one local or directly downloadable video into a source-faithful GitHub Flavored Markdown document with timestamped transcript evidence, keyframe screenshots, short GIFs for motion-dependent information, adaptive visual resampling, and a resumable coverage review. Use for 视频转文档、带截图的视频笔记、video to Markdown, or preserving spoken and visual content together. Do not use for pure ASR, one-off video Q&A, downloading/editing/compressing video, video generation, or automatic publishing.
-compatibility: Requires Python managed by uv >= 0.8, ffmpeg, ffprobe, and a host Agent that can inspect images. AIHub ASR requires network access and AIHUB_API_KEY when no subtitle is supplied. Supports Codex and Claude Code.
+  version: "2.0.0"
+description: v2.0.0｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
+compatibility: Claude Code, Codex and WorkBuddy are required targets; new host workflows need separate acceptance. Requires uv >= 0.8, ffmpeg, ffprobe and host image inspection. Cloud transcription uses installed AIhub Audio (aihub-studio >=1.3.0,<2) or user-authorized Lark CLI >=1.0.98,<2. Native Windows uses PowerShell. See README for tested scope.
 ---
 
 # video-to-markdown
 
-Convert one video into a source-faithful GFM document. The deterministic workflow owns files, timestamps, ffmpeg operations, AIHub ASR, recovery, and final validation. You own visual understanding and writing: inspect each persisted batch, record only what its frames support, request denser evidence where needed, then write the document and review report.
+Convert one video into a source-faithful GFM document. The workflow owns files, timestamps, ffmpeg operations, transcription coordination, recovery and validation. You inspect frames, record supported observations, request denser evidence where needed, and write the document and review report. A pending action is not a completed transcription or document.
 
-Read [references/workflow.md](references/workflow.md) before the first run. Read [references/schemas.md](references/schemas.md) when constructing observation or review JSON. Read [references/aihub-asr.md](references/aihub-asr.md) only when ASR is needed or an AIHub request fails.
+Read [references/workflow.md](references/workflow.md) before the first run and [references/schemas.md](references/schemas.md) for observation/review JSON. When transcription is needed, follow [references/transcription.md](references/transcription.md), including dependency loading, identity confirmation, failure choices and interrupted-write handling.
 
 ## Step 0: Check For Updates
 
-Run `<skill-dir>/scripts/check_update.sh` on every invocation.
+For a Git installation, run `<skill-dir>/scripts/check_update.ps1` in native Windows PowerShell, or `scripts/check_update.sh` in Bash on macOS/Linux. Do not invoke Windows' WSL `bash.exe` as a native adapter.
 
 - Exit `0`: continue without relaying its output.
-- Exit `10`: relay the report verbatim and ask whether to pull now. If approved, run the same script with `--pull`; whether pulling succeeds or fails, continue this task with the available version.
+- Exit `10`: relay the report verbatim and ask whether to update now. After approval use `-Pull` in PowerShell or `--pull` in Bash; continue with the available version if it fails.
 - If the user declines or does not answer, continue without asking again in this run.
 - To disable this check, write `AUTO_UPDATE_CHECK=0` to `~/.config/video-to-markdown/.env` without changing other lines.
 
 The update check never blocks video processing.
+
+For a copy installation, read `update.json`, find the newest stable tag under its prefix and resolve its commit SHA. Show the local/remote versions, repository, exact tag/SHA and destination before asking to update. Only after confirmation download that SHA to a temporary directory on the same filesystem, validate the Skill, atomically replace the installation and read it back. Do not infer WorkBuddy update APIs; unavailable discovery/apply capabilities report `not-applicable`/`apply-failed` and continue the task.
 
 ## Start Or Resume
 
@@ -38,8 +40,10 @@ Useful options:
 - `--project-root <directory>` overrides only default output placement. It does not change where configuration is read.
 - `--use-local-key` authorizes this run to read `~/.config/video-to-markdown/.env`.
 - `--language <code>` records the requested source language hint. Translation is not implied.
+- `--provider aihub-audio|feishu-minutes` selects this task; `--only-provider` forbids switching to the other platform.
+- `--no-global-config` disables global business configuration for this task and the AIhub dependency. It is preserved on resume.
 
-Configuration is resolved per variable from the process environment, then `$PWD/.env.video-to-markdown`, then `$PWD/.env.local`, then `$PWD/.env`, then the authorized home file. Never search parent directories. `VIDEO_TO_MARKDOWN_ASR_MODEL` defaults to `paraformer-v2`; unknown models fail before any paid request.
+Configuration is resolved from the process environment, `$PWD/.env.video-to-markdown`, `$PWD/.env.local`, `$PWD/.env`, then the explicitly enabled home file. Never search parents. `VIDEO_TO_MARKDOWN_ASR_PROVIDER` defaults to `aihub-audio`. The Feishu profile/app/user group comes from a single layer. AIhub credentials/models belong to AIhub Audio. An old `VIDEO_TO_MARKDOWN_ASR_MODEL` is a migration error; explain its migration instead of silently changing the model.
 
 To continue an existing task:
 
@@ -47,7 +51,7 @@ To continue an existing task:
 uv run --project <skill-dir> <skill-dir>/scripts/workflow.py resume --task-dir <task-directory>
 ```
 
-Resume must validate the source SHA-256. If an upload or ASR task ID already exists, continue that operation; never create a duplicate. Stop on `ambiguous_upload` or `ambiguous_asr_create` and explain that the request may have been accepted but no usable response was received.
+Resume checks source/audio identity and keeps the saved provider. A task lock prevents concurrent resume. Preserve receipts and known IDs; stop on `submission_unknown`. Do not delete state or start again to escape an uncertain write. Version 1 task schemas are preserved but rejected by v2; no old task is automatically resubmitted.
 
 ## Inspect Every Batch
 
@@ -96,7 +100,7 @@ uv run --project <skill-dir> <skill-dir>/scripts/workflow.py make-gif \
   --purpose "Shows the animated transition between the two states"
 ```
 
-Do not reconstruct SVG animation in v1.
+Do not reconstruct SVG animation.
 
 ## Write And Validate
 
@@ -124,11 +128,12 @@ Relay the final document path and task directory. If a rename occurs, relay the 
 ## Hard Boundaries
 
 - One video per task.
-- Direct file URLs only; no platform page downloader in v1.
+- Direct file URLs only; no platform page downloader.
 - Use supplied SRT, VTT, or timestamped transcript instead of ASR.
-- Never upload the full video for ASR; upload only `source/audio-for-asr.flac`.
+- Never upload the full video for transcription; upload only the prepared MP3. It preserves the first audio track with a recorded video offset, without truncation or automatic splitting.
 - Do not download, install, start, or call a local model. ffmpeg and host image understanding are allowed.
 - Static evidence is PNG/JPEG; motion evidence is GIF; no SVG reconstruction.
 - Use actual decoded-frame PTS for frame/GIF timestamps and preserve upstream ASR timestamp precision.
-- No automatic model fallback and no multi-task splitting beyond an ASR model's documented single-file duration.
+- AIhub Audio owns model selection and its confirmation policy. Known AIhub failure may switch this task to Feishu once; processing, confirmation, query/download failure or unknown writes cannot trigger that switch.
+- Keep `.state/` private. Never paste raw receipts, signed URLs, login tokens or dependency records into public documents. Provide local recovery paths and explain actual status.
 - This Skill has no per-request paid authorization gate. A failed request may still require user involvement when its outcome is ambiguous.

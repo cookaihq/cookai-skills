@@ -1,29 +1,16 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
-ALLOWED_ASR_MODELS = frozenset(
-    {
-        "paraformer-v2",
-        "paraformer-8k-v2",
-        "scribe-v2",
-        "cohere-transcribe",
-    }
-)
-DEFAULT_ASR_MODEL = "paraformer-v2"
-CANONICAL_KEY = "AIHUB_API_KEY"
-LEGACY_KEY = "X_API_KEY"
+PROVIDERS = ("aihub-audio", "feishu-minutes")
+PROVIDER_KEY = "VIDEO_TO_MARKDOWN_ASR_PROVIDER"
+IDENTITY_KEYS = tuple("VIDEO_TO_MARKDOWN_FEISHU_" + suffix for suffix in ("PROFILE", "APP_ID", "USER_OPEN_ID"))
 KNOWN_NAMES = (
-    CANONICAL_KEY,
-    LEGACY_KEY,
-    "VIDEO_TO_MARKDOWN_ASR_MODEL",
-    "VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR",
-    "VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR",
-    "FFMPEG_BIN",
-    "FFPROBE_BIN",
+    PROVIDER_KEY, "VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR", "VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR",
+    "FFMPEG_BIN", "FFPROBE_BIN", "VIDEO_TO_MARKDOWN_ASR_MODEL", *IDENTITY_KEYS,
 )
 
 
@@ -33,39 +20,34 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class ResolvedConfig:
-    api_key: str | None
-    api_key_name: str | None
-    asr_model: str
+    asr_provider: str
     output_base: str | None
     source_video_dir: str | None
     ffmpeg_bin: str
     ffprobe_bin: str
     sources: dict[str, str]
+    use_home: bool
+    home_file: Path
+    feishu_identity: dict[str, str]
 
     def public_snapshot(self) -> dict:
         return {
-            "asr_model": self.asr_model,
-            "output_base": self.output_base,
-            "source_video_dir": self.source_video_dir,
-            "ffmpeg_bin": self.ffmpeg_bin,
-            "ffprobe_bin": self.ffprobe_bin,
-            "sources": dict(self.sources),
-            "api_key_name": self.api_key_name,
-            "api_key_masked": mask_key(self.api_key) if self.api_key else None,
+            "asr_provider": self.asr_provider, "output_base": self.output_base,
+            "source_video_dir": self.source_video_dir, "ffmpeg_bin": self.ffmpeg_bin,
+            "ffprobe_bin": self.ffprobe_bin, "sources": dict(self.sources),
+            "use_home": self.use_home,
         }
 
 
 def parse_dotenv(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
+        if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
+        key, value = key.strip(), value.strip()
         if key not in KNOWN_NAMES:
             continue
-        value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
         values[key] = value
@@ -74,83 +56,85 @@ def parse_dotenv(text: str) -> dict[str, str]:
 
 def _read_dotenv(path: Path) -> dict[str, str]:
     try:
-        return parse_dotenv(path.read_text(encoding="utf-8"))
-    except OSError:
+        return parse_dotenv(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
         return {}
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError("cannot read configuration: %s" % path) from exc
 
 
-def _first_nonempty(
-    names: tuple[str, ...], layers: list[tuple[str, dict[str, str]]]
-) -> tuple[str | None, str | None, str | None]:
-    for source, values in layers:
-        for name in names:
-            value = (values.get(name) or "").strip()
-            if value:
-                return value, source, name
-    return None, None, None
-
-
-def resolve(
-    environ: dict[str, str] | None = None,
-    cwd: str | os.PathLike[str] | None = None,
-    *,
-    use_home: bool = False,
-    home_config_dir: str | os.PathLike[str] | None = None,
-) -> ResolvedConfig:
+def resolve(environ: dict[str, str] | None = None, cwd: str | os.PathLike[str] | None = None,
+            *, use_home: bool = False, home_config_dir: str | os.PathLike[str] | None = None) -> ResolvedConfig:
     env = dict(os.environ if environ is None else environ)
-    invocation_dir = Path.cwd() if cwd is None else Path(cwd)
-    config_dir = (
-        Path(home_config_dir).expanduser()
-        if home_config_dir is not None
-        else Path.home() / ".config" / "video-to-markdown"
-    )
-    layers: list[tuple[str, dict[str, str]]] = [
-        ("process environment", env),
-        (str(invocation_dir / ".env.video-to-markdown"), _read_dotenv(invocation_dir / ".env.video-to-markdown")),
-        (str(invocation_dir / ".env.local"), _read_dotenv(invocation_dir / ".env.local")),
-        (str(invocation_dir / ".env"), _read_dotenv(invocation_dir / ".env")),
-    ]
+    invocation = (Path.cwd() if cwd is None else Path(cwd)).resolve()
+    home_file = (Path(home_config_dir) if home_config_dir is not None else Path.home() / ".config" / "video-to-markdown") / ".env"
+    layers = [("process environment", env)]
+    for name in (".env.video-to-markdown", ".env.local", ".env"):
+        path = invocation / name
+        layers.append((str(path), _read_dotenv(path)))
     if use_home:
-        layers.append((str(config_dir / ".env"), _read_dotenv(config_dir / ".env")))
-
+        layers.append((str(home_file), _read_dotenv(home_file)))
     sources: dict[str, str] = {}
 
-    def one(public_name: str, names: tuple[str, ...]) -> tuple[str | None, str | None]:
-        value, source, actual_name = _first_nonempty(names, layers)
-        if source is not None:
-            sources[public_name] = source
-        return value, actual_name
-
-    api_key, api_key_name = one("api_key", (CANONICAL_KEY, LEGACY_KEY))
-    asr_model, _ = one("asr_model", ("VIDEO_TO_MARKDOWN_ASR_MODEL",))
-    output_base, _ = one("output_base", ("VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR",))
-    source_video_dir, _ = one(
-        "source_video_dir", ("VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR",)
-    )
-    ffmpeg_bin, _ = one("ffmpeg_bin", ("FFMPEG_BIN",))
-    ffprobe_bin, _ = one("ffprobe_bin", ("FFPROBE_BIN",))
-
-    model = asr_model or DEFAULT_ASR_MODEL
-    if model not in ALLOWED_ASR_MODELS:
-        raise ConfigError(
-            "VIDEO_TO_MARKDOWN_ASR_MODEL must be one of: %s"
-            % ", ".join(sorted(ALLOWED_ASR_MODELS))
-        )
-    return ResolvedConfig(
-        api_key=api_key,
-        api_key_name=api_key_name,
-        asr_model=model,
-        output_base=output_base,
-        source_video_dir=source_video_dir,
-        ffmpeg_bin=ffmpeg_bin or "ffmpeg",
-        ffprobe_bin=ffprobe_bin or "ffprobe",
-        sources=sources,
-    )
-
-
-def mask_key(value: str | None) -> str | None:
-    if value is None:
+    def one(field: str, key: str) -> str | None:
+        for source, values in layers:
+            value = (values.get(key) or "").strip()
+            if value:
+                sources[field] = source
+                return value
         return None
-    if len(value) <= 8:
-        return "****"
-    return value[:4] + "****" + value[-4:]
+
+    provider = one("asr_provider", PROVIDER_KEY) or "aihub-audio"
+    if provider not in PROVIDERS:
+        raise ConfigError(PROVIDER_KEY + " must be aihub-audio or feishu-minutes")
+    identity = {}
+    for source, values in layers:
+        if any((values.get(key) or "").strip() for key in IDENTITY_KEYS):
+            identity = {key.rsplit("FEISHU_", 1)[1].lower(): (values.get(key) or "").strip() for key in IDENTITY_KEYS}
+            sources["feishu_identity"] = source
+            break
+    if one("legacy_model", "VIDEO_TO_MARKDOWN_ASR_MODEL"):
+        raise ConfigError("VIDEO_TO_MARKDOWN_ASR_MODEL is retired; explicitly migrate its model intent to AIhub Audio before starting (no credentials were moved)")
+    return ResolvedConfig(
+        provider, one("output_base", "VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR"),
+        one("source_video_dir", "VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR"),
+        one("ffmpeg_bin", "FFMPEG_BIN") or "ffmpeg", one("ffprobe_bin", "FFPROBE_BIN") or "ffprobe",
+        sources, use_home, home_file, identity,
+    )
+
+
+def save_default(resolved: ResolvedConfig, *, cwd: Path, provider: str) -> dict:
+    source = resolved.sources.get("asr_provider")
+    if source == "process environment":
+        return {"effective": False, "reason": "process_environment_override"}
+    if source is None and not resolved.use_home:
+        return {"effective": False, "reason": "global_reading_not_enabled", "path": str(resolved.home_file)}
+    target = Path(source) if source else resolved.home_file
+    try:
+        update_file(target, {PROVIDER_KEY: provider})
+        after = resolve(cwd=cwd, use_home=resolved.use_home, home_config_dir=resolved.home_file.parent)
+        effective = after.asr_provider == provider and after.sources.get("asr_provider") == str(target)
+        return {"effective": effective, "path": str(target), "reason": "saved" if effective else "readback_not_effective"}
+    except (OSError, ConfigError):
+        return {"effective": False, "path": str(target), "reason": "save_or_readback_failed"}
+
+
+def update_file(path: Path, changes: dict[str, str]) -> None:
+    from . import state
+    if path.is_symlink():
+        raise ConfigError("refusing to replace a symlink configuration")
+    existed = path.exists()
+    original = path.read_bytes() if existed else b""
+    text = original.decode("utf-8-sig")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    for key, value in changes.items():
+        if any(char in value for char in "\r\n\"'"):
+            raise ConfigError("configuration value cannot be represented safely")
+        pattern = re.compile(r"^[ \t]*" + re.escape(key) + r"[ \t]*=[^\r\n]*", re.M)
+        if pattern.search(text):
+            text = pattern.sub(key + "=" + value, text)
+        else:
+            text += (newline if text and not text.endswith("\n") else "") + key + "=" + value + newline
+    if (path.exists() != existed) or (existed and path.read_bytes() != original):
+        raise ConfigError("configuration changed before save; retry from the current source")
+    state.atomic_write_bytes(path, text.encode("utf-8"))

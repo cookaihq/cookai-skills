@@ -7,12 +7,15 @@ import sys
 
 
 REEXEC_ENV = "VIDEO_TO_MARKDOWN_BOOTSTRAP_REEXEC"
-UV_INSTALL_HINT = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+UV_INSTALL_HINT = (
+    "winget install --exact --id astral-sh.uv" if os.name == "nt"
+    else "curl -LsSf https://astral.sh/uv/install.sh | sh"
+)
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENV_DIR = os.path.join(
     SKILL_DIR, os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv"
 )
-VENV_PY = os.path.join(VENV_DIR, "bin", "python")
+VENV_PY = os.path.join(VENV_DIR, "Scripts", "python.exe") if os.name == "nt" else os.path.join(VENV_DIR, "bin", "python")
 
 
 def _fail(message):
@@ -21,16 +24,32 @@ def _fail(message):
 
 
 def _manual_rebuild_hint():
-    return "rm -rf %s && uv sync --project %s --no-dev" % (
-        shlex.quote(VENV_DIR),
-        shlex.quote(SKILL_DIR),
-    )
+    quoted = "'" + SKILL_DIR.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(SKILL_DIR)
+    return "uv sync --frozen --project %s --no-dev --reinstall" % quoted
 
 
 def _venv_is_valid():
     return os.path.exists(VENV_PY) and os.path.exists(
         os.path.join(VENV_DIR, "pyvenv.cfg")
     )
+
+
+def _dependencies_are_valid(*, report_error=False):
+    modules = "from PIL import Image, ImageDraw, ImageOps"
+    if os.name == "nt":
+        modules += "; import win32api, win32con, win32file, win32security, ntsecuritycon, pywintypes, win32event, win32job, win32pipe, win32process"
+    try:
+        result = subprocess.run(
+            [VENV_PY, "-c", modules], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        if report_error:
+            sys.stderr.write("Dependency import probe failed: %s\n" % exc)
+        return False
+    if result.returncode != 0 and report_error:
+        sys.stderr.write(result.stdout.decode("utf-8", "replace"))
+    return result.returncode == 0
 
 
 def _require_uv():
@@ -55,12 +74,12 @@ def _require_uv():
 
 def _sync():
     sys.stderr.write(
-        "[bootstrap] Runtime environment is missing; rebuilding from uv.lock at %s ...\n"
+        "[bootstrap] Runtime environment is missing or damaged; rebuilding from uv.lock at %s ...\n"
         % VENV_DIR
     )
     try:
         sync = subprocess.run(
-            ["uv", "sync", "--project", SKILL_DIR, "--no-dev"],
+            ["uv", "sync", "--frozen", "--project", SKILL_DIR, "--no-dev", "--reinstall"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=600,
@@ -76,17 +95,20 @@ def _sync():
 
 def ensure():
     target = os.path.realpath(VENV_DIR)
-    if os.path.realpath(sys.prefix) == target:
+    runtime_ready = _venv_is_valid() and _dependencies_are_valid()
+    if os.path.realpath(sys.prefix) == target and runtime_ready:
         if os.environ.get(REEXEC_ENV) == target:
             os.environ.pop(REEXEC_ENV, None)
         return
     if os.environ.get(REEXEC_ENV) == target:
         _fail(
-            "Runtime is still outside %s after re-exec. Rebuild it with: %s"
+            "Runtime is still unusable at %s after re-exec. Rebuild it with: %s"
             % (VENV_DIR, _manual_rebuild_hint())
         )
-    if not _venv_is_valid():
+    if not runtime_ready:
         _require_uv()
         _sync()
+        if not _dependencies_are_valid(report_error=True):
+            _fail("Runtime dependencies still fail to import after repair. Run: " + _manual_rebuild_hint())
     os.environ[REEXEC_ENV] = target
     os.execv(VENV_PY, [VENV_PY] + sys.argv)

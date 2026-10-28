@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "video-to-markdown",
+  "channel": "stable",
+  "tag_prefix": "video-to-markdown/v",
+  "ref_type": "tag"
+}

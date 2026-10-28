@@ -40,7 +40,7 @@ def split_batches(duration_ms: int) -> list[dict]:
 
 
 def _dedupe_candidates(values: list[tuple[int, str]], *, minimum_gap_ms: int = 500) -> list[dict]:
-    merged = []
+    merged: list[dict] = []
     for timestamp, reason in sorted(values):
         if merged and timestamp - merged[-1]["requested_ms"] < minimum_gap_ms:
             if reason not in merged[-1]["reasons"]:
@@ -152,7 +152,7 @@ def prepare_first_pass(
         if state_path.exists() and batch.get("status") != "pending":
             continue
         candidates = first_pass_candidates(source, batch, ffmpeg_bin=ffmpeg_bin)
-        frames = []
+        frames: list[dict] = []
         for candidate in candidates:
             frame = media.extract_frame(
                 source,
@@ -241,7 +241,7 @@ def resample(
     requested = list(range(start_ms, end_ms, interval))
     if len(requested) > 60:
         raise SamplingError("resampling would exceed 60 frames; increase --interval-ms")
-    frames = []
+    frames: list[dict] = []
     for timestamp in requested:
         frame = media.extract_frame(
             source,

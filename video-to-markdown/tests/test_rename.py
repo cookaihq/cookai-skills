@@ -10,7 +10,7 @@ def make_valid_task(tmp_path):
     task_dir.mkdir()
     manifest, _ = state.initialize_task(
         task_dir,
-        settings_snapshot={"asr_model": "paraformer-v2", "sources": {}},
+        settings_snapshot={"asr_provider": "aihub-audio", "sources": {}},
     )
     manifest["validation"]["complete"] = True
     state.save_manifest(task_dir, manifest)
