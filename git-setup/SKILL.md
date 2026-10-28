@@ -1,8 +1,8 @@
 ---
 name: git-setup
 metadata:
-  version: "1.0.0"
-description: v1.0.0｜检查和设置项目 Git，维护项目 Git 使用说明及 Agent 规则引用；支持 GitHub/CNB 凭证来源选择、明确请求的发布、单向同步与本地/GitHub Issue。
+  version: "1.0.1"
+description: v1.0.1｜检查和设置项目 Git，维护项目 Git 使用说明及 Agent 规则引用；支持 GitHub/CNB 凭证来源选择、明确请求的发布、单向同步与本地/GitHub Issue。
 compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Claude Code, Codex and WorkBuddy; gh is optional for GitHub authentication.
 ---
 
@@ -38,7 +38,9 @@ Git 检出安装：macOS/Linux 执行本 Skill 的 scripts/check_update.sh；Win
 
 读取 [仓库鉴权](references/authentication.md)、[Git 操作](references/git.md)。已有任意 remote 时，让用户明确替换哪个或以什么名称新增；同 URL 也不省略这个决定。已有同范围明确选择可沿用。无 remote 可默认 origin。
 
-GitHub HTTPS 先选 gh 的明确账号或仓库独立 Token；CNB 文件保存单行带 cnb 用户名与 Token 的完整鉴权 URL。来源由本次明确输入、项目规则或可选的 .credentials/repositories/sources.local.md 决定；本机记录只保存目标、方式、文件路径/账号，不含 Token、ready/pending 或历史 Token 指纹。能从规则重建时不额外保存来源记录。文件里的 Token 轮换后，下次直接读取并作当前验证；同一操作中变化则停止重查。
+GitHub HTTPS 默认复用项目为完整目标配置的 Token，并做本次验证，不再要求在项目 Token 与全局 gh 之间二选一。发现全局 gh 已登录时只作信息提示，不列为默认或推荐；只有用户明确选择全局 gh（或可核验的同目标、同作用范围已确认选择）才使用明确账号。项目 Token 缺失、失效或权限不足时报告目标、来源与问题，按用户明确决定处理，不静默回退全局 gh。
+
+来源由本次明确输入、项目规则或可选的 .credentials/repositories/sources.local.md 决定；没有其他已确认来源时，CLI 使用目标仓库的标准 Token 路径。项目规则指定自定义文件或 environment 时，Agent 将该来源传入 CLI，不扫描其他文件。CNB 文件继续保存单行带 cnb 用户名与 Token 的完整鉴权 URL。本机记录只保存目标、方式、文件路径/账号，不含 Token、ready/pending 或历史 Token 指纹。能从规则重建时不额外保存来源记录。文件里的 Token 轮换后，下次直接读取并作当前验证；同一操作中变化则停止重查。
 
 新文件用 credential-prepare 准备被忽略的空文件，已有文件原样保留。准备后在回复提供返回的完整可点击路径、格式、目标和本次用途；等待用户明确“已填写”才读取。等待需要跨轮且不能从现有任务重建时，只保存必要非敏感恢复信息。文件非空不等于用户已回复；不要把 Token 发回对话。真实凭证保存仍须已有明确授权。
 
@@ -50,7 +52,7 @@ GitHub HTTPS 先选 gh 的明确账号或仓库独立 Token；CNB 文件保存�
 
 ## 3. 明确请求的发布与同步
 
-读取 [Git 操作](references/git.md)。提交作者与鉴权身份分别核对；仅发布用户已授权的提交。创建分支、提交、远端写入分别依据本次请求和项目规则。
+读取 [Git 操作](references/git.md)。每个目标沿用第 2 节的项目 Token 默认规则与全局 gh 明确选择条件。提交作者与鉴权身份分别核对；仅发布用户已授权的提交。创建分支、提交、远端写入分别依据本次请求和项目规则。
 
 发布用 publish --remote <名称> --ref <完整引用> 先预览，执行用同参数与 --apply --expected-fingerprint。同步用 sync --input - 提供 {sync:{source,targets,refs},sources?:[...]}；来源是主要远端已经发布的 refs，不混入未发布本地引用。项目已有明确脚本策略时可用 --policy-directory，损坏或缺项停止，不从别处取默认。
 
@@ -78,7 +80,7 @@ GitHub HTTPS 先选 gh 的明确账号或仓库独立 Token；CNB 文件保存�
 
 GitHub Issue 写入继续使用 git-setup 的鉴权与恢复实现。本地只有明确选择脚本校验、并发编号或操作恢复能力时才使用同一低层 CLI，不能把它作为所有本地 Issue 的必经步骤。先读 [输入契约](references/configuration.md)和[写入与恢复](references/github.md)。
 
-1. Agent 读取现有规则，明确发起仓、规则 owner、关系、最终目标及本次内容。在线目标必须完整指定 `github.com/owner/repo`，鉴权使用该目标已选来源；不从当前 remote、活动账号或 matt 的通用模板推断。
+1. Agent 读取现有规则，明确发起仓、规则 owner、关系、最终目标及本次内容。在线目标必须完整指定 `github.com/owner/repo`，鉴权按第 2 节默认复用该目标的项目 Token；全局 gh 仍须明确选择。不从当前 remote、活动账号或 matt 的通用模板推断目标或凭证。
 2. 准备稳定 operationId 和完整本次输入。默认用 `--input -` 从 stdin 传递 JSON，不创建临时参数文件。需要跨会话恢复且无法从已有任务材料完整重建输入时，才按项目规则保存一份原输入，并告知路径与用途；其中可能含正文。操作记录只有指纹和摘要，不能单凭它重建原输入。
 3. `issue-resolve --project <发起Git根> --input -` 核对事实；同一输入交给 `issue-create`、`issue-update` 或 `issue-comment`，在已有具体授权内加 `--apply --expected-fingerprint <指纹>`。脚本写前重验规则、关系、目标和来源；变化拒绝旧计划。
 4. 成功回读后给实际路径或 GitHub 链接。结果不明时使用原输入和 operationId 调用 `issue-recover --input -`，只核对原目标，不换编号重发。若原输入不能重建，保留记录并报告缺项；不把一次空查询、同标题或旧 verified 状态当作未写入/本轮成功的证据。

@@ -2,7 +2,7 @@
 
 帮你为项目设置 Git，并把“这个项目怎样用 Git”写进项目说明、从 Agent 规则中引用。后续 Agent 会按说明定位仓库、读取凭证并执行获授权的操作。
 
-当前版本 **1.0.0**。需要 Node.js 20+、Git 2.29+；没有额外 npm/Python 包或本地模型。普通终端、IDE、CI 使用既有鉴权，不会自动读取 .credentials/repositories。
+当前版本 **1.0.1**。需要 Node.js 20+、Git 2.29+；没有额外 npm/Python 包或本地模型。普通终端、IDE、CI 使用既有鉴权，不会自动读取 .credentials/repositories。
 
 ## 安装与第一次使用
 
@@ -28,11 +28,13 @@ Claude Code 可用 /git-setup，Codex 可用 $git-setup，WorkBuddy 在已加载
 
 可以说：“我在 Orca 中使用这个项目，请用 git-setup 检查 origin 和同步到 GitHub 的机制，说明 Workflow 的 Issue 显示条件，先让我选择是否调整 origin。”
 
-GitHub 可选明确的 gh 账号或仓库独立 Token。CNB 文件保存一行带用户名和 Token 的 URL：
+GitHub 默认使用项目为该仓库配置的 Token，并验证本次能否使用；已有 Token 时不会再让你二选一。全局 gh 已登录时，Agent 可以告诉你这个情况；只有你明确说“本次使用全局 gh 的某账号”，或此前已确认的选择仍适用于这个目标和范围，才会使用该账号。当前活动账号不会自动成为本项目的选择。
+
+项目 Token 缺失、失效或权限不足时，Agent 会说明具体来源和问题，按你的决定处理，不自动换用全局 gh。新文件的准备与保存仍按你明确的授权执行。CNB 文件保存一行带用户名和 Token 的 URL：
 
     https://cnb:<TOKEN>@cnb.cool/<完整仓库路径>
 
-用户名是 cnb，Token 中的 URL 特殊字符须编码。Agent 会先准备空文件、提供完整可点击路径和格式，等你回复“已填写”再验证。不要把 Token 发到对话里。文件须未跟踪且被 Git 忽略；macOS/Linux 目录 700、文件 600，Windows 核对私有 ACL。真实 remote 始终保存不含用户名和 Token 的地址。
+用户名是 cnb，Token 中的 URL 特殊字符须编码。需要新文件时，Agent 会先准备空文件、提供完整可点击路径和格式，等你回复“已填写”再验证；项目已有凭证直接读取并做本次验证。不要把 Token 发到对话里。文件须未跟踪且被 Git 忽略；macOS/Linux 目录 700、文件 600，Windows 核对私有 ACL。真实 remote 始终保存不含用户名和 Token 的地址。
 
 需要记住机器自己的账号或自定义文件时，可在主检出的 .credentials/repositories/sources.local.md 记非敏感来源；普通路径已能从项目说明确定时不额外记录。同一文件内换 Token，下次直接验证当前值，无需重新绑定。缺失或失效时修复原来源，不自动换账号。
 
@@ -46,7 +48,7 @@ GitHub 可选明确的 gh 账号或仓库独立 Token。CNB 文件保存一行�
 - “检查当前操作实际使用哪个凭证文件，只显示来源，不显示值。”
 - “这次操作中断了，先核对真实结果，再继续确认未完成的步骤。”
 
-项目已有发布、PR 或 Release 脚本会在说明中引用，是否执行仍由具体请求决定。普通本地 Issue 沿用项目 tracker；GitHub Issue 支持原操作回读与恢复。网络读取设超时并有限重试；写入不明时先回读，避免重复。
+发布、同步和 GitHub Issue 同样默认使用各目标的项目 Token，全局 gh 的明确选择要求相同。项目已有发布、PR 或 Release 脚本会在说明中引用，是否执行仍由具体请求决定。普通本地 Issue 沿用项目 tracker；GitHub Issue 支持原操作回读与恢复。网络读取设超时并有限重试；写入不明时先回读，避免重复。
 
 ## 配置位置与更新
 
@@ -59,6 +61,8 @@ GitHub 可选明确的 gh 账号或仓库独立 Token。CNB 文件保存一行�
 **1.0.0 为不兼容升级。** 原持久 helper、鉴权绑定和生成运行包接口已删除。已有安装先清点并迁移实际调用方，验证后删除旧入口和无人引用的旧运行包；不会自动改真实凭证或删除其他 helper。可以说“将这个项目迁移到 Git 文档方案，先列出调用方与影响，再在我已授权范围内迁移并删除旧实现”。
 
 ## 支持状态
+
+1.0.1 的三种离线来源场景已在 Windows 原生 Codex 0.165.0（workspace-write 沙箱）和 Claude Code 2.1.312 上验证：已有项目 Token 直接选用、缺失时不回退全局 gh、明确选择时使用指定 gh 账号。两端均检查了本次 1.0.1 源码；Claude Code 的同名个人安装可能优先加载，验收时须核对实际 Skill 路径与版本。WorkBuddy 5.8.3 启动后未提供可操作窗口，本次尚未完成该端调用验证。离线来源检查不证明线上凭证有效或写入权限。
 
 已合入 0.5.0 的 GitHub origin 与 Orca Issue 提醒。该提醒的三个客户端实际会话及 Orca Workflow 界面尚未验证。
 

@@ -135,21 +135,27 @@ function targetOptions(options, target) {
   const item = matches[0];
   return item ? { ...options, authMethod: item.method, credentialFile: item.file, ghUser: item.account } : options;
 }
-export async function authSelection(project, url, options = {}) {
-  const target = authTarget(url);
-  if (!target) return { status: 'not_applicable', target: null };
+async function resolveSource(project, target, options) {
   options = targetOptions(options, target);
   const scope = await credentialOwner(project, options);
   const saved = options.authMethod === undefined ? (await readSources(scope.owner)).find(item => authTarget(item.url).key === target.key) : undefined;
   const explicit = options.authMethod !== undefined;
-  const method = options.authMethod || saved?.method || (target.host === 'cnb.cool' ? 'cnb-url' : null);
+  // Saved entries represent an explicit choice for this complete target. Ambient
+  // gh logins never participate in selection or replace a missing project Token.
+  const method = options.authMethod ?? saved?.method ?? (target.host === 'cnb.cool' ? 'cnb-url' : 'github-token');
   const file = options.credentialFile ? resolve(scope.owner.main, options.credentialFile) : (!explicit && saved?.file ? resolve(scope.owner.main, saved.file) : join(scope.directory, target.filename));
-  if (!method) return { status: 'needs_input', required: ['auth-method'], target, credentialFile: file,
-    choices: [{ method: 'gh', label: '使用本机明确选择的 gh 账号' }, { method: 'github-token', label: '使用仓库独立 Token：' + file }] };
   if (!methods[target.host].includes(method)) authFail('auth_method_invalid', '鉴权方式与目标平台不匹配。');
+  return { options, scope, method, file, account: options.ghUser || (!explicit && saved?.account) };
+}
+
+export async function authSelection(project, url, options = {}) {
+  const target = authTarget(url);
+  if (!target) return { status: 'not_applicable', target: null };
+  const selected = await resolveSource(project, target, options);
+  options = selected.options;
+  const { scope, method, file, account } = selected;
   let source = { target, method, project: scope.repository.main, commonDir: scope.repository.commonDir, owner: scope.owner, relationship: relationshipSelection(scope.relationship) };
   if (method === 'gh') {
-    const account = options.ghUser || (!explicit && saved?.account);
     if (!account) return { status: 'needs_input', required: ['gh-user'], target, accounts: options.metadataOnly ? [] : await ghAccounts(options) };
     if (!/^[A-Za-z0-9-]+$/.test(account)) authFail('gh_account_invalid', 'gh 账号名无效。');
     source.account = account;
@@ -173,10 +179,11 @@ function helperCommand() {
 export async function prepareAuth(project, url, options = {}) {
   const target = authTarget(url);
   if (!target) authFail('auth_target_unsupported', '凭证准备只支持 GitHub/CNB HTTPS。');
-  const method = options.authMethod || (target.host === 'cnb.cool' ? 'cnb-url' : undefined);
-  if (!methods[target.host].includes(method)) return { status: 'needs_input', required: ['auth-method'] };
+  const selected = await resolveSource(project, target, options);
+  options = selected.options;
+  const { method, file } = selected;
   if (method === 'gh' || method === 'environment') return publicSelection(await authSelection(project, url, options));
-  let scope = await credentialOwner(project, options);
+  let { scope } = selected;
   let initialization = scope.repository.isGit ? await credentialInitialization(project, options) : null;
   if (initialization && initialization.target !== target.key) authFail('auth_initialization_target_changed', '未完成初始化的目标不同；先核对原任务。');
   if (!scope.repository.isGit) {
@@ -184,7 +191,6 @@ export async function prepareAuth(project, url, options = {}) {
     if (!options.apply) return { status: 'planned', initialization, target };
     scope = await credentialOwner(project, options);
   }
-  const file = options.credentialFile ? resolve(scope.owner.main, options.credentialFile) : join(scope.directory, target.filename);
   await protectedPath(file, scope.owner, { allowMissing: true, allowIgnore: Boolean(options.apply && options.allowIgnore) });
   if (!options.apply) return { status: 'planned', credentialFile: file, target, method };
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
@@ -248,7 +254,7 @@ export function gitAuthentication(project, options = {}, prepared) {
     const target = authTarget(url);
     if (!target) return { env: {}, metadata: { method: 'existing' } };
     let selected = cache.get(target.key) || await authSelection(project, url, options);
-    if (selected.status !== 'selected') authFail('auth_selection_required', `目标 ${target.url} 尚未完成鉴权选择或文件填写；按项目说明选择来源。`);
+    if (selected.status !== 'selected') authFail('auth_selection_required', `目标 ${target.url} 的来源 ${selected.credentialFile || selected.source?.account || 'gh（待明确账号）'} 尚未就绪（${selected.required.join(', ')}）；先处理该来源，不回退全局 gh 或其他凭证。`);
     if (!cache.has(target.key)) { selected = await verifySelection(selected, options); cache.set(target.key, selected); }
     if (!authReports.some(report => report.source.target.key === target.key)) authReports.push(publicSelection(selected));
     // Read the selected source again for every Git operation; detect rotation during a plan.
@@ -264,6 +270,6 @@ export function gitAuthentication(project, options = {}, prepared) {
 
 export async function selectedGitHubClient(project, target, options = {}) {
   const selected = await verifySelection(await authSelection(project, 'https://' + target.host + '/' + target.repository, options), options);
-  if (selected.status !== 'selected') authFail('auth_selection_required', 'GitHub API 目标需要明确鉴权来源，不借用其他账号。');
+  if (selected.status !== 'selected') authFail('auth_selection_required', `GitHub API 目标 ${selected.target.url} 的来源 ${selected.credentialFile || 'gh（待明确账号）'} 尚未就绪（${selected.required.join(', ')}）；先处理该来源，不回退全局 gh 或其他凭证。`);
   return { ...sourceClient(selected.source, createGitHubClient({ auth: { method: 'token', token: selected.credential.password, ...target }, transport: options.apiTransport })), authentication: publicSelection(selected) };
 }

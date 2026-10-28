@@ -5,18 +5,106 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { repositoryFixture } from './fixtures/repositories.mjs';
-import { prepareAuth, authSelection, verifySelection, publicSelection, rememberSource, gitAuthentication } from '../scripts/git-setup/auth.mjs';
+import { prepareAuth, authSelection, verifySelection, verifyAuth, publicSelection, rememberSource, gitAuthentication, selectedGitHubClient } from '../scripts/git-setup/auth.mjs';
 import { sourceRecordPath } from '../scripts/git-setup/source-record.mjs';
 const exec=promisify(execFile);
 const url='https://github.com/team/project.git';
 const identity=async()=>({status:200,data:{login:'fixture-user',id:17},headers:{}});
 async function fixture(){const f=await repositoryFixture();return {...f,project:await f.repo('project')};}
 async function token(f){const p=await prepareAuth(f.project,url,{authMethod:'github-token',apply:true});await writeFile(p.credentialFile,'synthetic-only-token\n');return p;}
-test('GitHub requires a source choice and a missing file is not created by reading',async()=>{
+test('GitHub defaults to its project Token and a missing file is not created by reading',async()=>{
  const f=await fixture();const before=await f.git(f.project,'config','--local','--list');
- assert.deepEqual((await authSelection(f.project,url)).required,['auth-method']);
+ const selected=await authSelection(f.project,url);
+ assert.deepEqual(selected.required,['credential-prepare']);
+ assert.equal(selected.source.method,'github-token');
+ assert.equal(selected.credentialFile,join(f.project,'.credentials/repositories/team--project.github-token'));
+ await assert.rejects(readFile(selected.credentialFile),{code:'ENOENT'});
  assert.deepEqual((await authSelection(f.project,url,{authMethod:'github-token'})).required,['credential-prepare']);
  assert.equal(await f.git(f.project,'config','--local','--list'),before);
+});
+
+function globalGh() {
+ const calls=[];
+ const run=async(file,args)=>{
+  assert.equal(file,'gh');calls.push(args);
+  if(args[0]==='--version')return {stdout:'gh version 2.80.0\n'};
+  if(args[1]==='status')return {stdout:JSON.stringify({hosts:{'github.com':[
+   {login:'active-user',state:'success',active:true},{login:'fixture-user',state:'success',active:false}
+  ]}})};
+  assert.deepEqual(args,['auth','token','--hostname','github.com','--user','fixture-user']);
+  return {stdout:'synthetic-gh-token\n'};
+ };
+ return {calls,run};
+}
+
+test('a configured project Token is verified without probing or reading available global gh accounts',async()=>{
+ const f=await fixture(),p=await token(f),gh=globalGh();let requests=0;
+ const verified=await verifyAuth(f.project,url,{run:gh.run,apiOnly:true,apiTransport:async request=>{
+  requests++;assert.equal(request.headers.Authorization,'Bearer synthetic-only-token');return identity();
+ }});
+ assert.equal(verified.status,'verified');assert.equal(verified.source.method,'github-token');
+ assert.equal(verified.source.file,p.credentialFile);assert.equal(verified.identity.login,'fixture-user');
+ assert.equal(requests,1);assert.deepEqual(gh.calls,[]);
+ assert.ok(!JSON.stringify(verified).includes('synthetic-only-token'));
+ await assert.rejects(readFile(sourceRecordPath({main:f.project})),{code:'ENOENT'});
+});
+
+test('missing, empty, malformed and rejected project Tokens never fall back to available gh',async()=>{
+ const f=await fixture(),gh=globalGh(),options={run:gh.run,apiOnly:true};
+ assert.deepEqual((await verifyAuth(f.project,url,options)).required,['credential-prepare']);
+ await assert.rejects(selectedGitHubClient(f.project,{host:'github.com',repository:'team/project'},options),error=>{
+  assert.equal(error.code,'auth_selection_required');assert.ok(error.message.includes('team--project.github-token'));return true;
+ });
+ const p=await prepareAuth(f.project,url,{apply:true});
+ assert.deepEqual((await verifyAuth(f.project,url,options)).required,['credentials-filled']);
+ await writeFile(p.credentialFile,'invalid\nmultiple-lines');
+ await assert.rejects(verifyAuth(f.project,url,options),{code:'auth_file_format'});
+ await writeFile(p.credentialFile,'synthetic-rejected-token');
+ for(const status of [401,403]){
+  let requests=0;
+  await assert.rejects(verifyAuth(f.project,url,{...options,apiTransport:async request=>{
+   requests++;assert.equal(request.headers.Authorization,'Bearer synthetic-rejected-token');return {status,data:{},headers:{}};
+  }}),error=>{
+   assert.equal(error.code,'http-error');assert.ok(error.message.includes(p.credentialFile));return true;
+  });
+  assert.equal(requests,1);
+ }
+ assert.equal(await readFile(p.credentialFile,'utf8'),'synthetic-rejected-token');
+ assert.deepEqual(gh.calls,[]);
+});
+
+test('project-defined custom Token sources are reused by selection and preparation without falling back',async()=>{
+ const f=await fixture(),standard=await token(f),gh=globalGh();
+ const p=await prepareAuth(f.project,url,{credentialFile:'.credentials/repositories/custom.github-token',apply:true});
+ await writeFile(p.credentialFile,'synthetic-custom-token');
+ const source={url,method:'github-token',file:p.credentialFile};
+ const explicit=await authSelection(f.project,url,{sources:[source],run:gh.run});
+ assert.equal(explicit.credential.password,'synthetic-custom-token');
+ await rememberSource(f.project,source,{apply:true});
+ assert.equal((await authSelection(f.project,url,{run:gh.run})).source.file,p.credentialFile);
+ const prepared=await prepareAuth(f.project,url,{apply:true});
+ assert.equal(prepared.credentialFile,p.credentialFile);assert.equal(prepared.created,false);
+ await rm(p.credentialFile);
+ const missing=await authSelection(f.project,url,{run:gh.run});
+ assert.deepEqual(missing.required,['credential-prepare']);assert.equal(missing.credentialFile,p.credentialFile);
+ assert.equal(await readFile(standard.credentialFile,'utf8'),'synthetic-only-token\n');assert.deepEqual(gh.calls,[]);
+});
+
+test('only an explicit gh choice or a saved choice for this target uses the named global account',async()=>{
+ const f=await fixture();await token(f);const gh=globalGh();
+ const pending=await authSelection(f.project,url,{authMethod:'gh',run:gh.run});
+ assert.deepEqual(pending.required,['gh-user']);assert.equal(pending.accounts[0].active,true);
+ assert.equal(gh.calls.some(args=>args[1]==='token'),false);
+ const source={url,method:'gh',account:'fixture-user'};
+ const selected=await authSelection(f.project,url,{sources:[source],run:gh.run});
+ assert.equal(selected.source.account,'fixture-user');assert.equal(selected.credential.password,'synthetic-gh-token');
+ await rememberSource(f.project,source,{apply:true});
+ const saved=await authSelection(f.project,url,{run:gh.run});assert.equal(saved.source.account,'fixture-user');
+ assert.deepEqual(gh.calls.at(-1),['auth','token','--hostname','github.com','--user','fixture-user']);
+ const unrelated=await authSelection(f.project,'https://github.com/team/other',{run:gh.run});
+ assert.equal(unrelated.source.method,'github-token');assert.deepEqual(unrelated.required,['credential-prepare']);
+ const project=await authSelection(f.project,url,{authMethod:'github-token',run:gh.run});
+ assert.equal(project.credential.password,'synthetic-only-token');
 });
 test('optional source record contains no secret or ready state and preserves prose',async()=>{
  const f=await fixture(),p=await token(f),entry={url,method:'github-token',file:p.credentialFile};

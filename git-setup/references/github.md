@@ -10,9 +10,9 @@ GitHub 目标始终是输入的 `target.github`，不从 CWD、origin、GH_REPO 
 
 ## 身份与权限
 
-GitHub API 的最终 host/repository 交给 `auth.mjs` 的 `boundGitHubClient`。它读取该目标已经选定的独立文件或 gh 账号，通过 `/user` 核验身份，再构造只访问 `api.github.com` 的客户端。Git 传输使用同一来源；gh 使用明确账号取得的进程内凭证，不依赖活动账号、不导出到项目，也不受 GH_TOKEN / GITHUB_TOKEN 覆盖。
+GitHub API 的最终 host/repository 交给 `auth.mjs` 的 `selectedGitHubClient`。它按[仓库鉴权](authentication.md)默认读取该目标的项目 Token；仅在用户明确选择全局 gh（含可核验的同范围既有选择）时读取指定账号。通过 `/user` 核验身份后，构造只访问 `api.github.com` 的客户端。Git 传输使用同一来源；gh 使用明确账号取得的进程内凭证，不依赖活动账号、不导出到项目，也不受 GH_TOKEN / GITHUB_TOKEN 覆盖。
 
-首次会话选择、受保护空文件、等待“已填写”、真实路径、外仓与 Worktree 规则见 [仓库鉴权](authentication.md)。新 GitHub 文件为主检出或明确统筹外仓 `.credentials/repositories/<owner>--<repo>.github-token`，内容为单行 Token 原文。不得把已确认流程替换成 `.env.local`。只有明确选择 environment 才读取 dotenv / 进程配置；不自动回退。
+项目 Token 复用、新文件准备与等待“已填写”、真实路径、外仓与 Worktree 规则见 [仓库鉴权](authentication.md)。新 GitHub 文件为主检出或明确统筹外仓 `.credentials/repositories/<完整路径各段的连字符转为 %2D，再用双连字符连接>.github-token`，内容为单行 Token 原文。不得把已确认流程替换成 `.env.local`。只有明确选择 environment 才读取 dotenv / 进程配置；不自动回退。
 
 Token 和 gh 均不能从提交作者推出。SSH Git 鉴权不代表 Issue API 权限。不同目标分别选择来源；缺失、来源不符或账号变化时停止，不寻找其他 Token。配置修复不授权重发结果不明的写入。
 

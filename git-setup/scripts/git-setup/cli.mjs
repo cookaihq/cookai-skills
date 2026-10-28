@@ -62,7 +62,9 @@ credential-info --url <url>                  无值来源报告
 credential-prepare --url <url>               准备被忽略的空文件；写入需 apply [--allow-ignore]
 credential-check --url <url> [--api-only]     当前值验证，不安装 helper
 source-save --input - [--apply --allow-ignore]  记住所选非敏感 {url,method,file?,account?}
-鉴权选项：--auth-method gh|github-token|cnb-url|environment，--gh-user <login>，--credential-file <path>
+GitHub 默认复用项目目标 Token；缺失或验证失败不回退全局 gh，同目标已确认来源可复用。
+鉴权选项：--auth-method github-token|gh|cnb-url|environment，--credential-file <path>。
+仅用户明确选择全局 gh 时传 --auth-method gh --gh-user <login>；活动账号不构成选择。
 管理关系：--workspace <root> [--policy-directory <明确项目策略目录>]
 check/read/publish/sync 支持 --repository <登记路径或 .> [--checkout <该仓检出>]
 read --remote <name>                         读取指定远端
