@@ -1,8 +1,8 @@
 import { readFile, lstat, realpath } from 'node:fs/promises';
 import { join, resolve, relative, dirname, sep } from 'node:path';
 import { mainCheckout, localGit, isGitDirectory, authFail as fail } from './repository-facts.mjs';
-import { resolveHarnessDirectory, portablePath } from './harness-location.mjs';
-import { digest, safePath } from './runtime-bundle.mjs';
+import { portablePath } from './validation.mjs';
+import { digest, safePath } from './validation.mjs';
 
 async function optionalFile(file) {
   try {
@@ -12,11 +12,11 @@ async function optionalFile(file) {
   } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
-/** Registration is authoritative; bindings only remember which manager to revalidate. */
-export async function registeredRepositories(manager, { harnessDirectory, registrySourceDirectory } = {}) {
+/** Registration is authoritative; the caller selects the manager and optional registry explicitly. */
+export async function registeredRepositories(manager, { policyDirectory } = {}) {
   const outer = typeof manager === 'string' ? await mainCheckout(manager) : manager;
   if (!outer.isGit) fail('WORKSPACE_INVALID', '管理仓必须是实际 Git 仓库。');
-  const directory = await resolveHarnessDirectory(outer.root, harnessDirectory);
+  const directory = policyDirectory == null ? null : portablePath(policyDirectory);
   const entries = [], paths = new Set(), commonDirs = new Set();
   const add = async (repositoryPath, kind, evidence, moduleName) => {
     portablePath(repositoryPath);
@@ -68,17 +68,11 @@ export async function registeredRepositories(manager, { harnessDirectory, regist
   }
   let registry = null;
   if (directory) {
-    // Recovery may read the already verified staged/backup package while the
-    // original directory is between atomic renames. Evidence keeps its real destination.
-    const source = registrySourceDirectory || join(outer.root, directory);
+    const source = join(outer.root, directory);
     const file = join(source, 'repos.conf');
     await safePath(outer.root, file);
     registry = await optionalFile(file);
     if (registry !== null) {
-      let manifest;
-      try { manifest = JSON.parse(await readFile(join(source, 'manifest.json'), 'utf8')); }
-      catch { fail('WORKSPACE_HARNESS_INVALID', '独立仓登记缺少有效的 Harness 清单。'); }
-      if (manifest.standard !== 'git-setup' || manifest.directory !== directory) fail('WORKSPACE_HARNESS_INVALID', '独立仓清单不属于指定 Harness。');
       for (const line of registry.split(/\r?\n/)) {
         const value = line.trim();
         if (!value || value.startsWith('#')) continue;
@@ -123,19 +117,18 @@ export async function resolveRepository(project, options = {}) {
     candidates.push(registration); cursor = outer;
   }
   const hint = options.expectedRelationship;
-  const explicit = options.workspace || options.credentialWorkspace || hint?.workspace || options.expectedOwner?.main;
-  if (options.workspace && options.credentialWorkspace && (await mainCheckout(options.workspace)).commonDir !== (await mainCheckout(options.credentialWorkspace)).commonDir) fail('WORKSPACE_CONFLICT', '操作管理仓与凭证管理仓必须使用同一已确认关系。');
+  const explicit = options.workspace || hint?.workspace || options.expectedOwner?.main;
   let management = repository, registration = { kind: 'self', path: '.', evidence: 'git', gitlink: null }, directory = null;
   if (explicit) {
     const chosen = await mainCheckout(explicit);
     if (chosen.commonDir !== repository.commonDir || chosen.main !== repository.main) {
       if (!chosen.isGit) fail('WORKSPACE_INVALID', '所选管理仓不可用。');
       let selected = candidates.find(item => item.outer.commonDir === chosen.commonDir);
-      selected ||= await registeredRepositories(chosen, { harnessDirectory: options.harnessDirectory || hint?.directory, registrySourceDirectory: options.registrySourceDirectory });
+      selected ||= await registeredRepositories(chosen, { policyDirectory: options.policyDirectory || hint?.directory });
       const entry = selected.entries.find(item => item.repository?.commonDir === repository.commonDir);
       if (!entry && !candidates.includes(selected)) fail('WORKSPACE_UNREGISTERED', '指定管理仓未登记当前仓库；路径嵌套、同一 URL 或旧本机绑定均不能替代登记。');
       management = selected.outer; directory = selected.directory;
-      registration = entry ? { kind: entry.kind, path: entry.path, evidence: entry.evidence, gitlink: entry.gitlink } : { kind: 'submodule-chain', path: relative(management.root, repository.main), evidence: candidates.map(item => item.fingerprint) };
+      registration = entry ? { kind: entry.kind, path: entry.path, evidence: entry.evidence, gitlink: entry.gitlink } : { kind: 'submodule-chain', path: relative(management.root, repository.main).replaceAll('\\','/'), evidence: candidates.map(item => item.fingerprint) };
     }
   } else if (candidates.length) {
     if (candidates.length !== 1) fail('WORKSPACE_AMBIGUOUS', `多个已验证管理仓，需要明确选择：${candidates.map(item => item.outer.root).join('、')}`);
@@ -143,23 +136,23 @@ export async function resolveRepository(project, options = {}) {
     const entry = candidates[0].entries.find(item => item.repository?.commonDir === repository.commonDir);
     registration = { kind: entry.kind, path: entry.path, evidence: entry.evidence, gitlink: entry.gitlink };
   }
-  if (options.expectedOwner && (management.main !== options.expectedOwner.main || (options.expectedOwner.commonDir !== null && management.commonDir !== options.expectedOwner.commonDir))) fail('auth_owner_changed', '已绑定的凭证主检出发生变化；修复原关系，不切换来源。');
-  const result = { initiatingProject: repository.requestedPath, project: repository, management, harness: { root: management.root, directory }, registration };
+  if (options.expectedOwner && (management.main !== options.expectedOwner.main || (options.expectedOwner.commonDir !== null && management.commonDir !== options.expectedOwner.commonDir))) fail('auth_owner_changed', '本次凭证主检出发生变化；修复原关系，不切换来源。');
+  const result = { initiatingProject: repository.requestedPath, project: repository, management, policy: { root: management.root, directory }, registration };
   // Only the selected relationship is relevant; unrelated remote URL changes are not dependencies.
   result.fingerprint = digest({ project: [repository.root, repository.main, repository.commonDir], management: [management.root, management.main, management.commonDir], directory, registration });
   return result;
 }
 
-export const relationshipSelection = relation => ({ workspace: relation.management.root, directory: relation.harness.directory });
+export const relationshipSelection = relation => ({ workspace: relation.management.root, directory: relation.policy.directory });
 
 /** Select one registered repository, then verify an optional checkout by common directory. */
-export async function selectRepository(manager, { repository = '.', checkout, harnessDirectory, registrySourceDirectory } = {}) {
+export async function selectRepository(manager, { repository = '.', checkout, policyDirectory } = {}) {
   const outer = await mainCheckout(manager);
-  if (!outer.isGit || outer.requestedPath !== outer.root) fail('WORKSPACE_INVALID', 'Harness 所属项目必须是实际 Git 检出根目录。');
+  if (!outer.isGit || outer.requestedPath !== outer.root) fail('WORKSPACE_INVALID', '管理项目必须是实际 Git 检出根目录。');
   let selected = outer;
   if (repository !== '.') {
     portablePath(repository);
-    const registered = await registeredRepositories(outer, { harnessDirectory, registrySourceDirectory });
+    const registered = await registeredRepositories(outer, { policyDirectory });
     const entry = registered.entries.find(item => item.path === repository);
     if (!entry) fail('WORKSPACE_UNREGISTERED', '所选仓库没有登记在这个管理仓；不回退操作外仓。');
     if (!entry.repository) fail(entry.unavailable, `所选登记仓库不可用：${repository}`);
@@ -170,6 +163,6 @@ export async function selectRepository(manager, { repository = '.', checkout, ha
     if (requested.root !== requested.requestedPath || requested.commonDir !== selected.commonDir || requested.main !== selected.main) fail('WORKSPACE_CHECKOUT_MISMATCH', '指定检出不属于已选仓库；相同 URL 或目录嵌套不构成依据。');
     selected = requested;
   }
-  const relationship = await resolveRepository(selected.root, { workspace: outer.root, harnessDirectory, registrySourceDirectory });
+  const relationship = await resolveRepository(selected.root, { workspace: outer.root, policyDirectory });
   return { key: repository, relationship, project: selected, manager: outer };
 }

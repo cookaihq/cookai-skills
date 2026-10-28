@@ -1,16 +1,14 @@
 # 配置来源与可选 Issue CLI 输入
 
-Git 远端来自所选仓库的实际 Git 配置。Harness 策略来自已登记的实际安装目录 `config.json`；外仓自身使用顶层 `targets/sync`，已登记子仓使用 `repositories[登记路径]`，缺策略不回退外仓。详见 [Harness](harness.md)。
+Git remote 来自当前实际 Git 配置；项目共同政策由 Git 使用说明承载。业务命令可接受本次 sync/sources 输入；明确维护项目脚本的仓库可传 --policy-directory，读取该目录 config.json 与 repos.conf。没有默认安装或目录发现。外仓自身用顶层 targets/sync，已登记子仓用 repositories[登记路径]，不能借用外仓策略。
 
-仓库关系由 `repository-relationship.mjs` 共用解析：子模块联合核对 `.gitmodules`、gitlink 和 Git 元数据；非子模块独立仓读取管理仓实际 Harness 的 `repos.conf`。Worktree 用 Git common directory 核对归属，同 URL 的独立 clone 不是同一仓库。登记证明管理关系，不决定 Issue 归属或账号共享。
-
-`.git-setup/project.json`、`.git-setup/issue-routing.md`、`GIT_SETUP_ISSUE_JSON` 已退出正常读写；`config-check`、`config-write`、`install-rules` 明确拒绝。旧文件原样保留，不兼容、不自动迁移或删除。普通 Git setup 不读取 Issue 规则，不维护旧 JSON 中的 remote 副本。
+仓库关系共同解析 .gitmodules、gitlink 和 Git 元数据，独立仓使用明确项目策略目录的 repos.conf。Worktree 按 Git common directory 归属；登记不决定 Issue 目标或账号共享。
 
 ## 默认复用项目流程
 
 普通本地 Markdown Issue 由 Agent 读取项目现有 tracker、模板和状态约定，沿已初始化的 matt-pocock-skills 流程直接写入并回读正式事项。不要求 JSON、operationId、额外模板或 git-setup 恢复记录；不重新初始化已有工程规则。Git 设置本身不强制安装 matt-pocock-skills。
 
-下文只适用于 GitHub 写入，以及明确选择脚本校验/编号/恢复能力的本地操作。原 CLI 继续可用，其输入契约没有改成项目长期配置。
+下文只适用于 GitHub 写入，以及明确选择脚本校验/编号/恢复能力的本地操作。输入只服务本次操作。
 
 ## 低层 CLI 的本次输入
 
@@ -65,7 +63,7 @@ node <skill>/scripts/git-setup/cli.mjs issue-recover --project <同一项目> --
 | --- | --- |
 | `action` / `operationId` | create、update 或 comment；稳定的 8–80 位字母、数字、下划线或连字符标识，同一次恢复不换标识 |
 | `initiatingProject` | 实际发起检出根；必须与 `--project` 一致 |
-| `relationship` | `workspace` 为明确管理仓或自身；`kind/path` 与实际解析的 self / independent / submodule 和登记路径匹配；可选 `harnessDirectory` 为管理仓实际安装位置 |
+| `relationship` | `workspace` 为明确管理仓或自身；`kind/path` 与实际解析的 self / independent / submodule 和登记路径匹配；可选 `policyDirectory` 为管理仓明确项目策略目录 |
 | `rules.project` | 规则 owner，必须属于发起仓、已验证管理仓或明确目标仓 |
 | `rules.path/sha256/references` | 主规则路径与内容 SHA-256；references 为已读取引用的 `{path, sha256}` 列表，不由脚本猜引用 |
 | `rules.initialization` | 一般项目为 initialize-if-missing；禁止重跑脚手架时用 repair-existing 并提供 `evidence: {path, sha256}` 指向限制依据 |
@@ -92,11 +90,11 @@ GitHub update/comment 使用 `existing: {url: "https://github.com/owner/name/iss
 
 ## 鉴权环境配置
 
-新 GitHub/CNB 鉴权沿用 [仓库鉴权](authentication.md) 的独立文件或 gh 账号绑定。已有效绑定的目标不被其他环境 Token 替换。已有显式配置继续按以下顺序读取：进程环境 → 所选鉴权项目根 `.env.git-setup` → `.env.local` → `.env` → 本次 `--use-global-config` 显式启用的个人 `.config/git-setup/.env`。
+只有显式 auth-method=environment 的 GitHub 目标才使用以下业务配置读取顺序：进程环境 → 所选鉴权项目根 `.env.git-setup` → `.env.local` → `.env` → 本次 `--use-global-config` 显式启用的个人 `.config/git-setup/.env`。
 
 不扫描父目录、其他 Skill 或另一操作系统环境。macOS/Linux 使用当前 Node 用户目录；Windows 原生由 os.homedir() 定位用户目录下 `.config\git-setup\.env`；WSL 使用其 Linux 用户目录，不自动读取 Windows 文件。文件内容仅按 KEY=value 读取，支持引号，不执行 `$()`、反引号或变量展开。
 
-只识别四个鉴权字段：`GIT_SETUP_GITHUB_AUTH`（token/gh）、`GIT_SETUP_GITHUB_TOKEN`、`GIT_SETUP_GITHUB_HOST`、`GIT_SETUP_GITHUB_REPOSITORY`。首个含非空鉴权字段的层提供完整组，不从较低层补齐。Token 模式必须同层提供 TOKEN/HOST/REPOSITORY；gh 模式不能同时包含 TOKEN。本地 Issue 不加载无关 GitHub 鉴权。`auth-info` 只报告来源和是否填写，不输出值。读取不授权保存或迁移凭证。
+只识别四个鉴权字段：`GIT_SETUP_GITHUB_AUTH`（token/gh）、`GIT_SETUP_GITHUB_TOKEN`、`GIT_SETUP_GITHUB_HOST`、`GIT_SETUP_GITHUB_REPOSITORY`。首个含非空鉴权字段的层提供完整组，不从较低层补齐。Token 模式必须同层提供 TOKEN/HOST/REPOSITORY；gh 模式不能同时包含 TOKEN。本地 Issue 不加载无关 GitHub 鉴权。`credential-info` 只报告来源和是否填写，不输出值。读取不授权保存或迁移凭证。
 
 ## 校验和恢复责任
 

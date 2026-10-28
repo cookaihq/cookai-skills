@@ -42,7 +42,7 @@ test('retired configuration and routing commands reject calls and preserve exist
   for (const command of ['config-check', 'config-write', 'install-rules']) {
     const result = runCli(root, command, '--apply');
     assert.equal(result.status, 1);
-    assert.equal(JSON.parse(result.stderr).code, 'legacy_command_removed');
+    assert.equal(JSON.parse(result.stderr).code, 'unknown_command');
   }
   for (const flag of ['--override', '--project-rule', '--rule-file', '--title', '--body-file', '--filename', '--issue-url']) {
     const result = runCli(root, 'issue-create', flag, 'unused');

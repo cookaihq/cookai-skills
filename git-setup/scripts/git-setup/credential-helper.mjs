@@ -3,9 +3,8 @@ import { readFile } from 'node:fs/promises';
 const pkg = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8'));
 try {
   if (Number(process.versions.node.split('.')[0]) < Number(pkg.engines.node.replace('>=', ''))) throw new Error('Node 版本不符合 Skill 要求。');
-  const [flag, project, last] = process.argv.slice(2);
-  const operation = flag === '--transport' ? project : last;
-  if (!['--project', '--transport'].includes(flag) || !project || !['get', 'store', 'erase'].includes(operation)) throw new Error('Git helper 调用参数无效。');
+  const [flag, operation, last] = process.argv.slice(2);
+  if (flag !== '--transport' || last !== undefined || !['get', 'store', 'erase'].includes(operation)) throw new Error('Git helper 只接受本次传输调用。');
   if (operation === 'get') {
     let input = '';
     for await (const chunk of process.stdin) { input += chunk; if (input.length > 32768) throw new Error('Git 凭证请求过大。'); }
@@ -20,21 +19,18 @@ try {
       request[key] = value;
     }
     let credential;
-    if (flag === '--transport') {
+    {
       const { authTarget } = await import('./auth-roots.mjs');
       const expected = authTarget(process.env.GIT_SETUP_TRANSPORT_TARGET || '');
       const actual = request.protocol === 'https' && request.path && authTarget(`https://${request.host}/${request.path}`);
       if (!expected || !actual || actual.key !== expected.key) throw new Error('Git 请求目标与本次已选凭证不一致。');
       credential = { username: process.env.GIT_SETUP_TRANSPORT_USERNAME, password: process.env.GIT_SETUP_TRANSPORT_TOKEN };
       if (!credential.username || !credential.password || /[\r\n\0]/.test(credential.password) || (request.username && request.username !== credential.username)) throw new Error('本次 Git 凭证或用户名无效。');
-    } else {
-      const { helperCredential } = await import('./auth.mjs');
-      credential = await helperCredential(project, request);
     }
     process.stdout.write(`username=${credential.username}\npassword=${credential.password}\n\n`);
   }
 } catch (error) {
-  process.stderr.write(`git-setup credential helper: ${error.code || 'unavailable'}；${/^(auth_|gh_)/.test(error.code || '') ? error.message : '检查已绑定来源，不回退其他账号。'}\n`);
+  process.stderr.write(`git-setup credential helper: ${error.code || 'unavailable'}；${/^(auth_|gh_)/.test(error.code || '') ? error.message : '检查已选来源，不回退其他账号。'}\n`);
   process.stdout.write('quit=true\n\n');
   process.exitCode = 1;
 }

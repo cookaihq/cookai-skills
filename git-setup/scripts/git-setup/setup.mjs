@@ -1,34 +1,17 @@
+import { readProjectPolicy, repositoryPolicy } from './project-policy.mjs';
 import { resolveRepository } from './repository-relationship.mjs';
 import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { inspect, inspectRemote, init, completeInitialization, addRemote, replaceRemote, assertLocalRemote, setupFacts, cloneInto, redact, validateUrl,
   credentialInitialization, credentialProjectFiles, initializeCredentialRepository, cloneCredentialRepository, finishCredentialInitialization } from './git.mjs';
 import { saveSetupRecord } from './setup-record.mjs';
-import { authSelection, verifySelection, publicSelection, gitAuthentication, installAuth, rememberAuth } from './auth.mjs';
+import { authSelection, verifySelection, publicSelection, gitAuthentication } from './auth.mjs';
 import { authTarget } from './auth-roots.mjs';
-import { readHarnessConfig } from './harness-config.mjs';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const message = '已完成 Git 设置和远端读取验证。本次暂未提交和推送。';
 
-async function harnessPolicies(project, relationship) {
-  const own = await readHarnessConfig(project, relationship.registration.kind === 'self' ? relationship.harness.directory ?? undefined : undefined);
-  const policies = [{ project, repository: '.', path: own.path, fingerprint: own.fingerprint, policy: own.config ?? null }];
-  if (relationship.registration.kind !== 'self') {
-    const management = await readHarnessConfig(relationship.management.root, relationship.harness.directory ?? undefined);
-    policies.push({ project: relationship.management.root, repository: relationship.registration.path, path: management.path, fingerprint: management.fingerprint, policy: management.config?.repositories?.[relationship.registration.path] ?? null });
-  }
-  return policies;
-}
-function policyEffects(policies, name, url) {
-  return policies.filter(item => item.policy?.targets?.[name]).map(item => {
-    const sync = item.policy.sync, role = sync?.source === name ? 'source' : sync?.targets.includes(name) ? 'target' : null;
-    return { project: item.project, path: item.path, repository: item.repository, before: item.policy.targets[name], after: url,
-      sync: role ? { role, refs: sync.refs } : null,
-      consequence: '已确认目标变化后，标准读取/发布/同步会停止；需重新生成并确认对应仓库的 Harness 策略。' };
-  });
-}
 async function otherWorktreeEffects(local, facts, selection, options, relationship) {
   const effects = [];
   for (const line of facts?.worktrees.split('\n') ?? []) {
@@ -42,9 +25,7 @@ async function otherWorktreeEffects(local, facts, selection, options, relationsh
     const state = await inspect(directory, options);
     if (state.root === local.root) continue;
     await assertLocalRemote(state.root ?? directory, selection.name, options);
-    const relation = await resolveRepository(directory, { workspace: relationship.registration.kind === 'self' ? directory : relationship.management.root, harnessDirectory: relationship.registration.kind === 'self' ? undefined : relationship.harness.directory });
-    const policies = await harnessPolicies(directory, relation);
-    effects.push({ project: directory, policies, harness: policyEffects(policies, selection.name, options.url),
+    effects.push({ project: directory,
       projectRules: 'Agent 必须另行读取本 Worktree 的规则；当前请求的规则不套用于它。' });
   }
   return effects;
@@ -59,8 +40,8 @@ export async function setup(project, options = {}) {
   if (initialization && initialization.target !== authTarget(options.url)?.key) fail('setup_initialization_target_changed', '凭证准备中的目标与本次 URL 不同；先核对原初始化记录，不连接其他目标。');
   if (initialization?.stage === 'checked-out' && (local.head !== initialization.head || local.branch !== initialization.branch)) fail('setup_initialization_changed', '已检出的 HEAD 或分支与初始化记录不同；先核对原操作，不自动重新检出。');
   if (initialization && !['checkout', 'checked-out'].includes(initialization.stage) && local.head) fail('setup_initialization_changed', '凭证准备后已有本地提交；先明确它与远端历史的关系。');
-  const request = { project: local.project, url: options.url, action: options.action, name: options.name, branch: options.branch, authorName: options.authorName, authorEmail: options.authorEmail, workspace: options.workspace, harnessDirectory: options.harnessDirectory, useGlobalConfig: Boolean(options.useGlobalConfig), acceptEffects: Boolean(options.acceptEffects),
-    authMethod: options.authMethod, ghUser: options.ghUser, credentialWorkspace: options.credentialWorkspace, credentialFile: options.credentialFile, credentialsFilled: Boolean(options.credentialsFilled), githubAuth: Boolean(options.githubAuth) };
+  const request = { project: local.project, url: options.url, action: options.action, name: options.name, branch: options.branch, authorName: options.authorName, authorEmail: options.authorEmail, workspace: options.workspace, policyDirectory: options.policyDirectory, useGlobalConfig: Boolean(options.useGlobalConfig), acceptEffects: Boolean(options.acceptEffects),
+    authMethod: options.authMethod, ghUser: options.ghUser, credentialFile: options.credentialFile, sources: options.sources };
   const record = async result => {
     if (options.planFile) {
       const saved = result.status === 'configured' && result.complete === true
@@ -94,7 +75,7 @@ export async function setup(project, options = {}) {
   const remote = await inspectRemote(local.project, options.url, options);
   const preparing = initialization && initialization.stage !== 'checked-out';
   const recoveringCheckout = preparing && initialization.stage === 'checkout' && local.head;
-  const entries = preparing && !recoveringCheckout ? await credentialProjectFiles(local.project, authentication.binding.file) : local.initialized ? null : (await readdir(local.project)).sort();
+  const entries = preparing && !recoveringCheckout ? await credentialProjectFiles(local.project, authentication.source.file) : local.initialized ? null : (await readdir(local.project)).sort();
   const kind = recoveringCheckout ? 'clone' : local.initialized && !preparing ? 'connect' : remote.empty ? 'init' : entries.length === 0 ? 'clone' : 'files_conflict';
   if (kind === 'files_conflict') return need(['local-files'], '当前目录已有文件且远端已有历史，请明确文件保留与迁入方式。', { remote, initialization, files: entries });
   if (kind === 'init' && (!options.branch || !options.authorName || !options.authorEmail)) return need(['branch', 'author-name', 'author-email'], '初始化前需沿项目规则明确初始分支与作者。');
@@ -103,19 +84,21 @@ export async function setup(project, options = {}) {
   if (kind === 'clone' && (!cloneBranch || !remote.refs[`refs/heads/${cloneBranch}`])) return need(['branch'], '远端有引用但没有可确定的检出分支；请明确一个实际存在的分支。', { remote });
   const inputs = { url: options.url, ...selection, branch: options.branch ?? null, authorName: options.authorName ?? null, authorEmail: options.authorEmail ?? null };
   const facts = local.initialized ? await setupFacts(local.project, options) : null;
-  const policies = await harnessPolicies(local.project, relationship);
   const changed = existing && (existing.fetch[0] !== options.url || existing.push[0] !== options.url);
+  const policy = await readProjectPolicy(relationship.management.root, options.policyDirectory);
+  const selectedPolicy = policy.exists ? repositoryPolicy(policy.config, relationship.registration.path) : null;
+  const policyEffects = changed && selectedPolicy?.targets[selection.name] ? [{path:policy.path, repository:relationship.registration.path, fingerprint:policy.fingerprint, target:selectedPolicy.targets[selection.name], sync: selectedPolicy.sync ? {role:selectedPolicy.sync.source === selection.name ? 'source' : selectedPolicy.sync.targets.includes(selection.name) ? 'target' : 'unrelated'} : null}] : [];
   const effects = {
+    policy: policyEffects,
     branches: facts?.branches ?? [], remotePushDefault: local.remotePushDefault ?? null,
     author: options.authorName ? { before: local.author ?? null, after: { name: options.authorName, email: options.authorEmail }, scope: 'repository; fill missing local fields only' } : null,
-    harness: changed ? policyEffects(policies, selection.name, options.url) : [],
     retainedTrackingRefs: facts?.trackingRefs.filter(line => line.startsWith(`refs/remotes/${selection.name}/`)) ?? [],
     historyCompared: false, trackingRefsRefreshed: false,
     otherWorktrees: selection.action === 'replace' && changed ? await otherWorktreeEffects(local, facts, selection, options, relationship) : [],
   };
-  if ((effects.harness.length || effects.otherWorktrees.length) && !options.acceptEffects) return need(['accept-effects'], '远端变更将影响对应仓库的 Harness 目标/同步策略或其他 Worktree；请先确认计划列出的具体变化。', { remote, selection, effects });
+  if ((effects.otherWorktrees.length || effects.policy.length || (changed && (effects.branches.length || effects.remotePushDefault))) && !options.acceptEffects) return need(['accept-effects'], '远端变更将影响已列出的项目策略、分支设置或其他 Worktree；请先确认计划列出的具体变化。', { remote, selection, effects });
   const auth = publicSelection(authentication);
-  const fingerprint = hash({ relationship: relationship.fingerprint, local, remote, entries, inputs, facts, effects, policies, auth, initialization, acceptedEffects: Boolean(options.acceptEffects) });
+  const fingerprint = hash({ relationship: relationship.fingerprint, local, remote, entries, inputs, facts, effects, auth, initialization, acceptedEffects: Boolean(options.acceptEffects) });
   const plan = { status: 'planned', kind, cloneBranch, local, remote, relationship, selection, authentication: auth, initialization, fingerprint, facts, effects, committed: false, pushed: false };
   if (!options.apply) return record(plan);
   if (options.expectedFingerprint !== fingerprint) fail('setup_plan_changed', '缺少计划指纹或状态已改变；请重新检查并使用最新计划，尚未写入。');
@@ -136,31 +119,24 @@ export async function setup(project, options = {}) {
       remoteStateFingerprint = (await setupFacts(local.project, options)).fingerprint;
     }
     if (kind === 'clone') {
-      const cloneOptions = { ...options, name: selection.name, branch: cloneBranch, expectedHead: remote.refs[`refs/heads/${cloneBranch}`], defaultRef: remote.defaultRef, credentialFile: authentication.binding?.file };
+      const cloneOptions = { ...options, name: selection.name, branch: cloneBranch, expectedHead: remote.refs[`refs/heads/${cloneBranch}`], defaultRef: remote.defaultRef, credentialFile: authentication.source?.file };
       if (preparing) await cloneCredentialRepository(local.project, cloneOptions);
       else await cloneInto(local.project, cloneOptions);
       completedSteps.push('clone');
-      if (authentication.status === 'selected') { await rememberAuth(local.project, authentication); completedSteps.push('authentication_choice'); }
       // Only the Agent can interpret newly obtained project rules. Yield before continuing Git setup.
-      return await record({ ...plan, status: 'needs_project_rules', complete: false, completedSteps, local: await inspect(local.project, options), message: '已克隆到选定目录；Agent 需读取新取得的项目规则和实际 Harness 策略，然后沿用本次远端选择重新计划并完成设置。本次暂未提交和推送。' });
+      return await record({ ...plan, status: 'needs_project_rules', complete: false, completedSteps, local: await inspect(local.project, options), message: '已克隆到选定目录；Agent 需读取新取得的项目规则和实际 Git 使用说明与已有脚本，然后沿用本次远端选择重新计划并完成设置。本次暂未提交和推送。' });
     }
     step = 'remote';
     if (selection.action === 'replace') await replaceRemote(local.project, { ...options, name: selection.name, expectedFetch: existing.fetch[0], expectedPush: existing.push[0], expectedState: remoteStateFingerprint });
     else await addRemote(local.project, { ...options, name: selection.name });
     completedSteps.push('remote');
     step = 'readback';
-    let installedAuth;
-    if (authentication.status === 'selected') {
-      step = 'authentication';
-      installedAuth = await installAuth(local.project, authentication);
-      completedSteps.push('authentication'); step = 'readback';
-    }
     const state = await inspect(local.project, options);
     const actual = state.remotes.find(r => r.name === selection.name);
     if (actual?.fetch.length !== 1 || actual.fetch[0] !== options.url || actual.push.length !== 1 || actual.push[0] !== options.url) fail('setup_readback', '远端实际地址与计划不一致，请检查 URL 重写或并发配置变化。');
     const verified = await inspectRemote(local.project, options.url, options);
     if (initialization) { await finishCredentialInitialization(local.project, options); completedSteps.push('initialization_complete'); }
-    return await record({ ...plan, status: 'configured', message, local: state, remote: verified, initialization: initialization ? { ...initialization, stage: 'complete' } : null, authentication: installedAuth ? { ...installedAuth, remoteRead: 'verified' } : auth, completedSteps: [...completedSteps, 'readback'], complete: true });
+    return await record({ ...plan, status: 'configured', message, local: state, remote: verified, initialization: initialization ? { ...initialization, stage: 'complete' } : null, authentication: { ...auth, remoteRead: 'verified', persistentHelper: false }, completedSteps: [...completedSteps, 'readback'], complete: true });
   } catch (error) {
     let actual;
     try { actual = await inspect(local.project, options); } catch { actual = null; }

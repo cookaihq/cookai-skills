@@ -1,81 +1,66 @@
 ---
 name: git-setup
 metadata:
-  version: "0.5.0"
-description: v0.5.0｜检查项目 Git 配置与 Harness，为当前项目接入仓库 URL，按选择生成可独立运行的 Git 脚本；也支持明确请求的发布、单向同步和项目本地/GitHub Issue 规则。
+  version: "1.0.0"
+description: v1.0.0｜检查和设置项目 Git，维护项目 Git 使用说明及 Agent 规则引用；支持 GitHub/CNB 凭证来源选择、明确请求的发布、单向同步与本地/GitHub Issue。
 compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Claude Code, Codex and WorkBuddy; gh is optional for GitHub authentication.
 ---
 
 # git-setup
 
-帮助用户设置项目的 Git，并让每次 Issue 操作遵守项目已有规则文档。根据本次请求只执行需要的分支。用户已经授权的操作继续执行；缺少目标、身份或必要内容时先查询现有项目，再补问缺项。
+帮助 Agent 按目标项目规则使用 Git。默认交付是项目 Git 使用说明、实际 Agent 规则入口中的引用和必要的 Git 设置。普通终端 Git、IDE、CI 沿用其已有鉴权；自定义凭证目录须由 Agent 按说明读取。
 
 ## 0. 自动检查更新
 
-Git 检出安装：macOS/Linux 执行本 Skill 的 `scripts/check_update.sh`；Windows 原生执行 `scripts/check_update.ps1`。退出 0 继续业务，不复述输出；退出 10 原样转述报告，用户确认后才分别用 `--pull` / `-Pull`。拒绝、未回复、检查或更新失败都按当前版本继续。
+Git 检出安装：macOS/Linux 执行本 Skill 的 scripts/check_update.sh；Windows 原生执行 scripts/check_update.ps1。退出 0 继续业务；退出 10 原样转述报告，经用户确认才分别用 --pull / -Pull。拒绝、未回复、检查失败均继续当前任务。
 
-复制安装：读取 `update.json`，按 `git-setup/v` 稳定 tag 查询版本及确切 commit SHA；展示本地/远端版本、来源、tag、SHA、安装目录，经确认才下载该 SHA 到同一文件系统临时目录，校验 Skill 名、版本、description 后原子替换并回读。无法核实宿主安装器或 WorkBuddy 更新 API 时报告 `not-applicable` 并继续，不编造更新接口。关闭检查只修改个人目录 `.config/git-setup/.env` 的 `AUTO_UPDATE_CHECK=0`，保留其他字段。
+复制安装：读取 update.json，查询稳定 tag 的版本与精确 commit SHA，经逐次确认后下载该 SHA 到临时目录、核验名称/版本/description、原子替换并回读。WorkBuddy 更新 API 未核实则报告 not-applicable，继续业务。关闭方式是在个人 .config/git-setup/.env 设置 AUTO_UPDATE_CHECK=0；这是单独的非敏感开关。
 
-## 1. 入口与初检
+## 1. 检查项目并建立文档入口
 
-仅在 Agent 明确调用本 Skill 时执行本节完整流程；不要求用户必须手工输入斜杠命令。先读取当前实际宿主适用的全局、项目、目录规则及其引用，确定项目根、安装位置和入口登记文件。普通 Git、直接业务 CLI 和项目日常入口只做本次必要校验，不自动启动规则调查和标准比较。
+定位本 SKILL.md 的真实目录，下面 <skill> 均指此目录。Node >=20、Git >=2.29 为系统依赖，脚本真实执行并检查版本；无需 npm/Python 包或本地模型。Claude Code、Codex、WorkBuddy 使用同一份行为源。
 
-先定位此 `SKILL.md` 的真实目录。以下 `<skill>` 均指该目录，不能按使用者项目目录寻找脚本。工具返回的实际路径直接用于命令、参数和链接；不根据推测的操作系统改写盘符、斜杠或主目录。路径读取失败时，先核对当前目录和原路径是否存在，不把 macOS/Linux 的 `/Users/...` 转成 Windows 路径重试。
+先读当前实际宿主生效的全局、项目及目录规则和其中引用的 Git 说明。核对 Git 根、主检出、Worktree、登记子仓及实际 remote。普通父目录嵌套不证明管理关系；子模块联合核对 .gitmodules/gitlink/Git 元数据；独立仓仅消费明确项目策略目录中的 repos.conf。创建分支/Worktree 按目标项目规则及用户决定。
 
-```text
-node <skill>/scripts/git-setup/cli.mjs check --project <用户项目>
-```
+运行 node <skill>/scripts/git-setup/cli.mjs check --project <项目>，它只返回事实，不解析 Markdown 或替 Agent 作决定。仅调用 Skill 而无其他参数时，完成检查并报告具体问题、来源与待决定项。普通业务请求只读取适用规则并核对本次事实，不触发完整 Skill 调查。
 
-入口从 `package.json` 校验 Node 版本，Git 模块真实执行 Git 并要求版本不低于 2.29。系统程序缺失时给安装办法，按已有授权处理安装；没有 Python、npm 包或本地模型依赖。三宿主运行同一份脚本。
+设置请求中，读取 [项目 Git 使用说明](references/project-document.md)。优先更新项目已有文档；无既有路径则采用 docs/agent/git.md。正文必须足以让后续未加载本 Skill 的 Agent 完成日常 Git 操作：写清仓库/远端、凭证定位、只读临时鉴权、权限与失败处理。现有发布/同步/PR/Release 脚本按其真实功能引用，不能因精简默认交付而丢失业务能力。只有具体需求需要时才新增项目脚本。
 
-读取项目适用的 Agent 规则、Git 配置；只有实际 Issue 请求才读取已有 Issue 工具和模板。涉及 GitHub HTTPS、CNB Git 或 GitHub API 时，先读 [仓库鉴权](references/authentication.md)，按完整目标取得会话选择和实际凭证来源。区分无 Git、空仓库、有历史、父仓目录、Worktree、子模块；嵌套目录或多 remote 不证明外仓关系。不要给父仓的普通目录自动嵌套初始化。新分支/Worktree按使用者项目规则和本次授权决定。
+把该文档引用加入 Claude Code、Codex、WorkBuddy 实际生效的项目规则入口；先查实际安装形态，不能只按文件名假设已加载。规则文件为符号链接时编辑同一实体、保留链接。不重复三份正文。文档写完逐条回读引用及目标，最后说明哪些客户端已实测、哪些尚未验证。
 
-管理仓、主检出、当前检出和登记来源以共同解析结果为准；旧 JSON 与本机 `gitsetup.repository` 不构成关系依据。多管理仓候选须明确选择。
-
-每次调用都先读 [标准 Harness](references/harness.md) 并检查实际项目，包括 URL、发布、同步和 Issue 请求。公开 check 提供事实，不代表脚本已理解规则；其他业务命令不再附带完整 Skill 检查。只输入 Skill 时默认完成 Harness 与 Git 配置来源检查，报告符合项、具体问题和来源、待选项及未知项，不先索要 URL 或只给帮助。读取候选脚本及其真实 hooks/CI 调用链，比较标准行为；指纹不代替语义比较。分别取得“是否采用标准”和“重新实现哪些独有功能”的决定，按实际规则和授权把 `directory`、`ruleFiles` 交给公开计划入口，生成并登记真实项目入口；不预设脚本目录。事实未变时沿用同范围明确选择。检查本身不授权写入，也不扩大本次任务。 升级先列出生成、保留和明确修改的文件。扩展优先放在所选 Harness 的 `extensions/`，旧目录外扩展继续有效；省略策略保留原值，明确空扩展列表仅停用、不删除项目文件。配置语义不变时保留原字节和权限。只有核对新目标并获同范围授权后，才传 `refreshTargets: true` 刷新根仓目标身份。具体维护和恢复规则见同一参考文档。
+文件操作可用 document-plan / document-write，输入为 {path,content,ruleFiles}。write 需本次指纹与 --apply；已有用户授权不重复询问。已有文档映射/共享锚点时沿项目声明维护实体和引用；该脚本只处理项目内普通路径，不绕过路径限制另建 docs 副本。发现旧安装按 [迁移说明](references/project-document.md) 先迁移调用方再删，1.0.0 没有旧接口兼容层。
 
 初检发现**当前项目的 `origin` 不指向 GitHub，且已有将提交同步到 GitHub 的机制**时，按 [GitHub origin 与 Orca Issue 提醒](references/git.md#github-origin-与-orca-issue-提醒) 展示现有地址、GitHub 目标和同步依据，询问是否把 `origin` 改指该 GitHub 仓库。明确说明：**只有项目的 `origin` 指向 GitHub 仓库，Orca Workflow 的任务中才能显示当前项目的 Issue。** 已知用户使用 Orca 时直接指出当前影响；其他环境以“如果使用 Orca”说明。仅有 GitHub remote 不证明存在同步机制。此项由 Agent 根据实际调用链判断，不由 `check` JSON 自动决定；已有同范围明确选择且事实未变时沿用，不自动改绑，也不因等待选择阻塞无关已授权操作。
 
-所有业务命令输出 JSON。写入命令要求 `--apply`；这只是执行开关，Agent 应依据用户本次具体请求传入，不把它变成重复确认。状态不明、部分完成和检查未完成不能报告成功。鉴权来源使用 `auth-info`，仅输出字段是否填写及来源；选择低层 Issue CLI 时使用 `issue-resolve --input -` 验证本次输入；普通本地事项按第 4 节处理。
+## 2. 接入远端与鉴权
 
-入口脚本被权限限制阻止时，报告该入口未完成。手工读取只算辅助诊断，不替代完整检查；不以手工写配置或另建来源绕过被阻止的鉴权绑定步骤。
+只提供 URL，默认表示为当前项目接入这个已有远端并实际读取验证。Claude Code 使用 /git-setup <URL>，Codex 使用 $git-setup <URL>，WorkBuddy 在其已加载 Skill 的对话中点名 git-setup 并提供 URL。明确“只检查”“克隆到”“推送”等请求优先。
 
-## 2. 只提供仓库 URL 的默认流程
+读取 [仓库鉴权](references/authentication.md)、[Git 操作](references/git.md)。已有任意 remote 时，让用户明确替换哪个或以什么名称新增；同 URL 也不省略这个决定。已有同范围明确选择可沿用。无 remote 可默认 origin。
 
-Claude Code 的 `/git-setup <URL>`、Codex 的 `$git-setup <URL>`、WorkBuddy 对话中点名 git-setup 并提供 URL，默认表示：**为当前选定项目接入这个已有远端，完成 Git 设置和实际远端读取验证。** 不再泛问初始化、发布还是同步。用户明确要求“只检查”“克隆到”“推送”“增加同步目标”等动作时，以明确请求为准。
+GitHub HTTPS 先选 gh 的明确账号或仓库独立 Token；CNB 文件保存单行带 cnb 用户名与 Token 的完整鉴权 URL。来源由本次明确输入、项目规则或可选的 .credentials/repositories/sources.local.md 决定；本机记录只保存目标、方式、文件路径/账号，不含 Token、ready/pending 或历史 Token 指纹。能从规则重建时不额外保存来源记录。文件里的 Token 轮换后，下次直接读取并作当前验证；同一操作中变化则停止重查。
 
-先读取 [Git 操作](references/git.md) 和 [配置规则](references/configuration.md)，按第 1 节定位项目及规则，然后调用：
+新文件用 credential-prepare 准备被忽略的空文件，已有文件原样保留。准备后在回复提供返回的完整可点击路径、格式、目标和本次用途；等待用户明确“已填写”才读取。等待需要跨轮且不能从现有任务重建时，只保存必要非敏感恢复信息。文件非空不等于用户已回复；不要把 Token 发回对话。真实凭证保存仍须已有明确授权。
 
-```text
-node <skill>/scripts/git-setup/cli.mjs setup --project <项目目录> --url <完整仓库地址>
-```
+执行 setup --project <项目> --url <无凭证URL> 生成计划。按缺项补充 --action add|replace --name、--auth-method、--gh-user 或 --credential-file，以及必要的 --branch/--author-name/--author-email。已有历史的空目录取得真实历史；非空目录先解决文件保留方式，不覆盖或创造无关历史。涉及其他 Worktree 或分支/推送配置影响时说明具体范围，经同范围授权才带 --accept-effects。
 
-1. **已有任何远端都先选择。** 展示全部远端名称、脱敏 fetch/push 地址、当前分支使用的远端；询问“替换哪个现有远端的地址”或“保留现有远端并以哪个新名称添加”。已有相同 URL 也不跳过。仅沿用用户此前亲自明确作出且范围未变的添加/替换选择；Agent 自动采用 `origin`、脚本输出的 selection、计划记录或上次成功结果都不算用户选择。首次无远端可默认 `origin`，但完成后用户再次仅发送 URL 时，若从未明确选过添加/替换，必须询问。明确继续中断的同一次设置时可复用原操作参数。补全选择后传 `--action replace|add --name <名称>`。不同名称对应同一 URL 时说明会多出一个名称；同名同地址的 `add` 仅用于有既有操作依据的中断续作。
-2. **先完成鉴权，再按真实状态分支。** 首次 GitHub HTTPS 必须在会话中选择“使用本机 gh 已登录账号”或“使用这个仓库的独立 GitHub Token（保存于脚本返回的完整实际文件路径）”；有会话选择组件就使用，否则列文字选项。公开仓库可读不能跳过。Token/CNB 文件按鉴权文档排他创建受保护空文件；无 Git 项目在本次文件准备授权内调用 `auth-prepare --allow-ignore --apply`，先建立 Git 元数据及本机忽略规则，并保存尚未完成的初始化记录。同一条回复提供可点击完整路径、格式、目标、本次所需权限及用途，等待用户回复“已填写”后才传 `--credentials-filled` 验证。gh 多账号先让用户选择，不能以 active 代替。已有有效同范围绑定可复用。 `needs_input` 只补问 `required` 中的缺项。非空无 Git 目录遇到有历史远端时先明确文件保留/迁入方式；不能覆盖文件或创建无关历史。初始化需沿项目规则提供 `--branch`、`--author-name`、`--author-email`；空目录且远端有分支时克隆到当前选定目录，不另建子目录。若已为独立凭证准备 Git 元数据，脚本获取并检出远端真实历史，只排除该元数据和确切凭证文件检查其他内容；出现其他文件、暂存内容或凭证路径冲突时停止，不把残留 `.git` 当作已完成接入。默认分支不明、只有标签或自定义引用时明确实际分支，不当作空仓。父仓普通子目录不能自动改为操作父仓。
-3. **展示具体计划。** 说明项目路径、选中远端旧/新地址、写入的 Git 配置和已有 Harness 策略的具体影响、分支/作者来源以及完成范围。替换计划中的 `facts.worktrees` 表明同一 Git common config 的其他 Worktree 也受影响。`effects` 展示分支/推送设置、当前仓或已验证管理仓中的 Harness 策略，以及其他 Worktree 的影响；这些目标发生变化时，须让用户明确接受列出的具体变化后才传 `--accept-effects`，或先按其决定保留原目标。本次不重写已确认的 Harness 目标，不执行同步。
-4. **保存跨轮依据。** 需要等待选择或跨轮继续时，用 `--plan-file <路径>` 保存非敏感请求、计划指纹和执行状态。位置使用已有调用工作区中被忽略的 `data/git-setup/<任务>.json`（长期恢复）或 `tmp/git-setup/<任务>.json`（临时任务）；脚本拒绝跟踪路径、未忽略路径和符号链接。原生 clone 目标须真正为空；已准备独立凭证的分支按初始化记录检出历史。计划记录均放在已有调用工作区，不能额外写进待检出的目标目录。没有合规记录位置时先按项目规则确定位置及忽略规则，不假称已支持跨轮恢复。无等待或恢复需要时不传 plan-file，不创建记录目录。设置完成后同一记录自动压缩成目标、完成步骤及结果摘要，不保留完整输入。记录不含凭证，也不等于用户批准；Agent 同时保存本轮真实选择及授权范围，不从 `planned` 推断批准。
-5. **执行与核验。** 对已有授权且事实未变的具体计划，保留全部选择参数，增加 `--apply --expected-fingerprint <本次plan.fingerprint>`；`--plan-file` 继续用同一文件。脚本再次查询本地 Git、实际 Harness 策略、鉴权和远端引用，状态变化会拒绝旧计划。`needs_project_rules` 表示原地克隆已完成：Agent 读取新取得的 AGENTS.md/CLAUDE.md 等规则和实际 Harness 策略，再沿用本次选择 `--action add --name <原名称>` 重新计划并执行余下设置，无需再次询问替换或添加。只有 `configured` 才表示 Git 设置和读取回读完成。涉及支持的 HTTPS 目标时，还须完成来源与身份核验、持久 Git helper 设置及原生 Git 凭证回读；来源改变会拒绝旧计划。
-6. **普通接入不读取 Issue 规则。** 缺少、不可读或变化的 Issue 文档不阻塞 Git setup。旧项目 JSON、持久 Issue 环境覆盖和 routing 均不读取、不写回；旧文件损坏或留有旧写锁也不影响本次设置，不删除用户文件。仅在实际 Issue 请求中定位并解释规则。
-7. **中断先查证。** 读取计划记录和真实状态，使用已明确的远端选择形成新计划，补齐缺项。仍等待填写时，继续按鉴权文档在当前回复提供可点击的完整凭证路径、格式、目标、权限及用途，并区分已保存的本机待确认记录与尚未执行的远端设置。`applying`/`incomplete` 不能当作完成；克隆中断后先核对 Git、HEAD、检出文件及已完成步骤，禁止把残留 `.git` 当作完整克隆，禁止自动删除目录或盲目重跑 clone。没有原选择依据的新请求仍先询问替换/添加。过期的 fingerprint 不能复用。
+有授权且事实未变时，以同一参数加 --apply --expected-fingerprint <本次指纹> 执行。无跨轮恢复需要不传 --plan-file；确有需要才使用已忽略的 data/git-setup 或 tmp/git-setup 位置。needs_project_rules 表示已取得历史，先读取新规则再完成剩余设置。configured 才表示设置和读取回读完成；不会安装持久 helper。
 
-默认流程不暂存、提交、推送，不比较或合并历史。替换保留旧远端跟踪引用和 remote HEAD，并明确“本次未刷新这些引用、未验证本地与新远端历史关系”。读取成功不证明推送权限；访问账号仅以独立身份核验结果为准，CNB 没有账号 API 核验时如实说明；LFS/子模块内容未下载时按 `contentWarnings` 报告。
+实际回复须直接包含“本次暂未提交和推送。”，并报告目标、实际凭证来源、身份和读取验证范围。读取成功不能证明推送权限。中断先核对记录与实际 Git 状态，保留未完成检出；不盲目重跑或删除。最后完成第 1 节的文档与规则引用，不能只配置 remote 就报告整个设置完成。
 
-**本节实际会话回复必须直接包含：`本次暂未提交和推送。`** 等待鉴权选择、等待填写、初始化、添加、替换、同地址核验、克隆和续作均适用，不能只把这句话留在 JSON、日志或文档。凭证路径原样使用脚本返回值，准备文件后直接使用 `credentialLink`，不按推测的操作系统改写路径。说明实际远端/目录、鉴权方式和实际来源、身份核验、读取验证范围；推送预检与实际推送分别报告，本流程两者均未执行。部分失败先说明未完成步骤，再说明本次未提交和推送。后续明确请求提交/推送时按实际操作报告。
+## 3. 明确请求的发布与同步
 
-## 3. 明确请求的设置、发布与同步
+读取 [Git 操作](references/git.md)。提交作者与鉴权身份分别核对；仅发布用户已授权的提交。创建分支、提交、远端写入分别依据本次请求和项目规则。
 
-进入此分支时读取 [Git 操作](references/git.md) 和 [配置规则](references/configuration.md)。
+发布用 publish --remote <名称> --ref <完整引用> 先预览，执行用同参数与 --apply --expected-fingerprint。同步用 sync --input - 提供 {sync:{source,targets,refs},sources?:[...]}；来源是主要远端已经发布的 refs，不混入未发布本地引用。项目已有明确脚本策略时可用 --policy-directory，损坏或缺项停止，不从别处取默认。
 
-1. 明确本次是初始化、仅增加远端、发布已有提交或配置同步。分别核对提交作者与推送身份；作者正确不证明访问账号正确。沿用项目明确作者，否则展示生效作者并取得选择。暂存区和其他未提交文件保持现状。
-2. 无 Git 时明确初始分支和作者，调用 `init`。不制造占位文件或空提交。需要首次提交时，检查忽略规则、用户批准的文件范围与暂存区，使用 Git 的显式文件清单提交；不以“设置 Git”为理由自动 `git add -A`。空目录仅完成初始化并报告尚无提交。
-3. 目标已存在时核对完整地址，调用 `remote-add`；不替换已有同名远端。创建 GitHub 仓库另读 [GitHub](references/github.md)，所有者、名称、可见性明确且用户委托创建后才调用 `repo-create`。CNB 等平台首版接入已有 Git 仓库，不调用其仓库管理 API。
-4. 用户采用标准时按 Harness 参考生成项目脚本和非敏感同步配置，保存明确的目标身份与 refs。独立仓登记只写实际 Harness 的 `repos.conf`；子模块按 Git 登记核对。Git 与 Issue 均不消费旧项目 JSON，缺 Harness 策略时停止同步；不自动迁移或删除旧文件。实际 remote 只由 Git 配置提供。恢复记录放已忽略的 `data/git-setup/`，新增忽略规则须属于实际设置授权；已跟踪秘密不能自动移出索引。本次新建或调整 GitHub 同步机制后，按第 1 节重新核对 `origin` 提醒条件，不能仅因初检时尚无同步而漏掉提示。
-5. 首次发布前检查将提交文件及历史。`audit --ref refs/heads/<分支>` 会扫描所有可达 blob 的已知秘密模式及大文件；`publish`内置同一检查，检查发现或预算不完整会停止。发现只报告对象 SHA 和类别，不输出秘密。此检查不保证识别所有秘密。修复历史需单独明确处理决定，不能自行重写。
-6. 从外仓操作时明确 repository（登记路径，外仓自身为 .）和可选 checkout，交给共同关系解析；公开 CLI 的 project 是 Harness 管理仓。先核对该仓自己的 targets/sync、实际检出和鉴权，不套用外仓策略，也不批量执行。已采用标准时，先从项目入口生成发布计划，再以同参数和指纹执行；选中的 after-publish 扩展在发布全部成功后执行；event: explicit 仅登记，通过生成入口 project-entries 核对后按项目命令说明明确调用，不随普通发布或同步执行。未采用标准的旧项目使用 `publish --remote <主要远端> --ref <完整引用> --apply` 发布指定本地引用；只有已批准提交可发布。GitHub/CNB HTTPS 按每个完整目标读取已选文件或 gh 账号，并核对持久绑定；不回退其他账号。旧显式配置的 `--github-auth` 兼容方式见鉴权文档。其他地址保留已验证的 Git/SSH 鉴权。Token 只进入实际认证进程，不进入 remote、argv 或 Git config。
-7. `sync` 只读取已登记 Harness 策略，不读取旧共享 JSON。先不带 `--apply` 比较来源和各目标；标准项目执行时另传计划指纹及自动扩展所需 operation-id，缺少 Harness 策略时停止并先明确安装计划。脚本在读取来源对象后、任何目标写入前执行同一历史检查。来源是主要远端已经发布的引用，未发布本地分支/标签不加入。目标独有引用保留，不 force、mirror、prune；分叉、标签冲突、保护分支按实际结果报告，必要时沿项目既有 PR 流程处理。
-8. 检查每个目标、每个引用的实际 SHA 和来源是否变化。LFS、子模块内容未传输时报告引用与内容范围，不能宣称完整项目同步。推送验证与 CI 结果分开；没有查询 CI 时明确未验证 CI。复跑先比较真实状态再补缺项。
+本次新建或调整 GitHub 同步机制后，按第 1 节重新核对 origin 提醒条件。初检时尚无同步，不免除配置后的检查。
 
-运行恢复不安装后台服务、hooks 或 CI。用户要求网页合并自动同步或双向合并时，说明首版边界并另行确定方案。
+从管理仓操作时明确 --repository（外仓自身用 .）及可选 --checkout；共同关系解析验证所选检出。每仓独立策略与来源，错误选择不得改操作外仓。未安装 Skill 的 Agent 依据项目 Git 文档使用现有业务入口或本轮临时鉴权方法。
+
+推送前审查历史，audit --ref 与 publish 使用同一可达对象检查；不输出秘密内容，不保证识别全部秘密。sync 在获得所需对象后、写入前也审查历史。不能自动重写历史、强推、mirror 或删除目标独有引用。写入后逐目标/逐 ref 回读 SHA；结果不明先核查，不盲重试。
+
+有明确项目扩展时，after-publish/after-sync 仅在全部 Git 成功后执行，并用稳定 operation-id 记录不明结果避免重复。explicit 扩展按项目文档单独调用。不会默认生成运行包、hooks、后台任务或 CI。LFS、子模块内容与 CI 另报范围，Git 引用同步不等于这些检查完成。
 
 ## 4. 复用项目已有的 Issue 流程
 
@@ -99,10 +84,8 @@ GitHub Issue 写入继续使用 git-setup 的鉴权与恢复实现。本地只�
 4. 成功回读后给实际路径或 GitHub 链接。结果不明时使用原输入和 operationId 调用 `issue-recover --input -`，只核对原目标，不换编号重发。若原输入不能重建，保留记录并报告缺项；不把一次空查询、同标题或旧 verified 状态当作未写入/本轮成功的证据。
 5. `review_required` 先报告 knownResult、原 operationId 和已知路径/链接，再说明复核失败，不能表述为尚未写入。恢复记录位于 target.project 已忽略且未跟踪的 `data/git-setup/`，不含正文或凭证。GitHub 创建/回复的唯一标记、分页预算及结果不明不重发继续有效。配置修复不授权重发。
 
-本地普通事项只有正式 Markdown；选择上述低层流程才产生恢复记录。不能把“目录有位置规范”理解为每次必须创建目录或文件。其他文件生命周期及 helper 显式清理见 [Harness](references/harness.md)与[鉴权](references/authentication.md)。
+本地普通事项只有正式 Markdown；选择上述低层流程才产生恢复记录。不能把“目录有位置规范”理解为每次必须创建目录或文件。其他文件生命周期及 helper 显式清理见 [项目策略](references/project-document.md)与[鉴权](references/authentication.md)。
 
 ## 完成条件
 
 报告实际改动文件、配置来源、远端/本地事项位置、验证通过范围及未完成项。脚本通过不等于线上鉴权、真实 GitHub 写入或三宿主调用通过。当前分发与验证状态见 [README](README.md)，使用者项目中的能力须从其实际入口验证。
-
-生成入口的 `runtime-info` 仅验证自带运行包并报告安装位置与指纹，不选择仓库、不读取凭证、不联网；项目环境工具可用它定位已验证模块。日常业务仍从 check/read/publish/sync 或鉴权入口执行。登记中未初始化的无关仓库不阻断已选可用仓；升级保留其已有策略，明确选中它时报告初始化缺项，不擅自批量初始化。

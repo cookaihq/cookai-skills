@@ -20,5 +20,5 @@ export function authTarget(url) {
   const parts = repository.split('/');
   if (parts.length < 2 || (parsed.hostname === 'github.com' && parts.length !== 2) || parts.some(part => !/^[A-Za-z0-9_.-]+$/.test(part) || part === '.' || part === '..')) authFail('invalid_auth_target', '凭证目标必须是完整组织及仓库路径。');
   const host = parsed.hostname;
-  return { host, repository, key: `${host}/${host === 'github.com' ? repository.toLowerCase() : repository}`, url: `https://${host}/${repository}`, filename: `${parts.join('--')}.${host === 'github.com' ? 'github-token' : 'cnb-url'}` };
+  return { host, repository, key: `${host}/${host === 'github.com' ? repository.toLowerCase() : repository}`, url: `https://${host}/${repository}`, filename: `${parts.map(part => part.replaceAll('-', '%2D')).join('--')}.${host === 'github.com' ? 'github-token' : 'cnb-url'}` };
 }

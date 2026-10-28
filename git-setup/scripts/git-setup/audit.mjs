@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { devNull } from 'node:os';
 import { performance } from 'node:perf_hooks';
+import { gitConfiguration } from './git-trust.mjs';
 
 const MAX_OBJECTS = 100000;
 const MAX_SCAN_BYTES = 256 * 1024 * 1024;
@@ -16,6 +17,7 @@ const patterns = [
 function auditGit(project) {
   const env = { ...process.env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull };
   for (const key of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|CONFIG|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|SHALLOW_FILE)/.test(key)) delete env[key];
+  Object.assign(env, gitConfiguration());
   const deadline = performance.now() + TOTAL_TIMEOUT_MS;
   return (args, input) => {
     const remaining = Math.floor(deadline - performance.now());

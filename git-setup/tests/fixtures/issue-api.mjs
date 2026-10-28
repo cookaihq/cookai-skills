@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /** The public CLI uses its real HTTP client; only the external API is a fixture. */
 export async function issueAPI(t, f, targets) {
@@ -46,6 +47,6 @@ export async function issueAPI(t, f, targets) {
   t.after(() => new Promise(done => server.close(done)));
   const preload = join(f.root, 'issue-api-preload.mjs');
   await writeFile(preload, `const send = globalThis.fetch;\nglobalThis.fetch = (url, options) => {\n const target = new URL(url);\n if (target.origin !== 'https://api.github.com') throw new Error('Unexpected network target');\n return send(new URL(target.pathname + target.search, ${JSON.stringify(`http://127.0.0.1:${server.address().port}`)}), options);\n};\n`);
-  f.env.NODE_OPTIONS = `--import=${preload}`;
+  f.env.NODE_OPTIONS = `--import=${pathToFileURL(preload).href}`;
   return state;
 }

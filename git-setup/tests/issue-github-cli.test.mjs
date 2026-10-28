@@ -14,7 +14,7 @@ async function fixture(t) {
   await writeFile(join(target, '.env.git-setup'), 'GIT_SETUP_GITHUB_TOKEN=fixture-tickets-token\nGIT_SETUP_GITHUB_HOST=github.com\nGIT_SETUP_GITHUB_REPOSITORY=example/tickets\n');
   const input = await issueInput(project);
   input.target = { scope: 'specified', project: target, backend: 'github', github: { host: 'github.com', repository: 'example/tickets' } };
-  const run = async (command, file, extra = []) => f.run(cli, [command, '--project', project, '--input', file, ...extra], f.root);
+  const run = async (command, file, extra = []) => f.run(cli, [command, '--project', project, '--input', file, '--auth-method', 'environment', ...extra], f.root);
   const plan = file => run('issue-resolve', file);
   const apply = async (command, file) => { const p = await plan(file); assert.equal(p.status, 'planned', JSON.stringify(p)); return run(command, file, ['--apply', '--expected-fingerprint', p.fingerprint]); };
   return { f, project, target, api, input, run, plan, apply };
@@ -24,7 +24,7 @@ test('GitHub CLI uses the explicit target identity, recovers a lost create respo
   const { f, project, target, api, input, run, plan, apply } = await fixture(t);
   const file = await inputFile(f, input), preview = await plan(file);
   assert.equal(preview.status, 'planned', JSON.stringify(preview));
-  assert.equal(preview.authentication.binding.source, join(target, '.env.git-setup'));
+  assert.equal(preview.authentication.source.method, 'environment');
   api.drop = { method: 'POST', path: '/repos/example/tickets/issues' };
   const interrupted = await run('issue-create', file, ['--apply', '--expected-fingerprint', preview.fingerprint]);
   assert.equal(interrupted.status, 'ambiguous', JSON.stringify(interrupted));

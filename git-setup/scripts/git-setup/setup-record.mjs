@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { inspectProject } from './config.mjs';
+import { gitConfiguration } from './git-trust.mjs';
 
 const exec = promisify(execFile);
 const fail = message => { throw Object.assign(new Error(message), { code: 'setup_record_path' }); };
@@ -22,6 +23,7 @@ export async function saveSetupRecord(file, record, { createOnly = false, before
   if (!project.isGit || !/^(?:data|tmp)\/git-setup\/.+\.json$/.test(target)) fail('计划记录必须位于已有工作区的 data/git-setup/ 或 tmp/git-setup/ 中。空克隆目录应使用调用工作区中的记录。');
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
   for (const key of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|CONFIG)/.test(key)) delete env[key];
+  Object.assign(env, gitConfiguration());
   const git = async args => (await exec('git', ['-C', project.root, ...args], { env, timeout: 15000 })).stdout;
   if ((await git(['ls-files', '--', target])).trim()) fail('计划记录已被 Git 跟踪，不能写入。');
   try { await git(['check-ignore', '-q', '--', target]); }

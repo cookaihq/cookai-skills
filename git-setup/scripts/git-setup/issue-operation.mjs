@@ -1,13 +1,13 @@
 import { resolveIssueInput } from './issue-rules.mjs';
 import { createLocalIssue, createRemoteIssue, recoverIssue, editLocalIssue, previewLocalEdit, updateRemoteIssue, commentRemoteIssue } from './issues.mjs';
-import { boundGitHubClient } from './auth.mjs';
-import { digest } from './runtime-bundle.mjs';
+import { selectedGitHubClient } from './auth.mjs';
+import { digest } from './validation.mjs';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 export async function issueOperation(project, command, input, options = {}) {
   const prepare = async () => {
     const resolution = await resolveIssueInput(project, input);
-    const client = resolution.backend === 'github' ? await boundGitHubClient(resolution.targetProject, resolution.github, { useGlobalConfig: options.useGlobalConfig }) : undefined;
+    const client = resolution.backend === 'github' ? await selectedGitHubClient(resolution.targetProject, resolution.github, options) : undefined;
     if (client) {
       resolution.authentication = client.authentication;
       resolution.fingerprint = digest({ input: resolution.fingerprint, authentication: client.authentication.fingerprint });

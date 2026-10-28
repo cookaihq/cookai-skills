@@ -85,16 +85,14 @@ test('documented CLI adds a mirror, preserves local Issue conventions, recovers 
 
   await cli(app, 'inspect');
   await cli(app, 'remote-add', '--name', 'backup', '--url', mirror, '--apply');
-  const harnessInput = path.join(root, 'application-harness.json');
-  await fs.writeFile(harnessInput, JSON.stringify({ choice: 'standard', directory: 'vcs', ruleFiles: ['AGENTS.md'], sync: { source: 'origin', targets: ['backup'], refs: ['refs/heads/main'] } }));
-  const adoption = JSON.parse(await cli(app, 'harness-plan', '--input', harnessInput));
-  await cli(app, 'harness-apply', '--input', harnessInput, '--plan-file', path.join(app, 'data/git-setup/adoption.json'), '--expected-fingerprint', adoption.fingerprint, '--apply');
+  const syncInput = path.join(root,'sync.json');
+  await fs.writeFile(syncInput,JSON.stringify({sync:{source:'origin',targets:['backup'],refs:['refs/heads/main']}}));
   const publication = JSON.parse(await cli(app, 'publish', '--remote', 'origin', '--ref', 'refs/heads/main'));
   await cli(app, 'publish', '--remote', 'origin', '--ref', 'refs/heads/main', '--expected-fingerprint', publication.fingerprint, '--apply');
-  const synchronization = JSON.parse(await cli(app, 'sync'));
+  const synchronization = JSON.parse(await cli(app, 'sync', '--input', syncInput));
   const beforeMirror = await git(mirror, 'show-ref', '--heads').catch(() => '');
   assert.equal(beforeMirror, '', 'Preview must not write remote refs');
-  await cli(app, 'sync', '--expected-fingerprint', synchronization.fingerprint, '--apply');
+  await cli(app, 'sync', '--input',syncInput,'--expected-fingerprint', synchronization.fingerprint, '--apply');
   assert.equal(await git(origin, 'rev-parse', 'refs/heads/main'), head);
   assert.equal(await git(mirror, 'rev-parse', 'refs/heads/main'), head);
   assert.equal(await git(mirror, 'show-ref', '--verify', 'refs/heads/local-only').catch(() => ''), '');
@@ -105,7 +103,7 @@ test('documented CLI adds a mirror, preserves local Issue conventions, recovers 
   await registerRepositories(outer, ['application']);
   const input = await issueInput(outer);
   input.initiatingProject = app;
-  input.relationship = { workspace: outer, kind: 'independent', path: 'application' };
+  input.relationship = { workspace: outer, kind: 'independent', path: 'application', policyDirectory:'fixture-git' };
   input.target.scope = 'outer'; input.target.local.directory = 'issues';
   const issueFile = path.join(root, 'issue-operation.json');
   await fs.writeFile(issueFile, JSON.stringify(input));

@@ -12,9 +12,9 @@ GitHub 目标始终是输入的 `target.github`，不从 CWD、origin、GH_REPO 
 
 GitHub API 的最终 host/repository 交给 `auth.mjs` 的 `boundGitHubClient`。它读取该目标已经选定的独立文件或 gh 账号，通过 `/user` 核验身份，再构造只访问 `api.github.com` 的客户端。Git 传输使用同一来源；gh 使用明确账号取得的进程内凭证，不依赖活动账号、不导出到项目，也不受 GH_TOKEN / GITHUB_TOKEN 覆盖。
 
-首次会话选择、受保护空文件、等待“已填写”、真实路径、外仓与 Worktree 规则见 [仓库鉴权](authentication.md)。新 GitHub 文件为主检出或明确统筹外仓 `.credentials/repositories/<owner>--<repo>.github-token`，内容为单行 Token 原文。不得把已确认流程替换成 `.env.local`。已有明确 dotenv / 进程配置按原加载器兼容，不自动迁移；已建立绑定后必须使用该精确来源。
+首次会话选择、受保护空文件、等待“已填写”、真实路径、外仓与 Worktree 规则见 [仓库鉴权](authentication.md)。新 GitHub 文件为主检出或明确统筹外仓 `.credentials/repositories/<owner>--<repo>.github-token`，内容为单行 Token 原文。不得把已确认流程替换成 `.env.local`。只有明确选择 environment 才读取 dotenv / 进程配置；不自动回退。
 
-Token 和 gh 均不能从提交作者推出。SSH Git 鉴权不代表 Issue API 权限。不同目标分别选择来源；缺失、绑定不符或账号变化时停止，不寻找其他 Token。配置修复不授权重发结果不明的写入。
+Token 和 gh 均不能从提交作者推出。SSH Git 鉴权不代表 Issue API 权限。不同目标分别选择来源；缺失、来源不符或账号变化时停止，不寻找其他 Token。配置修复不授权重发结果不明的写入。
 
 GitHub Settings → Developer settings → Personal access tokens 中创建 Token 时，选择正确的资源所有者及目标仓库，设置有效期。创建或修改 Issue 需要该目标的 **Issues: write**；只读核对使用 Issues: read。对组织创建仓库，官方文档列出 Administration: write 或 Repository creation: write 权限方案，还受组织策略约束。仅配置已有仓库不需要为了方便申请创建仓库权限。权限字段、组织审批与可选资源范围以实际 GitHub 页面和下面的官方文档为准，不使用虚构的 Token 前缀或固定长度校验。
 
@@ -65,9 +65,9 @@ GitHub Issue 正文追加 HTML 注释，包含唯一 operationId 和内容哈希
 
 每次 HTTP 或 gh API 调用默认超时 30 秒，读取瞬时网络错误、429、5xx 最多尝试 3 次，指数退避 1、2 秒。403 仅在有 Retry-After 或剩余额度为零等明确限流响应头时按限流处理；其他 403 按权限错误停止。限流的 Retry-After 支持秒数或日期，上限 60 秒；主限流无 Retry-After 时可使用 reset 时间，同样限制上限。非法值回落指数退避。确定性 4xx 不重试。日志只含尝试次数、等待时间和状态码，不透传响应正文、命令 stderr 或 Token。
 
-当前 CLI 的文件与 gh 账号分支均通过相同 HTTP 客户端请求 GitHub，禁止自动跟随重定向。仓库迁移或改名需重新核对目标绑定。gh 只负责读取明确账号的已保存凭证，不切换活动账号。
+当前 CLI 的文件与 gh 账号分支均通过相同 HTTP 客户端请求 GitHub，禁止自动跟随重定向。仓库迁移或改名需重新核对完整目标。gh 只负责读取明确账号的已保存凭证，不切换活动账号。
 
-公开 CLI 测试在新进程使用本机 HTTP API 服务，仅在测试进程重定向 api.github.com；内部分类测试另用注入传输。测试使用隔离 Git 仓库和测试凭证，覆盖绑定、权限拒绝、超时、限流、无重复创建、并发与路径冲突。模拟测试通过不表示真实 Token、gh 登录或线上仓库写入已验收，更不表示 Claude Code、Codex、WorkBuddy 的实际会话已全部验收。线上创建需要当前任务对具体目标与内容的已有授权；本 Skill 的开发授权不构成线上写入授权。
+公开 CLI 测试在新进程使用本机 HTTP API 服务，仅在测试进程重定向 api.github.com；内部分类测试另用注入传输。测试使用隔离 Git 仓库和测试凭证，覆盖来源选择、权限拒绝、超时、限流、无重复创建、并发与路径冲突。模拟测试通过不表示真实 Token、gh 登录或线上仓库写入已验收，更不表示 Claude Code、Codex、WorkBuddy 的实际会话已全部验收。线上创建需要当前任务对具体目标与内容的已有授权；本 Skill 的开发授权不构成线上写入授权。
 
 ## 官方依据
 

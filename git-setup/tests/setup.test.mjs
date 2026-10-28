@@ -68,7 +68,7 @@ test('an empty reachable remote initializes the current project without staging,
   assert.equal(await f.git(f.work, 'ls-files'), '');
   assert.equal(await f.git(f.remote, 'for-each-ref'), '');
   assert.equal(await readFile(join(f.work, 'notes.txt'), 'utf8'), 'keep my notes\n');
-  assert.equal((await f.run('config-check')).code, 'legacy_command_removed');
+  assert.equal((await f.run('config-check')).code, 'unknown_command');
   await assert.rejects(readFile(join(f.work, '.git-setup/project.json')), { code: 'ENOENT' });
 });
 
@@ -108,11 +108,11 @@ test('replacement exposes sync dependencies and requires explicit acceptance; co
   const policy = JSON.parse(await readFile(policyFile, 'utf8'));
   policy.sync = { source: 'upstream', targets: ['backup'], refs: ['refs/heads/main'] };
   await writeFile(policyFile, JSON.stringify(policy));
-  const args = ['--url', f.remote, '--action', 'replace', '--name', 'upstream'];
+  const args = ['--policy-directory','fixture-git','--url', f.remote, '--action', 'replace', '--name', 'upstream'];
   const pending = await f.run('setup', ...args);
   assert.equal(pending.status, 'needs_input');
   assert.deepEqual(pending.required, ['accept-effects']);
-  assert.equal(pending.effects.harness[0].sync.role, 'source');
+  assert.equal(pending.effects.policy[0].sync.role, 'source');
   assert.match(pending.effects.branches.join('\n'), /branch.main.remote upstream/);
   assert.equal((await f.run('setup', ...args, '--apply')).code, 'setup_choice_required');
   const plan = await f.run('setup', ...args, '--accept-effects');
@@ -264,12 +264,12 @@ test('child replacement exposes the actual manager policy and another Worktree w
   policy.repositories = { work: { targets: { origin: { fetch: old, push: old } }, sync: null } };
   await writeFile(policyPath, JSON.stringify(policy));
   const linked = join(f.root, 'linked'); await f.git(f.work, 'worktree', 'add', '--detach', linked);
-  const args = ['--url', f.remote, '--workspace', f.root, '--action', 'replace', '--name', 'origin'];
+  const args = ['--policy-directory','fixture-git','--url', f.remote, '--workspace', f.root, '--action', 'replace', '--name', 'origin'];
   const pending = await f.run('setup', ...args);
   assert.equal(pending.status, 'needs_input', JSON.stringify(pending));
-  assert.equal(pending.effects.harness[0].path, policyPath);
-  assert.equal(pending.effects.harness[0].repository, 'work');
-  assert.equal(pending.effects.otherWorktrees[0].project, linked);
+  assert.equal(pending.effects.policy[0].path, policyPath);
+  assert.equal(pending.effects.policy[0].repository, 'work');
+  assert.equal(resolve(pending.effects.otherWorktrees[0].project), linked);
   assert.equal(pending.effects.issues, undefined);
   const plan = await f.run('setup', ...args, '--accept-effects');
   policy.repositories.work.targets.origin.push = f.remote;

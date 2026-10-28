@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, lstat, writeFile, symlink, rm, mkdir, chmod } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, readdir, lstat, writeFile, symlink, rm, mkdir } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { repositoryFixture, cli } from './fixtures/repositories.mjs';
 import { issueInput, inputFile, evidence, sha256 } from './fixtures/issue-input.mjs';
+import { withUnreadableFile } from './fixtures/file-access.mjs';
 
 test('public Issue input creates and recovers a numbered local ticket using the actual rule and template', async () => {
   const f = await repositoryFixture(), project = await f.repo('project');
@@ -46,9 +47,9 @@ test('missing rules distinguish initialization from forbidden reruns and templat
   assert.equal(forbidden.code, 'issue_rules_missing');
   assert.match(forbidden.message, /修复/); assert.doesNotMatch(forbidden.message, /\/setup-matt-pocock-skills/);
   await writeFile(ruleFile, original);
-  await chmod(ruleFile, 0);
-  try { assert.equal((await f.run(cli, ['issue-resolve', ...args])).code, 'issue_document_unreadable'); }
-  finally { await chmod(ruleFile, 0o644); }
+  await withUnreadableFile(ruleFile, async () => {
+    assert.equal((await f.run(cli, ['issue-resolve', ...args])).code, 'issue_document_unreadable');
+  });
   const plan = await f.run(cli, ['issue-resolve', ...args]);
   assert.equal(plan.status, 'planned', JSON.stringify(plan));
   await writeFile(join(project, input.target.local.template.path), '# changed template\n');
@@ -185,10 +186,10 @@ test('dead-owner lock recovery serializes concurrent public creates and partial 
 
 test('rules explicitly choose outer, specified or submodule-local storage and references never redirect a new ticket', async () => {
   const f = await repositoryFixture(), outer = await f.repo('outer'), child = await f.repo('outer/child'), specified = await f.repo('specified');
-  await f.install(outer); await writeFile(join(outer, 'vcs/repos.conf'), 'child\n');
+  await f.configure(outer); await writeFile(join(outer, 'vcs/repos.conf'), 'child\n');
   const input = await issueInput(outer);
   input.initiatingProject = child;
-  input.relationship = { workspace: outer, kind: 'independent', path: 'child' };
+  input.relationship = { workspace: outer, kind: 'independent', path: 'child', policyDirectory:'vcs' };
   input.target.scope = 'outer';
   const run = async value => {
     const args = ['--project', value.initiatingProject, '--input', await inputFile(f, value)];
@@ -198,17 +199,17 @@ test('rules explicitly choose outer, specified or submodule-local storage and re
   };
   const centralized = await run(input);
   assert.equal(centralized.status, 'verified', JSON.stringify(centralized));
-  assert.ok(centralized.filePath.startsWith(outer + '/tickets/'));
+  assert.equal(dirname(centralized.filePath), join(outer, 'tickets'));
   const original = await readFile(centralized.filePath, 'utf8');
   const referenced = await run({ ...input, operationId: randomUUID(), reference: centralized.filePath, target: { ...input.target, scope: 'specified', project: specified } });
   assert.equal(referenced.status, 'verified', JSON.stringify(referenced));
-  assert.ok(referenced.filePath.startsWith(specified + '/tickets/'));
+  assert.equal(dirname(referenced.filePath), join(specified, 'tickets'));
   assert.equal(await readFile(centralized.filePath, 'utf8'), original);
   await f.git(outer, '-c', 'protocol.file.allow=always', 'submodule', 'add', specified, 'module');
   const module = join(outer, 'module'), independent = await issueInput(module);
   independent.relationship = { workspace: outer, kind: 'submodule', path: 'module' };
   const created = await run(independent);
   assert.equal(created.status, 'verified', JSON.stringify(created));
-  assert.ok(created.filePath.startsWith(module + '/tickets/'));
+  assert.equal(dirname(created.filePath), join(module, 'tickets'));
   await assert.rejects(lstat(join(child, 'tickets')), { code: 'ENOENT' });
 });
