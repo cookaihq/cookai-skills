@@ -3,13 +3,13 @@ import os
 import subprocess
 import sys
 import time
+import shutil
 from pathlib import Path
 
 import pytest
 
 from project_config import project_id, runtime_home
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="Native Windows process management is not implemented.")
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "frpc_launch.py"
 
 FAKE = '''#!{python}
@@ -32,12 +32,15 @@ time.sleep(90)
 
 
 @pytest.fixture
-def setup(tmp_path):
+def setup(tmp_path, native_fake):
     defaults = tmp_path / "defaults"
     defaults.mkdir()
-    binary = tmp_path / "fake frpc"
-    binary.write_text(FAKE.format(python=sys.executable))
-    binary.chmod(0o755)
+    binary = tmp_path / ("fake frpc.exe" if os.name == "nt" else "fake frpc")
+    if native_fake:
+        shutil.copyfile(native_fake, binary)
+    else:
+        binary.write_text(FAKE.format(python=sys.executable))
+        binary.chmod(0o755)
     (defaults / ".env").write_text('FRPC_LAUNCH_SERVER_ADDR=127.0.0.1\nFRPC_LAUNCH_SERVER_PORT=7000\n'
                                     'FRPC_LAUNCH_TOKEN=synthetic-shared-token\nFRPC_LAUNCH_DOMAIN_SUFFIX=dev.example.test\n')
     projects = [tmp_path / "a" / "My App", tmp_path / "b" / "My App"]
@@ -194,6 +197,29 @@ def test_unreadable_configuration_still_reports_and_stops_owned_process(setup):
     assert run(a, "stop")[0] == 0
 
 
+def test_missing_current_binary_does_not_hide_live_process(setup, tmp_path):
+    _, (a, _), env, _, run = setup
+    first = run(a, "start", "--wait", "5")[1]
+    env["FRPC_LAUNCH_FRPC"] = str(tmp_path / "missing-frpc.exe")
+    code, status = run(a, "status", "--mode", "official")
+    assert code == 0
+    mode = status["modes"]["official"]
+    assert mode["running"] is True and mode["pid"] == first["pid"]
+    assert mode["configuration_error"]["result"] == "invalid_config"
+    assert run(a, "stop")[0] == 0
+
+
+def test_explicit_official_still_runs_with_invalid_sakura_sources(setup):
+    defaults, (a, _), env, _, run = setup
+    env["FRPC_LAUNCH_SAKURA_KEY"] = "synthetic-unrelated-key"
+    with (defaults / ".env").open("a") as stream:
+        stream.write("FRPC_LAUNCH_SAKURA_TUNNELS=1234\n")
+    assert run(a, "start", "--mode", "official", "--wait", "5")[0] == 0
+    code, status = run(a, "status")
+    assert code == 0 and status["modes"]["official"]["running"] is True
+    assert status["modes"]["sakura"]["configuration_error"]["result"] == "invalid_config"
+
+
 def test_corrupt_record_prevents_duplicate_start_and_does_not_kill(setup):
     defaults, (a, _), env, command, run = setup
     first = run(a, "start", "--wait", "5")[1]
@@ -204,7 +230,8 @@ def test_corrupt_record_prevents_duplicate_start_and_does_not_kill(setup):
         call = subprocess.run(command(a, "start", "--wait", "1"), env=env,
                               capture_output=True, text=True, timeout=10)
         assert call.returncode == 1
-        os.kill(first["pid"], 0)
+        from frpc_launch import pid_alive
+        assert pid_alive(first["pid"])
         assert file.read_text() == "{invalid"
     finally:
         file.write_bytes(original)

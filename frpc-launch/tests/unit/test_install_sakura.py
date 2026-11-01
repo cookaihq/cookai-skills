@@ -66,6 +66,7 @@ def test_reject_missing_platform():
 
 
 def test_install_sakura_verifies_size_and_hash(tmp_path, monkeypatch):
+    monkeypatch.setattr("frpc_launch.probe_binary", lambda binary: "synthetic-sakura")
     monkeypatch.setattr("frpc_launch.detect_platform", lambda: ("darwin", "macos", "arm64"))
     home = tmp_path / "home"
     ensure_home_layout(home)

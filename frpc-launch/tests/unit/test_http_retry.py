@@ -80,11 +80,13 @@ def test_http_429_follows_retry_after(patched):
     assert patched["slept"] == [7]
 
 
-def test_http_429_retry_after_capped(patched):
+def test_http_429_excessive_retry_after_exits_without_retry(patched):
     patched["install"]([http_error(429, retry_after=9999), b"OK"])
 
-    assert frpc_launch.http_get("https://example.com/x") == b"OK"
-    assert patched["slept"] == [frpc_launch.HTTP_RETRY_AFTER_CAP]
+    with pytest.raises(FrpcLaunchError, match="未提前重试"):
+        frpc_launch.http_get("https://example.com/x")
+    assert patched["calls"] == 1
+    assert patched["slept"] == []
 
 
 def test_deterministic_4xx_is_not_retried(patched):
@@ -113,3 +115,29 @@ def test_http_get_json_reuses_retrying_transport(patched):
 
     assert frpc_launch.http_get_json("https://example.com/x") == {"ok": True}
     assert patched["calls"] == 2
+
+
+def test_retry_after_http_date_on_503(patched, monkeypatch):
+    from email.utils import formatdate
+    monkeypatch.setattr(frpc_launch.time, "time", lambda: 1000000)
+    patched["install"]([http_error(503, formatdate(1000012, usegmt=True)), b"OK"])
+    assert frpc_launch.http_get("https://example.com/x") == b"OK"
+    assert patched["slept"] == [12]
+
+
+def test_certificate_failure_never_retries(patched):
+    import ssl
+    patched["install"]([urllib.error.URLError(ssl.SSLCertVerificationError("bad certificate"))])
+    with pytest.raises(FrpcLaunchError, match="证书"):
+        frpc_launch.http_get("https://example.com/x")
+    assert patched["calls"] == 1 and patched["slept"] == []
+
+
+def test_download_read_loop_obeys_total_budget(monkeypatch):
+    ticks = iter([0, 0, 0, 91])
+    monkeypatch.setattr(frpc_launch.time, "monotonic", lambda: next(ticks))
+    response = FakeResponse(b"chunk")
+    response.read1 = lambda n: response.payload
+    monkeypatch.setattr(frpc_launch.urllib.request, "urlopen", lambda *a, **kw: response)
+    with pytest.raises(FrpcLaunchError, match="下载总预算"):
+        frpc_launch.http_get("https://example.com/x")

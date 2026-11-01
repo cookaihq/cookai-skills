@@ -8,7 +8,7 @@ from frpc_launch import (detect_platform, ensure_home_layout, write_meta,
 
 def test_detect_platform_current_host():
     os_name, os_subdir, arch = detect_platform()   # 开发机为 macOS 或 Linux
-    assert (os_name, os_subdir) in [("darwin", "macos"), ("linux", "linux")]
+    assert (os_name, os_subdir) in [("darwin", "macos"), ("linux", "linux"), ("windows", "windows")]
     assert arch in ("amd64", "arm64")
 
 
@@ -17,7 +17,8 @@ def test_ensure_home_layout(tmp_path):
     ensure_home_layout(home)
     for sub in ["bin/macos", "bin/linux", "bin/windows", "run"]:
         assert (home / sub).is_dir()
-    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
 
 
 def test_meta_roundtrip_and_bad_json(tmp_path):

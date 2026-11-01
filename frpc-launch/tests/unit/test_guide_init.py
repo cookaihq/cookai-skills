@@ -41,7 +41,8 @@ def test_update_env_file_preserves_other_lines(tmp_path):
     assert "OTHER_VAR=keep" in text
     assert "FRPC_LAUNCH_SAKURA_KEY=newkey12345" in text and "old" not in text
     assert "FRPC_LAUNCH_SAKURA_TUNNELS=7,8" in text
-    assert stat.S_IMODE(f.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600
 
 
 def _run_guide(home, cwd, env_extra, *args):
@@ -63,7 +64,8 @@ def test_guide_init_global_official_writes_toml_0600(tmp_path):
     assert r.returncode == 0, r.stderr
     toml = home / "frpc.toml"
     assert 'auth.token = "tok_abcdefgh1234"' in toml.read_text()
-    assert stat.S_IMODE(toml.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(toml.stat().st_mode) == 0o600
     assert "tok_abcdefgh1234" not in r.stdout          # 回显掩码
     assert json.loads(r.stdout)["token"] == "tok_****1234"
 

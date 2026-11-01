@@ -75,6 +75,7 @@ def _fake_fetchers(tmp_path, tamper=False):
 
 
 def test_install_official_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setattr("frpc_launch.probe_binary", lambda binary: "0.70.1")
     monkeypatch.setattr("frpc_launch.detect_platform", lambda: ("darwin", "macos", "arm64"))
     home = tmp_path / "home"
     ensure_home_layout(home)
@@ -96,3 +97,29 @@ def test_install_official_checksum_mismatch_leaves_nothing(tmp_path, monkeypatch
         install_official(home, fetch_json=fj, fetch_bytes=fb)
     assert not (home / "bin" / "macos" / "frpc").exists()
     assert not (home / "bin" / "macos" / "frpc.meta.json").exists()
+
+
+def test_probe_failure_preserves_existing_binary_and_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr("frpc_launch.detect_platform", lambda: ("darwin", "macos", "arm64"))
+    home = tmp_path / "home"
+    ensure_home_layout(home)
+    binary = home / "bin/macos/frpc"
+    metadata = binary.with_name("frpc.meta.json")
+    binary.write_bytes(b"existing-client")
+    metadata.write_bytes(b'{"version":"previous"}')
+    def reject(_):
+        raise FrpcLaunchError("cannot execute")
+    monkeypatch.setattr("frpc_launch.probe_binary", reject)
+    fj, fb = _fake_fetchers(tmp_path)
+    with pytest.raises(FrpcLaunchError, match="cannot execute"):
+        install_official(home, fetch_json=fj, fetch_bytes=fb)
+    assert binary.read_bytes() == b"existing-client"
+    assert metadata.read_bytes() == b'{"version":"previous"}'
+
+
+@pytest.mark.parametrize("system", ["windows", "linux"])
+def test_corrupt_archive_has_actionable_error(tmp_path, system):
+    archive = tmp_path / "broken.archive"
+    archive.write_bytes(b"not a valid archive")
+    with pytest.raises(FrpcLaunchError, match="归档损坏"):
+        extract_frpc_member(archive, "0.70.1", system, "amd64", tmp_path / "frpc")

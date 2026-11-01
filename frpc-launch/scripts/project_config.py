@@ -19,6 +19,7 @@ import unicodedata
 from pathlib import Path
 
 import tomlkit
+from runtime_files import protect
 
 
 PREFIX = "FRPC_LAUNCH_"
@@ -360,10 +361,10 @@ def atomic_write(path, text):
     fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            protect(Path(temporary))
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -373,10 +374,6 @@ def atomic_write(path, text):
 def operation_lock(path, timeout=10):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+b") as stream:
-        stream.seek(0)
-        if not stream.read(1):
-            stream.write(b"0")
-            stream.flush()
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -393,6 +390,11 @@ def operation_lock(path, timeout=10):
                     raise ProjectError("同一项目有另一项操作正在执行，请稍后重试。", code="busy")
                 time.sleep(0.1)
         try:
+            # Windows byte-range locks also deny reads/writes by other handles.
+            # Acquire before inspecting or initialising the sentinel byte.
+            if not os.fstat(stream.fileno()).st_size:
+                stream.write(b"0")
+                stream.flush()
             yield
         finally:
             stream.seek(0)

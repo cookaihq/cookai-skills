@@ -3,7 +3,19 @@ import os
 import subprocess
 import sys
 import time
+import shutil
 from pathlib import Path
+
+import pytest
+from frpc_launch import pid_alive
+
+NATIVE_FAKE = None
+
+
+@pytest.fixture(autouse=True)
+def native_client_fixture(native_fake):
+    global NATIVE_FAKE
+    NATIVE_FAKE = native_fake
 
 SCRIPT = str(Path(__file__).parents[1] / "scripts" / "frpc_launch.py")
 
@@ -27,11 +39,19 @@ def _setup(tmp_path, fake_script):
     for sub in ("bin/macos", "bin/linux", "bin/windows", "run"):
         (home / sub).mkdir(parents=True)
     import platform
-    os_subdir = "macos" if platform.system() == "Darwin" else "linux"
-    frpc = home / "bin" / os_subdir / "frpc"
-    frpc.write_text(fake_script)
-    frpc.chmod(0o755)
-    (home / "frpc.toml").write_text('serverAddr = "example.com"\nserverPort = 7000\n')
+    os_subdir = {"Darwin": "macos", "Windows": "windows"}.get(platform.system(), "linux")
+    frpc = home / "bin" / os_subdir / ("frpc.exe" if os.name == "nt" else "frpc")
+    host = "example.com"
+    if NATIVE_FAKE:
+        shutil.copyfile(NATIVE_FAKE, frpc)
+        if "connect to server error" in fake_script:
+            host = "failure.example.test"
+        elif "login to server success" not in fake_script:
+            host = "silent.example.test"
+    else:
+        frpc.write_text(fake_script)
+        frpc.chmod(0o755)
+    (home / "frpc.toml").write_text('serverAddr = "%s"\nserverPort = 7000\n' % host)
     cwd = tmp_path / "proj"
     cwd.mkdir()
     return home, cwd
@@ -92,8 +112,7 @@ def test_start_login_failure_not_reported_as_success(tmp_path):
     assert "connect to server error" in out["log_tail"]
     # 启动失败后不留下孤儿进程（实现应清理已拉起的进程）
     time.sleep(0.5)
-    with __import__("pytest").raises(ProcessLookupError):
-        os.kill(out["pid"], 0)
+    assert not pid_alive(out["pid"])
     assert not (home / "run" / "official.pid").exists()
 
 
@@ -128,8 +147,7 @@ def test_stop_terminates_and_cleans(tmp_path):
     assert r.returncode == 0
     assert not (home / "run" / "official.pid").exists()
     time.sleep(0.3)
-    with __import__("pytest").raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not pid_alive(pid)
 
 
 def test_stop_stale_pid_does_not_kill_unrelated(tmp_path):

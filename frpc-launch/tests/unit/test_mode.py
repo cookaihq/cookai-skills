@@ -52,3 +52,12 @@ def test_cli_mode_flag_overrides(tmp_path):
     layered, home = _layered(tmp_path, official=True, sakura=True)
     d = decide_mode(layered, home, requested_mode="official")
     assert d.decision == "explicit" and d.modes == ["official"]
+
+
+def test_explicit_official_ignores_unrelated_sakura_error(tmp_path):
+    layered, home = _layered(tmp_path, official=True)
+    layered.update(FRPC_LAUNCH_SAKURA_KEY=("synthetic-key", ".env.local"),
+                   FRPC_LAUNCH_SAKURA_TUNNELS=("1", "global"))
+    assert decide_mode(layered, home, "official").modes == ["official"]
+    with pytest.raises(FrpcLaunchError, match="同一来源"):
+        decide_mode(layered, home, "sakura")

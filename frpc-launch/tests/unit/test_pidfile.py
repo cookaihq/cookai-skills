@@ -1,9 +1,12 @@
 import subprocess
 import sys
+import os
+from pathlib import Path
 
 from frpc_launch import (pid_paths, write_pid_record, read_pid_record,
                          pid_alive, pid_identity_ok, config_digest_official,
                          config_digest_sakura, read_log_tail)
+from frpc_launch import process_started
 
 
 def test_pid_record_roundtrip(tmp_path):
@@ -17,13 +20,15 @@ def test_pid_record_roundtrip(tmp_path):
 
 
 def test_pid_alive_and_identity(tmp_path):
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    argv = [str(Path(sys._base_executable).resolve()) if os.name == "nt" else sys.executable,
+            "-c", "import time; time.sleep(30)"]
+    proc = subprocess.Popen(argv)
     try:
         assert pid_alive(proc.pid) is True
-        good = {"pid": proc.pid, "exe": sys.executable}
+        good = {"pid": proc.pid, "exe": argv[0], "identity_args": argv, "process_start": process_started(proc.pid)}
         assert pid_identity_ok(good) is True
         # pid 存活但 exe 不匹配 → 身份核对不通过（模拟 pid 被无关进程复用）
-        bad = {"pid": proc.pid, "exe": "/managed/bin/frpc"}
+        bad = dict(good, identity_args=["/managed/bin/frpc"], exe="/managed/bin/frpc")
         assert pid_identity_ok(bad) is False
     finally:
         proc.kill()

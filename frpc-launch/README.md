@@ -4,11 +4,15 @@
 
 项目流程从 **1.4.0** 开始提供；安装后请让 Agent 核对实际版本。1.3.1 及更早版本不包含本版项目流程。
 
+**1.5.0** 新增 Windows 原生客户端准备和进程管理。2026-11-01 验收：Windows 11 x64 合成测试 **153 通过、2 未执行**，Linux amd64 容器回归 **141 通过、12 跳过、2 未执行**；Codex 合成闭环通过，Claude Code 部分通过，WorkBuddy、真实 FRP 链路及 macOS 实机仍待验。具体范围见下文。
+
 ## 开始前准备
 
 需要已有的自部署 FRPS、宝塔 FRPS 或樱花 FRP。Skill 管理本地客户端，不部署服务器，不修改远端 DNS、Nginx、证书或开机自启。首次保存连接只需 FRPS 地址、连接端口和 Token，本地服务端口到使用时再提供。
 
-macOS/Linux 有进程管理实现。本版在 Linux 容器中验证了项目配置、并行进程及隔离的本地 FRP 链路；macOS 本版尚未实机复测。Windows 原生仅验证了本地配置准备，不支持启动或停止 frpc；独立 WSL 用户环境本版未实测。
+Windows 原生支持客户端下载、离线配置校验、隐藏后台启动、停止、状态与日志。实现面向 Windows 10/11、macOS/Linux 的 amd64/arm64；当前实测为 Windows 11 x64 的合成客户端生命周期及 Linux amd64 容器回归，macOS、Windows arm64 与独立 WSL 用户环境未复测。
+
+真实客户端仍有独立缺项：官方 frp 0.70.1 Windows ZIP 被本机 Defender 拦截，未完成本机包哈希校验或执行；樱花客户端下载返回 HTTP 567，未完成真实登录。合成客户端测试不证明 FRPS、代理注册或公网业务可用。防护拦截时停止该分支并核查，不通过换目录、改名或关闭防护继续。
 
 需要 uv ≥ 0.8，由 Agent 检查和准备锁定环境。首次运行可能下载 Python、依赖和 frpc；启动不会顺带升级已有 frpc。
 
@@ -20,9 +24,9 @@ macOS/Linux 有进程管理实现。本版在 Linux 容器中验证了项目配�
 
 | 宿主 | 使用入口与本版验证状态 |
 | --- | --- |
-| Claude Code | `~/.claude/skills/frpc-launch/`，可用 `/frpc-launch` 点名；本次初始化清单已发现名称，加载和业务调用因测试环境接口额度不足未完成验收 |
-| Codex | `~/.agents/skills/frpc-launch/`，可用 `$frpc-launch` 点名；Windows 项目级入口已发现并加载 1.4.0，默认只读沙箱无法启动本机 uv，配置闭环未完成验收 |
-| WorkBuddy | `~/.workbuddy/skills/frpc-launch/`，自然语言点名并确认实际加载；本版发现、触发和客户端闭环未验收，不假定支持 symlink 或其他宿主命令语法 |
+| Claude Code | `~/.claude/skills/frpc-launch/`，可用 `/frpc-launch` 点名；2.1.312 经本次目录与命令授权，已加载源码并完成 A/B 启动、A 去重、日志、停 A 后 B 存活；模型接口额度不足返回 403，B 校验与最后停止步骤未在该宿主完成 |
+| Codex | `~/.agents/skills/frpc-launch/`，可用 `$frpc-launch` 点名；0.165.0 默认 `workspace-write / never`，在沙箱自行创建的私有目录中通过 A/B 配置、verify、跨调用存活、去重、日志及独立停止；使用同哈希 uv 副本，普通用户的真实配置访问不在本次通过范围 |
+| WorkBuddy | `~/.workbuddy/skills/frpc-launch/`，自然语言点名并确认实际加载；5.9.3 的临时副本安装与恢复已核对，界面测试请求未能成功提交，发现及业务闭环未验收 |
 
 三宿主使用同一份 Skill，按自然语言触发设计。文件检查、脚本测试与客户端真实调用分别记录，不能互相代替。
 
@@ -77,7 +81,7 @@ macOS/Linux 有进程管理实现。本版在 Linux 容器中验证了项目配�
 | 环境 | 个人配置与运行目录 |
 | --- | --- |
 | macOS / Linux | 当前运行用户的 `~/.config/frpc-launch/`；个人文件夹通常为 `/Users/<用户名>/` 或 `/home/<用户名>/` |
-| Windows 原生 | 当前 Windows 用户的 `%USERPROFILE%\.config\frpc-launch\`；本地配置命令使用此位置，原生进程管理未实现 |
+| Windows 原生 | 当前 Windows 用户的 `%USERPROFILE%\.config\frpc-launch\`；客户端与项目运行文件使用此位置 |
 | WSL | WSL Linux 用户的 `~/.config/frpc-launch/`；与 Windows 用户目录分开，不自动互读 |
 
 已有完整原生 TOML 与专用受管目录可继续按原接口使用，不会自动迁移成项目模式。让 Agent 先核对现有调用方式；原生完整配置生成器会覆盖文件，已有配置应定点编辑。
@@ -87,6 +91,8 @@ macOS/Linux 有进程管理实现。本版在 Linux 容器中验证了项目配�
 > 请检查 frpc-launch 的实际版本、项目目录、各项来源和是否已填写，隐藏 Token。新设置被高优先级文件遮蔽时指出实际来源，不要另写全局文件。沿我的完整 URL 核对域名、证书、代理和本地同路径的内容。
 
 域名占用时先核对具体项目和远端代理，DNS 能解析不等于可用。公网显示准备页时检查应用是否加载配置。启动等待超时会保留可识别的进程记录，先核对日志和现状再决定下一步。
+
+Windows 上可以说：“请准备并验证原生 frpc 客户端，先做离线配置校验，再按当前项目启动并检查日志。”遇到“拒绝访问”，让 Agent 区分 uv、客户端、配置目录和私有文件权限。不同宿主可能使用不同 Windows 执行账号；私有配置不会自动向另一账号开放，应沿宿主正常授权流程处理。不要自动放宽配置权限或关闭沙箱。
 
 ## 更新
 

@@ -47,10 +47,18 @@ def test_official_config_valid_requires_serveraddr(tmp_path):
 def test_sakura_config_requires_key_and_tunnels():
     only_key = {"FRPC_LAUNCH_SAKURA_KEY": ("k1234567890", ".env")}
     assert sakura_config(only_key) == (None, "")
-    both = dict(only_key, FRPC_LAUNCH_SAKURA_TUNNELS=("11,22", "global"))
+    both = dict(only_key, FRPC_LAUNCH_SAKURA_TUNNELS=("11,22", ".env"))
     cfg, source = sakura_config(both)
     assert cfg == {"key": "k1234567890", "tunnels": "11,22", "frpc_path": None}
     assert source == ".env"
+
+
+def test_sakura_rejects_mixed_credential_sources():
+    import pytest
+    from frpc_launch import FrpcLaunchError
+    with pytest.raises(FrpcLaunchError, match="同一来源"):
+        sakura_config({"FRPC_LAUNCH_SAKURA_KEY": ("synthetic-key", ".env"),
+                       "FRPC_LAUNCH_SAKURA_TUNNELS": ("11,22", "global")})
 
 
 def test_skill_specific_file_precedence_and_isolation(tmp_path):
