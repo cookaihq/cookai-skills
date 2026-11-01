@@ -35,6 +35,10 @@ export async function writeDocument(project, input, options = {}) {
     for (const item of files) {
       const file = join(plan.root, item.path);
       await safePath(plan.root, file);
+      if (item.before === item.after) {
+        if (digest(await readFile(file)) !== item.before) fail('document_changed', '保留文件在写入前发生变化。');
+        completed.push(item.path); continue;
+      }
       await mkdir(dirname(file), { recursive: true });
       const stat = item.before === null ? null : await lstat(file);
       const handle = await open(file, item.before === null ? 'wx' : 'r+');

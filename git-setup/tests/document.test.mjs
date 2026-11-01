@@ -34,6 +34,17 @@ test('multiple host rule links edit one entity and retain links',async()=>{
  const request={...input,ruleFiles:['AGENTS.md','CLAUDE.md']};const plan=await planDocument(p,request);assert.equal(plan.edits.length,1);
  assert.equal((await writeDocument(p,request,{apply:true,expectedFingerprint:plan.fingerprint})).complete,true);assert.equal((await lstat(join(p,'CLAUDE.md'))).isSymbolicLink(),true);
 });
+test('existing project rule references retain their wording without adding a second entry',async()=>{
+ const f=await repositoryFixture(),p=await f.repo('project');
+ await mkdir(join(p,'rules'));await mkdir(join(p,'docs/agents'),{recursive:true});
+ const original='# Existing policy\n执行 Git 操作前必须读取并遵守[Git 规则](../docs/agents/git-access.md)。\n';
+ await writeFile(join(p,'rules/project.md'),original);await symlink('rules/project.md',join(p,'AGENTS.md'),'file');
+ const request={...input,path:'docs/agents/git-access.md'};
+ const plan=await planDocument(p,request);assert.equal(plan.edits[0].reusedReference,true);assert.equal(plan.edits[0].requiresSemanticReview,true);
+ assert.equal((await writeDocument(p,request,{apply:true,expectedFingerprint:plan.fingerprint})).complete,true);
+ assert.equal(await readFile(join(p,'rules/project.md'),'utf8'),original);
+ assert.equal((await lstat(join(p,'AGENTS.md'))).isSymbolicLink(),true);
+});
 test('stale document plans preserve subsequent user changes and link retargets',async()=>{
  const f=await repositoryFixture(),p=await f.repo('project');await writeFile(join(p,'AGENTS.md'),'# Original\n');const plan=await planDocument(p,input);
  await writeFile(join(p,'AGENTS.md'),'# User change\n');await assert.rejects(writeDocument(p,input,{apply:true,expectedFingerprint:plan.fingerprint}),{code:'document_changed'});assert.equal(await readFile(join(p,'AGENTS.md'),'utf8'),'# User change\n');

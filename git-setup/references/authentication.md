@@ -33,3 +33,17 @@ Git credential 协议可发送重复的 `capability[]`、`wwwauth[]` 等多值�
 宿主沙箱可能用受保护的进程配置声明当前用户拥有的仓库可信。清理配置注入时，只保留 `safe.directory` 的具体绝对路径及清空列表的空项，并与本次鉴权配置合并；不保留 `*`、递归通配路径、相对路径或其他注入配置。不修改全局信任，也不以放宽沙箱解决所有权检查。项目 Git 说明中的临时调用方法应遵守同一边界。
 
 项目 Git 说明须保留这一操作原理和本项目具体路径，即使没有安装 Skill，Agent 也能用宿主本轮的短期脚本和进程环境执行。不能把带 Token 的 URL 直接作为 git 参数，不能把完整 Skill 复制到 .git。可参考项目已有满足同一契约的只读 helper；无脚本的项目不为此默认生成长期运行包。
+
+## 普通 Git / IDE 按需接入
+
+只有用户明确需要终端或 IDE 使用项目凭证时才接入。普通 setup 和 credential-check 保持按次鉴权，不自动安装。先核对现有 helper、URL 专属配置、额外鉴权头、来源和受影响的远端及 Worktree；已有 helper 满足以下契约时复用，不能覆盖用户脚本或直接改用 credential-store。
+
+默认新增脚本路径是目标仓库主检出内 scripts/git/credential-helper.mjs，已有明确路径则复用。它是独立的小脚本，只负责读取和完整目标匹配，不依赖 Skill 安装目录，不承载 read/publish/sync 业务或旧版本运行包。注册在该仓库本机 Git 配置中，固定已验证的 Node、Git、脚本及必要 gh 程序路径；启用 credential.useHttpPath、重置已确认的 helper 链、关闭目标重定向。预览列出替换的 helper、未接入远端及共用配置的其他 Worktree，沿已有具体授权处理，不擅自覆盖 URL 专属或 Worktree 鉴权设置。
+
+来源选择与 Agent/API 共用：标准文件直接复用；自定义文件或 gh 账号必须在被忽略的 sources.local.md 中保存非敏感选择，使独立启动的 Git 也能定位。保存来源记录须在本次已明确作用域内；不复制 Token。environment 只用于 Agent 按次鉴权，不能作为独立 IDE 的持久来源。gh 仍须已明确账号，不能借用 active 账号。
+
+helper 仅读取 get，store/erase 不写文件；完整目标或用户名不符、源文件失效、登记关系变化时返回 quit=true，不回退其他账号。每次重新读取来源记录和当前凭证，不保存 Token 指纹或 ready/pending 状态。文件保护及 Windows ACL 继续遵守上文要求。终端或 IDE 的额外进程配置、提示器和环境可能影响 Git，必须从实际入口验证。
+
+安装后的 credential fill 回读只证明普通 Git 获取了所选来源。随后用普通 Git 验证远端读取；有本次推送授权才测试推送并回读引用；最后从实际 IDE 按钮验证。分别报告“helper 已注册”“普通 Git 读取通过”“推送通过”“按钮通过”，不得互相替代。显式 git push --set-upstream origin HEAD 不受 remote.pushDefault 重定向。
+
+同一来源内轮换 Token 后，下一次 Git 请求读取当前值。新电脑、移动检出、运行时升级导致固定路径失效时重新预览和注册本机配置；共享脚本与文档到达不代表本机接入已完成。删除接入时先核对实际调用方，仅移除属于本 helper 的精确配置及无人使用脚本，保留来源文件和其他设置。

@@ -38,5 +38,8 @@ export async function entryCheck(project, options = {}) {
       observedHelpersAreSelections: false, message: '检测到已有 helper 只证明配置存在；它不是第三种 GitHub 鉴权选项，也不证明账号已被选择。本机来源从项目说明和可选来源记录取得。' },
     fingerprint: digest({ project: root, relationship: relationship.fingerprint, configuration: digest(raw), remotes: state.remotes, authentication }),
     network: 'not_performed', pushPreflight: 'not_performed', actualPush: 'not_performed', changed: false,
-    agentReview: ['读取实际项目规则核对作者及项目专属配置', '读取项目 Git 使用说明及已有脚本', '复用已明确的来源选择；普通操作不安装 helper 或运行包'] };
+    agentReview: ['读取实际项目规则核对作者及项目专属配置',
+      '多仓项目沿用已明确的主要仓库；缺失时列出实际仓库请用户选择。区分项目主仓、每仓主要远端与本次检出',
+      '复用项目 Git 正文与有效规则入口，核对各宿主实际加载以及独立打开子仓的入口',
+      '复用已明确的来源选择；普通 Git/IDE 有明确接入需求时才配置只读 helper，默认设置仍为按次鉴权'] };
 }

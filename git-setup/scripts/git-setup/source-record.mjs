@@ -1,24 +1,14 @@
 import { readFile, lstat, mkdir, open, rename, rm } from 'node:fs/promises';
-import { join, resolve, relative, dirname, isAbsolute, sep } from 'node:path';
+import { join, relative, dirname } from 'node:path';
 import { authTarget, localGit, authFail as fail } from './auth-roots.mjs';
-import { safePath, fields, publicText } from './validation.mjs';
+import { safePath, publicText } from './validation.mjs';
+import { validateCredentialSource, parseCredentialSources } from './credential-data.mjs';
 
 export const sourceRecordPath = owner => join(owner.main, '.credentials/repositories/sources.local.md');
 
 export function validateSource(entry, owner) {
-  fields(entry, ['url', 'method', 'file', 'account'], '本机凭证来源');
   publicText(entry);
-  const target = authTarget(entry.url);
-  if (!target || !['gh', 'github-token', 'cnb-url', 'environment'].includes(entry.method)
-      || (target.host === 'cnb.cool' ? entry.method !== 'cnb-url' : entry.method === 'cnb-url')) fail('auth_source_invalid', '来源的目标与鉴权方式不匹配。');
-  if (entry.method === 'gh') {
-    if (!/^[A-Za-z0-9-]+$/.test(entry.account || '') || entry.file !== undefined) fail('auth_source_invalid', 'gh 来源必须明确账号且不能包含文件。');
-  } else if (['github-token', 'cnb-url'].includes(entry.method)) {
-    if (typeof entry.file !== 'string' || /[\r\n\0]/.test(entry.file) || entry.account !== undefined) fail('auth_source_invalid', '文件来源须指定文件路径。');
-    const rel = relative(owner.main, resolve(owner.main, entry.file));
-    if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep)) fail('auth_source_invalid', '来源文件须位于已确认凭证主检出。');
-  } else if (entry.file !== undefined || entry.account !== undefined) fail('auth_source_invalid', '环境来源不得混入其他文件或账号。');
-  return { ...entry, url: target.url };
+  return validateCredentialSource(entry, owner);
 }
 
 async function protectedRecord(owner, allowMissing = false) {
@@ -38,13 +28,9 @@ export async function readSources(owner) {
   try { await lstat(file); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   await protectedRecord(owner);
   const text = await readFile(file, 'utf8');
-  const blocks = [...text.matchAll(/^```json\s*\r?\n([\s\S]*?)^```\s*$/gm)];
-  let entries;
-  try { if (blocks.length !== 1) throw new Error(); entries = JSON.parse(blocks[0][1]); } catch { fail('auth_source_invalid', '本机来源记录须包含唯一的 JSON 来源数组；不输出原文。'); }
-  if (!Array.isArray(entries) || entries.length > 200) fail('auth_source_invalid', '本机来源记录必须是来源数组。');
-  const result = entries.map(entry => validateSource(entry, owner));
-  if (new Set(result.map(entry => authTarget(entry.url).key)).size !== result.length) fail('auth_source_duplicate', '同一完整目标有重复来源，请明确保留哪个选择。');
-  return result;
+  const entries = parseCredentialSources(text, owner);
+  publicText(entries);
+  return entries;
 }
 
 export async function saveSource(owner, entry) {

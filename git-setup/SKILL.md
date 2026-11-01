@@ -8,7 +8,7 @@ compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Cla
 
 # git-setup
 
-帮助 Agent 按目标项目规则使用 Git。默认交付是项目 Git 使用说明、实际 Agent 规则入口中的引用和必要的 Git 设置。普通终端 Git、IDE、CI 沿用其已有鉴权；自定义凭证目录须由 Agent 按说明读取。
+帮助 Agent 按目标项目规则使用 Git。默认交付是项目 Git 使用说明、实际 Agent 规则入口中的引用和必要的 Git 设置。多仓项目先明确主要仓库；普通 Git / IDE 有明确接入需求时，按[鉴权文档](references/authentication.md#普通-git--ide-按需接入)配置项目只读 helper。
 
 ## 0. 自动检查更新
 
@@ -22,11 +22,15 @@ Git 检出安装：macOS/Linux 执行本 Skill 的 scripts/check_update.sh；Win
 
 先读当前实际宿主生效的全局、项目及目录规则和其中引用的 Git 说明。核对 Git 根、主检出、Worktree、登记子仓及实际 remote。普通父目录嵌套不证明管理关系；子模块联合核对 .gitmodules/gitlink/Git 元数据；独立仓仅消费明确项目策略目录中的 repos.conf。创建分支/Worktree 按目标项目规则及用户决定。
 
+区分项目主要仓库、每仓主要远端、本次操作检出。多仓时列出实际仓库的项目内相对路径、用途和完整远端，沿用同范围已确认主仓；缺少选择时请用户明确一个，不能把外仓、origin 或当前目录自动当作主仓。项目级请求使用该默认，用户明确指定仓库或项目要求每次明确选仓时遵守更具体要求。CLI 不解析主仓正文，Agent 仍传明确仓库、远端和必要检出参数。
+
+主要远端调整前核对 branch remote / merge / pushRemote、remote.pushDefault、其他 Worktree 和同步脚本，保留有效分支例外。普通 Git / IDE 操作当前打开的检出；项目主仓约定不会使按钮切换到独立子仓。显式指定 origin 的按钮命令仍连接 origin，不能以设置 remote.pushDefault 声称其目标已改变。
+
 运行 node <skill>/scripts/git-setup/cli.mjs check --project <项目>，它只返回事实，不解析 Markdown 或替 Agent 作决定。仅调用 Skill 而无其他参数时，完成检查并报告具体问题、来源与待决定项。普通业务请求只读取适用规则并核对本次事实，不触发完整 Skill 调查。
 
 设置请求中，读取 [项目 Git 使用说明](references/project-document.md)。优先更新项目已有文档；无既有路径则采用 docs/agent/git.md。正文必须足以让后续未加载本 Skill 的 Agent 完成日常 Git 操作：写清仓库/远端、凭证定位、只读临时鉴权、权限与失败处理。现有发布/同步/PR/Release 脚本按其真实功能引用，不能因精简默认交付而丢失业务能力。只有具体需求需要时才新增项目脚本。
 
-把该文档引用加入 Claude Code、Codex、WorkBuddy 实际生效的项目规则入口；先查实际安装形态，不能只按文件名假设已加载。规则文件为符号链接时编辑同一实体、保留链接。不重复三份正文。文档写完逐条回读引用及目标，最后说明哪些客户端已实测、哪些尚未验证。
+查找 Claude Code、Codex、WorkBuddy 实际生效的项目规则入口及其必读文档，已有有效 Git 入口直接复用；缺失时才添加或创建实际入口，不能只按文件名假设已加载。入口必须明确要求在 Git 设置、读取、提交、推送或发布前读取并遵守正文。规则文件为符号链接时编辑同一实体、保留链接，不重复三份正文。子仓独立打开时另核对适用入口。文档写完逐条回读引用及目标，最后说明哪些客户端已实测、哪些尚未验证。
 
 文件操作可用 document-plan / document-write，输入为 {path,content,ruleFiles}。write 需本次指纹与 --apply；已有用户授权不重复询问。已有文档映射/共享锚点时沿项目声明维护实体和引用；该脚本只处理项目内普通路径，不绕过路径限制另建 docs 副本。发现旧安装按 [迁移说明](references/project-document.md) 先迁移调用方再删，1.0.0 没有旧接口兼容层。
 

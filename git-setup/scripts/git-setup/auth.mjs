@@ -9,7 +9,7 @@ import { loadEnvironment } from './config.mjs';
 import { inspectRemote, prepareCredentialRepository, credentialInitialization } from './git.mjs';
 import { createGitHubClient, authFromEnvironment } from './github.mjs';
 import { authFail, authTarget, credentialOwner, localEnvironment, localGit } from './auth-roots.mjs';
-import { parseCnbCredential, cnbCredentialFormat } from './cnb-credential.mjs';
+import { cnbCredentialFormat, parseCredentialFile } from './credential-data.mjs';
 import { readSources, saveSource, sourceRecordPath, validateSource } from './source-record.mjs';
 import { gitConfiguration } from './git-trust.mjs';
 const exec = promisify(execFile);
@@ -97,14 +97,8 @@ async function readFileCredential(source) {
     if (error.code?.startsWith('auth_')) throw error;
     authFail('auth_file_unavailable', `无法读取已选凭证文件：${source.file}。不切换来源。`);
   }
-  if (source.method === 'cnb-url') return parseCnbCredential(raw, source.target);
-  const value = raw.replace(/^\uFEFF/, '').replace(/\r?\n$/, '');
-  if (!value || /[\s\0"']/u.test(value)) authFail('auth_file_format', `凭证应为单行原文，不加引号、变量名或空格：${source.file}`);
-  if (source.method === 'github-token') {
-    if (/[=:]/.test(value)) authFail('auth_file_format', `GitHub 文件只能填写 Token 原文：${source.file}`);
-    return { username: 'x-access-token', password: value, revision: hash(raw) };
-  }
-  authFail('auth_method_invalid', '未知文件鉴权方式。');
+  try { return parseCredentialFile(raw, source.method, source.target); }
+  catch (error) { error.message += ` 来源：${source.file}`; throw error; }
 }
 
 export async function readCredential(source, options = {}) {

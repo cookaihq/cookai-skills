@@ -1,5 +1,5 @@
 import { readFile, lstat, realpath, readlink } from 'node:fs/promises';
-import { join, relative, dirname } from 'node:path';
+import { join, relative, dirname, resolve } from 'node:path';
 import { safePath, digest, fail, portablePath } from './validation.mjs';
 
 const start = '<!-- git-setup:documentation:start -->';
@@ -9,6 +9,19 @@ export function withoutRegistration(content) {
   if (first === -1 && last === -1) return content;
   if (first < 0 || last < first || content.indexOf(start, first + start.length) !== -1 || content.indexOf(end, last + end.length) !== -1) fail('project_rules_invalid', '项目规则入口登记标记不完整或重复；先核对原文。');
   return content.slice(0, first) + content.slice(last + end.length);
+}
+
+// Detect direct local Markdown links only. The caller still reviews whether
+// their surrounding instruction covers the required triggers and scope.
+function referencesDocument(content, directory, document) {
+  const links = [...content.matchAll(/\]\(\s*(?:<([^>\n]+)>|([^\s)]+))[^\n)]*\)/g),
+    ...content.matchAll(/^\s{0,3}\[[^\]\n]+\]:\s*(?:<([^>\n]+)>|(\S+))/gm)];
+  return links.some(match => {
+    try {
+      const link = decodeURIComponent((match[1] || match[2]).split('#')[0]);
+      return link && !/^[a-z][\w+.-]*:|^\/\//i.test(link) && resolve(directory, link) === document;
+    } catch { return false; }
+  });
 }
 
 // Resolve only explicitly supplied project rule files. Preserve the link itself.
@@ -35,12 +48,14 @@ export async function registrationEdits(root, ruleFiles, documentPath) {
     const existing = entities.get(snapshot.entity);
     if (existing) { existing.aliases.push({ ...snapshot, content: undefined }); continue; }
     const link = relative(dirname(join(root, snapshot.entity)), join(root, documentPath)).replaceAll('\\', '/');
-    const block = `${start}\n执行本项目 Git 操作前，必须阅读并遵循[项目 Git 使用说明](<${link}>)。沿用其中明确的仓库、凭证来源及操作边界。\n${end}`;
+    const block = `${start}\n执行本项目 Git 设置、读取、提交、推送或发布前，必须读取并遵守[项目 Git 使用说明](<${link}>)。路径相对于本规则实体所在目录；沿用其中明确的主要仓库、操作检出、凭证来源及操作边界。\n${end}`;
     withoutRegistration(snapshot.content);
     const first = snapshot.content.indexOf(start), last = snapshot.content.indexOf(end);
-    const content = first < 0 ? `${snapshot.content}${snapshot.content.endsWith('\n') || !snapshot.content ? '' : '\n'}\n${block}\n`
+    const reusedReference = first < 0 && referencesDocument(snapshot.content, dirname(join(root, snapshot.entity)), join(root, documentPath));
+    const content = reusedReference ? snapshot.content : first < 0 ? `${snapshot.content}${snapshot.content.endsWith('\n') || !snapshot.content ? '' : '\n'}\n${block}\n`
       : snapshot.content.slice(0, first) + block + snapshot.content.slice(last + end.length);
-    entities.set(snapshot.entity, { path: snapshot.entity, before: snapshot.before, after: digest(content), content, mode: snapshot.mode, aliases: [{ ...snapshot, content: undefined }] });
+    entities.set(snapshot.entity, { path: snapshot.entity, before: snapshot.before, after: digest(content), content, mode: snapshot.mode,
+      reusedReference, requiresSemanticReview: true, aliases: [{ ...snapshot, content: undefined }] });
   }
   return [...entities.values()];
 }
