@@ -52,7 +52,7 @@ def serve(args, directory):
         record = {"pid": os.getpid(), "origin": server.origin, "public_origin": server.public_origin,
                   "instance": server.instance, "token": server.token, "page": args.page,
                   "project": str(args.project), "adapter": str(args.adapter)}
-        atomic_json(directory / "server.json", record)
+        atomic_json(directory / "server.json", record, owner_path=args.project)
         logging.info("service_started page=%s instance=%s", args.page, server.instance)
         threading.Thread(target=server.watcher, daemon=True).start()
         try:

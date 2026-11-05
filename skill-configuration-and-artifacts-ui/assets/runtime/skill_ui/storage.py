@@ -90,7 +90,7 @@ def file_lock(path):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def atomic_json(path, data):
+def atomic_json(path, data, owner_path=None):
     path = Path(path)
     if path.is_symlink() or (path.exists() and path.stat().st_nlink != 1):
         raise UIError("path", "保存目标必须是独立普通文件。")
@@ -103,7 +103,7 @@ def atomic_json(path, data):
             stream.flush()
             os.fsync(stream.fileno())
         if os.name == "nt":
-            _private_windows(temporary, path if path.exists() else path.parent)
+            _private_windows(temporary, owner_path or path.parent)
         os.replace(temporary, path)
     finally:
         if temporary.exists():
@@ -121,8 +121,9 @@ class JsonConfig:
     Dependencies and required checks run on candidate effective values before atomic replace.
     """
 
-    def __init__(self, path, fields):
+    def __init__(self, path, fields, owner_path=None):
         self.path, self.fields, self.key = Path(path), fields, secrets.token_bytes(32)
+        self.owner_path = Path(owner_path) if owner_path else self.path.parent
 
     def _read(self):
         if self.path.is_symlink():
@@ -147,7 +148,7 @@ class JsonConfig:
             raise UIError("changes", "没有待保存的修改。")
         # Existing business directories retain their ACL; only new directories/files are tightened.
         if not self.path.parent.exists():
-            private_directory(self.path.parent)
+            private_directory(self.path.parent, owner_path=self.owner_path if self.owner_path.exists() else None)
         with file_lock(self.path.with_suffix(self.path.suffix + ".lock")):
             values, current = self._read()
             if current != revision:
@@ -175,5 +176,5 @@ class JsonConfig:
                     raise UIError("validation", "请补齐：" + field["label"], 422)
                 if name in changes and not active(field, effective) and changes[name]["op"] == "set":
                     raise UIError("validation", field["label"] + "当前不适用，请先核对关联设置。", 422)
-            atomic_json(self.path, values)
+            atomic_json(self.path, values, owner_path=self.owner_path)
         return self.snapshot()

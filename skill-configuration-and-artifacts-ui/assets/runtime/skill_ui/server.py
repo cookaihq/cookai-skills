@@ -256,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
                     receipt = {"instance": server.instance, "project": str(server.project), "revision": snapshot["revision"],
                                "task": snapshot.get("task"), "validation": snapshot.get("validation", "适配器校验"),
                                "saved_at": time.time()}
-                    atomic_json(server.directory / "saved.json", receipt)
+                    atomic_json(server.directory / "saved.json", receipt, owner_path=server.project)
                     logging.info("config_saved instance=%s", server.instance)
                     return self.send(200, {"config": public, "receipt": receipt})
         raise UIError("missing", "此操作不存在。", 404)

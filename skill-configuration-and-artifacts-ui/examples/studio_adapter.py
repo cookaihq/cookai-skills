@@ -26,7 +26,7 @@ class Studio(Adapter):
             {"id":"days","label":"保留天数","type":"number","default":30,"depends_on":{"retain":True},"group":"产物设置","advanced":True},
             {"id":"priority","label":"语言优先级","type":"list","default":["中文","English"],"group":"文档设置","advanced":True},
             {"id":"workspace","label":"项目绑定","type":"text","default":str(project),"readonly":True,"group":"项目"},
-        ])
+        ], owner_path=project)
         audio = io.BytesIO()
         with wave.open(audio, "wb") as wav:
             wav.setparams((1, 2, 8000, 0, "NONE", "not compressed"))

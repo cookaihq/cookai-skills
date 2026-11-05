@@ -40,6 +40,8 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 
 产物条目按需提供 `kind/task/summary/status/metadata/resource/url/copy_text/preview`。`url` 仅允许 HTTP(S)，不提供失效链接。内置预览为 text、markdown（安全基础文本排版）、image、audio、video、table、comparison；复杂 Markdown/PDF/交互视图采用按目标确认的渲染器。`custom` 使用 `renderer/data`；定制视图通过 DOM textContent 插入不可信数据。下载采用分块和单 Range；超大集合或重型文档需适配器分页、摘要或定制视图，不能把全库塞入浏览器。
 
+Windows 私有运行目录和保存文件仅向执行账号及所选项目所有者授予访问，不改变已有业务父目录的 ACL。`JsonConfig(..., owner_path=project)` 可明确所有者基准（尤其配置位于新建子目录时）；默认使用配置父目录。由不同 Windows 沙箱账号运行的服务须从同一原生入口核验归属与权限，不能通过放开整个项目权限让测试通过。
+
 ## 运行示例与业务入口
 
 先创建一个已忽略的合成项目目录。分别启动两个页面：
