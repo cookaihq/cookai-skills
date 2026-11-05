@@ -43,6 +43,38 @@ def load_adapter(path, project):
     return module.build(project)
 
 
+def wait_for_exit(directory, timeout=5):
+    """An unhealthy listener may still be closing; wait for its process-owned lock."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with file_lock(directory / "service.lock"):
+                return
+        except UIError as exc:
+            if exc.code != "busy":
+                raise
+            if time.monotonic() >= deadline:
+                raise UIError("stopping", "服务尚未完成退出，请稍后查询状态。") from None
+            time.sleep(0.05)
+
+
+def remove_record(directory, instance):
+    # Windows readers briefly deny file deletion. Retry without releasing service ownership.
+    path = directory / "server.json"
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            if not path.exists():
+                return
+            if json.loads(path.read_text(encoding="utf-8")).get("instance") == instance:
+                path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def serve(args, directory):
     with file_lock(directory / "service.lock"):
         handler = RotatingFileHandler(directory / "service.log", maxBytes=1024*1024, backupCount=2, encoding="utf-8")
@@ -60,7 +92,7 @@ def serve(args, directory):
         finally:
             server.closed.set()
             server.server_close()
-            (directory / "server.json").unlink(missing_ok=True)
+            remove_record(directory, server.instance)
             logging.info("service_stopped page=%s instance=%s", args.page, server.instance)
 
 
@@ -91,6 +123,7 @@ def main():
             if args.public_origin and args.public_origin != record["public_origin"]:
                 raise UIError("origin", "已有服务使用不同访问地址，请先停止该页面再重开。")
         if args.command == "start" and not record:
+            wait_for_exit(directory)
             child_args = [sys.executable, "-m", "skill_ui", "serve", "--adapter", str(args.adapter), "--project", str(args.project),
                           "--page", args.page, "--runtime-dir", str(args.runtime_dir.resolve()), "--idle-seconds", str(args.idle_seconds)]
             if args.public_origin:
@@ -114,14 +147,13 @@ def main():
                 time.sleep(0.1)
             if not record:
                 raise UIError("startup", "启动未完成，请先查询状态；不要直接重复创建进程。")
-        if args.command == "stop" and record:
-            request(record["origin"], "/api/control/stop", {"token": record["token"]})
-            deadline = time.monotonic() + 5
-            while running(directory) and time.monotonic() < deadline:
-                time.sleep(0.1)
-            if running(directory):
-                raise UIError("stop", "停止请求已发送，尚未确认退出。")
+        if args.command == "stop":
+            if record:
+                request(record["origin"], "/api/control/stop", {"token": record["token"]})
+            wait_for_exit(directory)
             record = None
+        elif args.command == "status" and not record:
+            wait_for_exit(directory)
         output = {"status": "running" if record else "stopped", "runtime": str(directory)}
         if record:
             output.update(instance=record["instance"], page=record["page"], project=record["project"], lifetime=record["lifetime"])

@@ -66,4 +66,4 @@ Claude Code 使用用户主目录 `.claude/skills/skill-configuration-and-artifa
 
 每次使用会进行短时更新检查，失败不阻断工作。发现新版本后由你确认再更新；Git 安装使用仓库更新协议，复制安装按此 Skill 的固定 tag 与 commit 更新。可以说：“关闭 skill-configuration-and-artifacts-ui 的自动检查更新。”该开关独立保存在用户主目录 `.config/skill-configuration-and-artifacts-ui/.env`，不修改业务配置。
 
-开发和接入细节供 Agent 从 [SKILL.md](SKILL.md) 按需读取。宿主兼容不等于全部实测；本版本必需实测为 Codex，Claude Code、WorkBuddy 与另一操作系统的实际结果按交付记录说明。
+开发和接入细节供 Agent 从 [SKILL.md](SKILL.md) 按需读取。v0.1.0 已在 Windows 原生环境完成 Codex CLI 0.166.0 默认沙箱的新建接入、已有目标改造和无需 UI 的评估验收，并通过共用代码测试与桌面、手机尺寸浏览器检查。Codex 沙箱内 uv 可执行程序受限时，使用经过核验的同一锁定虚拟环境解释器继续，未扩大沙箱权限。macOS 待验；Claude Code、WorkBuddy 保持兼容目标，本批次未要求或宣称其实际验收通过。
