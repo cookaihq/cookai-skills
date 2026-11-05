@@ -11,15 +11,50 @@ import subprocess
 from .contracts import UIError
 
 
-def private_directory(path):
+def _windows_owner(path):
+    """Read the selected project's owner SID without depending on a shell/user-profile name."""
+    import ctypes
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    pointer = ctypes.c_void_p
+    advapi.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
+                                            ctypes.POINTER(pointer), pointer, pointer, pointer, ctypes.POINTER(pointer)]
+    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.ConvertSidToStringSidW.argtypes = [pointer, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [pointer]
+    owner, descriptor, text = pointer(), pointer(), wintypes.LPWSTR()
+    result = advapi.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor))
+    if result:
+        raise OSError(result, "Cannot read selected path owner")
+    try:
+        if not advapi.ConvertSidToStringSidW(owner, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return text.value
+    finally:
+        if text:
+            kernel.LocalFree(ctypes.cast(text, pointer))
+        kernel.LocalFree(descriptor)
+
+
+def _private_windows(path, owner_path):
+    current = subprocess.check_output(["whoami", "/user", "/fo", "csv", "/nh"], text=True).strip().split(",")[-1].strip('"')
+    owners = {current, _windows_owner(owner_path)}
+    permissions = "(OI)(CI)F" if path.is_dir() else "F"
+    command = ["icacls", str(path), "/inheritance:r"]
+    for sid in sorted(owners):
+        command.extend(["/grant:r", f"*{sid}:{permissions}"])
+    subprocess.run(command, check=True, capture_output=True, timeout=10)
+
+
+def private_directory(path, owner_path=None):
     path = Path(path)
     if path.is_symlink():
         raise UIError("path", "运行目录不能是符号链接。")
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name == "nt":
-        sid = subprocess.check_output(["whoami", "/user", "/fo", "csv", "/nh"], text=True).strip().split(",")[-1].strip('"')
-        subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],
-                       check=True, capture_output=True, timeout=10)
+        _private_windows(path, owner_path or path.parent)
     else:
         path.chmod(0o700)
     return path
@@ -67,6 +102,8 @@ def atomic_json(path, data):
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        if os.name == "nt":
+            _private_windows(temporary, path if path.exists() else path.parent)
         os.replace(temporary, path)
     finally:
         if temporary.exists():
@@ -108,7 +145,9 @@ class JsonConfig:
     def save(self, changes, revision):
         if not isinstance(changes, dict) or not changes:
             raise UIError("changes", "没有待保存的修改。")
-        private_directory(self.path.parent)
+        # Existing business directories retain their ACL; only new directories/files are tightened.
+        if not self.path.parent.exists():
+            private_directory(self.path.parent)
         with file_lock(self.path.with_suffix(self.path.suffix + ".lock")):
             values, current = self._read()
             if current != revision:

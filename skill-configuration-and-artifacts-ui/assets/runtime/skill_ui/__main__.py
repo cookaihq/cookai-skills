@@ -82,7 +82,7 @@ def main():
     if args.command in ("status", "stop") and not directory.exists():
         print(json.dumps({"status": "stopped", "runtime": str(directory)}))
         return
-    private_directory(directory)
+    private_directory(directory, owner_path=args.project)
     if args.command == "serve":
         return serve(args, directory)
     with file_lock(directory / "launcher.lock"):
