@@ -39,4 +39,7 @@ def ensure():
         if not ready():
             raise RuntimeError("Runtime repair failed: " + str(environment))
     os.environ[MARKER] = str(environment)
+    if os.name == "nt":
+        # Windows execv detaches from some host capture pipes; wait and propagate the real result.
+        raise SystemExit(subprocess.run([str(interpreter)] + sys.argv).returncode)
     os.execv(str(interpreter), [str(interpreter)] + sys.argv)
