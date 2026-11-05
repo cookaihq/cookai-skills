@@ -21,6 +21,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [template-preview](template-preview/) | 把「一批图片 + 文案」的文件夹渲染成模仿知名 App UI 的展示页（v1 内置小红书个人主页模板），产出自包含的 `index.html` + assets，可交给 preview-share 上传 | [README](template-preview/README.md) · [SKILL.md](template-preview/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
 | [frpc-launch](frpc-launch/) | 使用已有自部署/宝塔或樱花 FRP；按项目复用连接、固定域名并隔离代理、进程和日志，支持检查与独立停止 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
+| [skill-configuration-and-artifacts-ui](skill-configuration-and-artifacts-ui/) | 为新建或已有 Skill / Plugin 评估、预览和接入配置中心与产物集合；携带共用规则、运行代码和改造工具 | [README](skill-configuration-and-artifacts-ui/README.md) · [SKILL.md](skill-configuration-and-artifacts-ui/SKILL.md) |
 
 ## 版本与 Release
 
@@ -44,6 +45,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | preview-share | 1.3.0 | [preview-share/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.3.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
+| skill-configuration-and-artifacts-ui | 0.1.0 | [skill-configuration-and-artifacts-ui/v0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv0.1.0) |
 | template-preview | 1.3.0 | [template-preview/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.3.0) |
 | video-to-markdown | 2.0.0 | [video-to-markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv2.0.0) |
 <!-- release-table:end -->

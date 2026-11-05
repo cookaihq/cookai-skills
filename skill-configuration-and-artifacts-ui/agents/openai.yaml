@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill 配置与产物 UI"
+  short_description: "为新建或已有 Skill / Plugin 接入配置中心与产物集合"
+  default_prompt: "使用 $skill-configuration-and-artifacts-ui，检查我指定的 Skill 或 Plugin，分别评估配置与产物 UI 的必要性，提出展示和改造方案，经确认后接入。"

@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "skill-configuration-and-artifacts-ui",
+  "channel": "stable",
+  "tag_prefix": "skill-configuration-and-artifacts-ui/v",
+  "ref_type": "tag"
+}

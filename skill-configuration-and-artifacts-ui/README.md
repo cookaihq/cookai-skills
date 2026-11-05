@@ -1,0 +1,69 @@
+# Skill 配置与产物 UI
+
+给 Skill / Plugin 开发者使用：为新产物接入配置中心和产物集合，也能评估、改造已有产物。Agent 会先调查实际配置与结果，再与你确认哪些需要展示、怎样展示，并提供可运行预览。
+
+配置中心既能补齐 API Key 等必要信息，也能查看和修改全部持久设置。产物页面默认使用集合与专注预览，可展示文档、图片、音视频、表格和业务回执，并保留定制视图。
+
+两个页面分别计时、分别结束。产物页面可为本次服务勾选常驻，并显示资源占用提示。业务 Skill / Plugin 会携带固定版本的共用代码，最终使用者无需安装这个开发 Skill。
+
+## 安装
+
+支持 Claude Code、Codex 和 WorkBuddy。把下面这段话发给你使用的 Agent：
+
+```text
+请从 https://github.com/cookaihq/cookai-skills 安装其中的
+skill-configuration-and-artifacts-ui，使用当前 Agent 支持的用户级 Skill 入口。
+安装完整目录，保留 references、assets、examples、scripts 和锁文件，
+然后在新会话中验证发现和调用。
+```
+
+Claude Code 使用用户主目录 `.claude/skills/skill-configuration-and-artifacts-ui/`；Codex 使用 `.agents/skills/skill-configuration-and-artifacts-ui/`，展示名为“Skill 配置与产物 UI”。WorkBuddy 使用其原生本地 Skill 导入/安装入口，导入同一完整目录，不依赖 Codex 展示配置。WorkBuddy 的安装器能力由 Agent 在当前客户端核实，不能把另一个宿主的链接可用视为导入成功。
+
+本 Skill 无需 API Key 或业务账户。Agent 运行示例与接入工具时使用 uv 0.8+ 和随包固定的 Python 3.13；缺少 uv 时会说明当前设备的准备方式。
+
+## 第一次使用
+
+向 Codex 发送（其他 Agent 可直接点名同名 Skill）：
+
+```text
+使用 $skill-configuration-and-artifacts-ui，检查当前项目里的 <目标 Skill 或 Plugin>。
+分别判断是否需要配置 UI 和产物 UI，告诉我现有配置和成果适合怎样展示。
+先给展示方案和可运行预览，经我确认后再接入。
+```
+
+把 `<目标 Skill 或 Plugin>` 替换为实际名称或目录。你会得到基于源码的必要性建议、具体字段与产物方案、预览，以及确认后的真实接入。没有配置或不适合新增界面的目标可以选择只做一个页面或两个都不做。
+
+## 改造已有 Skill
+
+```text
+用 skill-configuration-and-artifacts-ui 改造这个已有 Skill。
+先调查现有界面和用户配置；我想先看看新界面，再决定保留、补充还是替换。
+如果缺少运行记录，请提出采集、存储、保留和历史覆盖方案让我确认。
+```
+
+再次接入会核对共用代码版本与定制内容，发生冲突先给出差异，不覆盖用户配置或业务适配。可让 Agent 只评估或只做预览。实际验收使用哪些 Agent 由你选择，已有决定继续沿用。
+
+## 查看示例与跨设备访问
+
+```text
+启动这个 Skill 自带的配置中心和产物集合合成示例，给我两个本机链接。
+```
+
+示例仅写入指定演示项目，不调用真实 API；请只填合成密钥。
+
+**📱 手机或其他设备访问需要 FRP 或 Tailscale。** 已配置时可发送：“用 FRP 开放这个产物预览，给我手机可访问的链接。”没有安装配置时，需先请 Agent 安装配置；仅安装完成不代表页面已经可访问。
+
+## 遇到问题
+
+- “页面打不开，请核对这次项目和页面的服务状态、访问期限及完整链接。”
+- “保存提示配置已改变，请保留我的修改，检查实际文件差异和生效范围。”
+- “已有产物没显示，请检查项目归属与记录覆盖，不要扫描其他项目或补造历史。”
+- “升级提示共用代码有本地修改，请比较差异并提出保留定制的方案。”
+
+保存成功只表示所显示的配置校验已完成，不代表外部 API 或业务任务成功。Agent 会核对原任务再继续；会话结束时页面可提供继续请求。停止 UI 保留配置与成果。
+
+## 更新
+
+每次使用会进行短时更新检查，失败不阻断工作。发现新版本后由你确认再更新；Git 安装使用仓库更新协议，复制安装按此 Skill 的固定 tag 与 commit 更新。可以说：“关闭 skill-configuration-and-artifacts-ui 的自动检查更新。”该开关独立保存在用户主目录 `.config/skill-configuration-and-artifacts-ui/.env`，不修改业务配置。
+
+开发和接入细节供 Agent 从 [SKILL.md](SKILL.md) 按需读取。宿主兼容不等于全部实测；本版本必需实测为 Codex，Claude Code、WorkBuddy 与另一操作系统的实际结果按交付记录说明。
