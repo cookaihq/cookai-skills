@@ -1,0 +1,6 @@
+interface:
+  display_name: "小红书 Skill 下载"
+  short_description: "下载小红书 RedSkill 发布包，校验完整性并报告缺失资源"
+  default_prompt: "使用 $redskill-download 下载这段小红书 RedSkill 分享中的技能，保存到配置的下载目录并检查缺件。"
+policy:
+  allow_implicit_invocation: true

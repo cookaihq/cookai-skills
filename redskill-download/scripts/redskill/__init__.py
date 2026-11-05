@@ -1,0 +1,1 @@
+"""Shared RedSkill download implementation."""

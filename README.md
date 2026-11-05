@@ -17,6 +17,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [pdf2markdown](pdf2markdown/) | 通过 AIHub Doc2X 转换本地 PDF 或公开 HTTPS PDF，由 Agent 逐页核验、修订和复核，在本地交付 Markdown、图片、核验报告与三栏预览；支持同任务恢复和已有 ZIP 重新核验 | [README](pdf2markdown/README.md) · [SKILL.md](pdf2markdown/SKILL.md) |
 | [s3-upload](s3-upload/) | 把本地文件持久写入用户自己的 S3 兼容 bucket（AWS S3 / Cloudflare R2 / custom，OSS / COS experimental）：严格 JSON Object Reference + public/presigned URL、`--collision reject` 原子 no-overwrite 与同内容采纳、17 键闭合 result 合同与 `--result-out` 跨进程 handoff、checkpoint 只读对账恢复 | [README](s3-upload/README.md) · [SKILL.md](s3-upload/SKILL.md) |
 | [preview-share](preview-share/) | 把本地 HTML 页面（或任意本地文件）传到线上预览并拿到可分享 URL，自动识别并一并上传相对路径引用的图片 / CSS / JS | [README](preview-share/README.md) · [SKILL.md](preview-share/SKILL.md) |
+| [redskill-download](redskill-download/) | 下载小红书 RedSkill 分享的技能发布包，保存原始 ZIP、解压文件和校验记录，检查引用缺件；下载目录可配置 | [README](redskill-download/README.md) · [SKILL.md](redskill-download/SKILL.md) |
 | [template-preview](template-preview/) | 把「一批图片 + 文案」的文件夹渲染成模仿知名 App UI 的展示页（v1 内置小红书个人主页模板），产出自包含的 `index.html` + assets，可交给 preview-share 上传 | [README](template-preview/README.md) · [SKILL.md](template-preview/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
 | [frpc-launch](frpc-launch/) | 使用已有自部署/宝塔或樱花 FRP；按项目复用连接、固定域名并隔离代理、进程和日志，支持检查与独立停止 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
@@ -41,6 +42,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | multimodal-ask | 1.3.0 | [multimodal-ask/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.3.0) |
 | pdf2markdown | 2.0.0 | [pdf2markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv2.0.0) |
 | preview-share | 1.3.0 | [preview-share/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.3.0) |
+| redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | template-preview | 1.3.0 | [template-preview/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.3.0) |
 | video-to-markdown | 2.0.0 | [video-to-markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv2.0.0) |
@@ -92,7 +94,7 @@ npx skills add cookaihq/cookai-skills --skill image-2 -a claude-code
 
 ## 自动检查更新
 
-本仓全部 14 个 skill 都自带 `scripts/check_update.sh`，SKILL.md 的第 0 步会在每次运行时调用它：脚本按 skill 所在的 git 检出比对 `origin/main`，落后就把版本变化和提交摘要打印出来，由 Agent 转述给你并询问是否拉取；只有你同意后才会执行 `check_update.sh --pull`（仅当分支为 `main`、跟踪文件无未提交改动、且可 fast-forward 时执行 `git merge --ff-only`，脚本从不 commit / push / reset / checkout）。
+本仓 Skill 自带 `scripts/check_update.sh`，按各自 `SKILL.md` 在运行前检查更新：Git 安装按 skill 所在的检出比对 `origin/main`，落后就把版本变化和提交摘要打印出来，由 Agent 转述给你并询问是否拉取；只有你同意后才会执行 `check_update.sh --pull`（仅当分支为 `main`、跟踪文件无未提交改动、且可 fast-forward 时执行 `git merge --ff-only`，脚本从不 commit / push / reset / checkout）。`redskill-download` 在 Windows 原生使用随包的 `check_update.ps1`；复制安装的检查和更新方式见其 README。
 
 它只做检查和提醒，不会自动改你本机的文件。检查每 6 小时最多一次，`git fetch` 单次尝试、5 秒超时，网络失败、非 git 检出（如手工拷贝安装）一律静默跳过——更新检查任何情况下都不会挡住 skill 干正事。
 
