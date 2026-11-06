@@ -46,6 +46,8 @@ Claude Code 使用用户主目录 `.claude/skills/skill-configuration-and-artifa
 
 再次接入会核对共用代码版本与定制内容，发生冲突先给出差异，不覆盖用户配置或业务适配。可让 Agent 只评估或只做预览。实际验收使用哪些 Agent 由你选择，已有决定继续沿用。
 
+讨论或预览反馈同时涉及多项相互影响的改动、又有关键问题未明确时，Agent 会结合具体缺口，建议你是否使用 `mattpocock-skills:grill-with-docs` 梳理需求。它会提供当前 Agent 中可用的显式调用入口；尚未安装或无法核实入口时会说明情况，也可继续普通澄清。你可以拒绝，同一问题不会反复推荐；选择梳理后会保留已确认决定，结束时接回原来的设计、预览或实施阶段。简单调整或已说明清楚的复杂需求直接继续。
+
 ## 查看示例与跨设备访问
 
 ```text
@@ -72,3 +74,5 @@ Claude Code 使用用户主目录 `.claude/skills/skill-configuration-and-artifa
 开发和接入细节供 Agent 从 [SKILL.md](SKILL.md) 按需读取。v0.1.0 已在 Windows 原生环境完成 Codex CLI 0.166.0 默认沙箱的新建接入、已有目标改造和无需 UI 的评估验收，并通过共用代码测试与桌面、手机尺寸浏览器检查。Codex 沙箱内 uv 可执行程序受限时，使用经过核验的同一锁定虚拟环境解释器继续，未扩大沙箱权限。macOS 待验；Claude Code、WorkBuddy 保持兼容目标，本批次未要求或宣称其实际验收通过。
 
 v0.1.1 修复了配置方式与旧入口保留规则的冲突，已在 Windows 的 Codex CLI 0.166.0 默认沙箱通过新建与存量方案评估，以及 30 项合成命令入口、配置语义和数据保留检查。共用 UI 代码未变，沿用 v0.1.0 的对应测试证据；本次未重跑浏览器。macOS 待验，Claude Code、WorkBuddy 未实测。
+
+v0.2.0 新增复杂需求澄清推荐，已在 Windows 的 Codex CLI 0.166.0 默认沙箱验证复杂与清楚需求、简单改动、普通同意与拒绝、用户显式调用、预览追加反馈、梳理后接回及本轮不可用约束下的普通澄清。共用 UI 代码未变，沿用对应历史证据；macOS 待验，Claude Code、WorkBuddy 未实测。

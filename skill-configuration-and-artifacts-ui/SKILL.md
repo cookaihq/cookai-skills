@@ -1,8 +1,8 @@
 ---
 name: skill-configuration-and-artifacts-ui
-description: v0.1.1｜为新建或已有 Skill / Plugin 设计、接入和改造配置与产物 UI；评估必要性、确认展示方案，并提供配置中心、产物集合与专注预览的共用规则和代码。适用于 Skill 开发及界面改造。
+description: v0.2.0｜为新建或已有 Skill / Plugin 设计、接入和改造配置与产物 UI；评估必要性、确认展示方案，并提供配置中心、产物集合与专注预览的共用规则和代码。适用于 Skill 开发及界面改造。
 metadata:
-  version: "0.1.1"
+  version: "0.2.0"
 ---
 
 # Skill 配置与产物 UI
@@ -16,6 +16,8 @@ metadata:
 ## 1. 调查并决定适用性
 
 读取 [调查与改造](references/assessment.md)；涉及配置时，在形成方案前同时读取 [配置规则](references/configuration.md)，按其中的配置方式边界调查存量入口。查目标源码、已有 UI、配置加载与保存、输出与任务记录、发布包和宿主入口。分别给配置 UI、产物 UI 的必要性结论及证据，让用户决定两者、其一或均不需要；沿用仍适用的决定。此开发 Skill 本身不需要业务配置或产物服务，不递归给自己接入 UI。
+
+初次需求、后续追加调整或预览反馈出现复杂且影响方案的关键缺口时，按 [复杂需求澄清](references/assessment.md#复杂需求澄清) 主动推荐 `mattpocock-skills:grill-with-docs`，沿用用户选择后接回当前阶段。
 
 完成条件：目标和项目明确，每项配置/产物可对应实际读写或记录入口；新增数据采集与存量 UI 的处置已经确定。仅评估请求到此交付方案，不擅自改造。
 
