@@ -1,4 +1,0 @@
-interface:
-  display_name: "Feishu CLI Gateway"
-  short_description: "安全检查、账户登录、权限确认并调用飞书官方 lark-cli"
-  default_prompt: "使用 $feishu-use 检查 lark-cli、确认我的飞书账户并完成这项飞书操作。"

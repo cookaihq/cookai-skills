@@ -7,20 +7,13 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | Skill | 功能 | 文档 |
 |---|---|---|
 | [bilibili-charge-download](bilibili-charge-download/) | 使用用户已登录且有完整播放及保存权限的 B 站账号下载充电专属视频，将 DASH 音视频封装并完整性验证为 MP4；不读取 Cookie，不绕过付费或访问限制 | [README](bilibili-charge-download/README.md) · [SKILL.md](bilibili-charge-download/SKILL.md) |
-| [feishu-use](feishu-use/) | 安全调用飞书官方 `lark-cli` 的通用入口：检查安装与最新版、确认更新选择、核对用户/应用身份和目标账户、引导链接 + 二维码登录、增量授权后再执行 Base / 文档 / 日历等操作 | [README](feishu-use/README.md) · [SKILL.md](feishu-use/SKILL.md) |
 | [git-setup](git-setup/) | 仅提供 URL 即按当前项目状态接入远端；支持明确请求的发布、同步与本地/GitHub Issue | [README](git-setup/README.md) · [SKILL.md](git-setup/SKILL.md) |
-| [image-2](image-2/) | `gpt-image-2` 生成图片：文生图 / 图生图、11 种预设比例 + 自定义分辨率（最高 4K）、任务完成自动下载到工作区 | [README](image-2/README.md) · [SKILL.md](image-2/SKILL.md) |
-| [banana-2](banana-2/) | Nano Banana 2（`gemini-3.1-flash-image-preview`）生成 / 编辑图片：文生图 / 图生图 / 图像编辑、15 种宽高比 + `512`~`4K` 画质档、可选联网搜索 / 图片搜索增强、任务完成自动下载到工作区 | [README](banana-2/README.md) · [SKILL.md](banana-2/SKILL.md) |
-| [memoji-sticker-pack](memoji-sticker-pack/) | 从一张人物照片生成一套 Apple Memoji 风格（拟我表情）表情贴纸包：先出基准头像锁定长相，再并发生成 N 个表情（默认 16），绿幕出图 + 自动抠成透明底 PNG，产出画廊 `index.html`（调用 `image-2` 生成，内置参考图上传） | [README](memoji-sticker-pack/README.md) · [SKILL.md](memoji-sticker-pack/SKILL.md) |
-| [multimodal-ask](multimodal-ask/) | 指定模型做多模态理解与文本生成：分析 / 转写音视频、让指定模型读取本地或远程图片 / PDF、对混合媒体一次性推理（异步） | [README](multimodal-ask/README.md) · [SKILL.md](multimodal-ask/SKILL.md) |
 | [video-to-markdown](video-to-markdown/) | 把本地或可直接下载的视频转成可复核、可续跑的 Markdown 文档：结合带时间戳的语音转写、关键帧截图、短 GIF、自适应补采样和全时间线覆盖检查，保留语音与画面共同承载的内容 | [README](video-to-markdown/README.md) · [SKILL.md](video-to-markdown/SKILL.md) |
 | [pdf2markdown](pdf2markdown/) | 通过 AIHub Doc2X 转换本地 PDF 或公开 HTTPS PDF，由 Agent 逐页核验、修订和复核，在本地交付 Markdown、图片、核验报告与三栏预览；支持同任务恢复和已有 ZIP 重新核验 | [README](pdf2markdown/README.md) · [SKILL.md](pdf2markdown/SKILL.md) |
 | [s3-upload](s3-upload/) | 把本地文件持久写入用户自己的 S3 兼容 bucket（AWS S3 / Cloudflare R2 / custom，OSS / COS experimental）：严格 JSON Object Reference + public/presigned URL、`--collision reject` 原子 no-overwrite 与同内容采纳、17 键闭合 result 合同与 `--result-out` 跨进程 handoff、checkpoint 只读对账恢复 | [README](s3-upload/README.md) · [SKILL.md](s3-upload/SKILL.md) |
-| [preview-share](preview-share/) | 把本地 HTML 页面（或任意本地文件）传到线上预览并拿到可分享 URL，自动识别并一并上传相对路径引用的图片 / CSS / JS | [README](preview-share/README.md) · [SKILL.md](preview-share/SKILL.md) |
-| [redskill-download](redskill-download/) | 下载小红书 RedSkill 分享的技能发布包，保存原始 ZIP、解压文件和校验记录，检查引用缺件；下载目录可配置 | [README](redskill-download/README.md) · [SKILL.md](redskill-download/SKILL.md) |
-| [template-preview](template-preview/) | 把「一批图片 + 文案」的文件夹渲染成模仿知名 App UI 的展示页（v1 内置小红书个人主页模板），产出自包含的 `index.html` + assets，可交给 preview-share 上传 | [README](template-preview/README.md) · [SKILL.md](template-preview/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
 | [frpc-launch](frpc-launch/) | 使用已有自部署/宝塔或樱花 FRP；按项目复用连接、固定域名并隔离代理、进程和日志，支持检查与独立停止 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
+| [redskill-download](redskill-download/) | 下载小红书 RedSkill 分享的技能发布包，保存原始 ZIP、解压文件和校验记录，检查引用缺件；下载目录可配置 | [README](redskill-download/README.md) · [SKILL.md](redskill-download/SKILL.md) |
 | [skill-configuration-and-artifacts-ui](skill-configuration-and-artifacts-ui/) | 为新建或已有 Skill / Plugin 评估、预览和接入配置中心与产物集合；携带共用规则、运行代码和改造工具 | [README](skill-configuration-and-artifacts-ui/README.md) · [SKILL.md](skill-configuration-and-artifacts-ui/SKILL.md) |
 
 ## 版本与 Release
@@ -32,36 +25,29 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
 |---|---|---|
-| banana-2 | 1.3.0 | [banana-2/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/banana-2%2Fv1.3.0) |
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
-| feishu-use | 1.2.0 | [feishu-use/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/feishu-use%2Fv1.2.0) |
 | frpc-launch | 1.5.0 | [frpc-launch/v1.5.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.5.0) |
 | git-setup | 1.0.1 | [git-setup/v1.0.1](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.1) |
-| image-2 | 1.3.0 | [image-2/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/image-2%2Fv1.3.0) |
-| memoji-sticker-pack | 1.3.0 | [memoji-sticker-pack/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/memoji-sticker-pack%2Fv1.3.0) |
-| multimodal-ask | 1.3.0 | [multimodal-ask/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/multimodal-ask%2Fv1.3.0) |
 | pdf2markdown | 2.0.0 | [pdf2markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv2.0.0) |
-| preview-share | 1.3.0 | [preview-share/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/preview-share%2Fv1.3.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | skill-configuration-and-artifacts-ui | 0.1.0 | [skill-configuration-and-artifacts-ui/v0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv0.1.0) |
-| template-preview | 1.3.0 | [template-preview/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/template-preview%2Fv1.3.0) |
 | video-to-markdown | 2.0.0 | [video-to-markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv2.0.0) |
 <!-- release-table:end -->
 
 ## 安装
 
-以 `image-2` 为例，四种方式任选其一（其他 skill 如 `banana-2` 把命令里的 `image-2` 换成对应目录名即可）。
+以 `frpc-launch` 为例，四种方式任选其一（其他 skill 如 `bilibili-charge-download` 把命令里的 `frpc-launch` 换成对应目录名即可）。
 
 让 Agent 自己装（推荐，最省事 —— 把下面这段提示词丢给 Claude Code 或 Codex）：
 
 ```text
-请把 https://github.com/cookaihq/cookai-skills 仓库里的 image-2 skill 安装给你自己用：
+请把 https://github.com/cookaihq/cookai-skills 仓库里的 frpc-launch skill 安装给你自己用：
 1. 克隆仓库到本地（已克隆则更新）
-2. 把其中的 image-2 目录链接或复制到你当前平台的 skills 目录
-   （Claude Code 用 ~/.claude/skills/image-2，其他平台用各自约定的位置）
-3. 读 image-2/SKILL.md 确认能被识别，然后告诉我怎么触发它
+2. 把其中的 frpc-launch 目录链接或复制到你当前平台的 skills 目录
+   （Claude Code 用 ~/.claude/skills/frpc-launch，其他平台用各自约定的位置）
+3. 读 frpc-launch/SKILL.md 确认能被识别，然后告诉我怎么触发它
 ```
 
 如果你非常清楚 Skills 的安装方式，可以使用以下方法。
@@ -71,19 +57,19 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 ```bash
 git clone https://github.com/cookaihq/cookai-skills.git
 mkdir -p ./.claude/skills
-ln -s "$(pwd)/cookai-skills/image-2" ./.claude/skills/image-2
+ln -s "$(pwd)/cookai-skills/frpc-launch" ./.claude/skills/frpc-launch
 ```
 
 用户级 symlink（所有项目可触发）：
 
 ```bash
-ln -s "$(pwd)/cookai-skills/image-2" ~/.claude/skills/image-2
+ln -s "$(pwd)/cookai-skills/frpc-launch" ~/.claude/skills/frpc-launch
 ```
 
 skills CLI：
 
 ```bash
-npx skills add cookaihq/cookai-skills --skill image-2 -a claude-code
+npx skills add cookaihq/cookai-skills --skill frpc-launch -a claude-code
 ```
 
 > Codex / Gemini 用户把 `-a claude-code` 换成对应平台标识。
