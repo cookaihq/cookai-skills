@@ -1,6 +1,6 @@
 [project]
 name = "skill-configuration-and-artifacts-ui"
-version = "0.1.0"
+version = "0.1.1"
 description = "Reusable local configuration and artifacts UI for Skill developers"
 requires-python = ">=3.13,<3.14"
 dependencies = []

@@ -9,7 +9,7 @@
 - `scripts/vendor.py`：检查并复制核心，生成 `.vendor.json` 的版本与逐文件 SHA-256。默认只检查；`--apply` 才应用，冲突退出 2。迁移暂存必须指定同一文件系统的已忽略临时目录，成功保留旧核心以便恢复。
 - `scripts/ui.py`：本开发 Skill 预览入口，先进入自身锁定环境。业务发布包直接使用其已有运行环境调用 vendored `skill_ui`；不依赖本开发 Skill 或其安装路径。
 
-在目标发布根选择独立核心目录，例如 `shared/skill_ui/`，每个 Plugin 一份。业务适配器、定制视图在 `ui/` 或目标已有正式目录维护，用户配置和记录留在原位置。
+在目标发布根选择独立核心目录，例如 `shared/skill_ui/`，每个 Plugin 一份。业务适配器、定制视图在 `ui/` 或目标已有正式目录维护，用户配置和记录留在原位置。配置入口与调用方按 [配置方式与存量改造](configuration.md#配置方式与存量改造) 接续，清理已退出的路径；复用真实加载器不意味着保留旧的取值或配置引导流程。
 
 ```text
 uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --target <目标>/shared/skill_ui

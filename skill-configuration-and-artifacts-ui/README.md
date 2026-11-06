@@ -4,6 +4,8 @@
 
 配置中心既能补齐 API Key 等必要信息，也能查看和修改全部持久设置。产物页面默认使用集合与专注预览，可展示文档、图片、音视频、表格和业务回执，并保留定制视图。
 
+配置通过配置中心直接填写和修改，不再采用 Secret Book。改造已有目标时，Agent 会把相关配置入口和缺项、修复引导接到配置中心，不另留独立或备用入口；已有本机配置继续有效，用户凭证和 Secret Book 中的数据不会因此迁移或删除。
+
 两个页面分别计时、分别结束。产物页面可为本次服务勾选常驻，并显示资源占用提示。业务 Skill / Plugin 会携带固定版本的共用代码，最终使用者无需安装这个开发 Skill。
 
 ## 安装
@@ -11,8 +13,9 @@
 支持 Claude Code、Codex 和 WorkBuddy。把下面这段话发给你使用的 Agent：
 
 ```text
-请从 https://github.com/cookaihq/cookai-skills 安装其中的
-skill-configuration-and-artifacts-ui，使用当前 Agent 支持的用户级 Skill 入口。
+请优先从 https://github.com/cookaihq/cookai-skills 安装其中的
+skill-configuration-and-artifacts-ui，网络故障时尝试 https://cnb.cool/zhidateam/tannt/tannt-skills，
+使用当前 Agent 支持的用户级 Skill 入口。
 安装完整目录，保留 references、assets、examples、scripts 和锁文件，
 然后在新会话中验证发现和调用。
 ```
@@ -67,3 +70,5 @@ Claude Code 使用用户主目录 `.claude/skills/skill-configuration-and-artifa
 每次使用会进行短时更新检查，失败不阻断工作。发现新版本后由你确认再更新；Git 安装使用仓库更新协议，复制安装按此 Skill 的固定 tag 与 commit 更新。可以说：“关闭 skill-configuration-and-artifacts-ui 的自动检查更新。”该开关独立保存在用户主目录 `.config/skill-configuration-and-artifacts-ui/.env`，不修改业务配置。
 
 开发和接入细节供 Agent 从 [SKILL.md](SKILL.md) 按需读取。v0.1.0 已在 Windows 原生环境完成 Codex CLI 0.166.0 默认沙箱的新建接入、已有目标改造和无需 UI 的评估验收，并通过共用代码测试与桌面、手机尺寸浏览器检查。Codex 沙箱内 uv 可执行程序受限时，使用经过核验的同一锁定虚拟环境解释器继续，未扩大沙箱权限。macOS 待验；Claude Code、WorkBuddy 保持兼容目标，本批次未要求或宣称其实际验收通过。
+
+v0.1.1 修复了配置方式与旧入口保留规则的冲突，已在 Windows 的 Codex CLI 0.166.0 默认沙箱通过新建与存量方案评估，以及 30 项合成命令入口、配置语义和数据保留检查。共用 UI 代码未变，沿用 v0.1.0 的对应测试证据；本次未重跑浏览器。macOS 待验，Claude Code、WorkBuddy 未实测。
