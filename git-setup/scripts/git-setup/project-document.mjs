@@ -9,7 +9,7 @@ export async function planDocument(project, input) {
   const state = await inspectProject(project);
   const root = state.root || state.requestedPath;
   if (root !== state.requestedPath) fail('document_root_required', '请明确项目 Git 根，不从普通子目录修改父仓规则。');
-  const path = portablePath(input.path || 'docs/agent/git.md');
+  const path = portablePath(input.path || 'docs/agents/git-repository-operations.md');
   if (typeof input.content !== 'string' || !input.content.trim() || Buffer.byteLength(input.content) > 262144
       || !Array.isArray(input.ruleFiles) || !input.ruleFiles.length) fail('document_input', '需要完整 Git 使用说明与实际生效的规则入口列表。');
   publicText(input.content);

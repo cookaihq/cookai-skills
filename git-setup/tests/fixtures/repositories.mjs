@@ -57,7 +57,7 @@ export async function repositoryFixture() {
       if(!config.repositories[item.path] || input.repositories?.[item.path]) config.repositories[item.path] = { targets: confirmedTargets(await inspect(item.repository.root)), sync: input.repositories?.[item.path]?.sync ?? config.repositories[item.path]?.sync ?? null };
     }
     await writeFile(path, JSON.stringify(config,null,2)+'\n');
-    const doc = { path:'docs/agent/git.md', content:'# Project Git\n\nRead project rules; choose the repository and remote explicitly.\n', ruleFiles:['AGENTS.md'] };
+    const doc = { path:'docs/agents/git-repository-operations.md', content:'# Project Git\n\nRead project rules; choose the repository and remote explicitly.\n', ruleFiles:['AGENTS.md'] };
     const plan = await planDocument(project, doc);
     return writeDocument(project, doc, {apply:true,expectedFingerprint:plan.fingerprint});
   };

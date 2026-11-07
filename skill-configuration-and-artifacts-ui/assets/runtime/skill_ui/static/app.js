@@ -2,8 +2,17 @@ const root = document.querySelector('#app');
 const e = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 let state, csrf = '', ended = false, pending = {}, revealed = {}, localErrors = {}, remaining = 0, lastActivity = 0, toastTimer;
 let collectionScroll = history.state?.collectionScroll || 0;
+let savePanelExpanded = false;
 const eye = shown => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>${shown?'<path d="m3 3 18 18"/>':''}</svg>`;
 const renderers = new Map();
+// Reserve the dock's actual height, including wrapped validation and save results.
+const saveBoxObserver = new ResizeObserver(entries => {
+  document.documentElement.style.setProperty('--save-space', `${Math.ceil(entries[0].target.getBoundingClientRect().height) + 40}px`);
+});
+function resetSaveBox() {
+  saveBoxObserver.disconnect();
+  document.documentElement.style.removeProperty('--save-space');
+}
 const params = () => new URLSearchParams(location.search);
 const value = (key, fallback = '') => params().get(key) ?? fallback;
 const resourceURL = (id, download = false) => '/resources/' + encodeURIComponent(id) + (download ? '?download=1' : '');
@@ -17,6 +26,7 @@ async function api(path, data) {
   return body;
 }
 function fail(error) {
+  resetSaveBox();
   if (error.status === 410 || error.status === 401) ended = true;
   root.innerHTML = `<div class="shell"><div class="empty"><h1>${ended ? '页面已结束' : '暂时无法读取'}</h1><p>${e(error.message)}</p>${ended ? '<p>请让 Agent 重新打开此页面。已保存的配置和产物仍然保留。</p>' : '<button data-action="reload">重试</button>'}</div></div>`;
   root.setAttribute('aria-busy','false');
@@ -42,7 +52,6 @@ function navigate(changes, replace = false) {
 }
 function effective(field) { const edit = pending[field.id]; return edit ? (edit.op === 'unset' ? field.default : edit.value) : field.value; }
 function active(field) { return Object.entries(field.depends_on || {}).every(([id, expected]) => effective(state.config.fields.find(f=>f.id===id)||{}) === expected); }
-function missing(field) { return active(field) && field.required && (field.sensitive ? !field.configured : field.value == null || field.value === '' || (Array.isArray(field.value)&&!field.value.length)); }
 function fieldHTML(field) {
   const id = field.id, edit = pending[id], type = field.type || 'text', disabled = field.readonly ? 'disabled' : '';
   let control, current = effective(field);
@@ -55,16 +64,20 @@ function fieldHTML(field) {
   else control = `<input id="field-${e(id)}" data-field="${e(id)}" type="${type==='number'?'number':'text'}" value="${e(current)}" ${disabled}>`;
   return `<div class="field ${field.readonly?'readonly':''}"><div class="field-label"><label for="field-${e(id)}">${e(field.label)} ${field.required?'<span class="required">*</span>':''}</label><span class="state">${field.readonly?'只读':field.explicit?'已设置':'默认 / 继承'}</span><small>${e(field.help)}</small></div><div class="field-control">${control}<small>${e(field.effect)}${type==='list'?' 每行一项，顺序会被保留。':''}</small><small>${e(field.scope)} · ${e(field.path)}</small>${!field.readonly?`<div class="field-actions"><button class="text-button small" data-action="clear" data-id="${e(id)}">清除显式值</button>${edit?`<button class="text-button small" data-action="undo" data-id="${e(id)}">撤销修改</button>`:''}<span>${e(field.clear_help||'清除后使用默认值或继承值。')}</span></div>`:''}<div id="error-${e(id)}" class="error">${e(localErrors[id])}</div></div></div>`;
 }
+function savePanelHTML() {
+  return `<div class="save-box" role="region" aria-labelledby="save-heading"><div class="save-details" id="save-details" tabindex="0" aria-label="变更摘要与校验说明" ${savePanelExpanded?'':'hidden'}><div id="summary"></div><small class="save-validation">校验：${e(state.config.validation||'由业务适配器执行')}<br>编辑不会自动保存。</small></div><div class="save-feedback" id="save-message" role="status"></div><div class="save-bar"><div class="save-overview"><h3 id="save-heading">本次修改</h3><span class="save-count" id="save-count" aria-live="polite">暂无修改</span></div><div class="save-actions"><button type="button" class="save-toggle" data-action="toggle-save-details" aria-controls="save-details" aria-expanded="${savePanelExpanded}">${savePanelExpanded?'收起':'展开'}</button><button class="primary" data-action="save" id="save">保存</button></div></div></div>`;
+}
 function configuration() {
   const required = value('mode','all') === 'required', advanced = value('advanced') === '1';
-  const fields = state.config.fields.filter(f=>active(f) && (required?missing(f):advanced||!f.advanced));
+  const fields = state.config.fields.filter(f=>active(f) && (required?f.required:advanced||!f.advanced));
   const groups = [...new Set(fields.map(f=>f.group||'配置'))];
-  return `<section class="content config-content"><div class="heading"><div><div class="eyebrow">CONFIGURATION</div><h1>${required?'补齐必要配置':'全部配置'}</h1><p>${required?'填写当前任务缺少的必要信息，保存后由 Agent 继续处理。':'查看和调整这个 Skill 或 Plugin 的持久设置。'}</p></div><button data-action="reload">重新载入</button></div><div class="toolbar config-tabs"><div class="segmented"><button data-action="mode" data-mode="required" class="${required?'active':''}">补齐必要配置</button><button data-action="mode" data-mode="all" class="${!required?'active':''}">全部配置</button></div>${!required?`<label class="advanced-option"><input type="checkbox" id="advanced" ${advanced?'checked':''}>显示高级项</label>`:''}</div>${state.config.note?`<p class="muted">${e(state.config.note)}</p>`:''}<div id="fields">${groups.map(group=>`<section class="group"><h2>${e(group)}</h2>${fields.filter(f=>(f.group||'配置')===group).map(fieldHTML).join('')}</section>`).join('')||'<div class="empty"><h2>必要配置已齐全</h2><p>可切换到全部配置查看和修改其他设置。</p></div>'}</div><div class="save-box"><h3>本次修改</h3><div id="summary"></div><div id="save-message" role="status"></div><div class="save-line"><small>校验：${e(state.config.validation||'由业务适配器执行')}<br>编辑不会自动保存。</small><button class="primary" data-action="save" id="save">保存</button></div></div><div id="continuation"></div></section>`;
+  return `<section class="content config-content"><div class="heading"><div><div class="eyebrow">CONFIGURATION</div><h1>${required?'必要配置':'全部配置'}</h1><p>${required?'查看和修改当前任务的必要信息，也可补齐缺少的配置。':'查看和调整这个 Skill 或 Plugin 的持久设置。'}</p></div><button data-action="reload">重新载入</button></div><div class="toolbar config-tabs"><div class="segmented"><button data-action="mode" data-mode="required" class="${required?'active':''}">必要配置</button><button data-action="mode" data-mode="all" class="${!required?'active':''}">全部配置</button></div>${!required?`<label class="advanced-option"><input type="checkbox" id="advanced" ${advanced?'checked':''}>显示高级项</label>`:''}</div>${state.config.note?`<p class="muted">${e(state.config.note)}</p>`:''}<div id="fields">${groups.map(group=>`<section class="group"><h2>${e(group)}</h2>${fields.filter(f=>(f.group||'配置')===group).map(fieldHTML).join('')}</section>`).join('')||`<div class="empty"><h2>${required?'当前没有适用的必要配置':'当前没有可显示的配置'}</h2><p>${required?'可切换到全部配置查看和修改其他设置。':'可尝试显示高级项，或在依赖条件生效后重新查看。'}</p></div>`}</div>${savePanelHTML()}<div id="continuation"></div></section>`;
 }
 function summary() {
   if (state.page!=='configuration') return;
   const keys = Object.keys(pending), node = document.querySelector('#summary');
   if (!node) return;
+  document.querySelector('#save-count').textContent = keys.length ? `${keys.length} 项未保存` : '暂无修改';
   node.innerHTML = keys.length?`<ul>${keys.map(id=>{const f=state.config.fields.find(f=>f.id===id);return `<li>${e(f.label)}：${pending[id].op==='unset'?'清除显式值':'修改'} · ${e(f.scope)} · ${e(f.path)}${f.effect?' · '+e(f.effect):''}</li>`}).join('')}</ul>`:'<p class="muted">暂无修改。</p>';
   document.querySelector('#save').disabled = !keys.length || Object.keys(localErrors).length>0;
 }
@@ -98,9 +111,11 @@ function detail() {
 }
 function render() {
   if (ended||!state) return;
+  resetSaveBox();
   const detailView=state.page==='artifacts'&&value('view')==='detail';
-  root.innerHTML=`<div class="shell">${header()}${state.page==='configuration'?configuration():detailView?detail():collection()}${footer()}</div>`;
+  root.innerHTML=`<div class="shell ${state.page==='configuration'?'config-shell':''}">${header()}${state.page==='configuration'?configuration():detailView?detail():collection()}${footer()}</div>`;
   root.setAttribute('aria-busy','false'); tick(false); summary();
+  const saveBox = document.querySelector('.save-box'); if (saveBox) saveBoxObserver.observe(saveBox);
   if (detailView) { const artifact=state.artifacts.items.find(a=>a.id===value('id')), node=document.querySelector('#custom-preview'); if (node) { const renderer=renderers.get(artifact.preview.renderer); if(renderer) { try { renderer(node,artifact.preview.data,{resourceURL}); } catch { node.textContent='定制预览失败，请检查适配器。'; } } else node.textContent='这个产物的定制预览未加载。'; } }
 }
 async function load() {
@@ -112,6 +127,12 @@ root.addEventListener('click', async event=>{
   const button=event.target.closest('[data-action]'); if(!button||ended)return;
   const action=button.dataset.action,id=button.dataset.id;
   try {
+    if(action==='toggle-save-details'){
+      savePanelExpanded=!savePanelExpanded;
+      document.querySelector('#save-details').hidden=!savePanelExpanded;
+      button.setAttribute('aria-expanded',String(savePanelExpanded));
+      button.textContent=savePanelExpanded?'收起':'展开';
+    }
     if(action==='reload'){if(Object.keys(pending).length&&!confirm('重新载入会丢弃尚未保存的修改，是否继续？'))return;pending={};revealed={};localErrors={};await load();}
     if(action==='mode')navigate({mode:button.dataset.mode});
     if(action==='layout')navigate({layout:button.dataset.layout});
@@ -127,7 +148,7 @@ root.addEventListener('click', async event=>{
     if(action==='save'){
       button.disabled=true;
       try {const result=await api('/api/save',{revision:state.config.revision,changes:pending});state.config=result.config;pending={};revealed={};localErrors={};render();document.querySelector('#save-message').innerHTML='<p class="success">已保存；'+e(result.receipt.validation)+'通过。</p>';if(result.config.task?.continuation){document.querySelector('#continuation').innerHTML=`<div class="continuation">若 Agent 会话已结束，可复制发送：<p>${e(result.config.task.continuation)}</p><button data-action="copy-continuation">复制继续请求</button></div>`;}}
-      catch(error){document.querySelector('#save-message').innerHTML=`<p class="error">${e(error.message)}</p>`;summary();}
+      catch(error){document.querySelector('#save-message').innerHTML=`<p class="error">${e(error.message)}</p>`;summary();document.querySelector('#save-message').scrollIntoView({block:'nearest'});}
     }
     if(action==='copy-continuation'){await navigator.clipboard.writeText(state.config.task.continuation);toast('已复制');}
   }catch(error){if(['reload'].includes(action)||error.status===410||error.status===401)fail(error);else toast(error.message);}

@@ -1,5 +1,7 @@
 # 共用代码接入
 
+本文件仅用于选用共用核心的接入分支。保留/改造已有界面或完全定制可不复制核心、不实现下述适配器；按目标原入口实现，并遵守实际能力对应的配置、产物和访问规则。局部复用只引入所需代码及其依赖，记录来源和定制边界。所有实现均须随目标发布并能独立启动，最终使用者无需安装本开发 Skill。
+
 以下命令由 Agent 执行，路径先在本机解析并按实际 Shell 引用。示例中的 `<本Skill>`、`<目标>`、`<项目>` 为实际绝对路径；业务目标的运行环境由其入口负责。
 
 ## 代码边界
@@ -44,7 +46,7 @@ Windows 私有运行目录和保存文件仅向执行账号及所选项目所有
 
 ## 运行示例与业务入口
 
-先创建一个已忽略的合成项目目录。分别启动两个页面：
+先创建一个已忽略的合成项目目录。以下是两个可独立选用的模板示例命令；只启动已选择的页面，两个都选才分别启动。共用核心当前按 `--page` 提供独立页面，不代表定制统一界面也须采用此结构：
 
 ```text
 uv run --frozen --project <本Skill> python <本Skill>/scripts/ui.py start --adapter <本Skill>/examples/studio_adapter.py --project <演示项目> --page configuration --runtime-dir <演示项目>/tmp/ui
@@ -55,4 +57,4 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/ui.py start --ada
 
 业务入口先通过自身 bootstrap 固定环境，再将 `<发布根>/shared` 加入 `sys.path`，调用 `skill_ui.__main__.main()`（参数协议相同）。Python 子进程使用当前解释器、固定包目录；无 GUI 窗口。配置命令仅传本地路径和任务标识，不把凭证放参数。运行目录位于已确认的忽略位置，`server.json` 包含私有访问 token；`service.log` 轮转为 1 MiB × 3，记录事件、错误类型和栈位置，不记录请求体及密钥。`launcher.log` 仅含启动诊断。
 
-跨设备先按 [访问规则](access-and-lifetime.md) 准备实际通道，再用 `--public-origin https://实际入口` 重开指定页面。默认监听 loopback，代理应转发正确 Host，不任意信任 forwarded headers。不要只换链接域名绕过 origin 检查。安装后从发布包运行验证，开发源能运行不等于目标自包含。
+跨设备先按 [访问规则](access-and-lifetime.md) 准备实际通道，再用 `--public-origin https://实际入口` 重开指定页面。默认监听 loopback，代理应转发正确 Host，不任意信任 forwarded headers。不要只换链接域名绕过 origin 检查。安装后从发布包运行验证，开发源能运行不等于目标自包含；在目标项目说明中接入 [重开入口](access-and-lifetime.md#重开入口)，使新会话能找到业务入口和实际参数。

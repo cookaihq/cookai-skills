@@ -1,0 +1,3 @@
+* text eol=lf
+shared/skill_ui/** -text
+shared/skill_ui/.vendor.json text eol=lf

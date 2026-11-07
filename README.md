@@ -6,6 +6,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 
 | Skill | 功能 | 文档 |
 |---|---|---|
+| [agent-instructions-update](agent-instructions-update/) | 检测五种 Agent 的规则入口，通过专用工作台审阅、编辑、同步和恢复全局及项目规则 | [README](agent-instructions-update/README.md) · [SKILL.md](agent-instructions-update/SKILL.md) |
 | [bilibili-charge-download](bilibili-charge-download/) | 使用用户已登录且有完整播放及保存权限的 B 站账号下载充电专属视频，将 DASH 音视频封装并完整性验证为 MP4；不读取 Cookie，不绕过付费或访问限制 | [README](bilibili-charge-download/README.md) · [SKILL.md](bilibili-charge-download/SKILL.md) |
 | [git-setup](git-setup/) | 仅提供 URL 即按当前项目状态接入远端；支持明确请求的发布、同步与本地/GitHub Issue | [README](git-setup/README.md) · [SKILL.md](git-setup/SKILL.md) |
 | [video-to-markdown](video-to-markdown/) | 把本地或可直接下载的视频转成可复核、可续跑的 Markdown 文档：结合带时间戳的语音转写、关键帧截图、短 GIF、自适应补采样和全时间线覆盖检查，保留语音与画面共同承载的内容 | [README](video-to-markdown/README.md) · [SKILL.md](video-to-markdown/SKILL.md) |
@@ -13,6 +14,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [s3-upload](s3-upload/) | 把本地文件持久写入用户自己的 S3 兼容 bucket（AWS S3 / Cloudflare R2 / custom，OSS / COS experimental）：严格 JSON Object Reference + public/presigned URL、`--collision reject` 原子 no-overwrite 与同内容采纳、17 键闭合 result 合同与 `--result-out` 跨进程 handoff、checkpoint 只读对账恢复 | [README](s3-upload/README.md) · [SKILL.md](s3-upload/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
 | [frpc-launch](frpc-launch/) | 使用已有自部署/宝塔或樱花 FRP；按项目复用连接、固定域名并隔离代理、进程和日志，支持检查与独立停止 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
+| [hermes-mobile-access](hermes-mobile-access/) | 复用 Hermes Desktop 和已有 FRP，为 Android 手机配置 HTTPS 接入、独立密钥与首选 profile，检查连接和恢复状态 | [README](hermes-mobile-access/README.md) · [SKILL.md](hermes-mobile-access/SKILL.md) |
 | [redskill-download](redskill-download/) | 下载小红书 RedSkill 分享的技能发布包，保存原始 ZIP、解压文件和校验记录，检查引用缺件；下载目录可配置 | [README](redskill-download/README.md) · [SKILL.md](redskill-download/SKILL.md) |
 | [skill-configuration-and-artifacts-ui](skill-configuration-and-artifacts-ui/) | 为新建或已有 Skill / Plugin 评估、预览和接入配置中心与产物集合；携带共用规则、运行代码和改造工具 | [README](skill-configuration-and-artifacts-ui/README.md) · [SKILL.md](skill-configuration-and-artifacts-ui/SKILL.md) |
 
@@ -25,19 +27,20 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
 |---|---|---|
+| agent-instructions-update | 0.1.1 | [agent-instructions-update/v0.1.1](https://github.com/cookaihq/cookai-skills/releases/tag/agent-instructions-update%2Fv0.1.1) |
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | frpc-launch | 1.6.0 | [frpc-launch/v1.6.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.6.0) |
-| git-setup | 1.0.1 | [git-setup/v1.0.1](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.1) |
+| git-setup | 1.0.2 | [git-setup/v1.0.2](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.2) |
 | hermes-mobile-access | 0.1.0 | [hermes-mobile-access/v0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access%2Fv0.1.0) |
 | pdf2markdown | 2.0.0 | [pdf2markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv2.0.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
-| skill-configuration-and-artifacts-ui | 0.2.0 | [skill-configuration-and-artifacts-ui/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv0.2.0) |
+| skill-configuration-and-artifacts-ui | 0.2.3 | [skill-configuration-and-artifacts-ui/v0.2.3](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv0.2.3) |
 | video-to-markdown | 2.0.0 | [video-to-markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv2.0.0) |
 <!-- release-table:end -->
 
-当前 `hermes-mobile-access` 开发分支中的 FRP 1.6.0 和 Hermes 0.1.0 尚未发布；表格反映源码版本，发布状态及未完成能力见各自 README。
+Hermes 手机接入 0.1.0 与 FRP Launch 1.6.0 的已验范围及待验事项见各自 README；Windows/Android 基础文字收发已验证，macOS 等其余场景按说明继续验收。
 
 ## 安装
 

@@ -1,6 +1,6 @@
 # 项目 Git 使用说明
 
-先读取目标项目实际 Agent 入口、其必读文档及已有 Git 规则，优先更新同主题正文和有效入口；缺失时才新增。无既有约定时，正文为目标项目根下 docs/agent/git.md。Claude Code、Codex、WorkBuddy 实际规则入口均引用同一正文，保留已有 symlink。引用应明确触发条件：“执行本项目 Git 设置、读取、提交、推送或发布前，必须读取并遵守[项目 Git 使用说明](相对路径)。”
+先读取目标项目实际 Agent 入口、其必读文档及已有 Git 规则，优先更新同主题正文和有效入口；缺失时才新增。无既有约定时，正文为目标项目根下 docs/agents/git-repository-operations.md，标题为“Git 仓库操作规则”。Claude Code、Codex、WorkBuddy 实际规则入口均引用同一正文，保留已有 symlink。引用应明确触发条件：“执行本项目 Git 设置、读取、提交、推送或发布前，必须读取并遵守[Git 仓库操作规则](相对路径)。”
 
 正文中项目路径以明确的项目根为基准，Markdown 引用以规则实体所在目录为基准；跨目录引用说明相对位置关系。其他设备保持这些相对路径及目录关系，绝对根目录可不同。项目已有共享文档锚点沿用其声明。子仓独立打开时核对自身适用入口，不以外仓已接入推断子仓已加载。
 
@@ -20,7 +20,7 @@ Agent 根据当前项目填写下列内容，不把模板占位符当成完成�
 
 node <skill>/scripts/git-setup/cli.mjs document-plan --project <根> --input -
 
-输入 {path:"docs/agent/git.md",content:"经当前项目核对的完整说明",ruleFiles:["AGENTS.md","CLAUDE.md", "<已核实的WorkBuddy规则入口>"]}。实际入口按客户端检查结果给出，不凭示例创建无效文件。document-write 使用同一输入、--apply 和 --expected-fingerprint。
+输入 {path:"docs/agents/git-repository-operations.md",content:"经当前项目核对的完整说明",ruleFiles:["AGENTS.md","CLAUDE.md", "<已核实的WorkBuddy规则入口>"]}。省略 path 时使用上述默认路径；复用已有正文时显式传入原路径。实际入口按客户端检查结果给出，不凭示例创建无效文件。document-write 使用同一输入、--apply 和 --expected-fingerprint。
 
 工具保留规则原文，在 git-setup:documentation 标记内替换引用；指向同一实体的规则只编辑一次。发现直接指向本正文的已有 Markdown 链接时保留原入口，不另加同主题块；Agent 必须核对其触发条件和强制读取要求，缺失时修改原句。间接必读引用、纯文本路径等由 Agent 沿实际规则核对并直接维护，不能为使用工具而增加重复入口。脚本不理解正文语义，文件写入完成不等于规则已生效。
 
