@@ -110,14 +110,14 @@ def read_workspace(app: Any, data: dict[str, Any]) -> dict[str, Any]:
         present = {x['path'] for x in indexed['files']}
         indexed['files'].extend({**x, 'title':scenario_title(x.get('content','')), 'references':[]} for path,x in extras.items() if path not in present)
         main = [record for record in indexed['files'] if record.get('role') == 'main']
+    reading_targets = {ref['target'] for record in indexed['files'] for ref in record.get('references', [])
+                       if ref.get('target') and reading_gate(record.get('content',''), ref['line'])}
     scenarios = []
     for record in indexed['files']:
         if record.get('role') in ('main','identity','memory'):
             continue
         path = Path(record['path'])
-        readers = [x for x in indexed['files'] for ref in x.get('references', []) if ref.get('target') == str(path.resolve())
-                   and reading_gate(x.get('content',''), ref['line'])]
-        if not path.is_relative_to(scenario_root) and record.get('role') != 'scenario' and not readers:
+        if not path.is_relative_to(scenario_root) and record.get('role') != 'scenario' and str(path.resolve()) not in reading_targets:
             continue
         relative = path.relative_to(scenario_root).as_posix() if path.is_relative_to(scenario_root) else path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
         scenarios.append({**record, 'relative_path':relative})
