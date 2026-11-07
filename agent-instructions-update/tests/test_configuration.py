@@ -56,6 +56,18 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(disabled['values']['history_keep'], 30)
         self.assertIsNone(disabled['values']['binding'])
 
+    def test_one_personal_save_updates_preferences_and_update_protocol_without_project_leakage(self):
+        app = Maintenance(self.personal, self.project, environment={})
+        before = app.action('config.read', {'scope':'global'})
+        saved = app.action('config.save', {'scope':'global', 'revision':before['revision'], 'save_scope':'personal',
+                                         'values':{'history_keep':12, 'auto_update':False}})
+        self.assertEqual(saved['values']['history_keep'], 12)
+        self.assertFalse(saved['values']['auto_update'])
+        self.assertIn('AUTO_UPDATE_CHECK=0', (self.personal/'.env').read_text())
+        self.assertFalse((self.project/'.env.local').exists())
+        with self.assertRaises(RuleError):
+            app.action('config.save', {'scope':'global', 'revision':saved['revision'], 'save_scope':'project', 'values':{'auto_update':True}})
+
 
 if __name__ == '__main__':
     unittest.main()

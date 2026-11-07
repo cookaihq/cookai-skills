@@ -12,6 +12,44 @@ LINK = re.compile(r'\[([^\]\n]+)\]\(<?([^)>\n]+)>?\)')
 CODE_PATH = re.compile(r'`([^`\n]+\.md(?:#[^`\n]*)?)`|(?<!\w)@([^\s]+\.md(?:#[^\s]*)?)')
 
 
+def scenario_title(content: str) -> str | None:
+    """Read the first document H1, excluding frontmatter, comments and fences."""
+    lines = content.lstrip('\ufeff').splitlines()
+    start = 0
+    if lines and lines[0].strip() == '---':
+        start = next((i + 1 for i, line in enumerate(lines[1:], 1) if line.strip() in ('---', '...')), 0)
+    fence = ''
+    comment = False
+    paragraph: list[str] = []
+    for line in lines[start:]:
+        if comment:
+            comment = '-->' not in line
+            continue
+        if re.match(r' {0,3}<!--', line):
+            comment = '-->' not in line
+            paragraph = []
+            continue
+        if fence:
+            close = re.fullmatch(r' {0,3}(`{3,}|~{3,})\s*', line)
+            if close and close[1][0] == fence[0] and len(close[1]) >= len(fence):
+                fence = ''
+            continue
+        opening = re.match(r' {0,3}(`{3,}|~{3,})(.*)', line)
+        if opening and not (opening[1][0] == '`' and '`' in opening[2]):
+            fence, paragraph = opening[1], []
+            continue
+        heading = re.fullmatch(r' {0,3}#(?:[ \t]+(.*)|[ \t]*)', line)
+        if heading:
+            return re.sub(r'(?:^|[ \t]+)#+[ \t]*$', '', heading[1] or '').strip() or None
+        if re.fullmatch(r' {0,3}=+[ \t]*', line) and paragraph:
+            return ' '.join(paragraph).strip() or None
+        if not line.strip() or re.match(r'^(?: {4}|\t)|^ {0,3}(?:>|#{1,6}(?:\s|$)|[-+*](?:\s|$)|\d+[.)]\s|<|[-_*]{3,}\s*$)', line):
+            paragraph = []
+        else:
+            paragraph.append(line.strip())
+    return None
+
+
 def references(path: Path, content: str, bases: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     from .maintenance import RuleError
     path = path.resolve()
@@ -84,11 +122,11 @@ def reference_text(ref: dict[str, Any], target: Path, document: Path) -> str:
     return quote(relative, safe='/.-_~:') + ('#' + ref['fragment'] if ref['fragment'] else '')
 
 
-def index_project(project: Path, extra: list[str] | None = None, bases: list[dict[str, str]] | None = None) -> dict[str, Any]:
+def index_project(project: Path, extra: list[str] | None = None, bases: list[dict[str, str]] | None = None, *, scan_root: bool = True) -> dict[str, Any]:
     from .maintenance import snapshot, RuleError, is_entrance
     pending = [Path(p) for p in extra or []]
     errors = []
-    for directory, directories, files in os.walk(project, followlinks=False, onerror=lambda error: errors.append(str(error.filename))):
+    for directory, directories, files in os.walk(project, followlinks=False, onerror=lambda error: errors.append(str(error.filename))) if scan_root else []:
         directories[:] = [name for name in directories if name not in EXCLUDED and not is_entrance(Path(directory) / name)]
         pending.extend(Path(directory) / name for name in files if name in MAIN_NAMES)
     found: dict[str, dict[str, Any]] = {}
@@ -100,7 +138,7 @@ def index_project(project: Path, extra: list[str] | None = None, bases: list[dic
         try:
             record = snapshot(str(path))
             refs = references(path, record['content'], bases)
-            record.update(role='main' if path.name in MAIN_NAMES else 'referenced',
+            record.update(title=scenario_title(record['content']), role='main' if path.name in MAIN_NAMES else 'referenced',
                           scope=str(path.parent) if path.name in MAIN_NAMES else 'reference-defined',
                           references=refs, loading='unverified', status='found' if record['exists'] else 'missing')
             found[key] = record
@@ -113,7 +151,7 @@ def index_project(project: Path, extra: list[str] | None = None, bases: list[dic
 
 def scenario_changes(project: Path, data: dict[str, Any], indexed: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     from .maintenance import snapshot, RuleError, entity_key
-    source = Path(data['path']).absolute()
+    source = Path(os.path.abspath(os.path.expanduser(data['path'])))
     if data.get('scope') == 'global':
         if not data.get('rules_root'):
             raise RuleError('scope', '全局场景需明确物理规则根目录。')
@@ -121,15 +159,23 @@ def scenario_changes(project: Path, data: dict[str, Any], indexed: dict[str, Any
     if not source.is_relative_to(project):
         raise RuleError('scope', '场景操作须属于所选规则根目录。')
     if data.get('operation') == 'add':
-        entry = Path(data['entry']).absolute()
+        entry = Path(os.path.abspath(os.path.expanduser(data['entry'])))
         if source.exists() or source.is_symlink() or not entry.is_relative_to(project):
             raise RuleError('destination', '场景须尚未存在，主规则须属于同一管理范围。')
-        if not all(isinstance(data.get(key), str) and data[key].strip() for key in ('content', 'title', 'trigger')):
-            raise RuleError('reading_gate', '新增场景须提供正文、名称及读取触发条件。')
+        if not all(isinstance(data.get(key), str) and data[key].strip() for key in ('content', 'trigger')):
+            raise RuleError('reading_gate', '新增场景须提供正文及读取触发条件。')
+        content = data['content']
+        title = scenario_title(content)
+        if title is None and isinstance(data.get('title'), str) and data['title'].strip():
+            content = '# ' + data['title'].strip().replace('\n', ' ') + '\n\n' + content
+            title = scenario_title(content)
+        if not title:
+            raise RuleError('scenario_title', '新增场景须以正文一级标题明确名称。')
         main = snapshot(str(entry))
         relative = quote(os.path.relpath(source.resolve(), Path(main['entity']).parent).replace(os.sep, '/'), safe='/.-_')
-        gate = f"\n- {data['trigger']}：读取并遵守 [{data['title']}]({relative})。\n"
-        return [{'path': str(source), 'op': 'write', 'content': data['content']},
+        label = title.replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]')
+        gate = f"\n- {data['trigger']}：读取并遵守 [{label}]({relative})。\n"
+        return [{'path': str(source), 'op': 'write', 'content': content},
                 {'path': str(entry), 'op': 'write', 'content': main['content'] + gate}]
     if data.get('operation') == 'edit':
         return [{'path': str(source), 'op': 'write', 'content': data['content']}]
@@ -186,7 +232,7 @@ def scenario_changes(project: Path, data: dict[str, Any], indexed: dict[str, Any
         return changes
     if data.get('operation') != 'rename':
         raise RuleError('operation', '未知场景操作。')
-    destination = Path(data['destination']).absolute()
+    destination = Path(os.path.abspath(os.path.expanduser(data['destination'])))
     if not destination.is_relative_to(project) or destination.exists() or destination.is_symlink():
         raise RuleError('destination', '目标须为本项目中尚不存在的规则路径。')
     if not original['exists']:

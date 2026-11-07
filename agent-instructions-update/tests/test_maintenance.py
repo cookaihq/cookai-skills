@@ -35,6 +35,71 @@ class MaintenanceTests(unittest.TestCase):
     def call(self, action, **data):
         return self.app.action(action, data)
 
+    def test_workspace_from_subdirectory_finds_project_and_named_nested_scenarios(self):
+        main = self.file('AGENTS.md', '# Project\n\nRead [Commands](docs/agents/dev/commands.md) before commands.\n')
+        scenario = self.file('docs/agents/dev/commands.md', '```sh\n# example\n```\n\n# Command execution\n\nCheck results.\n')
+        self.file('docs/agents/collaboration/handoff.md', '# Handoff\n')
+        self.file('notes.md', '# Not a scenario\n')
+        child = self.project / 'src'
+        child.mkdir()
+        app = Maintenance(self.base/'personal', child, environment={'HOME':str(self.base/'home'), 'USERPROFILE':str(self.base/'home'), 'PATH':''})
+        view = app.action('workspace.read', {'scope':'project'})
+        self.assertEqual(view['project']['path'], str(self.project))
+        self.assertEqual(view['project']['availability'], 'ready')
+        self.assertEqual({f['relative_path']:f['title'] for f in view['scenarios']},
+                         {'dev/commands.md':'Command execution', 'collaboration/handoff.md':'Handoff'})
+        self.assertEqual(next(f for f in view['scenarios'] if f['path']==scenario)['content'], self.call('file.read', path=scenario)['content'])
+        self.assertIn(main, [f['path'] for f in view['main_files']])
+
+    def test_global_workspace_keeps_project_scenarios_separate_and_does_not_create_rules(self):
+        home = self.base/'home'
+        library = home/'.agents'
+        (library/'scenarios-agent-instructions/tools').mkdir(parents=True)
+        (library/'AGENTS.md').write_text('# Global\n', encoding='utf-8')
+        rule = library/'scenarios-agent-instructions/tools/commands.md'
+        rule.write_text('# Global commands\n', encoding='utf-8')
+        self.file('AGENTS.md', '# Project\n')
+        self.file('docs/agents/commands.md', '# Project commands\n')
+        app = Maintenance(self.base/'personal', self.project, environment={'HOME':str(home), 'USERPROFILE':str(home), 'PATH':''})
+        view = app.action('workspace.read', {'scope':'global'})
+        self.assertEqual(view['scope'], 'global')
+        self.assertEqual({x['title'] for x in view['scenarios']}, {'Global commands'})
+        self.assertEqual(view['scenarios'][0]['relative_path'], 'tools/commands.md')
+        self.assertFalse((self.base/'personal').exists())
+
+    def test_project_without_scenario_directory_can_be_empty_then_ready(self):
+        (self.project/'.git').mkdir()
+        empty = self.call('workspace.read', scope='project')
+        self.assertEqual(empty['project']['availability'], 'empty')
+        self.assertEqual(empty['errors'], [])
+        self.file('AGENTS.md', '# Project\n')
+        ready = self.call('workspace.read', scope='project')
+        self.assertEqual(ready['project']['availability'], 'ready')
+        self.assertEqual(ready['scenarios'], [])
+        self.assertFalse((self.project/'docs/agents').exists())
+
+    def test_workspace_honors_project_binding_to_a_custom_authority(self):
+        authority = self.file('custom/main-rules.md', '# Custom project rules\n')
+        binding = {'scope':'project', 'project':str(self.project), 'product':'codex',
+                   'installation':'fixture installation', 'profile':'work', 'paths':[authority],
+                   'authority':authority, 'layout':'existing'}
+        config = self.call('config.read')
+        self.call('config.save', revision=config['revision'], save_scope='personal', values={'binding':binding})
+        view = self.call('workspace.read', scope='project')
+        self.assertEqual(view['project']['path'], str(self.project))
+        self.assertEqual(view['project']['availability'], 'ready')
+        self.assertIn(authority, [item['path'] for item in view['main_files']])
+
+    def test_workspace_finds_scoped_scenarios_from_a_table_reading_gate(self):
+        scenario = self.file('docs/deliverables/widget/agent-rules/release.md', '# Release checks\n')
+        for edge, delimiter in (('|', '---'), ('', '---'), ('|', '-'), ('', '--')):
+            with self.subTest(table_edge=edge, delimiter=delimiter):
+                self.file('AGENTS.md', '# Project\n\nFor matching work, read and follow the table below.\n\n'
+                          f'{edge} Trigger | Instructions {edge}\n{edge} {delimiter} | {delimiter} {edge}\n'
+                          f'{edge} Release | [Release](docs/deliverables/widget/agent-rules/release.md) {edge}\n')
+                view = self.call('workspace.read', scope='project')
+                self.assertEqual([item['path'] for item in view['scenarios']], [scenario])
+
     def test_mixed_batch_waits_then_writes_authority_and_every_selected_target(self):
         a = self.file('A.md', 'Keep preferences.\n')
         b = self.file('B.md', 'Keep project boundaries.\n')
@@ -58,6 +123,21 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual([Path(p).read_text() for p in [a, b, c, d]], [candidate] * 4)
         self.assertEqual(Path(e).read_text(), 'Independent unselected rule.\n')
         self.assertEqual(len(receipt['receipt']['written']), 4)
+
+    def test_scenario_parent_segments_cannot_escape_selected_rule_root(self):
+        main = self.file('AGENTS.md', '# Project\n')
+        source = self.file('docs/agents/commands.md', '# Commands\n')
+        escaped = str(self.project / '..' / 'outside.md')
+        for arguments in (
+            {'operation':'add', 'path':escaped, 'entry':main, 'trigger':'Before commands', 'content':'# Outside\n'},
+            {'operation':'edit', 'path':escaped, 'content':'# Outside\n'},
+            {'operation':'rename', 'path':source, 'destination':escaped},
+        ):
+            with self.subTest(operation=arguments['operation']):
+                with self.assertRaises(RuleError):
+                    self.call('scenario.plan', **arguments)
+        self.assertFalse((self.base/'outside.md').exists())
+        self.assertEqual(Path(source).read_text(), '# Commands\n')
 
     def test_external_edit_invalidates_confirmation_and_keeps_candidate(self):
         a = self.file('A.md', 'Authority.\n')
@@ -90,6 +170,18 @@ class MaintenanceTests(unittest.TestCase):
         replacement = self.call('task.create', kind='sync', authority=a, targets=[{'path':b,'strategy':'merge'}])
         self.assertEqual(replacement['status'], 'waiting_agent')
         self.assertEqual([x['content'] for x in replacement['merge_inputs']], ['Authority\n', 'External content\n'])
+
+    def test_review_candidates_include_differences_before_selection(self):
+        target = self.file('review.md', '# Rules\n\nOriginal requirement\n')
+        task = self.call('task.create', kind='review', paths=[target])
+        result = self.call('task.result', task_id=task['id'], input_revision=task['input_revision'],
+                           suggestions=[{'id':'s1', 'path':target, 'line':3, 'evidence':['Original text'],
+                                         'impact':'Trigger is unclear', 'recommendation':'Clarify the trigger',
+                                         'verification':'text', 'content':'# Rules\n\nClear requirement\n'}])
+        self.assertEqual(result['status'], 'candidate_review')
+        self.assertIn('-Original requirement\n', result['suggestions'][0]['diff'])
+        self.assertIn('+Clear requirement\n', result['suggestions'][0]['diff'])
+        self.assertEqual(Path(target).read_text(), '# Rules\n\nOriginal requirement\n')
 
     def test_reading_a_review_after_external_edit_reports_stale_and_preserves_suggestions(self):
         target = self.file('review.md', 'Original\n')
@@ -218,8 +310,19 @@ class MaintenanceTests(unittest.TestCase):
         self.call('task.confirm', task_id=task['id'], plan_revision=task['plan_revision'])
         result = self.call('task.apply', task_id=task['id'])
         self.assertEqual(result['status'], 'completed')
-        self.assertEqual(scenario.read_text(encoding='utf-8'), '核对实际 Shell。\n')
+        self.assertEqual(scenario.read_text(encoding='utf-8'), '# 命令执行\n\n核对实际 Shell。\n')
         self.assertIn('编写或执行命令前：读取并遵守 [命令执行](scenarios-agent-instructions/commands.md)', main.read_text(encoding='utf-8'))
+
+    def test_scenario_name_and_new_reading_entry_use_the_body_title(self):
+        main = self.file('AGENTS.md', '# Project\n')
+        path = str(self.project/'docs/agents/release.md')
+        task = self.call('scenario.plan', operation='add', path=path, entry=main,
+                         trigger='Before release', content='# Release checks\n\nValidate output.\n')
+        self.assertIn('[Release checks]', next(x['content'] for x in task['writes'] if x['path']==main))
+        self.call('task.confirm', task_id=task['id'], plan_revision=task['plan_revision'])
+        self.call('task.apply', task_id=task['id'])
+        view = self.call('workspace.read', scope='project')
+        self.assertEqual(view['scenarios'][0]['title'], 'Release checks')
 
     def test_scenario_edit_reports_known_shared_entrance_impact(self):
         target = self.file('scenarios/shared.md', 'Before\n')

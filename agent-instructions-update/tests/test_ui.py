@@ -47,6 +47,15 @@ class UITests(unittest.TestCase):
                     session = post('/api/session', {'token':parsed.fragment})
                     return post, session['csrf']
                 post, csrf = connect(start)
+                settings = post('/api/rules', {'action':'config.read','data':{'scope':'global'}}, csrf)['result']
+                saved = post('/api/rules', {'action':'config.save','data':{'scope':'global','save_scope':'personal',
+                    'revision':settings['revision'],'values':{'history_keep':8}}}, csrf)['result']
+                self.assertEqual(saved['values']['history_keep'], 8)
+                with self.assertRaises(HTTPError) as residency:
+                    post('/api/residency', {'resident':True}, csrf)
+                self.assertEqual(residency.exception.code, 400)
+                review = post('/api/rules', {'action':'task.create','data':{'kind':'review','paths':[str(a)]}}, csrf)['result']
+                self.assertEqual(review['status'], 'waiting_agent')
                 with self.assertRaises(HTTPError) as caught:
                     post('/api/rules', {'action':'task.create','data':{'kind':'sync','authority':str(a),'targets':[]}})
                 self.assertEqual(caught.exception.code, 403)

@@ -17,6 +17,8 @@ uv run --frozen --project <Skill实体目录> python <Skill实体目录>/scripts
 | `discover.scan` | `{}` 扫描当前用户原生环境；`custom` 可列出 `{product, installation?, home?, profile?, paths?, role?}`。产品标识 `codex/claude-code/workbuddy/hermes/opencode`；`paths` 为规则路径，未知职责保持 `unknown` |
 | `index.read` | 可传 `paths` 补充需要跟随引用的入口，返回项目根、子目录及引用文件；引用不是自动加载证据 |
 | `file.read` | `{path}` 返回当前正文、实体身份、入口链接、哈希和目录信息 |
+| `workspace.read` | `{scope:"global"|"project"}` 返回启动项目上下文、主规则与嵌套场景、真实目录和读取关系；全局可指定 `rules_root`，引用基准使用 `reference_bases` |
+| `scenario.title` | `{content}` 返回正文首个一级标题；无有效标题返回 `title:null`，跳过文首元数据、围栏代码及注释 |
 | `config.read` | 可传 `scope: "global"`；默认当前项目，返回值、来源、保存位置及 `revision` |
 
 `discover.scan` 的 `home` 和 `probe_system:false` 用于明确隔离的测试环境；它们不证明另一设备或平台可用。检测不运行发现的 Agent 程序，不读登录凭证；安装文件存在对应 `runnable:unverified`。实际 CLI、桌面及会话验证须另取证。
@@ -73,7 +75,7 @@ Markdown 相对链接按物理正式源文档目录解析。反引号路径或 `
 
 `scenario.plan`：
 
-- `operation:add`：`path/content/entry/title/trigger`；在主入口增加“触发时读取并遵守”的链接。
+- `operation:add`：`path/content/entry/trigger`；正文须含一级标题，在主入口增加以该标题命名的“触发时读取并遵守”链接。可提供 `title` 将缺标题的正文补为 `# title`，它不作为独立显示别名保存。
 - `operation:edit`：`path/content`。
 - `operation:rename`：`path/destination`；同步修改已知 Markdown、反引号路径及 @import 引用，重新计算迁移后正文的相对链接。
 - `operation:delete`：`path/reference_changes:[{path,content}]`；必须修复所有已知引用实体，候选不可仍指向删除对象。同一实体的多个入口可只提供一份候选，也可提供相同正文；冲突候选会被拒绝。被删除文件内部的自引用无需另行修改。
@@ -101,4 +103,16 @@ uv run --frozen --project <Skill实体目录> python <Skill实体目录>/scripts
 
 `ui status` 和 `ui stop` 使用相同的项目及 `--personal-dir`（若曾指定）。默认运行目录在个人维护目录的 `ui/` 下；可显式传 `ui start --runtime-dir <已获准的私有运行目录>`，后续状态/停止也传同一路径。入口复用固定版本 UI 核心的会话、CSRF、Host/Origin 与生命周期；业务动作通过独立 `/api/rules` 调用维护接口，不借配置保存执行规则写入。
 
-默认仅监听本机、空闲 3600 秒到期，后台读取不续期；实际交互续期。`--idle-seconds` 可用于隔离验收；`--public-origin` 只传已验证代理入口的精确 origin。新增检测、审阅、历史与设置页面当前候选尚未真实接入，不能用合成预览代替实际操作。
+默认仅监听本机、空闲 3600 秒到期，后台读取不续期；实际交互续期。工作台同时包含配置，因此不提供常驻。`--idle-seconds` 可用于隔离验收；`--public-origin` 只传已验证代理入口的精确 origin。
+
+启动目录向父级定位最近的项目标志（Git 或主规则）；无主规则时项目选项显示原因并置灰，仍可选择其他项目或预览建立规则的计划。项目目录选择后，文件、草稿、任务、绑定及历史各归对应范围。CLI 配置仍只读取显式 `--project` 的目录；页面选定的项目是后续操作的配置工作目录。
+
+场景树按真实路径分组，主显示正文首个一级标题，副显示文件名；标题草稿同步更新名称，文件改名单独计划。设置集中在一个页面，一次保存显示实际位置和覆盖来源；配置冲突后可“重读来源并保留编辑”，核对最新来源后再保存。
+
+交付链接时说明“空闲 60 分钟到期”，并填好以下重开请求中的实际项目绝对路径：
+
+- 当前会话：“请重新打开 Agent 规则维护工作台，给我新的访问链接。”
+- 当前项目新会话：“请打开当前项目中 agent-instructions-update 的规则维护工作台，给我新的访问链接。”
+- 其他项目新会话：“请打开项目【实际项目绝对路径】中 agent-instructions-update 的规则维护工作台，给我新的访问链接。”
+
+重开先核对项目、个人目录和运行目录的服务归属，再复用或启动；停止与到期不删除任务。提供跨设备提示时注明 FRP/Tailscale 已核实状态或“未核实”，未收到开放请求不自动建隧道。

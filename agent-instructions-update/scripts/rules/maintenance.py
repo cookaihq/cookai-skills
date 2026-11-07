@@ -11,7 +11,8 @@ import time
 from typing import Any
 import uuid
 from skill_ui.contracts import UIError
-from skill_ui.storage import file_lock, private_directory
+from skill_ui.storage import file_lock
+from .storage import prepare_history_directory
 
 
 class RuleError(Exception):
@@ -512,11 +513,11 @@ class Maintenance:
     def action(self, action: str, data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(data, dict):
             raise RuleError('request', '维护请求须为 JSON 对象。')
-        if action in ('file.read', 'index.read', 'config.read', 'discover.scan'):
+        if action in ('file.read', 'index.read', 'config.read', 'discover.scan', 'workspace.read', 'scenario.title'):
             return self._action(action, data)
         try:
             if not self._private:
-                private_directory(self.personal, owner_path=self.project)
+                prepare_history_directory(self.personal, self.project)
                 self._private = True
             with file_lock(self.personal / 'maintenance.lock'):
                 return self._action(action, data)
@@ -524,6 +525,12 @@ class Maintenance:
             raise RuleError(exc.code, exc.message) from None
 
     def _action(self, action: str, data: dict[str, Any]) -> dict[str, Any]:
+        if action == 'workspace.read':
+            from .workspace import read_workspace
+            return read_workspace(self, data)
+        if action == 'scenario.title':
+            from .indexing import scenario_title
+            return {'title': scenario_title(data['content'])}
         if action == 'discover.scan':
             from .discovery import scan
             return scan(self.project, self.settings.environment, data)
@@ -735,6 +742,9 @@ class Maintenance:
                     if type(suggestion['line']) is not int or suggestion['line'] < 1 or any(
                             not isinstance(suggestion[key], str) or not suggestion[key].strip() for key in ('id', 'impact', 'recommendation')):
                         raise RuleError('suggestion', '建议须包含有效原文行号、标识、影响及推荐。')
+                    before = next(record for record in task['inputs'] if record['path'] == suggestion['path'])
+                    suggestion['diff'] = ''.join(difflib.unified_diff(before['content'].splitlines(True),
+                        suggestion['content'].splitlines(True), fromfile=before['path'], tofile='候选正文'))
                     ids.add(suggestion['id'])
                 task.update(suggestions=suggestions, status='candidate_review', confirmation=None)
                 task['suggestions_expired'] = False

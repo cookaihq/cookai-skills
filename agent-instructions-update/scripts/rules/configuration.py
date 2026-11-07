@@ -113,7 +113,7 @@ class Settings:
                             continue
                         record = mapping[selected_scope]
                         if field == 'binding':
-                            values[field] = self.validate_binding(record, source)
+                            values[field] = None if record is None else self.validate_binding(record, source)
                         else:
                             if not isinstance(record, list) or not all(isinstance(x, str) and x for x in record):
                                 raise ValueError()
@@ -122,8 +122,20 @@ class Settings:
                     break
         except (ValueError, TypeError):
             raise RuleError('config_invalid', '配置值无效；检查历史数量或结构化 JSON，不能静默回退。') from None
+        update_path = self.personal/'.env'
+        try:
+            update_text = update_path.read_text(encoding='utf-8-sig')
+        except FileNotFoundError:
+            update_text = ''
+        except (OSError, UnicodeError):
+            raise RuleError('config_unreadable', f'无法读取更新偏好：{update_path}') from None
+        update_flag = parse_env(update_text).get('AUTO_UPDATE_CHECK', '1')
+        if update_flag not in ('0', '1'):
+            raise RuleError('config_invalid', 'AUTO_UPDATE_CHECK 须为 0 或 1。')
+        values['auto_update'] = update_flag != '0'
+        sources['auto_update'] = str(update_path) if 'AUTO_UPDATE_CHECK' in parse_env(update_text) else 'default'
         return {'values': values, 'sources': sources, 'scope': selected_scope,
-                'revision': digest([selected_scope, layers]), 'personal_enabled': self.use_personal,
+                'revision': digest([selected_scope, layers, update_text]), 'personal_enabled': self.use_personal,
                 'save_locations': {'personal': str(self.personal / '.env'), 'project': str(self.project / '.env.local')}}
 
     def save(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -143,6 +155,11 @@ class Settings:
         original = parse_env(content)
         updates = {}
         for field, value in data.get('values', {}).items():
+            if field == 'auto_update':
+                if save_scope != 'personal' or type(value) is not bool:
+                    raise RuleError('update_scope', '更新开关仅保存到个人设置，值须为布尔值。')
+                updates['AUTO_UPDATE_CHECK'] = '1' if value else '0'
+                continue
             if field not in KEYS:
                 raise RuleError('config_key', '未支持的配置字段。')
             if field == 'history_keep':
@@ -151,7 +168,8 @@ class Settings:
                 updates[KEYS[field]] = str(value)
             else:
                 if field == 'binding':
-                    self.validate_binding(value, str(path))
+                    if value is not None:
+                        self.validate_binding(value, str(path))
                 elif not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
                     raise RuleError('models', '目标模型须为模型 ID 列表。')
                 try:

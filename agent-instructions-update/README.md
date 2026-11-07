@@ -2,13 +2,13 @@
 
 在多个 Agent 和项目之间检查规则入口、审阅正文、同步独立副本，并在写入前展示具体差异。支持管理 Codex、Claude Code、WorkBuddy、Hermes、OpenCode；其他六种主流产品会列为尚未支持。
 
-当前为 0.1.0 实现候选，尚未发布。对话维护入口已通过 Windows Codex 隔离验收；主规则同步、场景规则、存储与入口三页已接入同一任务接口，HTTP 联通通过，可视验收待完成。新增检测、审阅、历史和设置界面仍为合成预览。macOS 及其他宿主实测尚未完成。
+当前版本为 0.1.0。专用工作台已接入真实文件和维护任务；Windows 原生 Codex 0.166.0 与浏览器代表性流程已验收，macOS 待验，Claude Code / WorkBuddy 执行本 Skill 尚未实测。检测到规则文件不代表对应 Agent 已加载或行为已验证。
 
 ## 安装与第一次使用
 
-将下面一段复制给 Codex、Claude Code 或 WorkBuddy。发布前需由维护者提供确定的候选源码位置，公开远端尚不保证包含此版本。
+将下面一段复制给 Codex、Claude Code 或 WorkBuddy。
 
-> 请安装完整的 agent-instructions-update Skill，优先使用 https://github.com/cookaihq/cookai-skills 中的 agent-instructions-update 目录，遇到网络故障时自动尝试同项目 https://cnb.cool/zhidateam/tannt/tannt-skills.git 的同名目录。沿用已有设置，核对确定版本，并验证当前 Agent 能发现和调用。
+> 请安装完整的 agent-instructions-update Skill 0.1.0，优先使用 https://github.com/cookaihq/cookai-skills 的 agent-instructions-update/v0.1.0 tag 中 agent-instructions-update 目录，遇到网络故障时自动尝试同项目 https://cnb.cool/zhidateam/tannt/tannt-skills.git 的同名目录并核对相同版本。沿用已有设置，并验证当前 Agent 能发现和调用。
 
 安装由 Agent 按当前宿主的原生入口完成：Codex 使用个人 `.agents/skills/`，Claude Code 使用 `.claude/skills/`，WorkBuddy 使用其个人 Skill 管理入口。复制安装带上整个 Skill 目录，不能只复制 `SKILL.md`。需要 uv 和固定 Python 环境，Agent 会按随包锁文件检查准备；本工具不需要 API Key，也不另接模型服务。
 
@@ -32,7 +32,9 @@
 
 > 请打开当前项目的 Agent 规则维护工作台，让我选择权威文件和同步目标；需要合并时，我会把页面上的任务提示交给你，完成候选后回到页面刷新查看。
 
-页面显示真实文件和待确认计划。只选择空目标时可按已经展示的清单直接同步；有合并目标时整批等待。页面关闭或服务结束不会删除维护任务，重新打开后可使用同一任务标识继续。默认空闲 60 分钟结束，也可在产物页选择本次常驻；常驻会持续占用系统资源。
+工作台包含检测、同步、场景、存储与入口、审阅、历史及一个设置页。顶部持续显示当前维护的是全局规则还是具体项目；没有项目规则时项目选项置灰，可选择项目或先预览建立规则。场景左侧按实际文件夹分组，以正文首个一级标题作为名称，并显示文件名。修改标题只改变名称，改文件路径另做计划。
+
+页面显示真实文件和待确认计划。只选择空目标时可按已经展示的清单直接同步；有合并目标时整批等待。页面关闭或服务结束不会删除维护任务，重新打开后可使用同一任务标识继续。统一工作台默认空闲 60 分钟结束，实际操作续期。
 
 **📱 手机或其他设备访问需要 FRP 或 Tailscale。** 可让 Agent 核实实际通道并提供可用链接；本机地址不能直接当作手机地址。
 
@@ -42,7 +44,7 @@
 
 | 运行环境 | 默认个人设置位置 | 验证范围 |
 | --- | --- | --- |
-| Windows 原生 | `C:/Users/<当前用户>/.config/agent-instructions-update/.env`；以 Python 识别的用户个人文件夹为准 | 本机已核对路径及 Codex 隔离业务流程；最终 UI 验收待完成 |
+| Windows 原生 | `C:/Users/<当前用户>/.config/agent-instructions-update/.env`；以 Python 识别的用户个人文件夹为准 | 路径、Codex 隔离业务、UI 创建任务→Agent 回传→UI 确认、七页代表性操作已验收 |
 | macOS / Linux | `/Users/<当前用户>/.config/agent-instructions-update/.env` 或 `/home/<当前用户>/.config/agent-instructions-update/.env`；以运行用户主目录为准 | macOS 尚未实机验证；Linux 尚未验证，不作为本版已验收平台 |
 | WSL | Linux 发行版内 `/home/<当前用户>/.config/agent-instructions-update/.env`，与 Windows 用户文件夹不同 | 尚未验证，不自动读取 Windows 侧设置 |
 
@@ -50,7 +52,7 @@
 
 > 请保存我的常用目标和历史保留数量，默认供我个人跨项目使用；核对当前项目的绑定，告诉我保存位置和实际生效来源。
 
-普通配置优先顺序是运行程序时的环境变量 → 所选工作文件夹 `.env.agent-instructions-update` → `.env.local` → `.env` → 个人配置。只查当前工作文件夹，不向父目录搜索；每项取首个非空来源，完整目标绑定不跨层拼接。入口已启用个人设置，需要本次关闭可直接告诉 Agent。
+普通配置优先顺序是运行程序时的环境变量 → 所选工作文件夹 `.env.agent-instructions-update` → `.env.local` → `.env` → 个人配置。每项取首个非空来源，完整目标绑定不跨层拼接。页面会先从启动目录定位项目，配置只查页面选定的项目目录；对话入口只查显式指定的工作目录，不向父级逐层拼接配置。入口已启用个人设置，需要本次关闭可直接告诉 Agent。
 
 只有明确要求当前项目覆盖时才保存到项目 `.env.local`。保存设置不会搬规则或改宿主模型；审阅模型默认只属于本次任务，明确要求复用才保存。全局和每个项目分别默认保留最近 30 个已完成任务；未完成和待恢复任务保留。
 
