@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -114,6 +115,42 @@ def active(field, values):
     return all(values.get(key) == value for key, value in field.get("depends_on", {}).items())
 
 
+def apply_changes(values, fields, changes):
+    """Validate explicit edits. Loading/fallback semantics remain the store's job."""
+    if not isinstance(changes, dict):
+        raise UIError("changes", "变更格式无效。")
+    definitions = {f["id"]: f for f in fields}
+    result = dict(values)
+    for name, change in changes.items():
+        field = definitions.get(name)
+        if not field or field.get("readonly"):
+            raise UIError("readonly", "变更包含未知或只读字段。")
+        if not isinstance(change, dict) or change.get("op") not in ("set", "unset"):
+            raise UIError("changes", "变更格式无效。")
+        if change["op"] == "unset":
+            result.pop(name, None)
+            continue
+        value, kind = change.get("value"), field.get("type", "text")
+        valid = {"text": isinstance(value, str), "select": value in field.get("choices", []),
+                 "number": type(value) in (int, float) and math.isfinite(value), "boolean": type(value) is bool,
+                 "list": isinstance(value, list) and all(isinstance(v, str) for v in value), "json": True}.get(kind, False)
+        if not valid or (isinstance(value, str) and "••••••" in value):
+            raise UIError("validation", field["label"] + "的值无效。", 422)
+        result[name] = value
+    return result
+
+
+def validation_errors(fields, effective, changes):
+    errors = []
+    for field in fields:
+        name = field["id"]
+        if active(field, effective) and field.get("required") and effective[name] in (None, "", []):
+            errors.append("请补齐：" + field["label"])
+        if name in changes and not active(field, effective) and changes[name]["op"] == "set":
+            errors.append(field["label"] + "当前不适用，请先核对关联设置。")
+    return errors
+
+
 class JsonConfig:
     """Single JSON-file opt-in reference store; never a replacement for an existing loader.
 
@@ -137,44 +174,45 @@ class JsonConfig:
             raise UIError("config", "配置文件格式无效，请先修复文件。", 422) from None
         return values, hmac.new(self.key, raw, hashlib.sha256).hexdigest()
 
-    def snapshot(self):
-        values, revision = self._read()
+    def _snapshot(self, values, revision, changes=None):
+        effective = {f["id"]: values.get(f["id"], f.get("default")) for f in self.fields}
+        fields = []
+        for f in self.fields:
+            present, value = f["id"] in values, effective[f["id"]]
+            status = "set" if present else "default" if "default" in f else "missing" if f.get("required") else "optional"
+            fields.append(dict(f, active=active(f, effective), targets=[] if f.get("readonly") else ["project"],
+                               effective={"value": value, "source": "project" if present else "default" if "default" in f else None, "status": status},
+                               rows=[{"layer": "project", "present": present, "value": values.get(f["id"]), "status": "effective" if present else "missing"}]))
         return {"revision": revision, "validation": "本地格式与必需项校验",
-                "fields": [dict(f, value=values.get(f["id"], f.get("default")), explicit=f["id"] in values,
-                                path=str(self.path), scope=f.get("scope", "当前项目")) for f in self.fields]}
+                "default_targets": {"project": "project"},
+                "layers": [{"id": "project", "name": self.path.name, "path": str(self.path), "scope": "project",
+                            "scope_label": "仅此项目", "readonly": False, "enabled": True}],
+                "fields": fields, "validation_errors": validation_errors(self.fields, effective, changes or {})}
 
-    def save(self, changes, revision):
+    def snapshot(self):
+        return self._snapshot(*self._read())
+
+    def _candidate(self, changes, revision, target):
+        if target != "project":
+            raise UIError("target", "请选择有效的保存文件。")
+        values, current = self._read()
+        if current != revision:
+            raise UIError("conflict", "配置已被其他操作修改。草稿仍保留，请重新载入后核对。", 409)
+        values = apply_changes(values, self.fields, changes)
+        return values, self._snapshot(values, current, changes)
+
+    def preview(self, changes, revision, target):
+        return self._candidate(changes, revision, target)[1]
+
+    def save(self, changes, revision, target):
         if not isinstance(changes, dict) or not changes:
             raise UIError("changes", "没有待保存的修改。")
         # Existing business directories retain their ACL; only new directories/files are tightened.
         if not self.path.parent.exists():
             private_directory(self.path.parent, owner_path=self.owner_path if self.owner_path.exists() else None)
         with file_lock(self.path.with_suffix(self.path.suffix + ".lock")):
-            values, current = self._read()
-            if current != revision:
-                raise UIError("conflict", "配置已被其他操作修改。草稿仍保留，请重新载入后核对。", 409)
-            definitions = {f["id"]: f for f in self.fields}
-            for name, change in changes.items():
-                field = definitions.get(name)
-                if not field or field.get("readonly"):
-                    raise UIError("readonly", "变更包含未知或只读字段。")
-                if not isinstance(change, dict) or change.get("op") not in ("set", "unset"):
-                    raise UIError("changes", "变更格式无效。")
-                if change["op"] == "unset":
-                    values.pop(name, None)
-                    continue
-                value, kind = change.get("value"), field.get("type", "text")
-                valid = {"text": isinstance(value, str), "select": value in field.get("choices", []),
-                         "number": type(value) in (int, float), "boolean": type(value) is bool,
-                         "list": isinstance(value, list), "json": True}.get(kind, False)
-                if not valid or (isinstance(value, str) and "••••••" in value):
-                    raise UIError("validation", field["label"] + "的值无效。", 422)
-                values[name] = value
-            effective = {name: values.get(name, f.get("default")) for name, f in definitions.items()}
-            for name, field in definitions.items():
-                if active(field, effective) and field.get("required") and effective[name] in (None, "", []):
-                    raise UIError("validation", "请补齐：" + field["label"], 422)
-                if name in changes and not active(field, effective) and changes[name]["op"] == "set":
-                    raise UIError("validation", field["label"] + "当前不适用，请先核对关联设置。", 422)
+            values, candidate = self._candidate(changes, revision, target)
+            if candidate["validation_errors"]:
+                raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
             atomic_json(self.path, values, owner_path=self.owner_path)
         return self.snapshot()

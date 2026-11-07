@@ -195,7 +195,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"app": "skill-ui", "instance": self.server.instance, "page": self.server.page,
                                    "lifetime": self.server.lifetime()})
         static = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                  "/style.css": ("style.css", "text/css; charset=utf-8")}
+                  "/style.css": ("style.css", "text/css; charset=utf-8"),
+                  "/configuration.js": ("configuration.js", "text/javascript; charset=utf-8"),
+                  "/configuration.css": ("configuration.css", "text/css; charset=utf-8")}
         if parsed.path in static:
             name, mime = static[parsed.path]
             return self.send(200, (STATIC / name).read_bytes(), mime)
@@ -248,14 +250,20 @@ class Handler(BaseHTTPRequestHandler):
                         raise UIError("conflict", "配置已变化，请重新载入核对。", 409)
                     for field in snapshot["fields"]:
                         if field["id"] == data.get("id") and field.get("sensitive"):
-                            return self.send(200, {"value": field.get("value", "")})
+                            record = field["effective"] if data.get("target") is None else next((r for r in field["rows"] if r["layer"] == data["target"]), None)
+                            if record is None:
+                                raise UIError("target", "请选择有效的配置文件。")
+                            return self.send(200, {"value": record.get("value", "")})
                     raise UIError("field", "此字段不支持查看原值。")
+                if path == "/api/preview":
+                    snapshot = server.adapter.preview(data.get("changes"), data.get("revision"), data.get("target"))
+                    return self.send(200, {"config": public_config(snapshot)})
                 if path == "/api/save":
-                    snapshot = server.adapter.save(data.get("changes"), data.get("revision"))
+                    snapshot = server.adapter.save(data.get("changes"), data.get("revision"), data.get("target"))
                     public = public_config(snapshot)
                     receipt = {"instance": server.instance, "project": str(server.project), "revision": snapshot["revision"],
                                "task": snapshot.get("task"), "validation": snapshot.get("validation", "适配器校验"),
-                               "saved_at": time.time()}
+                               "target": data.get("target"), "saved_at": time.time()}
                     atomic_json(server.directory / "saved.json", receipt, owner_path=server.project)
                     logging.info("config_saved instance=%s", server.instance)
                     return self.send(200, {"config": public, "receipt": receipt})

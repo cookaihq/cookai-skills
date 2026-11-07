@@ -18,6 +18,7 @@ from skill_ui import UIError
 from skill_ui.server import Server
 from skill_ui.storage import JsonConfig
 from studio_adapter import Studio
+from layers_adapter import LayeredStudio
 
 TMP = Path(os.environ.get("SKILL_UI_TEST_TMP", Path.cwd() / "tmp" / "skill-ui-tests")).resolve()
 TMP.mkdir(parents=True, exist_ok=True)
@@ -37,8 +38,8 @@ class CoreTests(unittest.TestCase):
             server.server_close()
         self.tmp.cleanup()
 
-    def server(self, page, **kwargs):
-        server = Server(Studio(self.project), self.project, page, self.project, **kwargs)
+    def server(self, page, adapter_class=Studio, **kwargs):
+        server = Server(adapter_class(self.project), self.project, page, self.project, **kwargs)
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval":0.05}, daemon=True)
         thread.start()
         self.servers.append((server, thread))
@@ -64,17 +65,17 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.request(server,opener,"/api/state")[0],401)
         self.login(server,opener)
         state = self.request(server,opener,"/api/state")[1]
-        self.assertFalse(state["config"]["fields"][0]["configured"])
+        self.assertFalse(state["config"]["fields"][0]["effective"]["configured"])
         first = state["config"]["revision"]
         secret = "demo-key-middle-private-987654"
-        code, saved, _ = self.request(server,opener,"/api/save",{"revision":first,"changes":{"api_key":{"op":"set","value":secret}}})
+        code, saved, _ = self.request(server,opener,"/api/save",{"target":"project","revision":first,"changes":{"api_key":{"op":"set","value":secret}}})
         self.assertEqual(code,200)
         self.assertNotIn(secret,json.dumps(saved))
         self.assertNotIn("middle-private",json.dumps(saved))
         self.assertNotIn(secret,(self.project/"saved.json").read_text(encoding="utf-8"))
         current = saved["config"]["revision"]
         self.assertEqual(self.request(server,opener,"/api/reveal",{"revision":current,"id":"api_key"})[1]["value"],secret)
-        self.assertEqual(self.request(server,opener,"/api/save",{"revision":first,"changes":{"format":{"op":"set","value":"纯文本"}}})[0],409)
+        self.assertEqual(self.request(server,opener,"/api/save",{"target":"project","revision":first,"changes":{"format":{"op":"set","value":"纯文本"}}})[0],409)
         self.assertEqual(json.loads((self.project/"demo-state/settings.json").read_text(encoding="utf-8"))["api_key"],secret)
         self.assertEqual(self.request(server,opener,"/api/reveal",{"revision":first,"id":"api_key"})[0],409)
 
@@ -89,13 +90,36 @@ class CoreTests(unittest.TestCase):
         old=path.read_bytes()
         for changes in ({"key":{"op":"unset"}}, {"count":{"op":"set","value":True}},
                         {"enabled":{"op":"set","value":False},"count":{"op":"set","value":3}}):
-            with self.assertRaises(UIError):store.save(changes,revision)
+            with self.assertRaises(UIError):store.save(changes,revision,"project")
             self.assertEqual(path.read_bytes(),old)
-        store.save({"ordered":{"op":"set","value":["z","a"]}},revision)
+        store.save({"ordered":{"op":"set","value":["z","a"]}},revision,"project")
         self.assertEqual(json.loads(path.read_text()),{"unknown":"keep","key":"existing","ordered":["z","a"]})
-        result=store.save({"ordered":{"op":"unset"}},store.snapshot()["revision"])
-        self.assertEqual(result["fields"][1]["value"],["c"])
-        self.assertFalse(result["fields"][1]["explicit"])
+        result=store.save({"ordered":{"op":"unset"}},store.snapshot()["revision"],"project")
+        self.assertEqual(result["fields"][1]["effective"]["value"],["c"])
+        self.assertEqual(result["fields"][1]["effective"]["source"],"default")
+
+    def test_layer_preview_masking_and_exact_target_save(self):
+        server, opener = self.server("configuration", adapter_class=LayeredStudio)
+        self.login(server, opener)
+        state = self.request(server, opener, "/api/state")[1]["config"]
+        request = {"target":"project_local", "revision":state["revision"], "changes":{"api_key":{"op":"unset"}}}
+        files = {p:p.read_bytes() for p in server.adapter.store.directory.glob("*.json")}
+        code, preview, _ = self.request(server, opener, "/api/preview", request)
+        self.assertEqual(code, 200)
+        key = next(f for f in preview["config"]["fields"] if f["id"] == "api_key")
+        self.assertEqual(key["effective"]["source"], "plugin_env")
+        self.assertNotIn("value", key["effective"])
+        self.assertTrue(all("value" not in row for row in key["rows"]))
+        self.assertEqual(files, {p:p.read_bytes() for p in files})
+        for target, expected in ((None,"demo-project-key-0002"),("plugin_env","demo-global-key-0001")):
+            self.assertEqual(self.request(server, opener, "/api/reveal", {"id":"api_key", "target":target, "revision":state["revision"]})[1]["value"], expected)
+        self.assertEqual(self.request(server, opener, "/api/reveal", {"id":"api_key", "target":"../bad", "revision":state["revision"]})[0], 400)
+        code, saved, _ = self.request(server, opener, "/api/save", request)
+        self.assertEqual(code, 200)
+        self.assertEqual(saved["receipt"]["target"], "project_local")
+        self.assertEqual(files[server.adapter.store.path("plugin_env")], server.adapter.store.path("plugin_env").read_bytes())
+        self.assertEqual(self.request(server, opener, "/api/preview", request)[0], 409)
+        self.assertEqual(self.request(server, opener, "/configuration.js", decode=False)[0], 200)
 
     def test_auth_origin_csrf_and_page_boundaries(self):
         config,cookies=self.server("configuration")

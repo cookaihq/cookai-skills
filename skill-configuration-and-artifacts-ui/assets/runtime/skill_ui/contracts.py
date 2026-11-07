@@ -20,8 +20,10 @@ class Resource:
 class Adapter:
     """Implement only the page(s) selected for the target. Methods run under a lock.
 
-    Config fields: id, label, type, value, sensitive, required, advanced, readonly,
-    group, help, choices, depends_on, explicit, default, scope, path, effect, clear_help.
+    Config: revision, layers (in loader order), fields, default_targets, validation_errors.
+    Fields: id, label, type, sensitive, required, advanced, readonly, active, group,
+    help, choices, depends_on, targets, effective {source, status, value, message},
+    rows [{layer, present, status, value, message}]. The adapter owns resolution.
     Types: text, number, boolean, select, list, json. depends_on maps field IDs to values.
     Artifacts need only id and title; optional kind, task, summary, preview, resource,
     url, status, metadata. preview: {type, text|columns+rows|resource|renderer+data}.
@@ -33,7 +35,11 @@ class Adapter:
     def config(self):
         raise UIError("unsupported", "此目标没有配置页面。", 404)
 
-    def save(self, changes, revision):
+    def preview(self, changes, revision, target):
+        """Resolve a candidate through the same loader without writing any files."""
+        raise UIError("unsupported", "此目标不支持配置预览。", 404)
+
+    def save(self, changes, revision, target):
         raise UIError("unsupported", "此目标不支持修改配置。", 404)
 
     def artifacts(self):
@@ -53,17 +59,24 @@ def masked(value):
 
 
 def public_config(snapshot):
-    result = {k: snapshot[k] for k in ("revision", "task", "validation", "note") if k in snapshot}
+    if "layers" not in snapshot:
+        raise UIError("contract", "配置适配器需要迁移到分层协议；请同时升级适配器和共用核心。", 422)
+    result = {k: snapshot[k] for k in ("revision", "task", "validation", "note", "default_targets", "validation_errors") if k in snapshot}
+    layer_keys = ("id", "name", "scope", "scope_label", "path", "readonly", "enabled", "message")
+    result["layers"] = [{k: layer[k] for k in layer_keys if k in layer} for layer in snapshot["layers"]]
     result["fields"] = []
-    allowed = ("id", "label", "type", "sensitive", "required", "advanced", "readonly", "group", "help",
-               "choices", "depends_on", "explicit", "scope", "path", "effect", "clear_help")
+    allowed = ("id", "label", "type", "sensitive", "required", "advanced", "readonly", "active", "group", "help",
+               "choices", "depends_on", "targets", "effect")
     for field in snapshot["fields"]:
         item = {k: field[k] for k in allowed if k in field}
-        if field.get("sensitive"):
-            item.update(mask=masked(field.get("value")), configured=field.get("value") not in (None, ""))
-        else:
-            item["value"] = field.get("value")
-            if "default" in field:
-                item["default"] = field["default"]
+        def public_value(record, keys):
+            public = {k: record[k] for k in keys if k in record}
+            if field.get("sensitive"):
+                public.update(mask=masked(record.get("value")), configured=record.get("value") not in (None, ""))
+            else:
+                public["value"] = record.get("value")
+            return public
+        item["effective"] = public_value(field["effective"], ("source", "status", "message"))
+        item["rows"] = [public_value(row, ("layer", "present", "status", "message")) for row in field["rows"]]
         result["fields"].append(item)
     return result
