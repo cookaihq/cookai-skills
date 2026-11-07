@@ -100,6 +100,25 @@ class MaintenanceTests(unittest.TestCase):
                 view = self.call('workspace.read', scope='project')
                 self.assertEqual([item['path'] for item in view['scenarios']], [scenario])
 
+    def test_workspace_only_promotes_scenarios_from_active_rule_reading_chains(self):
+        main = self.file('AGENTS.md', '# Project\nRead [Gate](policy/gate.md); context only: [Old](archive/old.md).\n'
+                         'Background: [Notes](notes.md).\nRead [Tool](tools/example/SKILL.md) before using the helper.\n')
+        gate = self.file('policy/gate.md', '# Gate\nRead [Nested](nested.md) before commands.\n'
+                         '历史记录包含读取动作；背景见 [Old](../archive/old.md)。\n')
+        nested = self.file('policy/nested.md', '# Nested\n')
+        direct = self.file('docs/agents/direct.md', '# Direct scenario\n')
+        self.file('notes.md', '# Historical notes\nRead [Old](archive/old.md).\nRead [Outside](../outside/AGENTS.md).\n')
+        self.file('archive/old.md', '# Historical example\n')
+        outside = self.base/'outside'
+        outside.mkdir()
+        (outside/'AGENTS.md').write_text('# Other project\nRead [Other](other.md).\n', encoding='utf-8')
+        (outside/'other.md').write_text('# Other scenario\n', encoding='utf-8')
+        self.file('tools/example/SKILL.md', '---\nname: example\ndescription: Tool instructions\n---\n# Example tool\nRead [Wrong](../../wrong.md).\n')
+        self.file('wrong.md', '# Tool reference\n')
+        view = self.call('workspace.read', scope='project')
+        self.assertEqual({item['path'] for item in view['scenarios']}, {gate, nested, direct})
+        self.assertEqual([item['path'] for item in view['main_files']], [main])
+
     def test_mixed_batch_waits_then_writes_authority_and_every_selected_target(self):
         a = self.file('A.md', 'Keep preferences.\n')
         b = self.file('B.md', 'Keep project boundaries.\n')
@@ -724,6 +743,9 @@ class MaintenanceTests(unittest.TestCase):
         entrance.symlink_to(main)
         index = self.call('index.read')
         self.assertIn(str(rule), {x['path'] for x in index['files'] if x['status']=='found'})
+        workspace = self.call('workspace.read', scope='project')
+        self.assertEqual([item['path'] for item in workspace['scenarios']], [str(rule)])
+        self.assertEqual([item['path'] for item in workspace['main_files']], [str(entrance)])
         destination = physical/'scenarios/new.md'
         task = self.call('scenario.plan', scope='global', rules_root=str(physical), operation='rename',
                          path=str(rule), destination=str(destination), entrances=[str(entrance)])

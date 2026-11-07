@@ -129,6 +129,7 @@ def index_project(project: Path, extra: list[str] | None = None, bases: list[dic
     for directory, directories, files in os.walk(project, followlinks=False, onerror=lambda error: errors.append(str(error.filename))) if scan_root else []:
         directories[:] = [name for name in directories if name not in EXCLUDED and not is_entrance(Path(directory) / name)]
         pending.extend(Path(directory) / name for name in files if name in MAIN_NAMES)
+    entrypoints = {os.path.normcase(str(path.absolute())) for path in pending}
     found: dict[str, dict[str, Any]] = {}
     while pending:
         path = pending.pop(0)
@@ -138,13 +139,13 @@ def index_project(project: Path, extra: list[str] | None = None, bases: list[dic
         try:
             record = snapshot(str(path))
             refs = references(path, record['content'], bases)
-            record.update(title=scenario_title(record['content']), role='main' if path.name in MAIN_NAMES else 'referenced',
+            record.update(title=scenario_title(record['content']), role='main' if path.name in MAIN_NAMES else 'referenced', entrypoint=key in entrypoints,
                           scope=str(path.parent) if path.name in MAIN_NAMES else 'reference-defined',
                           references=refs, loading='unverified', status='found' if record['exists'] else 'missing')
             found[key] = record
             pending.extend(Path(ref['target']) for ref in refs if ref['target'])
         except (OSError, RuleError) as exc:
-            found[key] = {'path': str(path), 'status': 'unreadable', 'error': type(exc).__name__, 'references': [], 'loading': 'unverified'}
+            found[key] = {'path': str(path), 'entrypoint':key in entrypoints, 'status': 'unreadable', 'error': type(exc).__name__, 'references': [], 'loading': 'unverified'}
     return {'project': str(project), 'files': sorted(found.values(), key=lambda record: record['path']),
             'errors': sorted(errors), 'loading': 'unverified'}
 

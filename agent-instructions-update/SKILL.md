@@ -1,8 +1,8 @@
 ---
 name: agent-instructions-update
-description: v0.1.0｜检测 Agent 安装与规则入口，结合宿主和模型审阅、编辑及同步全局和项目指令。适用于规则整理、场景规则维护、入口检查和布局调整。
+description: v0.1.1｜检测 Agent 安装与规则入口，结合宿主和模型审阅、编辑及同步全局和项目指令。适用于规则整理、场景规则维护、入口检查和布局调整。
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 compatibility: Requires uv >=0.8 and Python 3.13.3. Designed for Codex, Claude Code and WorkBuddy on native Windows and macOS.
 ---
 

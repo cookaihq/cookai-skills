@@ -2,13 +2,13 @@
 
 在多个 Agent 和项目之间检查规则入口、审阅正文、同步独立副本，并在写入前展示具体差异。支持管理 Codex、Claude Code、WorkBuddy、Hermes、OpenCode；其他六种主流产品会列为尚未支持。
 
-当前版本为 0.1.0。专用工作台已接入真实文件和维护任务；Windows 原生 Codex 0.166.0 与浏览器代表性流程已验收，macOS 待验，Claude Code / WorkBuddy 执行本 Skill 尚未实测。检测到规则文件不代表对应 Agent 已加载或行为已验证。
+当前版本为 0.1.1。专用工作台已接入真实文件和维护任务；Windows 原生 Codex 0.166.0 与浏览器代表性流程已验收，macOS 待验，Claude Code / WorkBuddy 执行本 Skill 尚未实测。0.1.1 修复参考资料被误列为场景的问题：仅从实际规则入口沿有效读取链识别场景，Skill 使用说明另按其职责保留。检测到规则文件不代表对应 Agent 已加载或行为已验证。
 
 ## 安装与第一次使用
 
 将下面一段复制给 Codex、Claude Code 或 WorkBuddy。
 
-> 请安装完整的 agent-instructions-update Skill 0.1.0，优先使用 https://github.com/cookaihq/cookai-skills 的 agent-instructions-update/v0.1.0 tag 中 agent-instructions-update 目录，遇到网络故障时自动尝试同项目 https://cnb.cool/zhidateam/tannt/tannt-skills.git 的同名目录并核对相同版本。沿用已有设置，并验证当前 Agent 能发现和调用。
+> 请安装完整的 agent-instructions-update Skill 0.1.1，优先使用 https://github.com/cookaihq/cookai-skills 的 agent-instructions-update/v0.1.1 tag 中 agent-instructions-update 目录，遇到网络故障时自动尝试同项目 https://cnb.cool/zhidateam/tannt/tannt-skills.git 的同名目录并核对相同版本。沿用已有设置，并验证当前 Agent 能发现和调用。
 
 安装由 Agent 按当前宿主的原生入口完成：Codex 使用个人 `.agents/skills/`，Claude Code 使用 `.claude/skills/`，WorkBuddy 使用其个人 Skill 管理入口。复制安装带上整个 Skill 目录，不能只复制 `SKILL.md`。需要 uv 和固定 Python 环境，Agent 会按随包锁文件检查准备；本工具不需要 API Key，也不另接模型服务。
 

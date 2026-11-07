@@ -42,10 +42,16 @@ def scenario_paths(root: Path) -> tuple[list[str], list[str]]:
     return paths, errors
 
 
-def reading_gate(content: str, line_number: int) -> bool:
+def reading_gate(content: str, line_number: int, reference: dict[str, Any] | None = None) -> bool:
     lines = content.splitlines()
     offset = line_number - 1
     context = [lines[offset]]
+    if reference:
+        line_start = content.rfind('\n', 0, reference['start']) + 1
+        line_end = content.find('\n', reference['end'])
+        before, after = content[line_start:reference['start']], content[reference['end']:line_end if line_end >= 0 else len(content)]
+        separator = r'[。；;]|\.(?=\s)'
+        context = [re.split(separator, before)[-1] + content[reference['start']:reference['end']] + re.split(separator, after)[0]]
     start, end = offset, offset
     while start >= 0 and re.search(r'(?<!\\)\|', lines[start]):
         start -= 1
@@ -79,7 +85,7 @@ def read_workspace(app: Any, data: dict[str, Any]) -> dict[str, Any]:
             if record['path'] == binding['authority']:
                 record['role'] = 'main'
     context['errors'] += indexed['errors'] + errors
-    main = [record for record in indexed['files'] if record.get('role') == 'main']
+    main = [record for record in indexed['files'] if record.get('role') == 'main' and record.get('entrypoint')]
     context['availability'] = 'error' if context['errors'] or any(x['status']=='unreadable' for x in indexed['files']) else 'ready' if any(x['status']=='found' for x in main) else 'empty' if context['identified'] else 'none'
     root = project
     discovery = None
@@ -108,16 +114,30 @@ def read_workspace(app: Any, data: dict[str, Any]) -> dict[str, Any]:
             details = extras.get(record['path'], {})
             record.update({key:details[key] for key in ('product','product_name','profile','selection','role') if key in details})
         present = {x['path'] for x in indexed['files']}
-        indexed['files'].extend({**x, 'title':scenario_title(x.get('content','')), 'references':[]} for path,x in extras.items() if path not in present)
+        indexed['files'].extend({**x, 'title':scenario_title(x.get('content','')), 'entrypoint':True, 'references':[]} for path,x in extras.items() if path not in present)
         main = [record for record in indexed['files'] if record.get('role') == 'main']
-    reading_targets = {ref['target'] for record in indexed['files'] for ref in record.get('references', [])
-                       if ref.get('target') and reading_gate(record.get('content',''), ref['line'])}
+    nodes = {record.get('entity', record['path']):record for record in indexed['files']}
+    reading_targets = {record.get('entity', record['path']) for record in indexed['files']
+                       if record.get('entrypoint') and record.get('role') not in ('identity','memory')}
+    pending = set(reading_targets)
+    while pending:
+        record = nodes[pending.pop()]
+        for ref in record.get('references', []):
+            target = ref.get('target')
+            if (not target or target in reading_targets or target not in nodes
+                    or nodes[target].get('role') in ('identity','memory') or Path(target).name == 'SKILL.md'):
+                continue
+            if reading_gate(record.get('content',''), ref['line'], ref):
+                reading_targets.add(target)
+                pending.add(target)
+    main = [record for record in indexed['files'] if record.get('role') == 'main'
+            and record.get('entity', record['path']) in reading_targets]
     scenarios = []
     for record in indexed['files']:
         if record.get('role') in ('main','identity','memory'):
             continue
         path = Path(record['path'])
-        if not path.is_relative_to(scenario_root) and record.get('role') != 'scenario' and str(path.resolve()) not in reading_targets:
+        if record.get('entity', record['path']) not in reading_targets:
             continue
         relative = path.relative_to(scenario_root).as_posix() if path.is_relative_to(scenario_root) else path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
         scenarios.append({**record, 'relative_path':relative})
