@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "agent-instructions-update",
+  "channel": "stable",
+  "tag_prefix": "agent-instructions-update/v",
+  "ref_type": "tag"
+}
