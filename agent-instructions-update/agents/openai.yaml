@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent 规则维护"
+  short_description: "检测 Agent 入口，审阅、编辑与同步全局及项目规则"
+  default_prompt: "请使用 $agent-instructions-update 检查本机 Agent 及当前项目的规则，结合宿主与目标模型提出改进方案，并在确认具体修改后执行。"
+policy:
+  allow_implicit_invocation: true

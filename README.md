@@ -6,6 +6,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 
 | Skill | 功能 | 文档 |
 |---|---|---|
+| [agent-instructions-update](agent-instructions-update/) | 检测五种 Agent 的规则入口，审阅、编辑、同步和恢复全局及项目规则（0.1.0 实现候选） | [README](agent-instructions-update/README.md) · [SKILL.md](agent-instructions-update/SKILL.md) |
 | [bilibili-charge-download](bilibili-charge-download/) | 使用用户已登录且有完整播放及保存权限的 B 站账号下载充电专属视频，将 DASH 音视频封装并完整性验证为 MP4；不读取 Cookie，不绕过付费或访问限制 | [README](bilibili-charge-download/README.md) · [SKILL.md](bilibili-charge-download/SKILL.md) |
 | [git-setup](git-setup/) | 仅提供 URL 即按当前项目状态接入远端；支持明确请求的发布、同步与本地/GitHub Issue | [README](git-setup/README.md) · [SKILL.md](git-setup/SKILL.md) |
 | [video-to-markdown](video-to-markdown/) | 把本地或可直接下载的视频转成可复核、可续跑的 Markdown 文档：结合带时间戳的语音转写、关键帧截图、短 GIF、自适应补采样和全时间线覆盖检查，保留语音与画面共同承载的内容 | [README](video-to-markdown/README.md) · [SKILL.md](video-to-markdown/SKILL.md) |
@@ -25,6 +26,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
 |---|---|---|
+| agent-instructions-update | 0.1.0 | [agent-instructions-update/v0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/agent-instructions-update%2Fv0.1.0) |
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | frpc-launch | 1.5.0 | [frpc-launch/v1.5.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.5.0) |
