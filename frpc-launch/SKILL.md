@@ -1,12 +1,14 @@
 ---
 name: frpc-launch
 metadata:
-  version: "1.5.0"
-description: v1.5.0｜通过已有 FRPS 入口启动、检查或停止本地 frpc。支持自部署/宝塔和樱花 FRP；按项目复用连接、固定域名并隔离代理与进程。适用于“把这个项目的 3000 端口透传出去”“启动 frpc”“FRP 连不上”。先核对已有域名、路由与本地服务。不修改远端服务器、DNS、证书或开机自启。支持 Windows 原生、macOS/Linux；实际验收范围见 README。
+  version: "1.6.0"
+description: v1.6.0｜通过已有 FRPS 入口启动、检查或停止本地 frpc。支持自部署/宝塔和樱花 FRP；按项目复用连接、固定域名并隔离代理与进程。适用于“把这个项目的 3000 端口透传出去”“启动 frpc”“FRP 连不上”。先核对已有域名、路由与本地服务。不修改远端服务器、DNS、证书或开机自启。支持 Windows 原生、macOS/Linux；实际验收范围见 README。
 compatibility: Claude Code, Codex or WorkBuddy with a local shell and uv >= 0.8. Native Windows 10/11, macOS and Linux on amd64/arm64. Client and host acceptance status is in README.md.
 ---
 
 # frpc-launch
+
+1.6.0 开发批次新增只读 `context-info` 与消费者独立连接接口。其他 Skill 要继承原项目连接、独立停止自己的实例时，先读 [消费者接口](references/consumers.md)。接口及运行目录与普通项目分开；查询缺项不隐藏已知父域，不提供远端空闲或业务可用证明。该批次尚未发布。
 
 1.5.0 新增 Windows 原生客户端准备和进程管理。Windows 合成回归与 Codex 合成闭环通过，Claude Code 部分通过，WorkBuddy、真实 FRP 链路及 macOS 实机仍待验；实际环境、宿主版本和限制见 README。
 

@@ -738,15 +738,8 @@ def process_command(pid: int) -> str:
 
 
 def process_started(pid: int) -> str:
-    if os.name == "nt":
-        return windows.snapshot(pid, command=False).get("process_start", "")
-    try:
-        fields = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
-        return "proc:" + fields[19]
-    except (OSError, IndexError):
-        result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="],
-                                capture_output=True, text=True, timeout=5)
-        return "ps:" + result.stdout.strip() if result.returncode == 0 else ""
+    from process_guard import process_started as inspect_start
+    return inspect_start(pid)
 
 
 def pid_identity_ok(record: dict, expected_project: str = "", expected_mode: str = "") -> bool:
@@ -775,10 +768,16 @@ def pid_identity_ok(record: dict, expected_project: str = "", expected_mode: str
 
 
 def runtime_root(args):
+    if getattr(args, "consumer", ""):
+        import consumer_config
+        return consumer_config.runtime_home(args)
     return projects.runtime_home(args.project, args.home) if args.project else args.home
 
 
 def expected_project(args):
+    if getattr(args, "consumer", ""):
+        import consumer_config
+        return consumer_config.identity(args)
     return projects.project_id(args.project) if args.project else ""
 
 
@@ -858,6 +857,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", type=Path, default=None,
                    help="当前项目目录；隔离代理、PID 和日志，--home 仅提供共享默认与二进制")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果（供 Agent 解析）")
+    p.add_argument("--consumer", default="", help="独立消费者标识；与 --instance 同时使用")
+    p.add_argument("--instance", default="", help="消费者内稳定连接 ID；配置仍来自 --project/--home")
     sub = p.add_subparsers(dest="command")
     for name, desc in [
         ("start", "后台启动 frpc"), ("verify", "离线校验 official 配置，不启动隧道"), ("stop", "停止受管 frpc"),
@@ -866,6 +867,8 @@ def build_parser() -> argparse.ArgumentParser:
         ("guide-init", "引导流程写配置（由 SKILL.md 编排调用）"),
         ("project-config", "保存项目连接、固定域名或定点更新代理；不启动隧道"),
         ("project-info", "只读报告项目配置来源和完整路由映射；不回显连接值"),
+        ("context-info", "只读返回接口版本、父域、来源及连接缺项，不要求凭证完整"),
+        ("instance-config", "保存消费者独立路由；不改变原项目代理或固定域名"),
     ]:
         sp = sub.add_parser(name, help=desc)
         if name in ("start", "verify", "stop", "status", "logs", "install", "update"):
@@ -875,6 +878,7 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--version", default="",
                             help="official 模式指定版本（缺省为最新稳定版）")
         if name == "start":
+            sp.add_argument("--owner-pid", type=int, help="消费者后台所有者；退出后停止独立客户端")
             sp.add_argument("--wait", type=float, default=15.0,
                             help="启动验证的有界等待秒数（默认 15）")
         if name == "logs":
@@ -905,6 +909,14 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--subdomain-host", default="")
             sp.add_argument("--location", action="append", dest="locations", default=None)
             sp.add_argument("--proxy", action="append", dest="proxies", default=[])
+        if name == "instance-config":
+            sp.add_argument("--require-tls", action="store_true", help="独立消费者要求 FRPC—FRPS TLS；拒绝显式禁用")
+            sp.add_argument("--context-revision", required=True)
+            sp.add_argument("--domain-prefix", required=True)
+            sp.add_argument("--local-port", type=int, required=True)
+            sp.add_argument("--local-ip", default="127.0.0.1")
+            sp.add_argument("--proxy-type", choices=("http", "https"), default="http")
+            sp.add_argument("--location", action="append", dest="locations", default=[])
     return p
 
 
@@ -1152,12 +1164,15 @@ def cmd_stop(args) -> int:
             continue
         if not pid_identity_ok(record, expected_project(args), mode):
             pid_file.unlink(missing_ok=True)
-            if isinstance(record.get("pid"), int) and not pid_alive(record["pid"]):
+            exited = isinstance(record.get("pid"), int) and not pid_alive(record["pid"])
+            if exited:
                 detail = "进程已退出，仅清理残留 pid 文件"
             else:
                 detail = ("pid 记录身份核对不通过（进程号可能被复用），"
                           "只清理 pid 文件，未发送任何信号")
-            results[mode] = {"result": "stale_pid_cleaned", "detail": detail}
+            results[mode] = {"result": "stale_pid_cleaned", "detail": detail,
+                             "owned_process_exited": bool(exited and record.get('project_id') == expected_project(args)
+                                                          and record.get('mode') == mode)}
             continue
         pid = record["pid"]
         signal_record(record, signal.SIGTERM)
@@ -1174,6 +1189,8 @@ def cmd_stop(args) -> int:
 
 
 def cmd_status(args) -> int:
+    if getattr(args, "consumer", ""):
+        return cmd_instance_status(args)
     if args.project:
         return cmd_project_status(args)
     home = args.home
@@ -1391,9 +1408,20 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
         return {"mode": mode, "result": "verified", "config_source": config_source,
                 "binary": str(binary), "binary_version": meta_now.get("version", ""), "exit_code": 0}
     tail_now = mask_text(read_log_tail(log_file, 20), secrets)
+    owner = {}
+    if getattr(args, "owner_pid", None) is not None:
+        if not getattr(args, "consumer", ""):
+            raise FrpcLaunchError("owner-pid 仅支持独立消费者实例。")
+        owner_start = process_started(args.owner_pid)
+        if not owner_start:
+            raise FrpcLaunchError("消费者所有者已退出；未启动客户端。")
+        owner = {"pid": args.owner_pid, "process_start": owner_start}
     record = read_pid_record(pid_file)
     if record:
         if pid_identity_ok(record, expected_project(args), mode):
+            if record.get("owner", {}) != owner:
+                return {"mode": mode, "result": "owner_changed", "pid": record["pid"],
+                        "detail": "后台所有者已变化；请先停止本实例再启动，未接管现有进程。", "exit_code": 5}
             if record.get("config_digest") == digest:
                 # review M2：timeout 写入的记录标记 verified=false；
                 # 二次 start 必须复核成功证据，不得把未登录成功的进程报成 0
@@ -1440,10 +1468,12 @@ def _start_one_mode(args, mode: str, decision: ModeDecision, layered: dict) -> d
         argv = [interpreter, str(Path(__file__).resolve().with_name("project_runner.py")),
                 "--instance", str(run_home), "--mode", mode, "--binary", str(binary),
                 "--log", str(log_file)] + (["--config", str(config_path)] if mode == "official" else [])
+        if owner:
+            argv += ["--owner-pid", str(owner['pid']), "--owner-start", owner['process_start']]
     proc = spawn_daemon(argv, env, log_file, supervised=supervised)
     pid = proc.pid
     record = {"pid": pid, "exe": argv[0], "mode": mode, "config_source": config_source,
-              "config_digest": digest, "verified": False,
+              "config_digest": digest, "verified": False, "owner": owner,
               "binary_version": meta_now.get("version", ""),
               "started_at": datetime.now(timezone.utc).isoformat()}
     if supervised:
@@ -1504,6 +1534,81 @@ def cmd_project_config(args):
     result = projects.configure(args, dict(os.environ), parse_proxy_spec)
     _emit(args, result, "项目配置已保存；域名：%s；连接来源：%s；未启动隧道。" % (
         result["domain"] or "尚未确定", result["config_source"]))
+    return 0
+
+
+def cmd_context_info(args):
+    import consumer_config as consumers
+    result = consumers.context_report(dict(os.environ), args.project, args.home)
+    _emit(args, result, "FRP 上下文已读取；父域状态：%s；公网未检查。" % result["domain_suffix"]["status"])
+    return 0
+
+
+def cmd_instance_config(args):
+    import consumer_config as consumers
+    report, _, _ = consumers.require_context(dict(os.environ), args)
+    if report["revision"] != args.context_revision:
+        raise projects.ProjectError("FRP 上下文已变化；重新载入后再保存。", code="context_changed", exit_code=5)
+    route = consumers.make_route(args, report)
+    record = read_pid_record(pid_paths(runtime_root(args), "official")[0])
+    if record and pid_alive(record.get("pid", 0)):
+        if not pid_identity_ok(record, expected_project(args), "official"):
+            raise projects.ProjectError("运行身份不匹配，保留现状。", code="ownership_mismatch")
+        if consumers.load_route(args) != route:
+            raise projects.ProjectError("本连接正在运行；先检查新域名，再明确停止本连接后修改路由。",
+                                        code="running", exit_code=5)
+    # Refuse to claim an existing route belonging to another source project.
+    if consumers.route_path(args).exists():
+        consumers.load_route(args)
+    projects.atomic_write(consumers.route_path(args), json.dumps(route, ensure_ascii=False, indent=2) + "\n")
+    _emit(args, {"result": "configured", "interface_version": consumers.INTERFACE_VERSION,
+                 **route, "runtime_dir": str(runtime_root(args)), "public_endpoint": "not_checked"},
+          "独立连接路由已保存；未启动隧道。")
+    return 0
+
+
+def cmd_instance_start(args):
+    import consumer_config as consumers
+    if args.mode not in ("", "official"):
+        raise projects.ProjectError("消费者独立连接接口目前只支持 official 模式。")
+    layered = project_layers(args)
+    args.effective_config, connection, route = consumers.effective_config(args, dict(os.environ))
+    template = runtime_root(args) / "run" / "official.toml"
+    projects.atomic_write(template, projects.RUNTIME_TEMPLATE)
+    decision = ModeDecision("explicit", ["official"], (template, connection.source), (None, ""))
+    result = _start_one_mode(args, "official", decision, layered)
+    code = result.pop("exit_code")
+    result.update({"interface_version": consumers.INTERFACE_VERSION, "consumer": args.consumer,
+                   "instance": args.instance, "domain": route["domain"], "proxy": route["proxy"],
+                   "runtime_dir": str(runtime_root(args)), "public_endpoint": "not_checked",
+                   "verification_scope": "configuration" if args.command == "verify" else "startup_log"})
+    _emit(args, result, "独立连接：%s；公网和业务状态未检查。" % result["result"])
+    return code
+
+
+def cmd_instance_status(args):
+    import consumer_config as consumers
+    result = {"interface_version": consumers.INTERFACE_VERSION, "consumer": args.consumer,
+              "instance": args.instance, "runtime_dir": str(runtime_root(args)), "modes": {}}
+    desired = ""
+    try:
+        result["route"] = consumers.load_route(args)
+        config, _, _ = consumers.effective_config(args, dict(os.environ))
+        binary, _ = resolve_official_binary(project_layers(args), args.home)
+        if binary:
+            desired = hashlib.sha256((config + "\0" + str(binary)).encode()).hexdigest()
+    except projects.ProjectError as exc:
+        result["configuration_error"] = exc.report()
+    except FrpcLaunchError:
+        result["configuration_error"] = {"result": "invalid_config", "detail": "FRP 客户端配置不可用。"}
+    record = read_pid_record(pid_paths(runtime_root(args), "official")[0])
+    running = bool(record) and pid_identity_ok(record, expected_project(args), "official")
+    result["modes"]["official"] = {
+        "running": running, "pid": record.get("pid") if running else None,
+        "verified": record.get("verified") if running else None,
+        "config_changed": (record.get("config_digest") != desired) if running and desired else None,
+        "verification_scope": "startup_log", "public_endpoint": "not_checked"}
+    _emit(args, result, "独立连接：%s；公网未检查。" % ("运行中" if running else "未运行"))
     return 0
 
 
@@ -1639,6 +1744,8 @@ def cmd_start(args) -> int:
         args.mode = "official"
     if not math.isfinite(args.wait) or args.wait < 0:
         raise FrpcLaunchError("--wait 必须是非负有限秒数。")
+    if getattr(args, "consumer", ""):
+        return cmd_instance_start(args)
     detect_platform()
     if args.project:
         return cmd_project_start(args)
@@ -1762,7 +1869,7 @@ def cmd_update(args) -> int:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     args.home = args.home.expanduser().resolve()
-    if args.command in ("project-config", "project-info") and args.project is None:
+    if args.command in ("project-config", "project-info", "context-info", "instance-config") and args.project is None and not (args.consumer or args.instance):
         args.project = Path.cwd()
     if args.project:
         args.project = args.project.expanduser().resolve()
@@ -1780,18 +1887,33 @@ def main(argv=None) -> int:
         "guide-init": cmd_guide_init,
         "project-config": cmd_project_config,
         "project-info": cmd_project_info,
+        "context-info": cmd_context_info,
+        "instance-config": cmd_instance_config,
     }
     handler = handlers.get(args.command)
     if handler is None:
         print("NOT_IMPLEMENTED: %s" % args.command, file=sys.stderr)
         return 2
     try:
-        if args.project and not args.project.is_dir():
+        if args.consumer or args.instance:
+            import consumer_config as consumers
+            consumers.validate_identity(args.consumer, args.instance)
+            if not args.project:
+                raise projects.ProjectError("独立连接必须显式提供原配置 --project。")
+            if args.command not in ("instance-config", "context-info", "start", "verify", "status", "logs", "stop"):
+                raise projects.ProjectError("该命令不接受消费者实例参数。")
+            if getattr(args, "mode", "") == "sakura":
+                raise projects.ProjectError("独立连接目前只支持 official 模式。")
+            if hasattr(args, "mode"):
+                args.mode = "official"
+        elif args.command == "instance-config":
+            raise projects.ProjectError("instance-config 需要 --consumer 与 --instance。")
+        if args.project and not args.project.is_dir() and not (args.consumer and args.command in ("stop", "status", "logs")):
             raise projects.ProjectError("项目目录不存在：%s" % args.project, exit_code=2)
         if args.command in ("install", "update"):
             with projects.operation_lock(args.home / "install.lock", timeout=120):
                 return handler(args)
-        if args.command in ("start", "verify", "stop"):
+        if args.command in ("start", "verify", "stop", "instance-config"):
             with projects.operation_lock(runtime_root(args) / "operation.lock"):
                 return handler(args)
         return handler(args)
@@ -1799,6 +1921,9 @@ def main(argv=None) -> int:
         _emit(args, e.report(), str(e))
         return e.exit_code
     except FrpcLaunchError as e:
+        if args.json:
+            print(json.dumps({"result": "frp_operation_failed", "operation": args.command,
+                              "detail": "FRP 操作失败；诊断见本次标准错误输出。"}, ensure_ascii=False))
         print("错误: %s" % e, file=sys.stderr)
         return 1
     except (OSError, subprocess.SubprocessError) as e:
@@ -1807,6 +1932,9 @@ def main(argv=None) -> int:
             _emit(args, {"result": "security_blocked", "detail": "Windows 安全防护阻止文件访问或执行；请核对保护历史，未绕过防护。"},
                   "Windows 安全防护阻止文件访问或执行；请核对保护历史，未绕过防护。")
         else:
+            if args.json:
+                print(json.dumps({"result": "environment_error", "operation": args.command,
+                                  "error_type": type(e).__name__}))
             print("错误: 环境调用失败: %s" % e, file=sys.stderr)
         return 1
 

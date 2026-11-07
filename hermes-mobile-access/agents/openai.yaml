@@ -1,0 +1,6 @@
+interface:
+  display_name: "Hermes 手机接入"
+  short_description: "在 Windows/macOS 上复用 Hermes Desktop 与 FRP，配置和排查手机连接"
+  default_prompt: "请使用 $hermes-mobile-access 帮我将 Android 手机接入当前 Windows 或 macOS 上的 Hermes Desktop，检查已有 FRP、认证条件和目标 profile，并完成已授权的连接与验证。"
+policy:
+  allow_implicit_invocation: true

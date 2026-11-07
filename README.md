@@ -27,14 +27,17 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 |---|---|---|
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
-| frpc-launch | 1.5.0 | [frpc-launch/v1.5.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.5.0) |
+| frpc-launch | 1.6.0 | [frpc-launch/v1.6.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.6.0) |
 | git-setup | 1.0.1 | [git-setup/v1.0.1](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.1) |
+| hermes-mobile-access | 0.1.0 | [hermes-mobile-access/v0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access%2Fv0.1.0) |
 | pdf2markdown | 2.0.0 | [pdf2markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv2.0.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | skill-configuration-and-artifacts-ui | 0.2.0 | [skill-configuration-and-artifacts-ui/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv0.2.0) |
 | video-to-markdown | 2.0.0 | [video-to-markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv2.0.0) |
 <!-- release-table:end -->
+
+当前 `hermes-mobile-access` 开发分支中的 FRP 1.6.0 和 Hermes 0.1.0 尚未发布；表格反映源码版本，发布状态及未完成能力见各自 README。
 
 ## 安装
 

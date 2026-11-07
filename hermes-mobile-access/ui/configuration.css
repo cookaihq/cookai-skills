@@ -1,0 +1,23 @@
+.domain-result { white-space: normal; line-height: 1.7; padding: 12px 14px; background: #f5f6f7; border-radius: 8px; margin: 0; }
+#domain-change-note { padding: 12px; border-left: 3px solid #3c7964; background: #eef6f2; line-height: 1.7; }
+.field-control input:disabled { color: #374b44; opacity: 1; }
+.field-control small { overflow-wrap: anywhere; }
+.binding-panel .field { padding: 9px 0; }
+.binding-panel .field small, .binding-panel .state { display: none; }
+.binding-panel input:disabled { background: transparent; border-color: transparent; box-shadow: none; padding-top: 4px; padding-bottom: 4px; }
+.binding-panel .domain-result { margin-top: 0; }
+.url-entry { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.url-entry input { flex: 1; min-width: 0; width: 100%; }
+.url-entry button { flex-shrink: 0; white-space: nowrap; }
+.url-composite { display: flex; align-items: center; flex: 1; min-width: 0; max-width: 100%; overflow-x: auto; white-space: nowrap; border: 1px solid var(--line); border-radius: 7px; background: #fff; padding: 8px 10px; }
+.url-fixed { flex: none; color: var(--muted); user-select: text; }
+.url-entry .url-composite input { flex: none; min-width: 6ch; padding: 3px 4px; margin: 0 2px; background: #eff5e8; border: 0; border-bottom: 1px solid #9ab68a; border-radius: 3px; font-weight: 600; }
+.profile-choices { display: flex; flex-wrap: wrap; gap: 10px; }
+.profile-choice { display: inline-flex; align-items: center; gap: 9px; min-height: 44px; max-width: 100%; padding: 10px 16px; border: 1px solid var(--line); border-radius: 8px; background: #fff; cursor: pointer; }
+.field-control .profile-choice input[type="radio"] { width: 16px; height: 16px; flex: 0 0 16px; margin: 0; padding: 0; accent-color: #3c7964; }
+.profile-choice span { overflow-wrap: anywhere; }
+.profile-choice:hover { border-color: #91ac9e; }
+.profile-choice:has(input:checked) { color: #265c48; background: #eaf4ed; border-color: #3c7964; box-shadow: inset 0 0 0 1px #3c7964; font-weight: 600; }
+.profile-choice:has(input:focus-visible) { outline: 2px solid #3c7964; outline-offset: 3px; }
+.profile-choice:has(input:disabled) { opacity: .6; cursor: default; }
+@media (max-width: 560px) { .url-entry { flex-wrap: wrap; } .url-entry > input, .url-composite { flex-basis: 100%; } }

@@ -9,9 +9,11 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from runtime_files import protect
+from process_guard import owner_matches
 
 LOG_LIMIT = 5 * 1024 * 1024
 
@@ -56,6 +58,8 @@ def main():
     parser.add_argument("--binary", required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--config")
+    parser.add_argument("--owner-pid", type=int)
+    parser.add_argument("--owner-start")
     args = parser.parse_args()
     secrets = sorted(set(json.loads(os.environ.pop("FRPC_LAUNCH_RUNTIME_SECRETS", "[]"))), key=len, reverse=True)
     env = {k: v for k, v in os.environ.items()
@@ -63,12 +67,16 @@ def main():
     argv = [args.binary] + (["-c", args.config] if args.mode == "official" else [])
     log = PrivateLog(args.log, secrets)
     child = None
+    finished = threading.Event()
     try:
         if os.name == "nt":
             from windows_runtime import own_job
             job = own_job()  # held until process exit; closing it terminates this process too
         if sys.stdin.buffer.read(3) != b"GO\n":
             return 1  # caller died before recording ownership: no client was started
+        if args.owner_pid and not owner_matches(args.owner_pid, args.owner_start):
+            log.write("[runner] owner unavailable before launch\n")
+            return 1
         child = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, encoding="utf-8", errors="replace",
@@ -81,6 +89,19 @@ def main():
                     pass  # The group signal may already have stopped frpc.
         signal.signal(signal.SIGTERM, terminate)
         signal.signal(signal.SIGINT, terminate)
+        if args.owner_pid:
+            def watch_owner():
+                while not finished.wait(1):
+                    if not owner_matches(args.owner_pid, args.owner_start):
+                        # No log writes from this thread: the main loop owns
+                        # rotation. A captured child handle, never a raw PID.
+                        terminate(None, None)
+                        try:
+                            child.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                        return
+            threading.Thread(target=watch_owner, daemon=True).start()
         for line in child.stdout:
             log.write(line)
         code = child.wait()
@@ -90,6 +111,7 @@ def main():
         log.write("[runner] startup/runtime error: %s\n" % exc)
         return 1
     finally:
+        finished.set()
         if child and child.poll() is None:
             child.terminate()
             try:

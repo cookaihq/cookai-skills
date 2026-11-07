@@ -9,7 +9,7 @@
 # 正是要消除的分叉。bootstrap 片段仍须保持 3.9 兼容语法（系统解释器可能先执行它）。
 [project]
 name = "frpc-launch"
-version = "1.5.0"
+version = "1.6.0"
 description = "frpc 项目配置与进程管理的锁定运行环境"
 requires-python = ">=3.9"
 dependencies = ["tomlkit==0.13.3"]
