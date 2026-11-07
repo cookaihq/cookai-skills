@@ -1,8 +1,8 @@
 ---
 name: git-setup
 metadata:
-  version: "1.0.1"
-description: v1.0.1｜检查和设置项目 Git，维护项目 Git 使用说明及 Agent 规则引用；支持 GitHub/CNB 凭证来源选择、明确请求的发布、单向同步与本地/GitHub Issue。
+  version: "1.0.2"
+description: v1.0.2｜检查和设置项目 Git，维护项目 Git 使用说明及 Agent 规则引用；支持 GitHub/CNB 凭证来源选择、明确请求的发布、单向同步与本地/GitHub Issue。
 compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Claude Code, Codex and WorkBuddy; gh is optional for GitHub authentication.
 ---
 
@@ -28,7 +28,7 @@ Git 检出安装：macOS/Linux 执行本 Skill 的 scripts/check_update.sh；Win
 
 运行 node <skill>/scripts/git-setup/cli.mjs check --project <项目>，它只返回事实，不解析 Markdown 或替 Agent 作决定。仅调用 Skill 而无其他参数时，完成检查并报告具体问题、来源与待决定项。普通业务请求只读取适用规则并核对本次事实，不触发完整 Skill 调查。
 
-设置请求中，读取 [项目 Git 使用说明](references/project-document.md)。优先更新项目已有文档；无既有路径则采用 docs/agent/git.md。正文必须足以让后续未加载本 Skill 的 Agent 完成日常 Git 操作：写清仓库/远端、凭证定位、只读临时鉴权、权限与失败处理。现有发布/同步/PR/Release 脚本按其真实功能引用，不能因精简默认交付而丢失业务能力。只有具体需求需要时才新增项目脚本。
+设置请求中，读取 [项目 Git 使用说明](references/project-document.md)。优先更新项目已有文档；无既有路径则采用项目根下的 docs/agents/git-repository-operations.md，标题为“Git 仓库操作规则”。正文必须足以让后续未加载本 Skill 的 Agent 完成日常 Git 操作：写清仓库/远端、凭证定位、只读临时鉴权、权限与失败处理。现有发布/同步/PR/Release 脚本按其真实功能引用，不能因精简默认交付而丢失业务能力。只有具体需求需要时才新增项目脚本。
 
 查找 Claude Code、Codex、WorkBuddy 实际生效的项目规则入口及其必读文档，已有有效 Git 入口直接复用；缺失时才添加或创建实际入口，不能只按文件名假设已加载。入口必须明确要求在 Git 设置、读取、提交、推送或发布前读取并遵守正文。规则文件为符号链接时编辑同一实体、保留链接，不重复三份正文。子仓独立打开时另核对适用入口。文档写完逐条回读引用及目标，最后说明哪些客户端已实测、哪些尚未验证。
 

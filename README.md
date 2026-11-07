@@ -28,7 +28,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | frpc-launch | 1.5.0 | [frpc-launch/v1.5.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.5.0) |
-| git-setup | 1.0.1 | [git-setup/v1.0.1](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.1) |
+| git-setup | 1.0.2 | [git-setup/v1.0.2](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.2) |
 | pdf2markdown | 2.0.0 | [pdf2markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv2.0.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |

@@ -24,7 +24,9 @@ test('project document links preserve existing rules and create no runtime or bi
  const f=await repositoryFixture(),p=await f.repo('project');await writeFile(join(p,'AGENTS.md'),'# Existing policy\nDo not discard this.\n');
  const plan=await planDocument(p,input);
  const done=await writeDocument(p,input,{apply:true,expectedFingerprint:plan.fingerprint});assert.equal(done.complete,true);
- const rules=await readFile(join(p,'AGENTS.md'),'utf8');assert.ok(rules.includes('Do not discard this.'));assert.ok(rules.includes('docs/agent/git.md'));assert.equal(await readFile(join(p,'docs/agent/git.md'),'utf8'),input.content);
+ assert.equal(plan.document.path,'docs/agents/git-repository-operations.md');
+ const rules=await readFile(join(p,'AGENTS.md'),'utf8');assert.ok(rules.includes('Do not discard this.'));assert.ok(rules.includes('docs/agents/git-repository-operations.md'));assert.equal(await readFile(join(p,'docs/agents/git-repository-operations.md'),'utf8'),input.content);
+ await assert.rejects(lstat(join(p,'docs/agent/git.md')),{code:'ENOENT'});
 
  for(const name of ['run.mjs','harness','runtime','.git/git-setup'])await assert.rejects(lstat(join(p,name)),{code:'ENOENT'});
  const next=await planDocument(p,input);await writeDocument(p,input,{apply:true,expectedFingerprint:next.fingerprint});assert.equal(await readFile(join(p,'AGENTS.md'),'utf8'),rules);
@@ -43,6 +45,8 @@ test('existing project rule references retain their wording without adding a sec
  const plan=await planDocument(p,request);assert.equal(plan.edits[0].reusedReference,true);assert.equal(plan.edits[0].requiresSemanticReview,true);
  assert.equal((await writeDocument(p,request,{apply:true,expectedFingerprint:plan.fingerprint})).complete,true);
  assert.equal(await readFile(join(p,'rules/project.md'),'utf8'),original);
+ assert.equal(await readFile(join(p,'docs/agents/git-access.md'),'utf8'),input.content);
+ await assert.rejects(lstat(join(p,'docs/agents/git-repository-operations.md')),{code:'ENOENT'});
  assert.equal((await lstat(join(p,'AGENTS.md'))).isSymbolicLink(),true);
 });
 test('stale document plans preserve subsequent user changes and link retargets',async()=>{

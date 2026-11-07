@@ -48,7 +48,7 @@ export async function registrationEdits(root, ruleFiles, documentPath) {
     const existing = entities.get(snapshot.entity);
     if (existing) { existing.aliases.push({ ...snapshot, content: undefined }); continue; }
     const link = relative(dirname(join(root, snapshot.entity)), join(root, documentPath)).replaceAll('\\', '/');
-    const block = `${start}\n执行本项目 Git 设置、读取、提交、推送或发布前，必须读取并遵守[项目 Git 使用说明](<${link}>)。路径相对于本规则实体所在目录；沿用其中明确的主要仓库、操作检出、凭证来源及操作边界。\n${end}`;
+    const block = `${start}\n执行本项目 Git 设置、读取、提交、推送或发布前，必须读取并遵守[Git 仓库操作规则](<${link}>)。路径相对于本规则实体所在目录；沿用其中明确的主要仓库、操作检出、凭证来源及操作边界。\n${end}`;
     withoutRegistration(snapshot.content);
     const first = snapshot.content.indexOf(start), last = snapshot.content.indexOf(end);
     const reusedReference = first < 0 && referencesDocument(snapshot.content, dirname(join(root, snapshot.entity)), join(root, documentPath));
