@@ -1,8 +1,8 @@
 ---
 name: skill-configuration-and-artifacts-ui
-description: v1.1.0｜为新建或已有 Skill / Plugin 设计、接入和改造配置与产物 UI；评估必要性、确认展示方案，并提供配置中心、产物集合与专注预览的共用规则和代码。适用于 Skill 开发及界面改造。
+description: v1.2.0｜为新建或已有 Skill / Plugin 设计、接入和改造配置与产物 UI；评估必要性、确认展示方案，并提供配置中心、产物集合与专注预览的共用规则和代码。适用于 Skill 开发及界面改造。
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Skill 配置与产物 UI

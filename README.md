@@ -36,7 +36,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | pdf2markdown | 2.0.0 | [pdf2markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv2.0.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
-| skill-configuration-and-artifacts-ui | 1.1.0 | [skill-configuration-and-artifacts-ui/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv1.1.0) |
+| skill-configuration-and-artifacts-ui | 1.2.0 | [skill-configuration-and-artifacts-ui/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv1.2.0) |
 | video-to-markdown | 3.0.0 | [video-to-markdown/v3.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv3.0.0) |
 <!-- release-table:end -->
 

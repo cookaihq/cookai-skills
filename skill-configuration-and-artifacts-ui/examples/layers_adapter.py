@@ -11,7 +11,7 @@ from pathlib import Path
 import secrets
 
 from skill_ui import UIError
-from skill_ui.storage import active, apply_changes, atomic_json, file_lock, private_directory, validation_errors
+from skill_ui.storage import active, apply_changes, atomic_json, file_lock, private_directory, prepare_private_write, validation_errors
 from studio_adapter import Studio
 
 
@@ -115,7 +115,8 @@ class LayeredDemo:
                     targets.append(lid)
                 status = "skipped" if not layer["enabled"] else "error" if lid in errors else "missing" if not present else "empty" if value is None or value == "" else "effective" if result["source"] == lid else "shadowed"
                 rows.append(dict(layer=lid, present=present, value=value, status=status, message=errors.get(lid, "")))
-            fields.append(dict(field, active=active(field, values), targets=targets, effective=result, rows=rows))
+            fields.append(dict(field, config_key="$[" + json.dumps(name, ensure_ascii=False) + "]",
+                               active=active(field, values), targets=targets, effective=result, rows=rows))
         issues = validation_errors(self.fields, values, changes or {})
         issues.extend(f["label"] + "：" + f["effective"].get("message", "配置无效") for f in fields if f["effective"]["status"] in ("error", "invalid"))
         return dict(revision=revision, layers=layers, fields=fields, default_targets={"project": "project_plugin_local", "global": "plugin_env"},
@@ -153,11 +154,15 @@ class LayeredDemo:
     def save(self, changes, revision, target):
         if not changes:
             raise UIError("changes", "没有待保存的修改。")
-        with file_lock(self.directory / "layers.lock"):
+        _, candidate = self._candidate(changes, revision, target)
+        if candidate["validation_errors"]:
+            raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
+        prepare_private_write(self.path(target), owner_path=self.project)
+        with file_lock(self.directory / "layers.lock", protect_git=True, owner_path=self.project):
             data, candidate = self._candidate(changes, revision, target)
             if candidate["validation_errors"]:
                 raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
-            atomic_json(self.path(target), data[target], owner_path=self.project)
+            atomic_json(self.path(target), data[target], owner_path=self.project, protect_git=True)
         return self.snapshot()
 
 

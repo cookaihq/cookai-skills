@@ -21,7 +21,7 @@ class Adapter:
     """Implement only the page(s) selected for the target. Methods run under a lock.
 
     Config: revision, layers (in loader order), fields, default_targets, validation_errors.
-    Fields: id, label, type, sensitive, required, advanced, readonly, active, group,
+    Fields: id (UI identity), config_key (actual key/path, no values), label, type, sensitive, required, advanced, readonly, active, group,
     help, choices, depends_on, targets, effective {source, status, value, message},
     rows [{layer, present, status, value, message}]. The adapter owns resolution.
     Types: text, number, boolean, select, list, json. depends_on maps field IDs to values.
@@ -65,7 +65,7 @@ def public_config(snapshot):
     layer_keys = ("id", "name", "scope", "scope_label", "path", "readonly", "enabled", "message")
     result["layers"] = [{k: layer[k] for k in layer_keys if k in layer} for layer in snapshot["layers"]]
     result["fields"] = []
-    allowed = ("id", "label", "type", "sensitive", "required", "advanced", "readonly", "active", "group", "help",
+    allowed = ("id", "config_key", "label", "type", "sensitive", "required", "advanced", "readonly", "active", "group", "help",
                "choices", "depends_on", "targets", "effect")
     for field in snapshot["fields"]:
         item = {k: field[k] for k in allowed if k in field}

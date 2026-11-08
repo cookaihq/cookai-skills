@@ -37,9 +37,15 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 
 `JsonConfig` 仅供明确采用单 JSON 文件协议的新目标/合成示例复用；已有 dotenv、全局/项目分层或多文件事务通过目标原加载器实现，不迁入示例存储。它保留未知 key，以 HMAC 修订号检测变化，OS 锁协调同协议写入，临时文件加原子替换；不能防止不参与锁的外部写入者在最终检查后并发修改。多来源 revision 必须覆盖所有影响实际值的输入；多文件保存必须先确认原子/回滚方案。
 
+`JsonConfig.save` 自动准备配置、锁和随机临时文件的 Git 忽略保护。自有保存协议可复用 `storage.prepare_private_write(path, owner_path=project)`：在每次实际写入前调用，拒绝跟踪文件，必要时在文件所在目录追加精确 `.gitignore` 规则，并复核 Git 结果。`file_lock(..., protect_git=True, owner_path=project)` 和 `atomic_json(..., protect_git=True, owner_path=project)` 接入相同检查；通用运行状态写入仍由调用方保证运行目录私有且被忽略，不把配置保存行为扩展到只读启动或预览。
+
+自有原子写入的随机临时文件先调用 `prepare_private_write(temporary, temporary_for=target, owner_path=project)`，名字需为 `<原文件名>.<随机部分>.tmp`，生成一条稳定的临时文件模式。事务的 journal 写入前调用 `prepare_private_write(journal, private_directory=recovery_dir, owner_path=project)`，保护整个专用恢复目录并拒绝其中的已跟踪内容；恢复目录须在仓内且不是仓根。该辅助不提供多文件事务或回滚，不代替业务 ACL、revision、目标白名单和原有事务机制。预览不调用它；保存先验证输入，再准备保护，锁内重查 revision 和实际写入条件。调用失败抛安全 `UIError`，页面草稿保留；忽略规则可保留供重试。
+
 `layers` 按加载器的真实高到低顺序返回；每层为 `{id, name, scope, scope_label, path, readonly, enabled}`。`scope` 用 `project/global/process` 或业务自定义值分类，`scope_label` 说明共享影响。`path` 是准确位置或只读注入来源说明。全局关闭时可展示已声明层及 `enabled:false`，不得为展示扫描加载器未知的目录。客户端提交层 ID，不提交任意路径；适配器用自己的白名单映射保存文件。
 
 字段的 `type` 为 `text/number/boolean/select/list/json`，`choices` 是字符串列表；`group/advanced/readonly/required/sensitive/help/effect` 控制展示。`active` 是加载器按实际依赖计算的布尔值，`depends_on` 可描述等值依赖，但前端不自行解析层级。绑定记录以一个 `json` 字段提交整个对象，由业务校验完整性。
+
+字段 `id` 是编辑、草稿、依赖与 API 提交使用的内部身份；`config_key` 是不含值的真实配置字段名或路径，例如 `{id:"credential_control", config_key:"SERVICE_API_KEY"}` 或 `{id:"routing", config_key:"routing.default"}`。业务适配器声明并维护实际映射，写入仍按原协议映射；核心只透传及转义显示，不把 `config_key` 当作磁盘路径或写入选择器。没有声明时不猜测 ID 就是真实 Key，接入验收须补齐实际映射。`JsonConfig` 和分层 JSON 示例按其真实顶层 JSON key 生成 `$["api_key"]` 等路径，不能把这类路径直接用于 dotenv。敏感字段的 `config_key` 可公开，原值只通过既有显隐接口取得。
 
 每个字段必须提供：
 

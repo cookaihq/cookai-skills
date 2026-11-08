@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import stat
 import subprocess
 
 from .contracts import UIError
@@ -62,49 +63,183 @@ def private_directory(path, owner_path=None):
 
 
 @contextlib.contextmanager
-def file_lock(path):
+def _stream_lock(stream):
+    stream.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise UIError("busy", "另一个实例正在操作，请稍后重试。", 409) from None
+    try:
+        yield
+    finally:
+        stream.seek(0)
+        if os.name == "nt":
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _checked_path(path, directory=False):
+    path = Path(os.path.abspath(path))
+    if any(c in str(path) for c in "\r\n\0"):
+        raise UIError("path", "保存路径无效。")
+    for part in (path, *path.parents):
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise UIError("path", "保存路径含链接，请使用实际文件位置。")
+        if part != path or directory:
+            valid = stat.S_ISDIR(info.st_mode)
+        else:
+            valid = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+        if not valid:
+            raise UIError("path", "保存目标必须是独立普通文件，父路径必须是目录。")
+    return path
+
+
+def _private_parents(path, owner_path=None):
+    missing, parent = [], path.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    owner = owner_path if owner_path is not None and Path(owner_path).exists() else parent
+    for folder in reversed(missing):
+        private_directory(folder, owner_path=owner)
+
+
+def _ignore_pattern(name):
+    return "/" + "".join("\\" + c if c in "\\*?[]!# " else c for c in name)
+
+
+def _append_ignore(directory, pattern, owner_path):
+    ignore = _checked_path(directory / ".gitignore")
+    _private_parents(ignore, owner_path)
+    # Lock the ignore file itself: no unprotected sidecar, no replacement of user rules.
+    with ignore.open("a+b") as stream, _stream_lock(stream):
+        _checked_path(ignore)
+        before = stream.read(1024 * 1024 + 1)
+        if len(before) > 1024 * 1024:
+            raise UIError("ignore", "忽略文件过大，无法自动追加保护规则；草稿已保留。")
+        rule = pattern.encode("utf-8")
+        if before.splitlines() and before.splitlines()[-1] == rule:
+            return
+        newline = b"\r\n" if b"\r\n" in before else b"\n"
+        stream.seek(0, os.SEEK_END)
+        stream.write((newline if before and not before.endswith(b"\n") else b"") + rule + newline)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def prepare_private_write(path, *, temporary_for=None, private_directory=None, owner_path=None):
+    """Prepare Git protection immediately before an authorized private write.
+
+    No config values or index changes. Outside Git, only validate the path. A caller's
+    transaction journal may opt into whole-directory protection via private_directory.
+    Call for each actual file, lock and temporary path; never from read/preview.
+    """
+    try:
+        path = _checked_path(path)
+        if path.name.lower() == ".gitignore" or ".git" in (part.lower() for part in path.parts):
+            raise UIError("path", "配置不能写入 Git 管理文件。")
+        folder = _checked_path(private_directory, directory=True) if private_directory is not None else None
+        if folder is not None:
+            path.relative_to(folder)
+        if folder is not None and temporary_for is not None:
+            raise ValueError("ambiguous protection")
+        original = _checked_path(temporary_for) if temporary_for is not None else None
+        if original is not None and (original.parent != path.parent or not path.name.startswith(original.name + ".") or not path.name.endswith(".tmp")):
+            raise ValueError("invalid temporary path")
+        directory = path.parent
+        while not directory.exists():
+            directory = directory.parent
+        selectors = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"}
+        environment = {k: v for k, v in os.environ.items() if k not in selectors}
+        environment["LC_ALL"] = "C"
+        def git(*args):
+            return subprocess.run(["git", "-C", str(directory), *args], env=environment, capture_output=True, timeout=10)
+        try:
+            probe = git("rev-parse", "--show-toplevel")
+        except FileNotFoundError:
+            if not any((part / ".git").exists() for part in (directory, *directory.parents)):
+                return
+            raise
+        if probe.returncode:
+            if any((part / ".git").exists() for part in (directory, *directory.parents)) or b"not a git repository" not in probe.stderr.lower():
+                raise ValueError("cannot determine repository")
+            return
+        root = Path(os.fsdecode(probe.stdout).rstrip("\r\n")).resolve()
+        if folder == root:
+            raise ValueError("recovery directory cannot be repository root")
+        relative = path.relative_to(root).as_posix()
+        directory = root
+        selector = (folder or path).relative_to(root).as_posix()
+        tracked = git("--literal-pathspecs", "ls-files", "-z", "--", selector)
+        if tracked.returncode:
+            raise ValueError("cannot inspect index")
+        if tracked.stdout:
+            raise UIError("tracked", "保存目标或私有恢复目录已被 Git 跟踪；草稿已保留，请先处理该文件。页面不会修改 Git 索引。")
+        ignored = git("check-ignore", "--quiet", "--", relative)
+        if ignored.returncode not in (0, 1):
+            raise ValueError("cannot inspect ignore rules")
+        if ignored.returncode:
+            if folder is not None:
+                _append_ignore(folder.parent, _ignore_pattern(folder.name) + "/", owner_path)
+            else:
+                pattern = _ignore_pattern(original.name) + ".*.tmp" if original else _ignore_pattern(path.name)
+                _append_ignore(path.parent, pattern, owner_path)
+            if git("check-ignore", "--quiet", "--", relative).returncode != 0:
+                raise UIError("ignore", "自动准备后仍未被 Git 忽略；草稿已保留，请检查目录权限与忽略规则后重试。")
+    except UIError:
+        raise
+    except (ValueError, OSError, subprocess.SubprocessError):
+        raise UIError("git", "无法自动准备保存位置的 Git 保护；草稿已保留，请检查 Git、目录权限或保存位置后重试。") from None
+
+
+@contextlib.contextmanager
+def file_lock(path, *, protect_git=False, owner_path=None):
     """OS lock, released on process exit; coordinates only cooperating writers."""
     path = Path(path)
+    if protect_git:
+        prepare_private_write(path, owner_path=owner_path)
+        _private_parents(path, owner_path)
     if path.is_symlink():
         raise UIError("path", "锁路径不能是符号链接。")
-    with path.open("a+b") as stream:
-        if stream.tell() == 0:
+    with path.open("a+b") as stream, _stream_lock(stream):
+        if os.fstat(stream.fileno()).st_size == 0:
             stream.write(b"0")
             stream.flush()
-        stream.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise UIError("busy", "另一个实例正在操作，请稍后重试。", 409) from None
-        try:
-            yield
-        finally:
-            stream.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(stream, fcntl.LOCK_UN)
+        yield
 
 
-def atomic_json(path, data, owner_path=None):
+def atomic_json(path, data, owner_path=None, *, protect_git=False):
     path = Path(path)
+    if protect_git:
+        prepare_private_write(path, owner_path=owner_path)
+        _private_parents(path, owner_path)
     if path.is_symlink() or (path.exists() and path.stat().st_nlink != 1):
         raise UIError("path", "保存目标必须是独立普通文件。")
     temporary = path.with_name(path.name + "." + secrets.token_hex(8) + ".tmp")
     try:
+        if protect_git:
+            prepare_private_write(temporary, temporary_for=path, owner_path=owner_path)
         descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            if os.name == "nt":
+                _private_windows(temporary, owner_path or path.parent)
             json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        if os.name == "nt":
-            _private_windows(temporary, owner_path or path.parent)
+        if protect_git:
+            prepare_private_write(path, owner_path=owner_path)
         os.replace(temporary, path)
     finally:
         if temporary.exists():
@@ -180,7 +315,8 @@ class JsonConfig:
         for f in self.fields:
             present, value = f["id"] in values, effective[f["id"]]
             status = "set" if present else "default" if "default" in f else "missing" if f.get("required") else "optional"
-            fields.append(dict(f, active=active(f, effective), targets=[] if f.get("readonly") else ["project"],
+            fields.append(dict(f, config_key="$[" + json.dumps(f["id"], ensure_ascii=False) + "]",
+                               active=active(f, effective), targets=[] if f.get("readonly") else ["project"],
                                effective={"value": value, "source": "project" if present else "default" if "default" in f else None, "status": status},
                                rows=[{"layer": "project", "present": present, "value": values.get(f["id"]), "status": "effective" if present else "missing"}]))
         return {"revision": revision, "validation": "本地格式与必需项校验",
@@ -207,12 +343,17 @@ class JsonConfig:
     def save(self, changes, revision, target):
         if not isinstance(changes, dict) or not changes:
             raise UIError("changes", "没有待保存的修改。")
+        # Reject invalid targets/edits and stale revisions before preparing any files.
+        _, candidate = self._candidate(changes, revision, target)
+        if candidate["validation_errors"]:
+            raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
+        prepare_private_write(self.path, owner_path=self.owner_path)
         # Existing business directories retain their ACL; only new directories/files are tightened.
         if not self.path.parent.exists():
             private_directory(self.path.parent, owner_path=self.owner_path if self.owner_path.exists() else None)
-        with file_lock(self.path.with_suffix(self.path.suffix + ".lock")):
+        with file_lock(self.path.with_suffix(self.path.suffix + ".lock"), protect_git=True, owner_path=self.owner_path):
             values, candidate = self._candidate(changes, revision, target)
             if candidate["validation_errors"]:
                 raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
-            atomic_json(self.path, values, owner_path=self.owner_path)
+            atomic_json(self.path, values, owner_path=self.owner_path, protect_git=True)
         return self.snapshot()
