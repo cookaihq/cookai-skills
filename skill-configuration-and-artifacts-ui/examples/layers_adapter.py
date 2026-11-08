@@ -1,4 +1,4 @@
-"""Synthetic JSON loader with ten layers. Never reads real env files or credentials.
+"""Synthetic JSON loader with optional Skill and shared Plugin project layers.
 
 This example owns its resolution protocol; the UI core only displays its reports.
 All files, including simulated global files, live under the selected demo project.
@@ -30,6 +30,8 @@ FIELDS = [
 LAYER_DEFS = [
     ("process", "进程环境变量", "process", "仅本次调用"),
     ("project_skill", "项目专用文件", "project", "仅此项目 · 此 Skill"),
+    ("project_plugin_local", "项目 Plugin 本地文件", "project", "仅此项目 · 此 Plugin 的各 Skill"),
+    ("project_plugin_env", "项目 Plugin 共享文件", "project", "仅此项目 · 此 Plugin 的各 Skill"),
     ("project_local", "项目本地文件", "project", "仅此项目 · 读取同名字段的 Skill"),
     ("project_env", "项目共享文件", "project", "仅此项目 · 读取同名字段的 Skill"),
     ("plugin_skill_local", "全局 Skill 本地文件", "global", "所有项目 · 此 Plugin 的此 Skill"),
@@ -109,14 +111,14 @@ class LayeredDemo:
             for layer in layers:
                 lid, present = layer["id"], name in data[layer["id"]]
                 value = data[lid].get(name)
-                if not layer["readonly"] and (not field.get("sensitive") or layer["scope"] != "project" or lid == "project_local" or present):
+                if not layer["readonly"] and (not field.get("sensitive") or layer["scope"] != "project" or lid in ("project_plugin_local", "project_local") or present):
                     targets.append(lid)
                 status = "skipped" if not layer["enabled"] else "error" if lid in errors else "missing" if not present else "empty" if value is None or value == "" else "effective" if result["source"] == lid else "shadowed"
                 rows.append(dict(layer=lid, present=present, value=value, status=status, message=errors.get(lid, "")))
             fields.append(dict(field, active=active(field, values), targets=targets, effective=result, rows=rows))
         issues = validation_errors(self.fields, values, changes or {})
         issues.extend(f["label"] + "：" + f["effective"].get("message", "配置无效") for f in fields if f["effective"]["status"] in ("error", "invalid"))
-        return dict(revision=revision, layers=layers, fields=fields, default_targets={"project": "project_local", "global": "plugin_env"},
+        return dict(revision=revision, layers=layers, fields=fields, default_targets={"project": "project_plugin_local", "global": "plugin_env"},
                     validation="本地类型、依赖与必需项校验（未验证 API 连通性）", validation_errors=list(dict.fromkeys(issues)),
                     note="合成分层示例：所有项目／全局文件都位于当前演示目录，不读取真实配置。")
 

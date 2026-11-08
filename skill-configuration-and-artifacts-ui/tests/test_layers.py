@@ -35,7 +35,7 @@ class LayerTests(unittest.TestCase):
 
     def test_project_key_only_and_clear_fallback(self):
         state = self.store.snapshot()
-        self.assertEqual(len(state["layers"]), 10)
+        self.assertEqual(len(state["layers"]), 12)
         self.assertEqual(self.field("api_key", state)["effective"]["source"], "project_local")
         for name in ("model", "endpoint", "timeout", "retries", "format"):
             self.assertEqual(self.field(name, state)["effective"]["source"], "plugin_env")
@@ -55,6 +55,27 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(self.field("model")["effective"]["source"], "process")
         with self.assertRaises(UIError): self.preview("process", {"model":{"op":"unset"}})
         with self.assertRaises(UIError): self.preview("../escape", {"model":{"op":"unset"}})
+
+    def test_plugin_project_files_preview_save_and_fallback(self):
+        self.write("project_plugin_env", {"model": "detail-v2"})
+        self.assertEqual(self.field("model")["effective"]["source"], "project_plugin_env")
+        before = self.store.snapshot()
+        self.assertEqual(before["default_targets"]["project"], "project_plugin_local")
+        changes = {"api_key": {"op": "set", "value": "synthetic-plugin-secret"},
+                   "model": {"op": "set", "value": "speed-v1"}}
+        preview = self.store.preview(changes, before["revision"], "project_plugin_local")
+        self.assertFalse(self.store.path("project_plugin_local").exists())
+        self.assertEqual(self.field("model", preview)["effective"]["value"], "speed-v1")
+        saved = self.store.save(changes, before["revision"], "project_plugin_local")
+        self.assertNotIn("synthetic-plugin-secret", json.dumps(public_config(saved)))
+        for change in ({"op": "unset"}, {"op": "set", "value": ""}):
+            projected = self.preview("project_plugin_local", {"model": change, "api_key": change})
+            self.assertEqual(self.field("model", projected)["effective"]["source"], "project_plugin_env")
+            self.assertEqual(self.field("api_key", projected)["effective"]["source"], "project_local")
+        self.write("project_skill", {"model": "balanced-v1"})
+        self.assertEqual(self.field("model")["effective"]["source"], "project_skill")
+        self.write("plugin_skill_root", {"timeout": 120})
+        self.assertEqual(self.field("timeout")["effective"]["source"], "plugin_skill_root")
 
     def test_disabled_global_missing_defaults_and_unreadable(self):
         self.store.global_enabled = False

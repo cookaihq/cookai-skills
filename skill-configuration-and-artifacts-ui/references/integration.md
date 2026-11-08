@@ -7,7 +7,7 @@
 ## 代码边界
 
 - `assets/runtime/skill_ui/`：无第三方依赖的 Python 服务与原生 JS/CSS 页面。Python 3.10+ 语法；本开发 Skill 固定 Python 3.13/uv 环境。
-- `examples/studio_adapter.py` 与 `receipt-view.js`：单文件配置和六类产物示例，含只读/依赖/高级字段及定制详情。`examples/layers_adapter.py` 增加十层合成 JSON 加载器；项目仅覆盖 Key、全局提供其余基础项，所有文件均在演示项目内。示例不代表真实业务接入，十层顺序也不是共用核心内置规则。
+- `examples/studio_adapter.py` 与 `receipt-view.js`：单文件配置和六类产物示例，含只读/依赖/高级字段及定制详情。`examples/layers_adapter.py` 提供十二层合成 JSON 加载器，包含 Plugin 项目的 local/普通共享来源，也保留 Skill 专用来源；项目仅覆盖 Key、全局提供其余基础项，所有文件均在演示项目内。示例不代表真实业务接入，层数及顺序也不是共用核心内置规则；目标的退出来源政策由业务适配器落实。
 - `scripts/vendor.py`：检查并复制核心，生成 `.vendor.json` 的版本与逐文件 SHA-256。默认只检查；`--apply` 才应用，冲突退出 2。迁移暂存必须指定同一文件系统的已忽略临时目录，成功保留旧核心以便恢复。
 - `scripts/ui.py`：本开发 Skill 预览入口，先进入自身锁定环境。业务发布包直接使用其已有运行环境调用 vendored `skill_ui`；不依赖本开发 Skill 或其安装路径。
 
