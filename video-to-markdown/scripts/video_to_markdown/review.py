@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 from . import media, observations, state
 
@@ -13,7 +14,7 @@ CLASSIFICATIONS = {
     "represented_by_gif",
     "deliberately_skipped",
 }
-IMAGE_LINK = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+IMAGE_LINK = re.compile(r"!\[[^\]\n]*\]\((?P<target><[^>\n]+>|[^\s)]+)(?:\s+[\"'][^\n]*?[\"'])?\)")
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
 
@@ -185,8 +186,8 @@ def validate_task(task_dir: Path, manifest: dict) -> dict:
             blockers.append("cannot read document Markdown: %s" % exc)
     anchors = _gfm_anchors(markdown)
     markdown_media = set()
-    for raw in IMAGE_LINK.findall(markdown):
-        value = raw.strip().split()[0].strip("<>")
+    for match in IMAGE_LINK.finditer(markdown):
+        value = unquote(match.group("target").strip("<>"))
         path = _safe_relative(task_dir, value)
         if path is None or not path.is_file():
             blockers.append("Markdown media is missing or unsafe: %s" % value)
@@ -322,6 +323,6 @@ def validate_task(task_dir: Path, manifest: dict) -> dict:
     manifest["validation"] = result
     if result["complete"] or manifest.get("stage") == "complete":
         manifest["completed_once"] = True
-    manifest["stage"] = "complete" if result["complete"] else "blocked_validation"
+    manifest["stage"] = "validated" if result["complete"] else "blocked_validation"
     state.save_manifest(task_dir, manifest)
     return result

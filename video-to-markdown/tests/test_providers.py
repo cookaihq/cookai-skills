@@ -1,5 +1,6 @@
 """Transcription acceptance through start/resume and the real task files."""
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ def isolated_configuration(monkeypatch, tmp_path):
 
 
 def invoke(capsys, *args, code=0):
+    if args[0] == "start":
+        args = (*args, "--project-root", str(Path.cwd()))
     result = cli.main(list(map(str, args)))
     output = capsys.readouterr()
     assert result == code, output.out + output.err
@@ -181,7 +184,7 @@ def test_aihub_uses_dependency_run_and_complete_files_then_waits_for_review(tmp_
     doc = json.loads((task / "transcript.json").read_text(encoding="utf-8"))
     assert [s["text"] for s in doc["segments"]] == ["第一句", "Second speaker"]
     assert calls.count("upload") == calls.count("run") == 1
-    for filename in ("manifest.json", "transcript.json", "document.md"):
+    for filename in ("manifest.json", "transcript.json", "source.mp4.md"):
         assert "PRIVATE" not in (task / filename).read_text(encoding="utf-8")
 
 
@@ -378,7 +381,7 @@ def test_nonzero_audio_start_is_preserved_in_exported_video_timestamps(tmp_path,
     import subprocess
     from video_to_markdown import external
     delayed = tmp_path / "delayed.mkv"
-    subprocess.run([os.environ["FFMPEG_BIN"], "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=160x90:d=3",
+    subprocess.run([os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg"), "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=160x90:d=3",
                     "-itsoffset", "1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:v", "libx264", "-c:a", "pcm_s16le", str(delayed)], check=True, timeout=30)
     for key, value in {"ASR_PROVIDER": "feishu-minutes", "FEISHU_PROFILE": "work", "FEISHU_APP_ID": "app", "FEISHU_USER_OPEN_ID": "user"}.items():
         monkeypatch.setenv("VIDEO_TO_MARKDOWN_" + key, value)
@@ -577,13 +580,14 @@ def test_default_save_failure_does_not_undo_task_only_switch(tmp_path, video, ca
     assert not (tmp_path / ".env").exists()
 
 
-def test_legacy_task_is_preserved_and_never_resubmitted(tmp_path, video, capsys, monkeypatch):
+@pytest.mark.parametrize("old_schema", [1, 2])
+def test_legacy_task_is_preserved_and_never_resubmitted(tmp_path, video, capsys, monkeypatch, old_schema):
     from video_to_markdown import external
     started = invoke(capsys, "start", "--video", video)
     task = Path(started["task_dir"])
     manifest_path = task / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["schema_version"] = 1
+    manifest["schema_version"] = old_schema
     manifest["skill_version"] = "1.1.0"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     before = {str(path.relative_to(task)): path.read_bytes() for path in task.rglob("*") if path.is_file()}
@@ -592,7 +596,7 @@ def test_legacy_task_is_preserved_and_never_resubmitted(tmp_path, video, capsys,
     monkeypatch.setattr(external, "execute", never_execute)
     assert cli.main(["resume", "--task-dir", str(task)]) == 1
     output = capsys.readouterr()
-    assert "old tasks are preserved but cannot resume in v2" in output.err
+    assert "v3 does not resume older tasks" in output.err
     assert {str(path.relative_to(task)): path.read_bytes() for path in task.rglob("*") if path.is_file()} == before
 
 
@@ -635,7 +639,8 @@ def test_aihub_persistence_receipt_is_replayed_before_continue(tmp_path, video, 
             raise AssertionError("must consume the known-ID receipt before a stale continue")
         return external.Result(0, json.dumps(value))
     mock_dependency(monkeypatch, execute)
-    assert cli.main(["start", "--video", str(video), "--aihub-plugin-dir", str(aihub_plugin), "--request", "完整转写"]) == 1
+    assert cli.main(["start", "--video", str(video), "--project-root", str(tmp_path),
+                     "--aihub-plugin-dir", str(aihub_plugin), "--request", "完整转写"]) == 1
     capsys.readouterr()
     private_path.rmdir()
     saved_private.rename(private_path)

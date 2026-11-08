@@ -1,8 +1,8 @@
 ---
 name: video-to-markdown
 metadata:
-  version: "2.0.0"
-description: v2.0.0｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
+  version: "3.0.0"
+description: v3.0.0｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
 compatibility: Claude Code, Codex and WorkBuddy are required targets; new host workflows need separate acceptance. Requires uv >= 0.8, ffmpeg, ffprobe and host image inspection. Cloud transcription uses installed AIhub Audio (aihub-studio >=1.3.0,<2) or user-authorized Lark CLI >=1.0.98,<2. Native Windows uses PowerShell. See README for tested scope.
 ---
 
@@ -36,7 +36,8 @@ uv run --project <skill-dir> <skill-dir>/scripts/workflow.py start \
 
 Useful options:
 
-- `--output-parent <directory>` uses that complete output parent instead of the default `<output-base>/video-to-markdown-output/`.
+- `--output-parent <directory>` uses that complete output parent instead of the default `<output-base>/data/video-to-markdown/`.
+- `--copy-dir <directory>` chooses where to place an additional portable Markdown copy and its referenced images/GIFs after finalization. For local inputs it defaults to the original video's directory, even when the source is copied into the task. URL inputs have no default copy directory.
 - `--project-root <directory>` overrides only default output placement. It does not change where configuration is read.
 - `--use-local-key` authorizes this run to read `~/.config/video-to-markdown/.env`.
 - `--language <code>` records the requested source language hint. Translation is not implied.
@@ -51,7 +52,7 @@ To continue an existing task:
 uv run --project <skill-dir> <skill-dir>/scripts/workflow.py resume --task-dir <task-directory>
 ```
 
-Resume checks source/audio identity and keeps the saved provider. A task lock prevents concurrent resume. Preserve receipts and known IDs; stop on `submission_unknown`. Do not delete state or start again to escape an uncertain write. Version 1 task schemas are preserved but rejected by v2; no old task is automatically resubmitted.
+Resume checks source/audio identity and keeps the saved provider. A task lock prevents concurrent resume, including during final renaming. Preserve receipts and known IDs; stop on `submission_unknown`. Do not delete state or start again to escape an uncertain write. V3 rejects older task schemas without migrating or resubmitting them.
 
 ## Inspect Every Batch
 
@@ -104,7 +105,7 @@ Do not reconstruct SVG animation.
 
 ## Write And Validate
 
-Write `<task-dir>/document.md` in the video's source language unless the user explicitly requested translation. Preserve video order and content; remove fillers and meaningless repetition, but do not replace the source with a summary. Put a timestamped screenshot beside static visual information and a GIF beside motion-dependent information. Use only relative media paths.
+Write to the `document` path returned by `start`/`resume`, initially `<task-dir>/<complete-original-video-filename>.md`, in the video's source language unless the user explicitly requested translation. Preserve video order and content; remove fillers and meaningless repetition, but do not replace the source with a summary. Put a timestamped screenshot beside static visual information and a GIF beside motion-dependent information. Use inline image links to relative files under `assets/`.
 
 Create `<task-dir>/review-report.json` using [references/schemas.md](references/schemas.md). Its intervals must classify the complete timeline as body, screenshot, GIF, or deliberate skip with a reason. Every transcript segment and visual observation must be consumed or explicitly skipped.
 
@@ -116,14 +117,18 @@ uv run --project <skill-dir> <skill-dir>/scripts/workflow.py validate --task-dir
 
 Do not call the task complete if validation reports a gap, missing media, out-of-range timestamp, unexplained evidence, source mismatch, or unresolved uncertainty.
 
-After validation succeeds, ask the user first whether to rename `document.md`, then whether to rename the task directory. Apply approved names only through:
+After validation succeeds, decide whether the original filename describes the video. Hashes, UUIDs, random IDs and bare timestamps are opaque; a descriptive title remains meaningful even if it includes an ID. Use the actual transcript and inspected frames to choose a concise source-language title only for an opaque name. Leave the title absent while conversion is in progress. Apply this naming decision automatically through `finalize` (no rename questions):
 
 ```bash
-uv run --project <skill-dir> <skill-dir>/scripts/workflow.py rename \
-  --task-dir <task-directory> [--document-name <name.md>] [--task-name <directory-name>]
+uv run --frozen --project <skill-dir> <skill-dir>/scripts/workflow.py finalize \
+  --task-dir <task-directory> --title <content-derived-title>
 ```
 
-Relay the final document path and task directory. If a rename occurs, relay the new paths returned by the command.
+For a meaningful filename, replace `--title` with `--keep-name`. Final names are `YYYYMMDDHHMMSS-<complete-original-filename>[-<title>]/<complete-original-filename>[-<title>].md`; the timestamp has exactly 14 digits. Preserve the original video extension. Omit both the separator and title when absent.
+
+Finalization revalidates, repairs internal paths after renaming, and copies the Markdown plus referenced media to the saved copy directory. An existing different file is never overwritten. Retry `finalize --task-dir <current-directory>` without a naming option to reuse the saved decision; use `--copy-dir` to resolve a destination conflict. After a rename interruption, use the final directory printed before the move if it already exists. See [workflow.md](references/workflow.md) for recovery details.
+
+Report completion only when `finalize` (or a subsequent `resume`) returns `stage: complete`. Relay the final document path, task directory and `copy_document` when present. Explain that the `.assets` directory must accompany a shared copy.
 
 ## Hard Boundaries
 

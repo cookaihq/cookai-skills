@@ -14,7 +14,7 @@ from . import __version__, private_files
 
 
 SCHEMA_VERSION = 1
-TASK_SCHEMA_VERSION = 2
+TASK_SCHEMA_VERSION = 3
 SKILL_VERSION = __version__
 MANIFEST_NAME = "manifest.json"
 PRIVATE_RELATIVE = Path(".state") / "private.json"
@@ -27,10 +27,13 @@ class StateError(ValueError):
 @contextmanager
 def task_lock(task_dir: Path):
     """Lock before reading mutable task state; the OS releases it after a crash."""
+    lock_manifest = read_json(task_dir / MANIFEST_NAME)
+    if lock_manifest.get("schema_version") != TASK_SCHEMA_VERSION:
+        raise StateError("unsupported task schema: v3 does not resume older tasks; no transcription was resubmitted")
     if os.name == "nt":
         import win32api
         import win32event
-        identity = hashlib.sha256(os.path.normcase(str(task_dir.resolve())).encode()).hexdigest()
+        identity = hashlib.sha256(lock_manifest["task_id"].encode()).hexdigest()
         handle = win32event.CreateMutex(None, False, "Local\\video-to-markdown-" + identity)
         acquired = False
         try:
@@ -45,10 +48,6 @@ def task_lock(task_dir: Path):
     else:
         import importlib
         fcntl = importlib.import_module("fcntl")
-        # Check the schema without mutating legacy tasks. Mutable data is re-read
-        # by the command after acquiring the lock.
-        if read_json(task_dir / MANIFEST_NAME).get("schema_version") != TASK_SCHEMA_VERSION:
-            raise StateError("old tasks are preserved but cannot resume in v2; no transcription was resubmitted")
         with (task_dir / ".state" / "task.lock").open("a+b") as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -140,7 +139,7 @@ def sha256_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def initialize_task(task_dir: Path, *, settings_snapshot: dict) -> tuple[dict, dict]:
+def initialize_task(task_dir: Path, *, settings_snapshot: dict, document_name: str = "document.md") -> tuple[dict, dict]:
     for relative in (
         "assets/frames",
         "assets/motion",
@@ -171,7 +170,7 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict) -> tuple[dict, d
         },
         "batches": [],
         "artifacts": {
-            "document": "document.md",
+            "document": document_name,
             "transcript": "transcript.json",
             "visual_observations": "visual-observations.json",
             "review_report": "review-report.json",
@@ -205,7 +204,7 @@ def load_task(task_dir_value: str | os.PathLike[str]) -> tuple[Path, dict, dict]
     if not isinstance(manifest, dict) or not isinstance(private, dict):
         raise StateError("task state must be JSON objects")
     if manifest.get("schema_version") != TASK_SCHEMA_VERSION:
-        raise StateError("unsupported task schema: old tasks are preserved but cannot resume in v2; no transcription was resubmitted")
+        raise StateError("unsupported task schema: v3 does not resume older tasks; no transcription was resubmitted")
     if private.get("schema_version") != TASK_SCHEMA_VERSION:
         raise StateError("unsupported private state schema")
     if manifest.get("task_id") != private.get("task_id"):
@@ -223,15 +222,15 @@ def save_private(task_dir: Path, private: dict) -> None:
     atomic_write_json(task_dir / PRIVATE_RELATIVE, private)
 
 
-def create_empty_artifacts(task_dir: Path) -> None:
+def create_empty_artifacts(task_dir: Path, document_name: str = "document.md") -> None:
     if not (task_dir / "visual-observations.json").exists():
         atomic_write_json(
             task_dir / "visual-observations.json",
             {"schema_version": SCHEMA_VERSION, "revisions": []},
         )
-    if not (task_dir / "document.md").exists():
+    if not (task_dir / document_name).exists():
         atomic_write_bytes(
-            task_dir / "document.md",
+            task_dir / document_name,
             b"# Video document\n\n",
             mode=0o644,
         )

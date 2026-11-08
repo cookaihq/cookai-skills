@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import unicodedata
@@ -10,7 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 
-DEFAULT_OUTPUT_PARENT = "video-to-markdown-output"
+DEFAULT_OUTPUT_PARENT = Path("data") / "video-to-markdown"
 UNSAFE_NAME = re.compile(r"[\\/:*?\"<>|\x00-\x1f\x7f]+")
 
 
@@ -48,23 +47,40 @@ def safe_leaf(value: str, *, require_markdown: bool = False) -> str:
     normalized = UNSAFE_NAME.sub("_", normalized).strip(" ._")
     if not normalized:
         raise PathError("name contains no safe characters")
-    if len(normalized.encode("utf-8")) > 180:
-        while len(normalized.encode("utf-8")) > 180:
-            normalized = normalized[:-1]
+    if len(normalized.encode("utf-8")) > 240:
+        raise PathError("name is too long; shorten the video filename or content title")
+    if normalized.split(".", 1)[0].upper() in {
+        "CON", "PRN", "AUX", "NUL", *["COM%d" % i for i in range(1, 10)],
+        *["LPT%d" % i for i in range(1, 10)],
+    }:
+        raise PathError("name is reserved on Windows")
     if require_markdown and Path(normalized).suffix.lower() != ".md":
         raise PathError("document name must end in .md")
     return normalized
 
 
-def safe_video_stem(value: str) -> str:
-    filename = source_filename(value)
-    stem = Path(filename).stem or filename
-    return safe_leaf(stem)
-
-
 def task_dir_name(video: str, now: datetime | None = None) -> str:
     moment = datetime.now().astimezone() if now is None else now
-    return "%s-%s" % (moment.strftime("%Y%m%d%H%M%S%f"), safe_video_stem(video))
+    return safe_leaf("%s-%s" % (moment.strftime("%Y%m%d%H%M%S"), source_filename(video)))
+
+
+def output_names(timestamp: str, filename: str, title: str | None = None) -> tuple[str, str]:
+    if not re.fullmatch(r"\d{14}", timestamp):
+        raise PathError("task timestamp must have format YYYYMMDDHHMMSS")
+    base = safe_leaf(filename)
+    if title is not None:
+        base += "-" + safe_leaf(title)
+    return safe_leaf(timestamp + "-" + base), safe_leaf(base + ".md", require_markdown=True)
+
+
+def resolve_copy_directory(video: str, *, cwd: Path, explicit: str | None) -> Path | None:
+    if explicit:
+        value = Path(explicit).expanduser()
+        return (cwd / value).resolve() if not value.is_absolute() else value.resolve()
+    if is_http_url(video):
+        return None
+    value = Path(video).expanduser()
+    return ((cwd / value) if not value.is_absolute() else value).resolve().parent
 
 
 def detect_project_root(cwd: Path, explicit: str | None = None) -> Path:

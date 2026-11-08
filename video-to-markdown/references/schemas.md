@@ -2,7 +2,7 @@
 
 The runtime performs strict structural and referential validation. Times are integer milliseconds from the beginning of the source video.
 
-The manifest and private task state use schema version 2. Transcript/observation/review artifacts retain their individual schema version 1. Old task state is not silently migrated. The private directory contains operation intents, raw receipts, provider run records and Feishu identity confirmation; do not publish it.
+The manifest and private task state use schema version 3. Transcript/observation/review artifacts retain their individual schema version 1. Older task state is rejected without migration or resubmission. The private directory contains operation intents, raw receipts, provider run records and Feishu identity confirmation; do not publish it.
 
 ## Transcript Timing
 
@@ -73,7 +73,7 @@ Write `<task-dir>/review-report.json`:
 ```json
 {
   "schema_version": 1,
-  "document": "document.md",
+  "document": "example.mp4.md",
   "intervals": [
     {
       "start_ms": 0,

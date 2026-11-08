@@ -8,7 +8,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from . import asr, config, media, observations, paths, review, sampling, state, transcript
+from . import asr, config, delivery, media, observations, paths, review, sampling, state, transcript
 
 
 class WorkflowError(ValueError):
@@ -76,7 +76,7 @@ def _finish_preparation(
 ) -> None:
     manifest["stage"] = "transcript_ready"
     state.save_manifest(task_dir, manifest)
-    state.create_empty_artifacts(task_dir)
+    state.create_empty_artifacts(task_dir, manifest["artifacts"]["document"])
     sampling.prepare_first_pass(
         task_dir=task_dir,
         manifest=manifest,
@@ -102,9 +102,12 @@ def command_start(args) -> int:
         explicit_parent=args.output_parent,
     )
     name = paths.task_dir_name(args.video)
+    _, document_name = paths.output_names(name.split("-", 1)[0], paths.source_filename(args.video))
+    copy_directory = paths.resolve_copy_directory(args.video, cwd=cwd, explicit=args.copy_dir)
     task_dir = paths.create_task_directory(output_parent, name)
     manifest, private = state.initialize_task(
         task_dir,
+        document_name=document_name,
         settings_snapshot={
             **resolved.public_snapshot(),
             "invocation_cwd": str(cwd),
@@ -117,6 +120,8 @@ def command_start(args) -> int:
             "no_global_config": args.no_global_config,
         },
     )
+    manifest["delivery"] = delivery.initialize(args.video, name, copy_directory)
+    state.save_manifest(task_dir, manifest)
     with state.task_lock(task_dir):
         return _start_prepared(args, task_dir, manifest, private, resolved, source_policy, name)
 
@@ -154,7 +159,8 @@ def _start_prepared(args, task_dir, manifest, private, resolved, source_policy, 
     _print(
         {
             "task_dir": str(task_dir),
-            "document": str(task_dir / "document.md"),
+            "document": str(task_dir / manifest["artifacts"]["document"]),
+            "copy_directory": manifest["delivery"]["copy_directory"],
             "stage": manifest["stage"],
             "next_action": "inspect_batch",
             "next_batch_id": pending[0] if pending else None,
@@ -188,13 +194,18 @@ def command_resume(args) -> int:
     if manifest.get("stage") == "complete" or manifest.get("completed_once"):
         manifest["completed_once"] = True
         validation = review.validate_task(task_dir, manifest)
+        copied = validation["complete"] and delivery.copy_is_current(task_dir, manifest)
+        if copied:
+            manifest["stage"] = "complete"
+            state.save_manifest(task_dir, manifest)
         _print(
             {
                 "task_dir": str(task_dir),
                 "stage": manifest["stage"],
-                "next_action": "ask_rename_questions" if validation["complete"] else "repair_artifacts",
+                "next_action": "complete" if copied else "finalize" if validation["complete"] else "repair_artifacts",
                 "validation": validation,
                 "document": str(task_dir / manifest["artifacts"]["document"]),
+                "copy_directory": manifest["delivery"]["copy_directory"],
                 "asr_task_id": manifest.get("asr", {}).get("task_id"),
                 **asr.public_status(private),
             }
@@ -224,6 +235,7 @@ def command_resume(args) -> int:
         {
             "task_dir": str(task_dir),
             "stage": manifest["stage"],
+            "document": str(task_dir / manifest["artifacts"]["document"]),
             "next_action": "inspect_batch" if pending else "adaptive_review",
             "next_batch_id": pending[0] if pending else None,
             "asr_task_id": manifest.get("asr", {}).get("task_id"),
@@ -340,54 +352,9 @@ def command_validate(args) -> int:
     return 0 if result["complete"] else 1
 
 
-def command_rename(args) -> int:
-    task_dir, manifest, _ = state.load_task(args.task_dir)
-    if not manifest.get("validation", {}).get("complete"):
-        raise WorkflowError("rename is allowed only after validation succeeds")
-    if not args.document_name and not args.task_name:
-        raise WorkflowError("provide --document-name and/or --task-name")
-    document_name = None
-    document_source = None
-    document_destination = None
-    task_destination = None
-    if args.document_name:
-        document_name = paths.safe_leaf(args.document_name, require_markdown=True)
-        old_name = manifest["artifacts"]["document"]
-        document_source = task_dir / old_name
-        document_destination = task_dir / document_name
-        if document_destination.exists() and document_destination != document_source:
-            raise WorkflowError(
-                "document rename target already exists: %s" % document_destination
-            )
-    if args.task_name:
-        new_task_name = paths.safe_leaf(args.task_name)
-        task_destination = task_dir.parent / new_task_name
-        if task_destination.exists() and task_destination != task_dir:
-            raise WorkflowError("task rename target already exists: %s" % task_destination)
-
-    if document_name and document_source and document_destination:
-        document_source.rename(document_destination)
-        manifest["artifacts"]["document"] = document_name
-        report_path = task_dir / "review-report.json"
-        report_document = state.read_json(report_path)
-        report_document["document"] = document_name
-        state.atomic_write_json(report_path, report_document)
-        state.save_manifest(task_dir, manifest)
-    if args.task_name and task_destination and task_destination != task_dir:
-        task_dir.rename(task_destination)
-        task_dir = task_destination.resolve()
-        manifest["task_dir_name"] = new_task_name
-        state.save_manifest(task_dir, manifest)
-    result = review.validate_task(task_dir, manifest)
-    if not result["complete"]:
-        raise WorkflowError("renamed task failed validation: %s" % "; ".join(result["blockers"]))
-    _print(
-        {
-            "task_dir": str(task_dir),
-            "document": str(task_dir / manifest["artifacts"]["document"]),
-            "validation": result,
-        }
-    )
+def command_finalize(args) -> int:
+    _print(delivery.finalize(Path(args.task_dir), title=args.title,
+                             keep_name=args.keep_name, copy_directory=args.copy_dir))
     return 0
 
 
@@ -400,6 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--subtitle")
     start.add_argument("--language")
     start.add_argument("--output-parent")
+    start.add_argument("--copy-dir", help="portable Markdown copy directory; defaults to the original local video's directory")
     start.add_argument("--project-root")
     start.add_argument("--use-local-key", action="store_true")
     start.set_defaults(handler=command_start)
@@ -459,11 +427,13 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--task-dir", required=True)
     validate.set_defaults(handler=command_validate)
 
-    rename = subparsers.add_parser("rename")
-    rename.add_argument("--task-dir", required=True)
-    rename.add_argument("--document-name")
-    rename.add_argument("--task-name")
-    rename.set_defaults(handler=command_rename)
+    finalize = subparsers.add_parser("finalize")
+    finalize.add_argument("--task-dir", required=True)
+    naming = finalize.add_mutually_exclusive_group()
+    naming.add_argument("--title", help="content-derived title for an opaque original filename")
+    naming.add_argument("--keep-name", action="store_true", help="the original filename is meaningful")
+    finalize.add_argument("--copy-dir", help="override the saved copy destination, including when retrying delivery")
+    finalize.set_defaults(handler=command_finalize)
     return parser
 
 
@@ -472,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if getattr(args, "task_dir", None):
             with state.task_lock(Path(args.task_dir).expanduser().resolve()):
+                args.task_dir = str(delivery.recover_rename(Path(args.task_dir)))
                 return int(args.handler(args))
         return int(args.handler(args))
     except (
@@ -485,6 +456,7 @@ def main(argv: list[str] | None = None) -> int:
         sampling.SamplingError,
         observations.ObservationError,
         review.ReviewError,
+        delivery.DeliveryError,
     ) as exc:
         print("Error: %s" % exc, file=sys.stderr)
         return 2 if isinstance(exc, (config.ConfigError, paths.PathError)) else 1

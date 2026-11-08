@@ -4,11 +4,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 from PIL import Image, ImageDraw
 
-from video_to_markdown import state
+from video_to_markdown import review, state
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
@@ -22,6 +23,7 @@ def run_workflow(cwd: Path, *arguments: str, expect: int = 0) -> dict:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         timeout=180,
         check=False,
     )
@@ -83,8 +85,12 @@ def make_video(tmp_path: Path) -> Path:
     return video
 
 
-def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path):
+@pytest.mark.parametrize("opaque", [False, True])
+def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path, monkeypatch, opaque):
     video = make_video(tmp_path)
+    if opaque:
+        video = video.rename(tmp_path / "a8f93.mp4")
+        monkeypatch.setenv("VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR", "project")
     subtitle = tmp_path / "sample.srt"
     subtitle.write_text(
         "1\n00:00:00,000 --> 00:00:03,000\nOpening title. The square moves.\n\n"
@@ -103,7 +109,10 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
     )
     task_dir = Path(started["task_dir"])
     assert task_dir.parent == tmp_path / "output"
-    assert len(task_dir.name.split("-", 1)[0]) == 20
+    assert len(task_dir.name.split("-", 1)[0]) == 14
+    assert task_dir.name.endswith("-" + video.name)
+    assert Path(started["document"]).name == video.name + ".md"
+    assert not (video.parent / (video.name + ".md")).exists()
 
     manifest = state.read_json(task_dir / "manifest.json")
     duration_ms = manifest["source"]["duration_ms"]
@@ -216,12 +225,12 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
         "![Moving square from 00:00:03.000](%s)\n"
         % (screenshot_relative, motion["path"])
     )
-    (task_dir / "document.md").write_text(document, encoding="utf-8")
+    Path(started["document"]).write_text(document, encoding="utf-8")
     state.atomic_write_json(
         task_dir / "review-report.json",
         {
             "schema_version": 1,
-            "document": "document.md",
+            "document": Path(started["document"]).name,
             "intervals": [
                 {
                     "start_ms": 0,
@@ -250,12 +259,26 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
     assert validated["complete"] is True
 
     resumed = run_workflow(tmp_path, "resume", "--task-dir", str(task_dir))
-    assert resumed["stage"] == "complete"
-    assert resumed["next_action"] == "ask_rename_questions"
+    assert resumed["stage"] == "validated"
+    assert resumed["next_action"] == "finalize"
 
-    (task_dir / "document.md").unlink()
+    finalized = run_workflow(tmp_path, "finalize", "--task-dir", str(task_dir),
+                             *(["--title", "方块运动演示"] if opaque else ["--keep-name"]))
+    task_dir = Path(finalized["task_dir"])
+    expected = video.name + ("-方块运动演示" if opaque else "")
+    assert task_dir.name.endswith("-" + expected)
+    assert Path(finalized["document"]).name == expected + ".md"
+    copied = Path(finalized["copy_document"])
+    assert copied == video.parent / (expected + ".md")
+    for match in review.IMAGE_LINK.finditer(copied.read_text(encoding="utf-8")):
+        with Image.open(copied.parent / unquote(match.group("target"))) as media_image:
+            assert media_image.width > 0
+    assert run_workflow(tmp_path, "resume", "--task-dir", str(task_dir))["next_action"] == "complete"
+    assert run_workflow(tmp_path, "finalize", "--task-dir", str(task_dir))["copy_document"] == str(copied)
+
+    Path(finalized["document"]).unlink()
     resumed = run_workflow(tmp_path, "resume", "--task-dir", str(task_dir), expect=1)
     assert resumed["stage"] == "blocked_validation"
     assert resumed["next_action"] == "repair_artifacts"
     assert "document Markdown is missing or unsafe" in resumed["validation"]["blockers"]
-    assert not (task_dir / "document.md").exists()
+    assert not Path(finalized["document"]).exists()

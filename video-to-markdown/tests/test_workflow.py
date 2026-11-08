@@ -52,6 +52,8 @@ def video_server(video, *, content_length=None, responses=()):
 
 
 def run_workflow(cwd, *arguments, expected=0, environment=None, error=None):
+    if arguments[0] == "start":
+        arguments = (*arguments, "--project-root", str(cwd))
     env = os.environ.copy()
     if environment:
         env.update(environment)
@@ -151,7 +153,7 @@ def test_missing_private_state_has_an_actionable_error(tmp_path):
 def test_missing_subtitle_remains_the_input_after_resume(tmp_path, video):
     subtitle = tmp_path / "later.srt"
     run_workflow(tmp_path, "start", "--video", video, "--subtitle", subtitle, expected=1)
-    task_dir = next((tmp_path / "video-to-markdown-output").iterdir())
+    task_dir = next((tmp_path / "data" / "video-to-markdown").iterdir())
     invalid = run_workflow(tmp_path, "validate", "--task-dir", task_dir, expected=1)
     assert invalid["complete"] is False
     subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nRecovered subtitles.\n", encoding="utf-8")
@@ -167,7 +169,7 @@ def test_missing_subtitle_remains_the_input_after_resume(tmp_path, video):
 def test_resume_rejects_changed_audio_before_using_a_transcription_service(tmp_path, video):
     without_credentials = {"AIHUB_API_KEY": "", "X_API_KEY": ""}
     run_workflow(tmp_path, "start", "--video", video, environment=without_credentials)
-    task_dir = next((tmp_path / "video-to-markdown-output").iterdir())
+    task_dir = next((tmp_path / "data" / "video-to-markdown").iterdir())
     audio = task_dir / "source" / "audio-for-asr.mp3"
     with audio.open("ab") as output:
         output.write(b"changed-after-preparation")
@@ -177,14 +179,17 @@ def test_resume_rejects_changed_audio_before_using_a_transcription_service(tmp_p
     )
 
 
-def test_signed_video_url_is_kept_only_in_private_state(tmp_path, video):
+@pytest.mark.parametrize("with_copy", [False, True])
+def test_signed_video_url_is_kept_only_in_private_state(tmp_path, video, with_copy):
     subtitle = tmp_path / "speech.srt"
     subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nDownloaded video.\n", encoding="utf-8")
     with video_server(video) as (url, requests):
         signed_url = url + "?token=synthetic-secret-5473#private-fragment"
-        started = run_workflow(tmp_path, "start", "--video", signed_url, "--subtitle", subtitle)
+        started = run_workflow(tmp_path, "start", "--video", signed_url, "--subtitle", subtitle,
+                               *(["--copy-dir", "copies"] if with_copy else []))
     assert len(requests) == 1
     task_dir = Path(started["task_dir"])
+    assert started["copy_directory"] == (str(tmp_path / "copies") if with_copy else None)
     public = (task_dir / "manifest.json").read_text(encoding="utf-8")
     assert "synthetic-secret-5473" not in public
     assert "private-fragment" not in public
@@ -202,7 +207,7 @@ def test_download_rejects_truncated_http_body_after_bounded_retries(tmp_path, vi
             expected=1, error="incomplete response body",
         )
     assert len(requests) == 3
-    task_dir = next((tmp_path / "video-to-markdown-output").iterdir())
+    task_dir = next((tmp_path / "data" / "video-to-markdown").iterdir())
     assert not (task_dir / "source" / "video.mp4").exists()
     assert not (task_dir / "transcript.json").exists()
 

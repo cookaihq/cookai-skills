@@ -10,7 +10,7 @@ from video_to_markdown import external, feishu
 
 def test_external_argv_and_utf8_round_trip_without_shell_expansion(tmp_path):
     script = tmp_path / "arguments.py"
-    script.write_text("import sys,json; print(json.dumps(sys.argv[1:], ensure_ascii=False))", encoding="utf-8")
+    script.write_text("import sys,json; sys.stdout.reconfigure(encoding='utf-8'); print(json.dumps(sys.argv[1:], ensure_ascii=False))", encoding="utf-8")
     args = ['中文 path with spaces', '{"need_timestamp":true}', '$(never-run)', '`never-run`']
     result = external.execute([sys.executable, str(script), *args], cwd=tmp_path, timeout=5)
     assert result.returncode == 0

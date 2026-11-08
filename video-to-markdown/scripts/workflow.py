@@ -17,4 +17,7 @@ from video_to_markdown.cli import main
 
 
 if __name__ == "__main__":
+    # JSON and recovery paths use UTF-8 even when Windows redirects a legacy-codepage console.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     raise SystemExit(main())
