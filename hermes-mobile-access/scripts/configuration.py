@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shared"))
 from skill_ui.storage import file_lock, private_directory, _private_windows
 from access_security import AUTH_TYPE, valid_key
+from access_policy import normalize_access
 
 SELECTOR = "HMA_CONNECTION"
 COLLECTION = "HMA_CONNECTIONS_JSON"
@@ -42,7 +43,7 @@ def new_id():
 
 def draft(name="我的 Hermes"):
     return {"name": name, "domain_prefix": "hermes-mobile", "hermes": {},
-            "frp": {}, "auth": None, "auto_recover": True}
+            "frp": {}, "auth": None, "auto_recover": True, "access": {}}
 
 
 def _object(value, allowed, field):
@@ -51,7 +52,7 @@ def _object(value, allowed, field):
 
 
 def validate_record(value):
-    _object(value, ("name", "domain_prefix", "hermes", "frp", "auth", "auto_recover"), "连接")
+    _object(value, ("name", "domain_prefix", "hermes", "frp", "auth", "auto_recover", "access"), "连接")
     value = copy.deepcopy(value)
     name = value.get("name")
     if not isinstance(name, str):
@@ -78,6 +79,13 @@ def validate_record(value):
             raise ConfigError("invalid_access_key", "请生成新的 32 字节接入密钥，或填写其 43 字符 Base64URL 值；不要填写掩码。")
     if type(value.setdefault("auto_recover", True)) is not bool:
         raise ConfigError("invalid_collection", "auto_recover 必须为布尔值。")
+    try:
+        access = value.setdefault('access', {})
+        if access is None:
+            raise ValueError()
+        normalize_access(access)
+    except ValueError:
+        raise ConfigError('invalid_access_policy', '访问范围只允许已声明的 HTTP / WebSocket 布尔开关。') from None
     return value
 
 

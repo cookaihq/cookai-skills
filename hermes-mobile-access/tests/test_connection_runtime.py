@@ -108,6 +108,20 @@ def test_rename_and_recovery_toggle_do_not_restart(connected):
     assert store.snapshot().select(cid)[1]['auto_recover'] is False
 
 
+def test_permission_change_restarts_same_binding_and_can_restore(connected, monkeypatch):
+    manager, store, cid, row, events = connected
+    def start(*a, **kw):
+        disabled = store.snapshot().select(cid)[1]['access'].get('websocket_enabled') is False
+        events.append('start:disabled' if disabled else 'start:restored')
+        return {'result': 'failed' if disabled else 'awaiting_mobile'}
+    monkeypatch.setattr(manager, '_connect', start)
+    with pytest.raises(ConfigError) as caught:
+        manager.apply(cid, *modified(store, cid, access={'websocket_enabled': False}))
+    assert caught.value.code == 'apply_failed_restored'
+    assert events == ['precheck', 'identity', 'stop', 'start:disabled', 'stop', 'start:restored']
+    assert store.snapshot().select(cid)[1] == row
+
+
 def test_clearing_key_stops_before_save_and_does_not_restore(connected):
     manager, store, cid, row, events = connected
     manager.apply(cid, *modified(store, cid, auth=None))

@@ -20,6 +20,9 @@ from access_security import AUTH_TYPE, KEY_HEADER
 from connection_runtime import Manager
 from skill_ui import Adapter
 from skill_ui.contracts import UIError
+sys.path.insert(0, str(ROOT / 'ui'))
+from access_fields import access_fields
+from access_policy import GROUP_IDS
 
 
 class Assets:
@@ -33,7 +36,10 @@ class Assets:
     def read_bytes(self):
         raw = (ROOT / "shared/skill_ui/static" / self.name).read_bytes()
         extra = {"app.js": "configuration.js", "style.css": "configuration.css"}.get(self.name)
-        return raw + b"\n" + (ROOT / "ui" / extra).read_bytes() if extra else raw
+        if extra:
+            raw += b"\n" + (ROOT / "ui" / extra).read_bytes()
+            raw += b"\n" + (ROOT / 'ui' / ('access.js' if self.name == 'app.js' else 'access.css')).read_bytes()
+        return raw
 
 
 class Configuration(Adapter):
@@ -125,6 +131,8 @@ class Configuration(Adapter):
         fields[-1]["explicit"] = record["auth"] is not None
         fields[-1]["effect"] = "保存接入密钥；替换或清除会使旧认证失效。公网连接与手机验证单独执行。"
         field("auth", "入口认证", "独立接入密钥 · 手机 Token 模式", group="手机连接信息", readonly=True)
+        permissions, permission_metadata = access_fields(record, cid, target, readonly=snap.target is None)
+        fields.extend(permissions)
         field("name", "连接名称", record["name"], required=True)
         field("suffix", "FRP 配置域名", suffix or "未配置", readonly=True, advanced=True,
               help="从 FRP Launch 的原项目和个人配置上下文读取。")
@@ -177,14 +185,18 @@ class Configuration(Adapter):
         return {"revision": revision, "fields": fields,
                 "note": "使用真实配置加载器保存连接。已有连接的变更先检查再应用；首次配置保存后由 Agent 连接。独立密钥用于手机 Token 模式。",
                 "validation": "本机配置格式、来源与修订检查；公网和手机未验证",
-                "task": {"id": cid, "binding": str(self.project), "continuation": "继续配置 Hermes 手机接入，核验目标电脑、FRP 和入口认证。"}}
+                "task": {"id": cid, "binding": str(self.project), **permission_metadata,
+                         "continuation": "继续配置 Hermes 手机接入，核验目标电脑、FRP 和入口认证。"}}
 
     def save(self, changes, revision):
         try:
             snap, cid, record, context, status, current, profiles = self._snapshot(force_profiles=True)
             if revision != current:
                 raise ConfigError("conflict", "FRP 或连接配置已变化，请重新载入；草稿保留。")
-            if not isinstance(changes, dict) or not changes or set(changes) - {"name", "subdomain", "profile", "access_key", "monitor", "update"}:
+            permission_ids = {protocol + '_' + group for protocol in ('http', 'websocket') for group in GROUP_IDS}
+            permission_ids.add('access_websocket_enabled')
+            if (not isinstance(changes, dict) or not changes or
+                    set(changes) - ({"name", "subdomain", "profile", "access_key", "monitor", "update"} | permission_ids)):
                 raise ConfigError("readonly", "变更包含只读或未验证字段。")
             auto_update = None
             if "update" in changes:
@@ -203,6 +215,20 @@ class Configuration(Adapter):
                     continue
                 if not isinstance(change, dict) or change.get("op") not in ("set", "unset"):
                     raise ConfigError("changes", "变更格式无效。")
+                if key in permission_ids:
+                    access = values.setdefault('access', {})
+                    if key == 'access_websocket_enabled':
+                        target, leaf = access, 'websocket_enabled'
+                    else:
+                        protocol, leaf = key.split('_', 1)
+                        target = access.setdefault(protocol, {})
+                    if change['op'] == 'unset':
+                        target.pop(leaf, None)
+                    elif type(change.get('value')) is not bool:
+                        raise ConfigError('invalid_access_policy', '访问开关必须为开启或关闭。')
+                    else:
+                        target[leaf] = change['value']
+                    continue
                 if key == "access_key":
                     values["auth"] = None if change["op"] == "unset" else {"type": AUTH_TYPE, "key": change.get("value")}
                     continue
@@ -229,7 +255,7 @@ class Configuration(Adapter):
                     raise ConfigError("subdomain", "完整主机名超过长度限制。")
             running = status.get("modes", {}).get("official", {}).get("running")
             if (running is not False and not self.manager.status(cid).get('controller_running')
-                    and any(values[k] != record[k] for k in ("domain_prefix", "auto_recover", "hermes"))):
+                    and any(values[k] != record[k] for k in ("domain_prefix", "auto_recover", "hermes", "access"))):
                 raise ConfigError("preflight_unknown", "FRP 不属于当前可核验的接入进程；先断开并核对，原配置保留。")
             collection = copy.deepcopy(snap.collection)
             first = not collection["connections"]

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import secrets
+from access_policy import normalize_access
 
 AUTH_TYPE = "mobile_key_v1"
 KEY_HEADER = "X-Hermes-Mobile-Key"
@@ -30,5 +31,6 @@ def generate_key():
 def binding_digest(source, connection_id, record):
     """Stable process-local comparison; never serialize this record to logs."""
     material = {key: record[key] for key in ("domain_prefix", "hermes", "frp", "auth")}
+    material['access'] = normalize_access(record.get('access'))
     return hashlib.sha256(json.dumps([source, connection_id, material],
                                     sort_keys=True, ensure_ascii=True).encode()).hexdigest()

@@ -1,6 +1,6 @@
 # 实际接入前的证据
 
-受查 Mobile 源码是 v2.9.6，commit `4d7f680c18eb7989ac97616841f6376547104127`；设备若不是该版本，应先核对实际实现。首版目标为 Windows 与 macOS，先验证当前 Windows；当前尚无 Android 完整接入或 macOS 实测通过记录。
+聊天适配最初核对 Mobile v2.9.6，commit `4d7f680c18eb7989ac97616841f6376547104127`；本次访问范围另核对 v3.0.1，commit `a63a830dd13f2d37ad5decbbb9b31c80e8934326` 的 HTTP / WS 协议及当前 Hermes 0.22.5 原生契约。用户表示手机为最新版，未取得设备版本号，不把受查源码当作安装版本。Windows 与 Android 基础文字收发及定时任务页面已有用户确认；其余手机场景和 macOS 尚未全部实测。
 
 1. 在目标 Windows 或 macOS 电脑发现 Desktop 当前使用的进程、启动时间、监听和健康协议，并核验实际 Hermes home/profile。分别使用实际平台的进程、权限和生命周期机制；Windows 结果不能代替 macOS。发现指纹是运行代际，不是永久逻辑身份；不要另起后端。
 2. 用 FRP Launch `context-info` 接口 v1 获取父域与原来源。手机 Server URL 是 HTTPS 完整基础 URL，末尾 `/`；只新增一个服务子域名。源站随机端口、`/api/ws` 与完整 Server URL 分开。
@@ -18,7 +18,13 @@ profile HTTP 探针和正式接入层共用已建立 TCP 连接的归属检查�
 
 `probe-access` 只建立临时 loopback 接入：匿名/错误密钥/Host/Origin、真实 profile、WS ready/ping、撤销后流关闭和新请求拒绝，结束即停止。已在 Windows Hermes 0.22.5 验证。正式适配器另以合成文件通过下载、媒体 Range 和显式 profile 读取；2026-11-07 用户确认 Windows 后端与 Android 基础文字消息往返通过。实际上传、语音、外部浏览器和重连历史同步尚待验；先于会话恢复的 `session.events.since` 仍可能返回 `not_found`。探针不自动保存生产密钥、不启动 FRP、不发模型请求。
 
-HTTP 仅发布代码 allowlist 内的基本状态、profile、模型信息、会话读取、文件和语音请求；会话 ID 可包含斜线。文件下载/播放允许且移除本适配器的 query 标记，仍须独立密钥；保留 Range/Content-Range。密钥持有人具有 Hermes 主机所有者的 WS 能力，首选 profile 与 HTTP 路径裁剪不是权限沙箱；保留原审批，不让手机声明 `desktop_local=true`。配置或身份失效撤销两侧活动流，每 2 秒启动检查，检查自身有预算，不能称为 2 秒内必定撤销。
+0.2.0 默认开放所有业务 `/api/` 路径的常规 HTTP 方法，按第一段路径归入配置页的 12 组；未知业务路径归入 `other`，原生 `/api/auth`、`/api/native` 与通用 HTTP 对 `/api/ws` 的访问保留拒绝。WS 握手由独立总开关控制。未设置的组默认开启；关闭 HTTP 组时在读取请求正文或申请原生票据前返回 `403/access_policy_denied`。后端不支持的接口仍由后端返回实际错误。文件下载/播放移除本适配器的 query 标记，仍须独立密钥；保留 Range/Content-Range。
+
+WebSocket 按 RPC/事件主题分组，关闭的调用返回 `4001`，`data.reason=access_policy_denied` 并注明组；通知和推送不转发。策略覆盖 `event/gateway.event`、`session.events.since` 回放和 `open_requests`，过滤后更新事件数量并保留序号水位。被拒绝的服务端请求返回拒绝回执，不转发手机未获准接收的请求回复；`request.answer` 在有限制且无法确定原请求主题时拒绝。开启 WS 时保留 `gateway.ready`、ping 和非 Desktop 的 capabilities。`session.mutate` 的模型/工作目录等跨组操作检查对应分组；带 session_id 的帧还检查聊天组。每个 WS 的请求和服务端交互分别最多关联 256 条。
+
+两种协议分别设置：仅关闭某组 HTTP 不关闭它的 WS，反之亦然。定时任务现在包含列表、详情及管理接口，默认全部开放；Agent 排查仍只执行已授权操作。首选 profile 和这些开关不构成操作系统或 Agent 工具沙箱。Shell、CLI、斜杠命令等通用能力归入 `other`，开启它们可能执行其他业务；聊天中的工具权限继续由 Hermes 管理。原生身份、独立密钥、Host/Origin、profile 校验及 `desktop_local=true` 拒绝保持有效。配置或身份失效撤销两侧活动流，每 2 秒启动检查，检查自身有预算，不能称为 2 秒内必定撤销。
+
+排查 403 时核对保存的有效策略及实际响应：主动关闭为 `access_policy_denied`，保留路径为 `route_not_published`，Host/Origin 为 `host_or_origin_rejected`，匿名为 401。`probe-access` 与公网检查按策略验证精确的主动拒绝；关闭 profiles、聊天组或 WS 总开关不会被误判成连接损坏。其他错误仍按原验证失败处理，不把任意 403 当作正常。
 
 换域名前先重新核对来源、身份、占用、TLS 与认证。可用才停止本连接，核对停止后更新路由并启动；竞态失败先清理本次资源，条件仍有效且配置未被外部修改时尝试恢复旧连接，恢复失败如实报告断开。
 

@@ -185,6 +185,30 @@ def test_invalid_key_or_stale_revision_cannot_partially_save(ui):
     assert (ui.store.home / '.env').read_bytes() == before
 
 
+def test_access_checkboxes_save_false_to_selected_connection_and_default_is_enabled(ui):
+    from access_policy import GROUP_IDS, normalize_access
+    page = ui.config()
+    fields = {f['id']: f for f in page['fields']}
+    assert fields['access_websocket_enabled']['value'] is True
+    assert all(fields[p + '_' + g]['value'] is True for p in ('http', 'websocket') for g in GROUP_IDS)
+    page = ui.save({'http_cron': {'op': 'set', 'value': False},
+                    'websocket_cron': {'op': 'set', 'value': False},
+                    'access_websocket_enabled': {'op': 'set', 'value': False}}, page['revision'])
+    cid, record = ui.store.snapshot().select()
+    assert record['access'] == {'http': {'cron': False}, 'websocket': {'cron': False}, 'websocket_enabled': False}
+    assert page['task']['field_paths']['websocket_cron'] == 'HMA_CONNECTIONS_JSON.connections.' + cid + '.access.websocket.cron'
+    reloaded = Configuration(ui.project, ui.options)
+    assert next(f for f in reloaded.config()['fields'] if f['id'] == 'websocket_cron')['value'] is False
+    page = ui.save({'websocket_cron': {'op': 'unset'}}, page['revision'])
+    assert normalize_access(ui.store.snapshot().select()[1]['access'])['websocket']['cron'] is True
+    assert not normalize_access(ui.store.snapshot().select()[1]['access'])['http']['cron']
+    before = (ui.store.home / '.env').read_bytes()
+    with pytest.raises(UIError):
+        ui.save({'name': {'op': 'set', 'value': 'must-not-save'},
+                 'http_cron': {'op': 'set', 'value': 'false'}}, page['revision'])
+    assert (ui.store.home / '.env').read_bytes() == before
+
+
 def test_http_ui_save_reveal_and_receipt_never_publish_key(ui, tmp_path):
     import http.client
     import json

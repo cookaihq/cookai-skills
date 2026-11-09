@@ -85,6 +85,9 @@ class Gateway:
         grant = request.headers.get('X-Hermes-Gateway-Ticket')
         home, purpose = self.grants.pop(grant)
         assert purpose == 'native-http'
+        if request.path == '/api/cron/jobs':
+            return web.json_response([{'id': 'fixture-job', 'name': 'Fixture job',
+                                       'profile': home, 'enabled': True}])
         if self.disconnect_after_grant:
             request.transport.abort()
             return web.Response()
@@ -106,7 +109,7 @@ class Gateway:
 
 
 @asynccontextmanager
-async def setup_bridge():
+async def setup_bridge(access=None, *, start=True):
     upstream = Gateway()
     app = web.Application()
     app.router.add_route('*', '/{path:.*}', upstream.handle)
@@ -116,9 +119,10 @@ async def setup_bridge():
     await site.start()
     upstream.origin = 'http://127.0.0.1:' + str(site._server.sockets[0].getsockname()[1])
     active = {'current': True}
-    bridge = AccessBridge('https://mobile.example.invalid/', generate_key(), upstream, lambda: active['current'])
+    bridge = AccessBridge('https://mobile.example.invalid/', generate_key(), upstream, lambda: active['current'], access=access)
     try:
-        await bridge.start()
+        if start:
+            await bridge.start()
         async with aiohttp.ClientSession(trust_env=False, timeout=aiohttp.ClientTimeout(total=4)) as client:
             yield bridge, upstream, client, active
     finally:
@@ -149,7 +153,7 @@ def test_authentication_and_path_gates_never_reach_gateway():
                 ('/', {**headers(bridge), 'Host': 'foreign.invalid'}, 403),
                 ('/', {**headers(bridge), 'Origin': ''}, 403),
                 ('/', CIMultiDict([*headers(bridge).items(), (KEY_HEADER, bridge.key)]), 401),
-                ('/api/config', headers(bridge), 403),
+                ('/api/auth/native-ticket', headers(bridge), 403),
                 ('/api/%2e%2e/config', headers(bridge), 400),
                 ('/api/files%2Fread', headers(bridge), 400),
                 ('/api/profiles?token=marker', headers(bridge), 400),
@@ -181,6 +185,55 @@ def test_rest_translates_one_use_grants_keeps_profile_and_strips_untrusted_heade
                 assert received['X-Hermes-Gateway-Ticket'] != 'forged'
                 assert not any(name in received for name in (KEY_HEADER, 'Authorization', 'Cookie',
                     'X-Forwarded-Host', 'X-Forwarded-For', 'Forwarded', 'Origin'))
+    asyncio.run(run())
+
+
+def test_mobile_cron_list_preserves_profile_and_native_response():
+    async def run():
+        async with setup_bridge() as (bridge, upstream, client, _):
+            sent = {**headers(bridge), 'Authorization': 'Bearer untrusted',
+                    'X-Hermes-Gateway-Ticket': 'forged', 'Cookie': 'cookie=untrusted'}
+            for query, home in [('', '/fixture/work'), ('?profile=personal', '/fixture/personal')]:
+                async with client.get(url(bridge, '/api/cron/jobs' + query), headers=sent) as response:
+                    assert response.status == 200
+                    assert await response.json() == [{'id': 'fixture-job', 'name': 'Fixture job',
+                                                       'profile': home, 'enabled': True}]
+                    assert response.headers['Cache-Control'] == 'no-store'
+                method, path, received, body = upstream.requests[-1]
+                assert (method, path, body) == ('GET', '/api/cron/jobs' + query, b'')
+                assert received['X-Hermes-Gateway-Ticket'] != 'forged'
+                assert not any(name in received for name in (KEY_HEADER, 'Authorization', 'Cookie'))
+            assert upstream.verified == 2 and not upstream.grants
+    asyncio.run(run())
+
+
+def test_cron_authentication_and_disabled_operations_never_reach_gateway():
+    async def run():
+        async with setup_bridge() as (bridge, upstream, client, _):
+            path = '/api/cron/jobs'
+            for sent, expected in [({'Host': bridge.host}, 401),
+                    ({**headers(bridge), KEY_HEADER: generate_key()}, 401),
+                    ({**headers(bridge), 'Host': 'foreign.invalid'}, 403),
+                    ({**headers(bridge), 'Origin': 'https://' + bridge.host}, 403)]:
+                async with client.get(url(bridge, path), headers=sent) as response:
+                    assert response.status == expected
+            for query in ('?profile=unknown', '?profile=work&profile=personal'):
+                async with client.get(url(bridge, path + query), headers=headers(bridge)) as response:
+                    assert response.status == 422
+            unpublished = [('POST', path), ('PUT', path), ('DELETE', path),
+                ('GET', path + '/'), ('GET', path + '-extra'), ('GET', path + '/fixture-job'),
+                ('GET', path + '/fixture-job/runs'), ('PUT', path + '/fixture-job'),
+                ('DELETE', path + '/fixture-job'), ('POST', '/api/cron/fire'),
+                ('GET', '/api/cron/blueprints'), ('GET', '/api/cron/delivery-targets')]
+            unpublished.extend(('POST', path + '/fixture-job/' + action)
+                               for action in ('trigger', 'pause', 'resume', 'cancel'))
+            from access_policy import AccessPolicy
+            bridge.policy = AccessPolicy({'http': {'cron': False}})
+            for method, target in unpublished:
+                async with client.request(method, url(bridge, target), headers=headers(bridge)) as response:
+                    assert response.status == 403
+                    assert await response.json() == {'error': 'access_policy_denied'}
+            assert not upstream.requests and not upstream.grants
     asyncio.run(run())
 
 

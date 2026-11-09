@@ -46,12 +46,17 @@ async def exercise(bridge):
                     raise ControlError('mobile_bootstrap_probe_failed')
                 marker = match[1].decode('ascii')
             async with client.get(base + '/api/profiles', headers=headers, allow_redirects=False) as response:
-                if response.status != 200:
+                if not bridge.policy.http_allowed('GET', '/api/profiles'):
+                    if response.status != 403 or (await response.json()).get('error') != 'access_policy_denied':
+                        raise ControlError('profile_policy_probe_failed')
+                    observed['profiles'] = 'disabled_by_policy'
+                elif response.status != 200:
                     raise ControlError('profile_rest_probe_failed')
-                data = await response.json()
-                observed['profile_count'] = len(data['profiles'])
-                if bridge.backend.preferred not in [row['name'] for row in data['profiles']]:
-                    raise ControlError('preferred_profile_not_returned')
+                else:
+                    data = await response.json()
+                    observed['profile_count'] = len(data['profiles'])
+                    if bridge.backend.preferred not in [row['name'] for row in data['profiles']]:
+                        raise ControlError('preferred_profile_not_returned')
             ws_url = base.replace('http:', 'ws:', 1) + '/api/ws?token=' + marker
             try:
                 async with client.ws_connect(ws_url, headers={'Host': bridge.host}):
@@ -60,28 +65,43 @@ async def exercise(bridge):
                 observed['anonymous_ws'] = exc.status
                 if exc.status != 401:
                     raise ControlError('ws_gate_probe_failed')
-            async with client.ws_connect(ws_url, headers=headers,
-                    timeout=aiohttp.ClientWSTimeout(ws_receive=8, ws_close=1)) as ws:
-                ready = await ws.receive_json()
-                observed['gateway_ready'] = ready.get('params', {}).get('type') == 'gateway.ready'
-                await ws.send_json({'jsonrpc': '2.0', 'id': 'hma-probe', 'method': 'gateway.ping', 'params': {}})
-                async with asyncio.timeout(8):
-                    while True:
-                        response = await ws.receive_json()
-                        if response.get('id') == 'hma-probe':
-                            break
-                observed['heartbeat'] = response.get('result', {}).get('ok') is True
-                observed['chat_methods'] = await check_chat_methods(ws, bridge.backend.preferred)
+            if not bridge.policy.websocket_enabled:
+                async with client.get(ws_url.replace('ws:', 'http:', 1), headers=headers) as response:
+                    if response.status != 403 or (await response.json()).get('error') != 'access_policy_denied':
+                        raise ControlError('ws_policy_probe_failed')
+                    observed['websocket'] = 'disabled_by_policy'
                 await bridge.revoke('probe_finished')
-                end = await ws.receive()
-                observed['test_socket_closed'] = end.type in (WSMsgType.CLOSE, WSMsgType.CLOSED)
+                observed['test_socket_closed'] = True
+            else:
+                await exercise_websocket(client, ws_url, headers, bridge, observed)
             async with client.get(base + '/api/profiles', headers=headers, allow_redirects=False) as response:
                 observed['revoked_test_instance'] = response.status == 401
-        if not all(observed.get(name) for name in ('gateway_ready', 'heartbeat', 'test_socket_closed', 'revoked_test_instance')):
+        required = ['test_socket_closed', 'revoked_test_instance']
+        if bridge.policy.websocket_enabled:
+            required += ['gateway_ready', 'heartbeat']
+        if not all(observed.get(name) for name in required):
             raise ControlError('access_protocol_probe_failed')
         return observed
     finally:
         await bridge.close()
+
+
+async def exercise_websocket(client, ws_url, headers, bridge, observed):
+    async with client.ws_connect(ws_url, headers=headers,
+            timeout=aiohttp.ClientWSTimeout(ws_receive=8, ws_close=1)) as ws:
+        ready = await ws.receive_json()
+        observed['gateway_ready'] = ready.get('params', {}).get('type') == 'gateway.ready'
+        await ws.send_json({'jsonrpc': '2.0', 'id': 'hma-probe', 'method': 'gateway.ping', 'params': {}})
+        async with asyncio.timeout(8):
+            while True:
+                response = await ws.receive_json()
+                if response.get('id') == 'hma-probe':
+                    break
+        observed['heartbeat'] = response.get('result', {}).get('ok') is True
+        observed['chat_methods'] = await check_chat_methods(ws, bridge.backend.preferred, bridge.policy)
+        await bridge.revoke('probe_finished')
+        end = await ws.receive()
+        observed['test_socket_closed'] = end.type in (WSMsgType.CLOSE, WSMsgType.CLOSED)
 
 
 def worker(options):
@@ -107,7 +127,7 @@ def worker(options):
         raise ControlError('frp_source_changed')
     url = 'https://' + record['domain_prefix'] + '.' + suffix['value'] + '/'
     backend = NativeBackend.discover(record['hermes'], options.get('selected'))
-    bridge = AccessBridge(url, record['auth']['key'], backend, unchanged)
+    bridge = AccessBridge(url, record['auth']['key'], backend, unchanged, access=record.get('access'))
     observed = asyncio.run(asyncio.wait_for(exercise(bridge), 45))
     return {'result': 'access_probe_passed', 'connection': cid, 'server_url': url,
             'checked_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),

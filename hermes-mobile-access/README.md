@@ -4,19 +4,27 @@
 
 **0.1.0 已通过 Windows 后端与 Android 的基础文字消息收发。** 已实现发现、命名连接/UI、独立密钥认证、域名预检、后台连接/恢复及独立 FRP。Windows 另已验证公网 HTTPS、认证拒绝、真实 profile REST、WS 探活、进程退出后 FRP 停止及重连。macOS、重连历史同步、Desktop 重启/睡眠恢复及其余手机场景仍待实测；首版不表示这些场景已全部验收。
 
+**0.2.0 增加访问范围配置，默认全部开启。** 每组分别勾选 HTTP 和 WebSocket，另有 WebSocket 总开关。Windows 全量 208 项、Codex 默认沙箱安装副本 111 项及浏览器交互验证通过；真实后端只读请求和关闭策略已验证。原定时任务列表 403 已修复，用户已确认 Android 页面可访问；其他手机页面与 macOS 仍需分别实测。
+
 ## 安装
 
 将下面的请求交给你正在使用的 Codex、Claude Code 或 WorkBuddy：
 
-> 请从 https://github.com/cookaihq/cookai-skills 安装 hermes-mobile-access v0.1.0，并准备同仓的 frpc-launch v1.6.0，保留我的已有配置，验证当前 Agent 能发现和调用。
+> 请从 https://github.com/cookaihq/cookai-skills 安装 hermes-mobile-access v0.2.0，并准备同仓的 frpc-launch v1.6.0，保留我的已有配置，验证当前 Agent 能发现和调用。已有运行连接请沿用原项目与来源重新连接，应用本次版本。
 
-固定版本入口为 [hermes-mobile-access/v0.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access/v0.1.0)，安装其中的 `hermes-mobile-access/`；FRP Launch 需要 1.6.0 起提供的消费者接口 v1。宿主使用同一份 Skill；Codex 通常使用 `~/.agents/skills/`，Claude Code 使用 `~/.claude/skills/`，WorkBuddy 使用 `~/.workbuddy/skills/`。首版已完成 Codex 安装与合成回归，其他两者保留兼容入口但未实测。
+固定版本入口为 [hermes-mobile-access/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access/v0.2.0)，安装其中的 `hermes-mobile-access/`；FRP Launch 需要 1.6.0 起提供的消费者接口 v1。宿主使用同一份 Skill；Codex 通常使用 `~/.agents/skills/`，Claude Code 使用 `~/.claude/skills/`，WorkBuddy 使用 `~/.workbuddy/skills/`。本版已完成 Codex 安装与合成回归，其他两者保留兼容入口但未实测。
 
 ## 配置与使用
 
 > 使用 hermes-mobile-access 检查当前 Desktop 后端，打开配置页面。新连接保存个人配置，已有连接按实际来源修改；保留 FRP Launch 的原配置，只让我修改新增的服务子域名。
 
 页面最前面依次显示 Server URL 和手机接入密钥。Server URL 整体显示完整地址，默认服务子域名为 `hermes-mobile`。协议、FRP 父域和 `/` 固定，复制得到完整地址。首选 profile 使用平铺选项，来自当前后端的真实列表；保存前重新核验，仅允许选择该后端正在提供的 profile。保存不会切换电脑当前 profile，接入时仍须在手机核对。读取失败时显示具体原因，不列合成 profile 供真实连接选择。
+
+“访问范围”按聊天、定时任务、Profile、模型、Skill/插件、工具/MCP、文件/语音、消息平台、记忆、配置/凭证、维护及其他接口分为 12 组。HTTP 与 WebSocket 可以分别关闭，未设置项默认开启；全部开启/关闭、撤销和恢复默认均在保存后生效。WebSocket 总开关关闭后拒绝连接，但保留分组选择。已有连接升级后也采用默认全开；如需限制，在更新后打开配置页保存。
+
+> 打开 hermes-mobile-access 的配置页，让我分别设置 HTTP 和 WebSocket 的访问范围；保存后核验当前连接，不运行我的任务或发送聊天。
+
+HTTP 开关同时控制读取和修改；WebSocket 开关控制调用、实时推送和重连回放，开启 WS 时保留连接就绪和心跳。保存权限变化会重连手机接入，旧流关闭；应用失败时按配置修订检查恢复原连接。这些是手机直接接口开关，聊天 Agent 的工具权限仍由 Hermes 管理；Shell、CLI 和斜杠命令等通用入口归入“其他接口与通用命令”。如需完全关闭某组直接访问，应同时取消该组两项勾选。
 
 入口采用独立接入密钥。在配置页生成、保存和复制；平时脱敏，可用眼睛按钮查看、替换或清除。手机选择 Token 模式，在 Custom Headers 中添加 `X-Hermes-Mobile-Key`，值为配置页的密钥；再探测服务器，让手机获取会话标记。密钥与手机 Token 字段中的会话标记不同，密钥不放进 URL。外部浏览器不继承自定义头，相关跳转功能尚未验证。
 
@@ -57,6 +65,8 @@
 > 检查 hermes-mobile-access 是否有更新，告诉我固定版本与来源；我同意后再更新，保留本机配置。
 
 > 关闭 hermes-mobile-access 的自动检查更新。
+
+> 手机某页面报 HTTP 403。请核对接入版本、访问范围勾选、请求路径与实际响应来源，区分主动关闭和后端拒绝，不运行或修改我的任务。
 
 更新检查只管理本 Skill，不升级 Hermes、FRP 或手机 App。配置冲突时重新载入核对草稿；环境来源无法直接从页面写回，须修复实际注入位置。秘密留在本地配置入口，不贴到聊天。
 

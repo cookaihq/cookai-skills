@@ -6,7 +6,11 @@
 
 配置集整套选择来源，高层不逐字段/连接补齐低层。空字符串回退，合法空集合遮蔽低层。JSON 损坏、重复键/名称、未知 schema、非法字段或类型返回实际来源错误；默认不存在或失效则明确选连接，不自动取第一条。环境来源只读，不能另写低层文件假装修复。
 
-记录包含 `name`、`domain_prefix`（默认 `hermes-mobile`）、`hermes`（`home/preferred_profile/profile_home`）、`frp`（原 `project/home/source_binding`）、`auth`、`auto_recover`（默认 true）。未知字段拒绝。`auth` 接受未配置的 `null`，或严格对象 `{"type":"mobile_key_v1","key":"<43 字符规范 Base64URL>"}`；密钥由 32 字节安全随机数生成，未知类型/字段、不合法编码及掩码均拒绝。逻辑路径须经真实后端核验；不能把目录字符串当身份凭证。
+记录包含 `name`、`domain_prefix`（默认 `hermes-mobile`）、`hermes`（`home/preferred_profile/profile_home`）、`frp`（原 `project/home/source_binding`）、`auth`、`auto_recover`（默认 true）和 `access`（默认空对象）。未知字段拒绝。`auth` 接受未配置的 `null`，或严格对象 `{"type":"mobile_key_v1","key":"<43 字符规范 Base64URL>"}`；密钥由 32 字节安全随机数生成，未知类型/字段、不合法编码及掩码均拒绝。逻辑路径须经真实后端核验；不能把目录字符串当身份凭证。
+
+`access` 包含可省略的 `websocket_enabled`、`http`、`websocket`。总开关和每个分组均为严格布尔值，省略为 true；字符串 `"false"`、数字、null 和未知分组拒绝。分组键为 `sessions`、`cron`、`profiles`、`models`、`skills_plugins`、`tools_mcp`、`files_audio`、`messaging`、`memory`、`configuration`、`maintenance`、`other`。例如 `{"http":{"cron":false},"websocket":{"cron":false}}` 关闭定时任务的两种直接接口，其他项保持默认开启。
+
+配置页显示各开关的真实 JSON 路径及文件来源。恢复默认移除显式值；总开关关闭不擦除分组选择，无自动保存。策略加入运行绑定摘要，语义相同的缺省/显式 true 不触发无谓重连。运行中保存权限变化使用与域名变更相同的预检、停旧启新和条件恢复流程，旧 WebSocket 不继续使用旧策略。外部修改由运行期绑定检查撤销，不承诺瞬时生效。升级 0.1.x 后首次应用 0.2.0 需通过管理入口断开并重连当前接入进程，保留原项目、来源、密钥、域名和后端。
 
 配置页生成新密钥只更新草稿，保存才写入；眼睛与复制原值均需显式动作和当前修订，普通响应/回执不含原值。清除不会回退到其他连接或来源中的密钥。替换/清除使使用旧绑定的接入层在检查时关闭现有流并拒绝新请求；检查间隔与检查预算分开，不承诺瞬时撤销。普通改名不改变运行绑定。实际永久保存/清除沿用当前用户授权；选择认证方案本身不代表已创建生产密钥。
 

@@ -350,7 +350,8 @@ class Supervisor:
             raise ControlError('domain_occupied')
         self.write(domain_check=check)
         backend = await blocking(NativeBackend.discover, record['hermes'], None if recovery else self.launch.get('selected'))
-        self.bridge = AccessBridge(self.launch['server_url'], record['auth']['key'], backend, self.unchanged, gated=True)
+        self.bridge = AccessBridge(self.launch['server_url'], record['auth']['key'], backend, self.unchanged,
+                                   gated=True, access=record.get('access'))
         await self.bridge.start()
         self.write(adapter_port=self.bridge.port, backend={'candidate': backend.candidate['id'],
             'pid': backend.candidate['pid'], 'host': backend.candidate['host'], 'port': backend.candidate['port'],

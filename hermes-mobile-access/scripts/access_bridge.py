@@ -21,6 +21,7 @@ from yarl import URL
 from access_security import KEY_HEADER, valid_key
 from native_control import ControlError
 from mobile_rpc import MobileRpc, RpcRefusal
+from access_policy import AccessPolicy, WebSocketPolicy, http_group
 
 MAX_BODY = 32 * 1024 * 1024
 MAX_WS_MESSAGE = 8 * 1024 * 1024
@@ -30,23 +31,7 @@ MONITOR_INTERVAL = 2.0
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=120, connect=5, sock_read=30)
 log = logging.getLogger('hermes_mobile_access.bridge')
 
-# The core Mobile chat paths present in v2.9.6. Dashboard, raw credentials,
-# plugin installation and gateway lifecycle routes are not published here.
-READ_PATHS = frozenset(('/api/health', '/api/status', '/api/profiles', '/api/profiles/active',
-    '/api/model/options', '/api/model/info', '/api/sessions', '/api/sessions/search',
-    '/api/sessions/stats', '/api/sessions/empty/count', '/api/files', '/api/files/read',
-    '/api/files/download', '/api/files/stream'))
 MEDIA_PATHS = frozenset(('/api/files/download', '/api/files/stream'))
-WRITE_PATHS = frozenset(('/api/files/upload', '/api/files/upload-stream',
-                         '/api/audio/transcribe', '/api/audio/speak'))
-# Mobile deliberately preserves '/' in server-issued session IDs. These are
-# read-only session paths; dot-segments are separately rejected before dispatch.
-SESSION_PATH = re.compile(r'/api/sessions/[A-Za-z0-9_.:-]{1,128}(?:/[A-Za-z0-9_.:-]{1,128}){0,15}\Z')
-
-
-def route_allowed(method, path):
-    return ((method in ('GET', 'HEAD') and (path in READ_PATHS or SESSION_PATH.fullmatch(path)))
-            or (method == 'POST' and path in WRITE_PATHS))
 
 
 def json_object(raw):
@@ -113,7 +98,7 @@ class OwnedConnector(aiohttp.TCPConnector):
 
 
 class AccessBridge:
-    def __init__(self, server_url, key, backend, binding_current, *, gated=False):
+    def __init__(self, server_url, key, backend, binding_current, *, gated=False, access=None):
         parsed = urlsplit(server_url)
         if (parsed.scheme != 'https' or parsed.path != '/' or parsed.query or parsed.fragment
                 or parsed.username or parsed.password or parsed.port not in (None, 443)
@@ -126,6 +111,7 @@ class AccessBridge:
         self.marker = secrets.token_urlsafe(32)
         self.reason = None
         self.gated = gated
+        self.policy = AccessPolicy(access)
         self.requests, self.sockets, self.upstream_sockets = set(), set(), set()
         self.ws_admitted = 0
         self._revoke_task = None
@@ -239,9 +225,11 @@ class AccessBridge:
             if self.gated:
                 return self.error(503, 'publication_pending')
             if request.path == '/api/ws' and request.method == 'GET':
+                if not self.policy.websocket_enabled:
+                    return self.error(403, 'access_policy_denied')
                 return await self._websocket(request)
-            if not route_allowed(request.method, request.path):
-                return self.error(403, 'route_not_published')
+            if not self.policy.http_allowed(request.method, request.path):
+                return self.error(403, 'access_policy_denied' if http_group(request.path) else 'route_not_published')
             return await self._http(request)
         except DownstreamDisconnected:
             # Cancel this handler so aiohttp closes its transport instead of
@@ -358,6 +346,7 @@ class AccessBridge:
             self.sockets.add(downstream)
             self.upstream_sockets.add(upstream)
             rpc = MobileRpc(preferred_profile=self.backend.preferred)
+            policy = WebSocketPolicy(self.policy)
 
             async def upload():
                 async for message in downstream:
@@ -374,9 +363,15 @@ class AccessBridge:
                     if frame.get('method') == 'client.capabilities' and isinstance(params, dict) and params.get('desktop_local'):
                         await downstream.close(code=1008)
                         break
+                    allowed, refusal = policy.upload(frame)
+                    if refusal is not None:
+                        await downstream.send_json(refusal)
+                    if allowed is None:
+                        continue
                     try:
                         translated = rpc.upload(frame)
                     except RpcRefusal as exc:
+                        policy.calls.pop((str if isinstance(frame.get('id'), str) else float, frame.get('id')), None)
                         await downstream.send_json(exc.frame)
                         continue
                     routed_params = translated.get('params')
@@ -389,8 +384,14 @@ class AccessBridge:
                     if message.type != WSMsgType.TEXT:
                         break
                     frame = json_object(message.data)
+                    frame, refusals = policy.download(frame)
+                    for refusal in refusals:
+                        await upstream.send_json(refusal)
+                    if frame is None:
+                        continue
                     translated = rpc.download(frame)
-                    await downstream.send_str(message.data if translated is frame else json.dumps(translated))
+                    # Policy may have removed replayed events or open requests.
+                    await downstream.send_str(json.dumps(translated))
 
             tasks = {asyncio.create_task(upload()), asyncio.create_task(download())}
             try:
