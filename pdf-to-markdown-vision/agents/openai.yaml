@@ -1,0 +1,3 @@
+interface:
+  display_name: "PDF 视觉转 Markdown"
+  short_description: "使用视觉理解将 PDF 转为忠实 Markdown，保留图片并支持处理追溯"

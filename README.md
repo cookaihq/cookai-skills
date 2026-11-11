@@ -12,6 +12,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [git-setup](git-setup/) | 仅提供 URL 即按当前项目状态接入远端；支持明确请求的发布、同步与本地/GitHub Issue | [README](git-setup/README.md) · [SKILL.md](git-setup/SKILL.md) |
 | [video-to-markdown](video-to-markdown/) | 把本地或可直接下载的视频转成可复核、可续跑的 Markdown 文档：结合带时间戳的语音转写、关键帧截图、短 GIF、自适应补采样和全时间线覆盖检查，保留语音与画面共同承载的内容 | [README](video-to-markdown/README.md) · [SKILL.md](video-to-markdown/SKILL.md) |
 | [pdf2markdown](pdf2markdown/) | 通过 AIHub Doc2X 转换本地 PDF 或公开 HTTPS PDF，由 Agent 逐页核验、修订和复核，在本地交付 Markdown、图片、核验报告与三栏预览；支持同任务恢复和已有 ZIP 重新核验 | [README](pdf2markdown/README.md) · [SKILL.md](pdf2markdown/SKILL.md) |
+| [pdf-to-markdown-vision](pdf-to-markdown-vision/) | 使用宿主原生视觉将 PDF 转为忠实 Markdown 与真实图片，保留表格条件和公式，支持清洗、续跑及结果追溯 | [README](pdf-to-markdown-vision/README.md) · [SKILL.md](pdf-to-markdown-vision/SKILL.md) |
 | [s3-upload](s3-upload/) | 把本地文件持久写入用户自己的 S3 兼容 bucket（AWS S3 / Cloudflare R2 / custom，OSS / COS experimental）：严格 JSON Object Reference + public/presigned URL、`--collision reject` 原子 no-overwrite 与同内容采纳、17 键闭合 result 合同与 `--result-out` 跨进程 handoff、checkpoint 只读对账恢复 | [README](s3-upload/README.md) · [SKILL.md](s3-upload/SKILL.md) |
 | [exit-ip](exit-ip/) | 查询运行本 Agent / Claude Agent SDK 环境的出口（公网）IP 与归属地 / 运营商，直接读取 `ipinfo.io` | [SKILL.md](exit-ip/SKILL.md) |
 | [frpc-launch](frpc-launch/) | 使用已有自部署/宝塔或樱花 FRP；按项目复用连接、固定域名并隔离代理、进程和日志，支持检查与独立停止 | [README](frpc-launch/README.md) · [SKILL.md](frpc-launch/SKILL.md) |
@@ -35,6 +36,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | frpc-launch | 1.6.0 | [frpc-launch/v1.6.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.6.0) |
 | git-setup | 1.0.2 | [git-setup/v1.0.2](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.2) |
 | hermes-mobile-access | 0.2.0 | [hermes-mobile-access/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access%2Fv0.2.0) |
+| pdf-to-markdown-vision | 1.0.0 | [pdf-to-markdown-vision/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf-to-markdown-vision%2Fv1.0.0) |
 | pdf2markdown | 2.0.0 | [pdf2markdown/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf2markdown%2Fv2.0.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
