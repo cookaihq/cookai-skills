@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "pdf-to-markdown-vision",
+  "channel": "stable",
+  "tag_prefix": "pdf-to-markdown-vision/v",
+  "ref_type": "tag"
+}
