@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 会话启动器 · 配置</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#"><span class="brand-icon">as<span>↗</span></span><span>会话启动器<small>AGENT SESSION</small></span></a>
+    <div class="sidebar-label">个人工作空间</div>
+    <button class="nav active" data-tab="presets"><span>▦</span> 会话预设 <span class="count" id="nav-count">3</span></button>
+    <button class="nav" data-tab="defaults"><span>◉</span> 默认配置</button>
+    <div class="sidebar-divider"></div>
+    <div class="sidebar-note"><span class="tiny-dot"></span> 通过 Orca 启动<small>在当前工作目录和分支中，<br>打开一个新的 Agent 会话。</small></div>
+    <div class="sidebar-bottom"><span class="avatar">Y</span><div>个人全局配置<small>在不同项目间复用</small></div><span>⌄</span></div>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar"><div><span class="muted">设置</span><span class="slash">/</span>Agent 会话启动器</div><div class="topbar-right"><span class="preview-badge">个人配置</span><span class="lifetime" id="lifetime">空闲 60 分钟到期</span></div></header>
+    <main>
+      <div class="page-heading"><div><div class="eyebrow">YOUR AGENTS, YOUR DEFAULTS</div><h1>新会话，按你的习惯开始<span class="orange-dot">.</span></h1><p>保存常用组合。一个代码，选择 Agent、模型和思考强度。</p></div><button class="button primary" id="add-preset"><span>＋</span> 添加预设</button></div>
+      <div class="demo-notice"><span>◈</span><span>选择并保存默认值和预设。试用区只预览，不会创建会话。</span><button id="refresh-catalog">刷新模型目录</button></div>
+      <div id="app-error" role="alert" hidden></div>
+
+      <div class="content-grid">
+        <section class="settings-column">
+          <section class="default-summary" id="default-summary">
+            <div class="summary-icon">↳</div><div><strong>不填预设代码？沿用当前 Agent。</strong><p>模型和思考强度，使用为这个 Agent 保存的默认值。</p><div id="default-summary-chips" class="summary-chips"></div></div><button class="text-button" data-tab="defaults">管理默认值 <span>↗</span></button>
+          </section>
+
+          <div class="section-tabs"><button class="tab active" data-tab="presets">会话预设 <span id="preset-count">3</span></button><button class="tab" data-tab="defaults">默认配置</button><div class="scope-pill">◌ 个人全局</div></div>
+
+          <section id="presets-view">
+            <div class="section-description"><strong>让代码决定用哪个 Agent</strong><p>预设固定目标 Agent。即使当前用 Codex，也可以用一个代码打开 Claude Code。</p></div>
+            <div class="preset-table-wrap"><table class="preset-table"><thead><tr><th>代码 / 名称</th><th>目标 Agent / 模型</th><th>思考强度</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="preset-rows"></tbody></table><div id="empty-presets" hidden><strong>还没有会话预设</strong><p>添加第一个代码，把常用的 Agent 和模型放在一起。</p><button class="button secondary" id="add-empty">添加预设</button></div></div>
+            <div class="tip"><span>↗</span><div><strong>一个预设，两种用法</strong><p><code>$as a</code> 打开空白会话 <span class="tip-divider">/</span> <code>$as a 检查登录逻辑</code> 新开会话并发送这条消息</p></div></div>
+          </section>
+
+          <section id="defaults-view" hidden>
+            <div class="section-description"><strong>当前 Agent，固定的起点</strong><p>直接调用 <code>$as</code> 时，按当前 Agent 选择默认值。命名预设使用自己保存的完整组合。</p></div>
+            <div id="default-cards"></div>
+            <div class="tip"><span>◎</span><div><strong>权限继续由 Orca 管理</strong><p>新会话沿用 Orca 的启动配置，不复制当前会话临时修改过的权限。</p></div></div>
+          </section>
+          <div class="config-source"><span>◌</span><div><strong>配置保存位置</strong><code id="source-path">正在读取配置…</code><p>个人全局配置在显式调用 AS 时自动读取；其他 Skill 的设置不受影响。</p></div></div>
+        </section>
+
+        <aside class="try-panel">
+          <div class="try-heading"><span class="try-icon">⌘</span><div><h2>试一下调用</h2><p>看看这段输入将如何启动会话</p></div></div>
+          <label class="field-label" for="current-agent">假设当前 Agent 是</label><select id="current-agent"></select>
+          <label class="field-label command-label" for="command">输入调用内容 <span>Codex 示例</span></label>
+          <div class="command-box"><div><span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span><span class="command-caption">新会话入口</span></div><textarea id="command" rows="4" spellcheck="false" aria-label="调用内容">$as</textarea></div>
+          <div class="example-buttons"><button data-example="$as">默认</button><button data-example="$as a">空白会话</button><button data-example="$as a 帮我检查登录逻辑">携带消息</button></div>
+          <button class="button secondary full" id="preview-command">预览启动结果 <span>↗</span></button>
+          <div id="launch-preview" aria-live="polite"></div>
+          <div class="preview-footnote"><span>◌</span> 仅预览当前草稿，不执行启动。</div>
+        </aside>
+      </div>
+      <div class="catalog-note">模型与强度来自本机 Agent 原生目录。Orca 使用其自身的账号、权限和界面设置；目录可见不代表每次请求一定可用。</div>
+    </main>
+    <footer class="save-bar"><div><span class="saved-dot" id="dirty-dot"></span><span id="save-state">正在读取配置</span><small id="save-detail">修改只在点击保存后写入个人配置</small></div><div><button class="button ghost" id="discard" disabled>放弃变更</button><button class="button primary" id="save" disabled>保存配置</button></div></footer>
+  </div>
+
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <section class="drawer" id="editor" role="dialog" aria-modal="true" aria-labelledby="editor-title" hidden>
+    <header class="drawer-header"><div><div class="eyebrow">SESSION PRESET</div><h2 id="editor-title">编辑预设</h2></div><button class="icon-button" id="close-editor" aria-label="关闭编辑">×</button></header>
+    <form id="preset-form">
+      <div class="drawer-body"><p class="drawer-intro">为这个代码指定要启动的 Agent 和完整配置。</p>
+        <div class="form-row"><div><label for="preset-code">预设代码</label><small class="config-key">presets.&lt;code&gt;</small><input id="preset-code" required maxlength="16" pattern="[a-zA-Z0-9][a-zA-Z0-9_-]*" placeholder="例如 1、a、review"><small class="field-help">字母、数字、下划线或连字符</small></div><div><label for="preset-name">名称</label><small class="config-key" data-key="name">presets.a.name</small><input id="preset-name" required maxlength="40" placeholder="给这个组合起个名字"></div></div>
+        <div class="agent-field"><label for="preset-agent">目标 Agent <span class="fixed-badge">明确指定</span></label><small class="config-key" data-key="agent">presets.a.agent</small><select id="preset-agent"></select><div class="agent-explanation" id="agent-explanation"></div></div>
+        <label for="preset-model">模型</label><small class="config-key" data-key="model">presets.a.model</small><select id="preset-model"></select>
+        <label for="preset-effort">思考强度</label><small class="config-key" data-key="effort">presets.a.effort</small><select id="preset-effort"></select>
+        <div class="inherit-box"><strong>其余启动设置</strong><div><span>工作目录与分支</span><b>当前所在位置</b></div><div><span>权限与界面模式</span><b>沿用 Orca 启动配置</b></div><div><span>聊天历史</span><b>全新上下文</b></div></div>
+        <div class="drawer-usage"><span>调用示例</span><code id="editor-example">$as a</code></div><p class="form-error" id="form-error" role="alert"></p>
+      </div>
+      <footer class="drawer-footer"><span>完成编辑后，在页面底部保存。</span><div><button class="button ghost" id="cancel-edit" type="button">取消编辑</button><button class="button primary" type="submit">完成编辑</button></div></footer>
+    </form>
+  </section>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

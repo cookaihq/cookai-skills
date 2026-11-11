@@ -1,0 +1,17 @@
+{
+  "package": "skill-configuration-and-artifacts-ui",
+  "version": "1.2.0",
+  "files": {
+    "contracts.py": "f1cdd977c3c01066ba152d09e081a8fe015bafa592cf7f4112809a48f5bee81c",
+    "LICENSE": "bdc7c3746af84cfe89f72eaf2d35a0efbc0b1f1af811b4136536c197f56317b7",
+    "server.py": "ab0aef6e52309432bb5a8fc18306e7b1124ef9e445ee5545885ed80fb911c95e",
+    "storage.py": "c444cb158a6ddd41a09f91b42079661503300702e83541bc4972281faa49db2c",
+    "__init__.py": "9127b4a5f46734a4c2944af5ec56dd274fc77a5b45cf2e9d5a297037feba6505",
+    "__main__.py": "4a7e78235806cf288148a9c9f2efdeae483fc9c3ea958de6ffc7f1426928b627",
+    "static/app.js": "7225778f5984e8ab3c6b2c0ebf8e9f60551151c412dcfe77764f7f52530cadee",
+    "static/configuration.css": "4a43d65404a99876fa989234f93ff119ff3f2506dafb20bbebfc3435d680fd42",
+    "static/configuration.js": "d1b763faee50f0f089dab7fd5c6c432d2ecd65becf90896c943e0b772c4880ba",
+    "static/index.html": "0b8316cd5badf26c1b01a3125cc09fb7eed1ac6603e9d8219690dec846b4f7bc",
+    "static/style.css": "ce99d3cdb5091acf95ff2612e4a35042b7708aef213547bfdb57139ea2cfe239"
+  }
+}

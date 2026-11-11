@@ -1,0 +1,5 @@
+interface:
+  display_name: "Agent 会话启动器"
+  short_description: "通过 Orca 按默认配置或预设新开 Agent 会话，可发送首条消息。"
+policy:
+  allow_implicit_invocation: false

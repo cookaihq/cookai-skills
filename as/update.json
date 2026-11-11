@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/cookaihq/cookai-skills",
+  "skill_path": "as",
+  "channel": "stable",
+  "tag_prefix": "as/v",
+  "ref_type": "tag"
+}

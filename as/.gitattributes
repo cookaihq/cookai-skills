@@ -1,0 +1,5 @@
+# Keep entrypoints portable across Windows and macOS checkouts.
+* text eol=lf
+# The vendored runtime manifest hashes the distributed bytes, including newlines.
+shared/skill_ui/** -text
+shared/skill_ui/.vendor.json text eol=lf
