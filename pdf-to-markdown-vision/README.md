@@ -14,7 +14,7 @@
 请从 https://github.com/cookaihq/cookai-skills 安装 pdf-to-markdown-vision 完整目录，保留已有设置，核对当前宿主能发现该 Skill，并检查运行环境。告诉我如何选中它。
 ```
 
-当前 1.0.0 已完成 Windows 本地开发与 Codex 验收，尚未发布。发布后上述来源才包含正式版本。
+1.0.0 已完成 Windows 本地开发与 Codex 验收；macOS 待验，具体宿主及范围见下文。
 
 | 宿主 | 安装与调用 |
 | --- | --- |
