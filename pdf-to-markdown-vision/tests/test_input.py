@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import threading
+from datetime import datetime, timezone
 
 
 def test_direct_download_freezes_source_and_changed_source_starts_related_task(pdf, tmp_path, command):
@@ -57,3 +58,32 @@ def test_git_data_ignored_without_untracking_existing_files(pdf, tmp_path, comma
     assert result.returncode == 0
     tracked = subprocess.run(["git", "-C", str(project), "ls-files"], capture_output=True, text=True, check=True)
     assert "data/pdf-to-markdown/kept.txt" in tracked.stdout
+
+
+def test_last_download_attempt_reports_full_server_cooldown(tmp_path, command):
+    class Handler(BaseHTTPRequestHandler):
+        count = 0
+
+        def do_GET(self):
+            Handler.count += 1
+            self.send_response(429)
+            self.send_header("Retry-After", "0" if Handler.count < 3 else "60")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        before = datetime.now(timezone.utc)
+        result = command("start", f"http://127.0.0.1:{server.server_port}/manual.pdf", "--project", tmp_path,
+                         "--owner", "host", "--vision", "available", expect=2)
+        assert Handler.count == 3
+        assert result["kind"] == "DownloadDeferred"
+        assert (datetime.fromisoformat(result["retry_at"]) - before).total_seconds() >= 60
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

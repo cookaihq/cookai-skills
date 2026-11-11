@@ -95,3 +95,35 @@ def test_failed_resume_can_be_retried_with_new_cleaning_selection(pdf, tmp_path,
     resumed = command("resume", "--task", task, "--owner", "a", "--vision", "available", "--no-cleaning")
     assert resumed["run"]["id"] == "r002"
     assert resumed["run"]["cleaning"]["enabled"] is False
+
+
+def test_missing_delivery_file_is_not_adopted_or_reused(pdf, tmp_path, command):
+    started = command("start", pdf, "--project", tmp_path, "--pages", "1", "--owner", "a", "--vision", "available")
+    task = Path(started["task_dir"])
+    submit(command, task, started["writer"], 1, tmp_path / "page.json")
+    first = command("finish", "--task", task, "--writer", started["writer"])
+    (task / first["current_result"] / "raw.md").unlink()
+    command("adopt", "--task", task, "--result", "v001", "--owner", "a", expect=2)
+    resumed = command("resume", "--task", task, "--owner", "a", "--vision", "available")
+    recovered = command("finish", "--task", task, "--writer", resumed["writer"])
+    assert recovered["current_result"] != first["current_result"]
+    assert (task / recovered["current_result"] / "raw.md").is_file()
+
+
+def test_conversion_requirements_survive_resume_and_changed_requirements_redo_pages(pdf, tmp_path, command):
+    request = tmp_path / "conversion-request.md"
+    text = "Use unambiguous plain text formulas; the receiver cannot render LaTeX."
+    request.write_text(text, encoding="utf-8")
+    started = command("start", pdf, "--project", tmp_path, "--pages", "1", "--owner", "a", "--vision", "available", "--requirements", request)
+    task = Path(started["task_dir"])
+    submit(command, task, started["writer"], 1, tmp_path / "page.json")
+    command("pause", "--task", task, "--writer", started["writer"], "--reason", "Restart")
+    request.unlink()
+    resumed = command("resume", "--task", task, "--owner", "b", "--vision", "available")
+    snapshot = json.loads((task / resumed["run"]["snapshot"] / "requirements.json").read_text(encoding="utf-8"))
+    assert snapshot["conversion"] == text
+    assert resumed["pending_pages"] == []
+    command("pause", "--task", task, "--writer", resumed["writer"], "--reason", "Change formula format")
+    request.write_text("Use LaTeX formulas.", encoding="utf-8")
+    changed = command("resume", "--task", task, "--owner", "b", "--vision", "available", "--requirements", request)
+    assert changed["pending_pages"] == [1]

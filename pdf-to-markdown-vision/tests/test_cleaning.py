@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import pytest
 
 from test_recovery import submit
 
@@ -34,6 +35,11 @@ def test_default_profile_temporary_override_and_reclean_keep_raw_and_snapshots(p
     folder = task / final["current_result"]
     assert "Vendor header" in (folder / "raw.md").read_text(encoding="utf-8")
     assert "Vendor header" not in (folder / "document.md").read_text(encoding="utf-8")
+    provenance = json.loads((folder / "provenance.json").read_text(encoding="utf-8"))
+    lines = (folder / "document.md").read_text(encoding="utf-8").splitlines()
+    output_line = lines.index("Bandwidth: 100 kHz") + 1
+    region = next(r for r in provenance["outputs"]["document.md"] if r["line_start"] <= output_line <= r["line_end"])
+    assert {"page": 1, "block": "instrument"} in region["sources"]
     (project / "config/pdf-to-markdown/cleaning/knowledge.md").unlink()
     assert PROFILE == (task / start["run"]["cleaning"]["path"]).read_text(encoding="utf-8")
     unchanged_default = (project / ".env.local").read_bytes()
@@ -73,3 +79,60 @@ def test_missing_profile_delivers_only_partial_raw_and_keeps_selection(pdf, tmp_
     assert result["status"] == "partial" and result["current_result"] is None
     assert (task / "results/v001/raw.md").is_file()
     assert not (task / "results/v001/cleaned.md").exists()
+
+
+def test_noop_cleaning_keeps_cleaned_delivery_and_deduplicates_repeats(pdf, tmp_path, command):
+    started = command("start", pdf, "--project", tmp_path, "--pages", "1", "--owner", "a", "--vision", "available")
+    task = Path(started["task_dir"])
+    submit(command, task, started["writer"], 1, tmp_path / "page.json")
+    command("finish", "--task", task, "--writer", started["writer"])
+    profile = tmp_path / "profile.md"
+    profile.write_text(PROFILE, encoding="utf-8")
+    results = []
+    for _ in range(2):
+        resumed = command("resume", "--task", task, "--owner", "a", "--vision", "available", "--cleaning", profile)
+        draft = command("finish", "--task", task, "--writer", resumed["writer"])
+        raw = (task / draft["input_dir"] / "raw.md").read_text(encoding="utf-8")
+        payload = tmp_path / "clean.json"
+        payload.write_text(json.dumps({"markdown": raw, "review": "No matching vendor header", "changes": []}), encoding="utf-8")
+        command("submit-cleaning", "--task", task, "--writer", resumed["writer"], "--input", payload)
+        result = command("finish", "--task", task, "--writer", resumed["writer"])
+        folder = task / result["current_result"]
+        assert (folder / "cleaned.md").read_text(encoding="utf-8") == raw
+        assert json.loads((folder / "result.json").read_text(encoding="utf-8"))["cleaning"]["enabled"]
+        results.append(result["current_result"])
+    assert results[0] == results[1]
+
+
+@pytest.mark.parametrize("replace_first", [False, True])
+def test_repeated_text_requires_unambiguous_cleaned_source_mapping(pdf, tmp_path, command, replace_first):
+    profile = tmp_path / "profile.md"
+    profile.write_text("Remove only the first source region; retain the second even if its text is identical.", encoding="utf-8")
+    start = command("start", pdf, "--project", tmp_path, "--pages", "1", "--owner", "a", "--vision", "available", "--cleaning", profile)
+    task, writer = Path(start["task_dir"]), start["writer"]
+    command("render", "--task", task, "--writer", writer, "--page", 1)
+    page = {"review": "Two distinct synthetic regions have identical text", "blocks": [
+        {"id": key, "bbox": box, "markdown": "Old label" if key == "first" and replace_first else "Repeated label",
+         "rules": ["reading-order"], "reason": "Separate source regions"}
+        for key, box in (("first", [0, 0, 1, .4]), ("second", [0, .4, 1, 1]))], "issues": []}
+    payload = tmp_path / "input.json"
+    payload.write_text(json.dumps(page), encoding="utf-8")
+    command("submit-page", "--task", task, "--writer", writer, "--page", 1, "--input", payload)
+    command("finish", "--task", task, "--writer", writer)
+    cleaned = {"markdown": "Repeated label\n" * (2 if replace_first else 1), "review": "Only first region changed", "changes": [
+        {"page": 1, "block": "first", "action": "replace" if replace_first else "remove", "reason": "Profile selects first region"}]}
+    payload.write_text(json.dumps(cleaned), encoding="utf-8")
+    command("submit-cleaning", "--task", task, "--writer", writer, "--input", payload)
+    command("finish", "--task", task, "--writer", writer, expect=2)
+    if replace_first:
+        cleaned["changes"][0]["output_lines"] = [1, 1]
+    retained_line = 2 if replace_first else 1
+    cleaned["changes"].append({"page": 1, "block": "second", "action": "retain", "reason": "Disambiguate the retained occurrence", "output_lines": [retained_line, retained_line]})
+    payload.write_text(json.dumps(cleaned), encoding="utf-8")
+    command("submit-cleaning", "--task", task, "--writer", writer, "--input", payload)
+    final = command("finish", "--task", task, "--writer", writer)
+    provenance = json.loads((task / final["current_result"] / "provenance.json").read_text(encoding="utf-8"))
+    mappings = provenance["outputs"]["document.md"]
+    assert mappings[-1]["sources"] == [{"page": 1, "block": "second"}]
+    if replace_first:
+        assert mappings[0]["sources"] == [{"page": 1, "block": "first"}]

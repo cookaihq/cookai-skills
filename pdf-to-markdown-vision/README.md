@@ -14,7 +14,7 @@
 请从 https://github.com/cookaihq/cookai-skills 安装 pdf-to-markdown-vision 完整目录，保留已有设置，核对当前宿主能发现该 Skill，并检查运行环境。告诉我如何选中它。
 ```
 
-当前 1.0.0 正在完成首次开发验收，尚未发布。发布后上述来源才包含正式版本。
+当前 1.0.0 已完成 Windows 本地开发与 Codex 验收，尚未发布。发布后上述来源才包含正式版本。
 
 | 宿主 | 安装与调用 |
 | --- | --- |
@@ -22,9 +22,11 @@
 | Claude Code | 完整目录放入 `~/.claude/skills/pdf-to-markdown-vision`，或单项链接到检出；使用 `/pdf-to-markdown-vision` 或在请求中点名 |
 | WorkBuddy | 通过当前客户端的本地 Skill 管理入口导入完整目录，在技能列表选中后给出转换请求；复制安装须保留脚本、references、锁文件和 update.json |
 
-Codex 的展示名为“PDF 视觉转 Markdown”，没有额外默认提示句。共享行为与内容规则只有一份。宿主安装形式和业务实测分别判断；本版 Windows Codex 正在实测，Claude Code、WorkBuddy 为兼容目标，未做业务实测；macOS 待验。
+Codex 的展示名为“PDF 视觉转 Markdown”，没有额外默认提示句。共享行为与内容规则只有一份。Windows 原生 Codex CLI 0.167.1 已在 workspace-write 默认沙箱中验证路径调用、真实样本、清洗、纠错与恢复；Claude Code、WorkBuddy 为兼容目标，未做业务实测；macOS、WSL 及 Codex GUI 交互待验。
 
 ## 第一次使用
+
+转换会消耗宿主自身的额度；宿主无法提供准确用量时会说明无法测量。链接输入会下载原件；页面理解按当前宿主的数据处理方式进行。
 
 在希望保存结果的项目中打开 Agent，选中 PDF 视觉转 Markdown，然后只发送一个 PDF 路径，例如：
 
@@ -35,8 +37,6 @@ D:/资料/仪器说明书.pdf
 也可只提供直接下载 PDF 的链接。文件可以在项目之外；只要会话已确定项目根，结果仍属于该项目。没有指定页范围就处理全文，没有默认清洗方案就保留原文。Agent 返回 Markdown、图片和任务说明的文件链接；用现有编辑器或宿主查看，不需要额外网页服务。
 
 任务存放在项目的 `data/pdf-to-markdown/创建时间_文件短名_任务ID/`。其中 `source/` 保存原件，`results/v001/` 等保存可独立复制的结果，`README.md` 说明进度、问题与如何继续。若有失败页或待复核内容，会列明缺口；阶段结果不会替换已有完整结果。
-
-转换会消耗宿主自身的额度；宿主无法提供准确用量时会说明无法测量。链接输入会下载原件；页面理解按当前宿主的数据处理方式进行。
 
 ## 可选清洗
 

@@ -14,7 +14,7 @@ from typing import Any
 
 from filelock import FileLock
 
-from . import config, download, pdf
+from . import config, download, pdf, provenance
 from .files import SKILL, atomic, ignore_data, read_json, require_space, sha, validate_images, version, within, write_json
 
 RULES = {"reading-order", "visual-unit", "table-groups", "merged-conditions", "formulas"}
@@ -111,6 +111,32 @@ def cleaning_snapshot(task: Path, path: str, selected: dict) -> dict:
     return metadata
 
 
+def conversion_requirements(path: Path | None, previous="") -> str:
+    if path is None:
+        return previous
+    text = path.read_text(encoding="utf-8-sig")
+    if not text.strip():
+        raise ValueError("Conversion requirements must not be empty")
+    return text
+
+
+def checked_result(folder: Path) -> dict | None:
+    try:
+        record = read_json(folder / "result.json")
+        files = record.get("files", {})
+        if not {"raw.md", "document.md", "provenance.json"} <= files.keys():
+            return None
+        if any(not within(folder, name).is_file() or sha(within(folder, name)) != expected
+               for name, expected in files.items()):
+            return None
+        for name in ("raw.md", "document.md", "cleaned.md"):
+            if name in files:
+                validate_images(folder, (folder / name).read_text(encoding="utf-8"))
+        return record
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def status(task: Path, state: dict | None = None) -> dict:
     state = state if state is not None else load(task)
     run = state["run"]
@@ -123,7 +149,7 @@ def status(task: Path, state: dict | None = None) -> dict:
 
 
 def start(source: str, project: Path, pages: str | None, owner: str, vision: str, *, related_task=None,
-          track_data=False, **options) -> dict:
+          track_data=False, requirements=None, **options) -> dict:
     if vision != "available":
         raise ValueError("Native host image viewing is required; no conversion service fallback")
     if not project.is_dir():
@@ -153,7 +179,7 @@ def start(source: str, project: Path, pages: str | None, owner: str, vision: str
     shutil.copyfile(original, task / "source/document.pdf")
     state: dict[str, Any] = {}
     run: dict[str, Any] = {"id": "r001", "skill_version": version(), "target_pages": selected, "started_at": now()}
-    run["snapshot"] = snapshot(task, run["id"], {"pages": selected, "cleaning": None})
+    run["snapshot"] = snapshot(task, run["id"], {"pages": selected, "conversion": conversion_requirements(requirements)})
     run["cleaning"] = cleaning_snapshot(task, run["snapshot"], config.select(project, **options))
     with locked(task):
         commit(task, state, "task-started", {"id": ident, "name": name, "schema": 1,
@@ -201,7 +227,7 @@ def require_page(state: dict, page: int) -> None:
 
 
 def resume(task: Path, state: dict, owner: str, vision: str, *, writer=None, takeover=False,
-           pages=None, redo_pages=None, project=None, **options) -> dict:
+           pages=None, redo_pages=None, project=None, requirements=None, **options) -> dict:
     if vision != "available":
         raise ValueError("Native host image viewing is required")
     if state.get("writer") and state["writer"] != writer and not takeover:
@@ -211,11 +237,14 @@ def resume(task: Path, state: dict, owner: str, vision: str, *, writer=None, tak
     selected = pdf.page_range(pages, state["page_count"]) if pages else state["run"]["target_pages"]
     redo = set(pdf.page_range(redo_pages, state["page_count"])) if redo_pages else set()
     upgraded = state["run"]["skill_version"] != version()
+    previous = read_json(within(task, state["run"]["snapshot"]) / "requirements.json").get("conversion", "")
+    requested = conversion_requirements(requirements, previous)
+    requirements_changed = requested != previous
     reusable = {}
     invalid = []
     for page in selected:
         entry = state.get("pages", {}).get(str(page))
-        if not entry or page in redo or upgraded:
+        if not entry or page in redo or upgraded or requirements_changed:
             continue
         if entry.get("files") and all(within(task, name).is_file() and sha(within(task, name)) == digest
                                       for name, digest in entry["files"].items()):
@@ -233,12 +262,13 @@ def resume(task: Path, state: dict, owner: str, vision: str, *, writer=None, tak
             chosen["content"] = within(task, chosen["path"]).read_text(encoding="utf-8")
     run_id = f"r{state['run_count'] + 1:03d}"
     run: dict[str, Any] = {"id": run_id, "skill_version": version(), "target_pages": selected, "started_at": now(),
-           "snapshot": snapshot(task, run_id, {"pages": selected, "cleaning": None})}
+           "snapshot": snapshot(task, run_id, {"pages": selected, "conversion": requested})}
     run["cleaning"] = cleaning_snapshot(task, run["snapshot"], chosen)
     commit(task, state, "run-resumed", {"run": run, "run_count": state["run_count"] + 1,
            "pages": reusable, "renders": {}, "status": "in-progress", "writer": uuid.uuid4().hex,
            "owner": owner}, details={"upgraded": upgraded, "invalid_pages": invalid,
-                                    "takeover": bool(takeover), "reused_pages": sorted(map(int, reusable))})
+                                    "takeover": bool(takeover), "reused_pages": sorted(map(int, reusable)),
+                                    "requirements_changed": requirements_changed})
     return status(task, state)
 
 
@@ -263,10 +293,11 @@ def adopt(task: Path, state: dict, result: str, owner: str) -> dict:
     if path not in state["versions"]:
         raise ValueError("Unknown committed result version")
     folder = within(task, path)
-    record = read_json(folder / "result.json")
+    record = checked_result(folder)
+    if record is None:
+        raise ValueError("Saved result files are incomplete or damaged; resume to rebuild before adopting")
     if record["status"] != "complete":
         raise ValueError("A partial result cannot become the current complete result")
-    validate_images(folder, (folder / "document.md").read_text(encoding="utf-8"))
     commit(task, state, "result-adopted", {"current_result": path}, details={"owner": owner, "result": path})
     return status(task, state)
 
@@ -383,7 +414,7 @@ def finish(task: Path, state: dict) -> dict:
     missing = [p for p in target if state.get("pages", {}).get(str(p), {}).get("status") != "complete"]
     folder = task / "results" / (".building-" + uuid.uuid4().hex)
     folder.mkdir(parents=True)
-    texts, provenance = [], []
+    texts, page_mappings = [], []
     line = 1
     for page in target:
         entry = state.get("pages", {}).get(str(page), {})
@@ -401,9 +432,11 @@ def finish(task: Path, state: dict) -> dict:
             shutil.copytree(source / "assets", folder / "assets", dirs_exist_ok=True)
         mapping = read_json(source / "provenance.json")
         mapping["document_line_start"] = line
-        provenance.append(mapping)
+        page_mappings.append(mapping)
         line += len(content.splitlines()) + 1
     raw = "\n".join(texts)
+    line_sources = provenance.raw_line_sources(raw, page_mappings)
+    outputs = {"raw.md": provenance.grouped(line_sources)}
     validate_images(folder, raw)
     atomic(folder / "raw.md", raw)
     cleaning = state["run"].get("cleaning", {})
@@ -413,6 +446,7 @@ def finish(task: Path, state: dict) -> dict:
     usable = cleaned.get("run") == state["run"]["id"] and cleaned.get("input_hash") == input_hash
     if cleaning.get("enabled") and not cleaning.get("error") and not usable:
         input_dir = f"pages/{state['run']['id']}/cleaning-input-{uuid.uuid4().hex[:8]}"
+        (task / input_dir).parent.mkdir(parents=True, exist_ok=True)
         folder.rename(task / input_dir)
         commit(task, state, "cleaning-input-prepared", {"cleaning_input": {"path": input_dir, "hash": input_hash,
                "run": state["run"]["id"]}}, details={"path": input_dir})
@@ -426,20 +460,26 @@ def finish(task: Path, state: dict) -> dict:
         payload = read_json(saved)
         document = payload["markdown"]
         validate_images(folder, document)
+        outputs["cleaned.md"] = provenance.cleaned_sources(raw, document, line_sources, payload["changes"])
         atomic(folder / "cleaned.md", document)
         write_json(folder / "cleaning-changes.json", payload["changes"])
     atomic(folder / "document.md", document)
-    write_json(folder / "provenance.json", {"source_hash": state["source_hash"], "pages": provenance})
+    outputs["document.md"] = outputs.get("cleaned.md", outputs["raw.md"])
+    write_json(folder / "provenance.json", {"source_hash": state["source_hash"], "page_line_reference": "raw.md",
+               "pages": page_mappings, "outputs": outputs})
     complete = not missing and not cleaning.get("error")
     write_json(folder / "result.json", {"status": "complete" if complete else "partial", "missing_pages": missing,
                "physical_pages": target, "run": state["run"]["id"], "skill_version": version(), "usage": None,
                "cleaning": cleaning, "cleaning_error": cleaning.get("error"),
-               "elapsed_seconds": (datetime.now(timezone.utc) - datetime.fromisoformat(state["run"]["started_at"])).total_seconds()})
+               "elapsed_seconds": (datetime.now(timezone.utc) - datetime.fromisoformat(state["run"]["started_at"])).total_seconds(),
+               "files": {p.relative_to(folder).as_posix(): sha(p) for p in folder.rglob("*")
+                         if p.is_file() and p.name != "result.json"}})
     signature = hashlib.sha256(json.dumps({"pages": target, "missing": missing, "cleaning_error": cleaning.get("error"),
                   "files": {p.relative_to(folder).as_posix(): sha(p) for p in sorted(folder.rglob("*"))
-                            if p.is_file() and (p.suffix == ".png" or p.name in {"raw.md", "document.md"})}},
+                            if p.is_file() and (p.suffix == ".png" or p.name in {"raw.md", "document.md", "cleaned.md"})}},
                   sort_keys=True).encode()).hexdigest()
-    old = next((p for p in state["versions"] if read_json(task / p / "result.json").get("signature") == signature), None)
+    old = next((p for p in state["versions"] if (record := checked_result(task / p)) is not None
+                and record.get("signature") == signature), None)
     if old:
         shutil.rmtree(folder)
         result_path = old

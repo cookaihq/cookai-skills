@@ -16,7 +16,7 @@ DOWNLOAD_LIMIT = 256 * 1024 * 1024
 class DownloadDeferred(ValueError):
     def __init__(self, retry_at: str):
         self.retry_at = retry_at
-        super().__init__("Server cooling period exceeds this download's budget; retry at " + retry_at)
+        super().__init__("Server retry delay exceeds this download's time or attempt budget; retry at " + retry_at)
 
 
 def redacted(url: str) -> str:
@@ -48,10 +48,12 @@ async def retrieve(url: str, target: Path) -> list[dict]:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30, max_redirects=5) as client:
             for attempt in range(3):
                 wait = float(2 ** attempt)
+                retryable_response = False
                 try:
                     async with client.stream("GET", url) as response:
                         status = response.status_code
                         if status == 429 or status in {408, 500, 502, 503, 504}:
+                            retryable_response = True
                             wait = retry_delay(response.headers.get("retry-after"), attempt)
                             attempts.append({"attempt": attempt + 1, "status": status, "wait": wait})
                         elif status != 200:
@@ -70,7 +72,7 @@ async def retrieve(url: str, target: Path) -> list[dict]:
                     if "CERTIFICATE_VERIFY_FAILED" in str(exc).upper():
                         raise ValueError("PDF download certificate verification failed") from None
                     attempts.append({"attempt": attempt + 1, "error": type(exc).__name__, "wait": wait})
-                if wait >= deadline - time.monotonic():
+                if wait >= deadline - time.monotonic() or (attempt == 2 and retryable_response):
                     raise DownloadDeferred((datetime.now(timezone.utc) + timedelta(seconds=wait)).isoformat())
                 if attempt < 2:
                     await asyncio.sleep(wait)

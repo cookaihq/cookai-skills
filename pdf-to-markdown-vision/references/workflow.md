@@ -10,6 +10,8 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
 
 `--vision available` 只在宿主实际可打开图片时传入。页范围使用物理页序 `--pages 1,3-5`；省略即全文，印刷页码由看图后填写，不能混用。没有 Git 的项目也可用。开始时显示实际选定项目和清洗来源；可直接读取返回的 `run.cleaning` 与快照。
 
+用户明确的非清洗转换要求保存为 UTF-8 文件，向 `start` / `resume` 传 `--requirements <文件>`；程序在本轮快照 `requirements.json` 的 `conversion` 中保存完整文本。宿主恢复时先读取它，不能只靠对话记忆。普通恢复及升级沿用已保存要求；本次替换要求且内容改变时全部目标页重做。没有额外要求时遵循当前内容规则，默认 LaTeX。临时清洗仍用单独的 `--instructions`。
+
 每个输入新建独立任务，即使 PDF 内容相同。源内容变更用 `start ... --related-task <旧任务目录>` 建立关联，不修改旧原件。同原件补页或纠错用 `resume`。默认追加必要的数据忽略项，保留已有 Git 跟踪；用户明确跟踪运行数据才传 `--track-data`。
 
 直链采用 GET，最多 3 次尝试，180 秒总预算、30 秒读写超时、256 MiB 下载上限。完整 Retry-After 超出预算时返回 `retry_at`，Agent 到该时间后再发起，不能提前重试。认证、证书、格式错误分别处理；任何网络失败都不更换转换服务。
@@ -53,6 +55,8 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
 `finish` 组装本轮目标范围。若返回 `needs-cleaning`，读取返回的 `input_dir/raw.md` 和 `run.cleaning.path`，按 [清洗协议](cleaning.md) 提交清洗后再 `finish`。不要把待清洗当作完成。
 
 成功结果位于 `results/v001/` 等目录：`raw.md`、按需生成的 `cleaned.md`、最终 `document.md`、二者所需全部 `assets/`、`provenance.json` 和 `result.json`。每个版本可单独复制阅读。追溯文件中的 snapshot/evidence 路径相对于**整个任务根**；复查历史处理须保留整个任务目录。
+
+`provenance.json.pages` 的页内行号及 `document_line_start` 明确以 `raw.md` 为基准；`outputs` 分别给出 `raw.md`、`cleaned.md` 和 `document.md` 的整份输出行范围到源页/区域的映射。查询清洗后的文字必须读取对应输出映射，再用 `pages` 找规则和快照。`result.json.files` 记录交付文件哈希；复用和采用历史结果时核验真实文件，损坏版本保留，重新组装有效版本。
 
 只有目标页全部通过且清洗无阻塞才成为 `current_result`。缺页、失败、待复核或清洗失败会产生明确的阶段结果，既有完整结果仍采用。重复内容保留本轮事件，不重复创建内容版本。程序的图片及资源检查只能证明文件完整；Agent 仍须核对语义和关键参数。最终回复给出实际文件链接及完成、失败和待复核范围，不能只说文件已生成。
 

@@ -1,15 +1,30 @@
 """Single CLI boundary used by hosts and behavioral tests."""
-from _runtime_bootstrap import ensure
-
-ensure()
-
 import argparse
 import json
 from pathlib import Path
 import sys
 
-from pdfvision import config, task
-from pdfvision.files import read_json
+
+def report_error(exc):
+    error = {"status": "error", "error": str(exc), "kind": type(exc).__name__}
+    if hasattr(exc, "retry_at"):
+        error["retry_at"] = exc.retry_at
+    print(json.dumps(error, ensure_ascii=False))
+    return 2
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
+try:
+    from _runtime_bootstrap import ensure
+    ensure()
+    from pdfvision import config, task
+    from pdfvision.files import read_json
+except Exception as runtime_error:
+    raise SystemExit(report_error(runtime_error))
 
 
 def main(argv=None):
@@ -23,6 +38,7 @@ def main(argv=None):
     start.add_argument("--vision", choices=["available", "unavailable"], required=True)
     start.add_argument("--related-task", type=Path)
     start.add_argument("--track-data", action="store_true")
+    start.add_argument("--requirements", type=Path)
 
     def cleaning_arguments(cmd):
         group = cmd.add_mutually_exclusive_group()
@@ -67,6 +83,7 @@ def main(argv=None):
             cmd.add_argument("--vision", choices=["available", "unavailable"], required=True)
             cmd.add_argument("--pages")
             cmd.add_argument("--redo-pages")
+            cmd.add_argument("--requirements", type=Path)
         if name == "adopt":
             cmd.add_argument("--result", required=True)
     args = parser.parse_args(argv)
@@ -77,7 +94,8 @@ def main(argv=None):
             raise ValueError("--no-cleaning cannot be combined with --instructions")
         if args.action == "start":
             result = task.start(args.source, args.project.resolve(), args.pages, args.owner, args.vision,
-                                related_task=args.related_task, track_data=args.track_data, **cleaning_options)
+                                related_task=args.related_task, track_data=args.track_data,
+                                requirements=args.requirements, **cleaning_options)
         elif args.action == "config":
             result = config.effective(args.project.resolve(), args.use_global_config)
         elif args.action == "profile-save":
@@ -94,7 +112,8 @@ def main(argv=None):
                     elif args.action == "resume":
                         result = task.resume(root, state, args.owner, args.vision, writer=args.writer,
                                              takeover=args.takeover, pages=args.pages, redo_pages=args.redo_pages,
-                                             project=args.project.resolve() if args.project else None, **cleaning_options)
+                                             project=args.project.resolve() if args.project else None,
+                                             requirements=args.requirements, **cleaning_options)
                     elif args.action == "adopt":
                         result = task.adopt(root, state, args.result, args.owner)
                     else:
@@ -116,16 +135,8 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except Exception as exc:
-        error = {"status": "error", "error": str(exc), "kind": type(exc).__name__}
-        if hasattr(exc, "retry_at"):
-            error["retry_at"] = exc.retry_at
-        print(json.dumps(error, ensure_ascii=False))
-        return 2
+        return report_error(exc)
 
 
 if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8")
     raise SystemExit(main())
