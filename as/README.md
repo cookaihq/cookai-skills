@@ -2,7 +2,7 @@
 
 在 Orca 的当前项目和分支中，新开一个 Agent 会话。你可以保存每个 Agent 的默认模型与思考强度，用短代码选择预设，并自动发送首条消息；加上 `-r`，让新会话先读取当前会话的原始记录再接手。
 
-当前版本 **1.1.0**。本地开发版，包含常用配置初始化、默认值快捷采用、调用解析与原始记录交接；尚未发布，最近已发布版本为 [1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.0.0)。
+当前版本 **[1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.1.0)**，包含常用配置初始化、默认值快捷采用、调用解析与原始记录交接。Windows Codex 默认沙箱的完整启动验收仍受访问限制阻塞，macOS 尚待实机验收，具体范围见下文。
 
 ## 开始前
 
@@ -25,7 +25,7 @@ Windows 原生环境已执行脚本、浏览器与 Orca 业务验证，包含 Co
 把下面整段发给准备使用 AS 的 Agent。仓库中有多个 Skill，只安装 `as`，保留其完整配套目录。
 
 ```text
-请从 https://github.com/cookaihq/cookai-skills 的 as/v1.0.0 版本安装 as Skill，只安装仓库中的 as 目录及其配套文件；GitHub 因网络原因不可达时，自动尝试 https://cnb.cool/zhidateam/tannt/tannt-skills 的相同版本与目录，并说明实际来源。沿用当前宿主的原生技能安装入口，保留已有配置，检查 Orca、目标 Agent 和运行环境，验证技能能被发现并告诉我显式调用方式。安装验证先停在配置与调用预览，不创建会话。
+请从 https://github.com/cookaihq/cookai-skills 的 as/v1.1.0 版本安装 as Skill，只安装仓库中的 as 目录及其配套文件；GitHub 因网络原因不可达时，自动尝试 https://cnb.cool/zhidateam/tannt/tannt-skills 的相同版本与目录，并说明实际来源。沿用当前宿主的原生技能安装入口，保留已有配置，检查 Orca、目标 Agent 和运行环境，验证技能能被发现并告诉我显式调用方式。安装验证先停在配置与调用预览，不创建会话。
 ```
 
 ## 完成首次配置
