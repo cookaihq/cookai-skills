@@ -12,11 +12,13 @@ from skill_ui.storage import prepare_private_write, private_directory
 from .catalog import discover
 from .config import Store, default_path, resolve
 from .launch import Launcher
+from .context import capture, read_page
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="AS Agent 会话启动器")
     parser.add_argument("--config-file", type=Path, default=default_path(), help="Explicit isolated configuration target")
     parser.add_argument("--runtime-dir", type=Path, help="Private runtime directory; default beside configuration")
@@ -29,6 +31,18 @@ def main():
         sub.add_argument("--input-file", type=Path, required=True, help="UTF-8 exact original invocation")
         if name == "launch":
             sub.add_argument("--request-id", required=True)
+            sub.add_argument("--adopt-recommended-default", action="store_true", help="Only after explicit user selection of a pending missing-default recommendation")
+            sub.add_argument("--source-session-id", help="Exact current native session ID; Codex defaults to CODEX_THREAD_ID")
+            sub.add_argument("--source-file", type=Path, help="Exact original transcript path from the current host")
+    source = commands.add_parser("context-source", help="Locate and verify the current transcript without launching")
+    source.add_argument("--current-agent", required=True, choices=["codex", "claude", "workbuddy"])
+    source.add_argument("--source-session-id")
+    source.add_argument("--source-file", type=Path)
+    context = commands.add_parser("context-read", help="Read a bounded page directly from the original transcript")
+    context.add_argument("--record-file", type=Path, required=True)
+    context.add_argument("--cursor", default="0:0")
+    context.add_argument("--max-chars", type=int, default=12000)
+    context.add_argument("--include-tools", action="store_true")
     for name in ("inspect", "resume"):
         sub = commands.add_parser(name)
         sub.add_argument("--request-id", required=True)
@@ -40,6 +54,7 @@ def main():
     cwd = Path.cwd().resolve()
     store = Store(args.config_file)
     runtime = (args.runtime_dir or store.path.parent / "runtime").resolve()
+    handler = None
     try:
         if args.command == "ui":
             from skill_ui.__main__ import main as ui_main
@@ -59,7 +74,16 @@ def main():
             output = {"settings": settings, "revision": revision, "source": str(store.path)}
         elif args.command == "resolve":
             settings, revision = store.read()
-            output = resolve(args.input_file.read_text(encoding="utf-8-sig", newline=""), args.current_agent, settings)
+            with args.input_file.open(encoding="utf-8-sig", newline="") as stream:
+                output = resolve(stream.read(), args.current_agent, settings)
+        elif args.command == "context-source":
+            output = capture(args.current_agent, cwd, args.source_session_id, args.source_file)
+        elif args.command == "context-read":
+            record = json.loads(args.record_file.read_text(encoding="utf-8"))
+            snapshot = record.get("context") if isinstance(record, dict) else None
+            if not isinstance(snapshot, dict):
+                raise UIError("context_missing", "该调用没有固定的原始记录范围。")
+            output = read_page(snapshot, args.cursor, args.max_chars, args.include_tools)
         else:
             launcher = Launcher(runtime / "launches")
             if args.command == "inspect":
@@ -75,12 +99,16 @@ def main():
                     with args.input_file.open(encoding="utf-8-sig", newline="") as stream:
                         invocation = stream.read()
                     # Existing requests bypass discovery and configuration changes entirely.
-                    if launcher.path(args.request_id).exists():
+                    if launcher.path(args.request_id).exists() and launcher.inspect(args.request_id)["status"] != "configuration_required":
                         catalog = {}
                     else:
                         catalog = discover(cwd)
-                    output = launcher.launch(args.request_id, invocation, args.current_agent, cwd, store, catalog)
+                    output = launcher.launch(args.request_id, invocation, args.current_agent, cwd, store, catalog,
+                                             source_session_id=args.source_session_id, source_file=args.source_file,
+                                             adopt_recommended=args.adopt_recommended_default)
         print(json.dumps(output, ensure_ascii=False))
+        if isinstance(output, dict) and output.get("status") == "configuration_required":
+            raise SystemExit(1)
         if isinstance(output, dict) and output.get("status") in ("unknown", "unconfirmed", "inflight"):
             raise SystemExit(2)
     except (UIError, OSError, ValueError) as exc:
@@ -88,3 +116,7 @@ def main():
         message = str(exc) if isinstance(exc, UIError) else "本地文件或数据不可用，请核对输入路径、权限与文件格式。"
         print(json.dumps({"error": code, "message": message}, ensure_ascii=False))
         raise SystemExit(1)
+    finally:
+        if handler is not None:
+            logging.getLogger().removeHandler(handler)
+            handler.close()

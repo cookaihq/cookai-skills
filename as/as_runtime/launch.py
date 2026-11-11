@@ -2,14 +2,18 @@
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import subprocess
 import time
+from copy import deepcopy
 
 from skill_ui.contracts import UIError
 from skill_ui.storage import atomic_json, file_lock, private_directory
-from .config import check_choice, resolve
+from .config import check_choice, parse_invocation, resolve_choice
+from .recommendations import DEFAULTS
+from .context import capture, prompt as context_prompt
 from .process import json_command, orca_executable, run
 
 
@@ -43,7 +47,20 @@ def operation_id(value):
 
 
 def receipt_summary(record):
-    return {key: record.get(key) for key in ("request_id", "status", "operation_id", "target", "choice", "receipt", "error")}
+    return {key: record.get(key) for key in ("request_id", "status", "operation_id", "target", "choice", "context", "receipt", "error", "configuration")}
+
+
+def configuration_offer(agent, store, catalog):
+    recommendation = deepcopy(DEFAULTS.get(agent))
+    problem = None
+    if recommendation is not None:
+        try:
+            check_choice(agent, recommendation, catalog)
+        except UIError as exc:
+            problem = str(exc)
+    return {"agent": agent, "source": str(store.path), "recommendation": recommendation,
+            "available": recommendation is not None and problem is None, "problem": problem,
+            "actions": (["adopt_recommended", "open_configuration"] if recommendation else ["choose_explicit_preset"])}
 
 
 class Launcher:
@@ -61,23 +78,56 @@ class Launcher:
             raise UIError("request_missing", "未找到此 AS 调用记录。")
         return receipt_summary(json.loads(path.read_text(encoding="utf-8")))
 
-    def launch(self, request_id, invocation, current_agent, cwd, store, catalog):
+    def launch(self, request_id, invocation, current_agent, cwd, store, catalog, *, source_session_id=None, source_file=None, adopt_recommended=False):
         cwd = Path(cwd).resolve()
         if not cwd.is_dir():
             raise UIError("cwd_missing", "调用目录不存在。")
         path = self.path(request_id)
         private_directory(self.directory, owner_path=cwd)
-        fingerprint = hashlib.sha256(json.dumps([invocation, current_agent, str(cwd), str(store.path)],
-                                               ensure_ascii=False).encode()).hexdigest()
+        inputs = [invocation, current_agent, str(cwd), str(store.path)]
+        if source_session_id is not None or source_file is not None:
+            inputs.append([source_session_id, str(source_file) if source_file is not None else None])
+        fingerprint = hashlib.sha256(json.dumps(inputs, ensure_ascii=False).encode()).hexdigest()
         with file_lock(path.with_suffix(".lock")):
+            previous = None
             if path.exists():
                 previous = json.loads(path.read_text(encoding="utf-8"))
                 if previous.get("fingerprint") != fingerprint:
                     raise UIError("request_conflict", "同一调用标识已用于不同输入；未创建新会话。")
-                return receipt_summary(previous)
-            settings, revision = store.read()
-            choice = resolve(invocation, current_agent, settings)
+                if previous.get("status") != "configuration_required":
+                    return receipt_summary(previous)
+            if adopt_recommended:
+                if previous is None:
+                    raise UIError("confirmation_required", "请先执行原调用并展示推荐组合与保存范围，用户明确选择后才能快捷采用。")
+                settings, revision = store.adopt_default(current_agent, previous["configuration"]["recommendation"], previous["config_revision"], catalog)
+                logging.info("recommended_default_saved request=%s agent=%s", request_id, current_agent)
+            else:
+                settings, revision = store.read()
+            parsed = previous["parsed"] if previous else parse_invocation(invocation, settings)
+            if previous:
+                source_session_id = previous.get("source_session_id")
+            elif parsed["carry_context"] and current_agent == "codex":
+                source_session_id = source_session_id or os.environ.get("CODEX_THREAD_ID")
+            try:
+                choice = resolve_choice(parsed, current_agent, settings)
+            except UIError as exc:
+                if exc.code != "configuration_required":
+                    raise
+                pending = {"request_id": request_id, "fingerprint": fingerprint, "created": time.time(),
+                           "status": "configuration_required", "config_revision": revision,
+                           "parsed": parsed, "source_session_id": source_session_id,
+                           "configuration": configuration_offer(current_agent, store, catalog), "error": str(exc)}
+                atomic_json(path, pending, owner_path=cwd)
+                logging.info("configuration_required request=%s agent=%s", request_id, current_agent)
+                return receipt_summary(pending)
             check_choice(choice["agent"], choice, catalog)
+            context = None
+            message = choice["message"]
+            if choice["carry_context"]:
+                context = capture(current_agent, cwd, source_session_id, source_file)
+                message = context_prompt(context, message, path)
+            elif source_session_id is not None or source_file is not None:
+                raise UIError("context_not_requested", "只有原始调用带 -r 时才接受来源会话参数。")
             orca = orca_executable()
             target = workspace(cwd, orca)
             argv = orca + ["agent", "launch", "--agent", choice["agent"],
@@ -85,11 +135,12 @@ class Launcher:
                            "--worktree", target["address"]["worktree"], "--model", choice["model"], "--json"]
             if choice["effort"] is not None:
                 argv += ["--effort", choice["effort"]]
-            if choice["message"]:
-                argv += ["--prompt", choice["message"]]
+            if message:
+                argv += ["--prompt", message]
             record = {"request_id": request_id, "fingerprint": fingerprint, "created": time.time(),
                       "status": "prepared", "target": target, "config_revision": revision,
-                      "choice": {key: value for key, value in choice.items() if key != "message"}, "argv": argv}
+                      "choice": {key: value for key, value in choice.items() if key != "message"},
+                      "context": context, "argv": argv}
             atomic_json(path, record, owner_path=cwd)
             return self._execute(path, record)
 
@@ -99,6 +150,8 @@ class Launcher:
             record = json.loads(path.read_text(encoding="utf-8"))
             if record["status"] == "complete":
                 return receipt_summary(record)
+            if record["status"] == "configuration_required":
+                raise UIError("configuration_required", "原调用尚未提交。配置完成后请使用原输入、宿主、目录和 request-id 接续 launch。")
             if record["status"] != "prepared" and not record.get("operation_id"):
                 raise UIError("outcome_unknown", "启动结果尚不明确且没有 Orca operationId。请只读核对工作区；禁止重新启动或补发正文。")
             cwd = Path(record["target"]["path"])

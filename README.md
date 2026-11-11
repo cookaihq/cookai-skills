@@ -29,7 +29,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | 目标 | 版本 | Release |
 |---|---|---|
 | agent-instructions-update | 0.1.1 | [agent-instructions-update/v0.1.1](https://github.com/cookaihq/cookai-skills/releases/tag/agent-instructions-update%2Fv0.1.1) |
-| as | 1.0.0 | [as/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.0.0) |
+| as | 1.1.0 | [as/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.1.0) |
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | frpc-launch | 1.6.0 | [frpc-launch/v1.6.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.6.0) |

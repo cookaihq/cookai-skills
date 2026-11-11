@@ -24,6 +24,14 @@
       <div class="page-heading"><div><div class="eyebrow">YOUR AGENTS, YOUR DEFAULTS</div><h1>新会话，按你的习惯开始<span class="orange-dot">.</span></h1><p>保存常用组合。一个代码，选择 Agent、模型和思考强度。</p></div><button class="button primary" id="add-preset"><span>＋</span> 添加预设</button></div>
       <div class="demo-notice"><span>◈</span><span>选择并保存默认值和预设。试用区只预览，不会创建会话。</span><button id="refresh-catalog">刷新模型目录</button></div>
       <div id="app-error" role="alert" hidden></div>
+      <section class="initialization" id="initialization" aria-labelledby="initialization-title" hidden>
+        <div class="initialization-heading"><div><span class="eyebrow">一个熟悉的起点</span><h2 id="initialization-title">添加常用配置</h2></div><button class="icon-button" id="dismiss-initialization" aria-label="关闭常用配置提示">×</button></div>
+        <p>一次加入 2 套 Agent 默认配置和 4 套会话预设。添加后可修改或移除，点击「保存配置」才会生效。</p>
+        <div class="recommendations" id="recommendations"></div>
+        <div class="initialization-footer"><small>添加或关闭后不再提示。已有个人配置保持独立。</small><button class="button primary" id="add-common">添加到草稿</button></div>
+      </section>
+      <div class="draft-notice" id="initialization-draft" role="status" hidden>常用配置已加入草稿。请检查两类配置；不可用项需修改或移除后保存。<button class="text-button" data-tab="defaults">查看默认配置 ↗</button></div>
+      <details id="change-summary" class="draft-notice" hidden><summary>本次保存的变更</summary><ul id="change-list"></ul><p>保存到下方显示的配置文件，立即用于后续调用。</p></details>
 
       <div class="content-grid">
         <section class="settings-column">
@@ -40,7 +48,7 @@
           </section>
 
           <section id="defaults-view" hidden>
-            <div class="section-description"><strong>当前 Agent，固定的起点</strong><p>直接调用 <code>$as</code> 时，按当前 Agent 选择默认值。命名预设使用自己保存的完整组合。</p></div>
+            <div class="section-description"><strong>当前 Agent，固定的起点</strong><p><code>$as</code> 打开空白会话，<code>$as 正文</code> 同时发送首条消息。首词命中已保存的预设代码时使用该预设；用 <code>$as -- 正文</code> 可以明确使用默认值。</p></div>
             <div id="default-cards"></div>
             <div class="tip"><span>◎</span><div><strong>权限继续由 Orca 管理</strong><p>新会话沿用 Orca 的启动配置，不复制当前会话临时修改过的权限。</p></div></div>
           </section>
@@ -52,7 +60,7 @@
           <label class="field-label" for="current-agent">假设当前 Agent 是</label><select id="current-agent"></select>
           <label class="field-label command-label" for="command">输入调用内容 <span>Codex 示例</span></label>
           <div class="command-box"><div><span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span><span class="command-caption">新会话入口</span></div><textarea id="command" rows="4" spellcheck="false" aria-label="调用内容">$as</textarea></div>
-          <div class="example-buttons"><button data-example="$as">默认</button><button data-example="$as a">空白会话</button><button data-example="$as a 帮我检查登录逻辑">携带消息</button></div>
+          <div class="example-buttons"><button data-example="$as">空白会话</button><button data-example="$as 打开as的设置页面">默认＋消息</button><button data-example="$as --preset a 帮我检查登录逻辑">指定预设</button><button data-example="$as a -r">带上下文</button></div>
           <button class="button secondary full" id="preview-command">预览启动结果 <span>↗</span></button>
           <div id="launch-preview" aria-live="polite"></div>
           <div class="preview-footnote"><span>◌</span> 仅预览当前草稿，不执行启动。</div>
@@ -72,7 +80,7 @@
         <div class="agent-field"><label for="preset-agent">目标 Agent <span class="fixed-badge">明确指定</span></label><small class="config-key" data-key="agent">presets.a.agent</small><select id="preset-agent"></select><div class="agent-explanation" id="agent-explanation"></div></div>
         <label for="preset-model">模型</label><small class="config-key" data-key="model">presets.a.model</small><select id="preset-model"></select>
         <label for="preset-effort">思考强度</label><small class="config-key" data-key="effort">presets.a.effort</small><select id="preset-effort"></select>
-        <div class="inherit-box"><strong>其余启动设置</strong><div><span>工作目录与分支</span><b>当前所在位置</b></div><div><span>权限与界面模式</span><b>沿用 Orca 启动配置</b></div><div><span>聊天历史</span><b>全新上下文</b></div></div>
+        <div class="inherit-box"><strong>其余启动设置</strong><div><span>工作目录与分支</span><b>当前所在位置</b></div><div><span>权限与界面模式</span><b>沿用 Orca 启动配置</b></div><div><span>上下文</span><b>默认空白；-r 读取当前会话记录</b></div></div>
         <div class="drawer-usage"><span>调用示例</span><code id="editor-example">$as a</code></div><p class="form-error" id="form-error" role="alert"></p>
       </div>
       <footer class="drawer-footer"><span>完成编辑后，在页面底部保存。</span><div><button class="button ghost" id="cancel-edit" type="button">取消编辑</button><button class="button primary" type="submit">完成编辑</button></div></footer>
