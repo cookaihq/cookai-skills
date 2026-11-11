@@ -1,0 +1,27 @@
+[project]
+name = "pdf-to-markdown-vision"
+# Generated mirror; the authoritative behavior version is SKILL.md metadata.version.
+version = "1.0.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "pypdfium2>=4.30,<6",
+  "Pillow>=11.3,<13",
+  "filelock>=3.20,<4",
+  "markdown-it-py>=4,<5",
+  "httpx>=0.28,<1",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "mypy>=1.18,<2", "types-Pillow"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+check_untyped_defs = true
+ignore_missing_imports = true
+incremental = false
