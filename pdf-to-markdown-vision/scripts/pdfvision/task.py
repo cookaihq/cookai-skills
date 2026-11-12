@@ -368,8 +368,10 @@ def submit_page(task: Path, state: dict, page: int, payload: dict) -> dict:
             raise ValueError("Each block must cite known rule IDs")
         if not isinstance(block.get("reason"), str) or not block["reason"].strip():
             raise ValueError("Each block needs its actual rule-selection reason")
-        if not isinstance(block.get("markdown"), str) or not block["markdown"].strip():
-            raise ValueError("Each block needs content or an explicit unreadable-region note")
+        if not isinstance(block.get("markdown"), str) or (not block["markdown"].strip() and not block.get("image")):
+            raise ValueError("Text blocks need content; image blocks may use an empty markdown string")
+        if block.get("image") and not isinstance(block.get("alt", key), str):
+            raise ValueError("Image alt must be a string")
     for issue in payload.get("issues", []):
         if issue.get("block") not in ids or not issue.get("message") or type(issue.get("blocking")) is not bool:
             raise ValueError("Issues need a known block, message and boolean blocking flag")
@@ -383,8 +385,9 @@ def submit_page(task: Path, state: dict, page: int, payload: dict) -> dict:
         if block.get("image"):
             ref = f"assets/p{page:04d}-{block['id']}.png"
             pdf.render(task / "source/document.pdf", page, folder / ref, 220, block["bbox"])
-            alt = block.get("alt", block["id"]).replace("[", "").replace("]", "").replace("\n", " ")
-            content = f"![{alt}]({ref})\n\n" + content
+            alt = " ".join(block.get("alt", block["id"]).split())
+            alt = re.sub(r"([\\`*_\[\]<>!&])", r"\\\1", alt)
+            content = f"![{alt}]({ref})" + ("\n\n" + content if content else "")
         validate_images(folder, content)
         count = len(content.splitlines())
         mappings.append({**block, "line_start": line, "line_end": line + count - 1,

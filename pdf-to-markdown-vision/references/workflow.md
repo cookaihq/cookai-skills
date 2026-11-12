@@ -31,9 +31,9 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
     {
       "id": "panel",
       "bbox": [0.05, 0.10, 0.95, 0.85],
-      "markdown": "源页的准确文字；需要时包含表格、LaTeX 和图下标签转写。",
+      "markdown": "原始图注；密集标注按对象成组转写。没有这些内容时可为\"\"。",
       "image": true,
-      "alt": "源页面板与全部标注",
+      "alt": "简短图内文字及其角色，或密集标注图的简短标识",
       "rules": ["reading-order", "visual-unit"],
       "reason": "这些文字通过指示线与面板位置相连。"
     }
@@ -42,7 +42,7 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
 }
 ```
 
-`image: true` 使程序从保存的源 PDF 实际裁图并放在该区域文字之前；标题可作为前一个独立文字区域。`image: false` 只转写文字。每个区域都有 bbox、唯一简短 ID、适用规则 ID 和非空文字，按阅读顺序排列；源页确有空白区域时无需单独建区域。无法识别的页仍可保存完整源图和简短疑点说明，状态必须待复核。
+`image: true` 使程序从保存的源 PDF 实际裁图并放在该区域文字之前；标题可作为前一个独立文字区域。简短图内标题/轴标/单位等按 `visual-unit` 写入 `alt`，保留原文字面字符；程序转义 Markdown 特殊字符，Agent 不预先转义该 JSON 字段。源图注和必要的密集标注写入 `markdown`；没有这些内容时，图片区域可显式使用 `markdown: ""`，输出只有图片。`image: false` 只转写文字，其 `markdown` 仍须非空。每个区域都有 bbox、唯一简短 ID、适用规则 ID，按阅读顺序排列；空白区域无需单独建立。无法识别的页仍可保存完整源图和简短疑点说明，状态必须待复核。
 
 问题格式：`{"block":"panel","message":"具体看不清或归属不明之处","blocking":true}`。程序自动保存该区域的证据截图。`blocking:false` 只用于已经核实、不影响正确阅读的提示；关键数字、表格条件、标签和公式未确定时是阻塞问题。重新提交同一页生成新页结果，旧页证据保留。
 

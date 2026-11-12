@@ -4,6 +4,8 @@
 
 适合仪器说明、规格表和图文混排资料。默认保留原文，不翻译、摘要或删除重复内容。公式默认用 LaTeX；需要交给不支持数学渲染的系统时，可以明确要求使用带括号的等义文字表达。无法辨认的区域保留原图和疑点。
 
+图片完整保留。简短图内标题、轴标和单位写入图片替代文本，密集标注在图下按对象归组；原始图注、独立正文和表格照常转写。邻近标题或正文已表达的图内文字不再另加副本。替代文本保存在 Markdown 中，通常不作为额外段落显示；交给知识库时，需核实下游索引是否保留替代文本。
+
 ## 安装与准备
 
 需要能查看图片、运行本地工具并写入项目的 Codex、Claude Code 或 WorkBuddy，以及 uv 0.8 以上版本。Agent 会按随包锁文件准备 Python 3.13 环境。无需配置额外模型、API Key 或 PDF 转换服务。
@@ -14,7 +16,7 @@
 请从 https://github.com/cookaihq/cookai-skills 安装 pdf-to-markdown-vision 完整目录，保留已有设置，核对当前宿主能发现该 Skill，并检查运行环境。告诉我如何选中它。
 ```
 
-1.0.0 已完成 Windows 本地开发与 Codex 验收；macOS 待验，具体宿主及范围见下文。
+1.0.1 已完成 Windows 本地开发与 Codex 验收；macOS 待验，具体宿主及范围见下文。
 
 | 宿主 | 安装与调用 |
 | --- | --- |
@@ -22,7 +24,7 @@
 | Claude Code | 完整目录放入 `~/.claude/skills/pdf-to-markdown-vision`，或单项链接到检出；使用 `/pdf-to-markdown-vision` 或在请求中点名 |
 | WorkBuddy | 通过当前客户端的本地 Skill 管理入口导入完整目录，在技能列表选中后给出转换请求；复制安装须保留脚本、references、锁文件和 update.json |
 
-Codex 的展示名为“PDF 视觉转 Markdown”，没有额外默认提示句。共享行为与内容规则只有一份。Windows 原生 Codex CLI 0.167.1 已在 workspace-write 默认沙箱中验证路径调用、真实样本、清洗、纠错与恢复；Claude Code、WorkBuddy 为兼容目标，未做业务实测；macOS、WSL 及 Codex GUI 交互待验。
+Codex 的展示名为“PDF 视觉转 Markdown”，没有额外默认提示句。共享行为与内容规则只有一份。1.0.1 使用 Windows 原生 Codex CLI 0.167.2，在 workspace-write 默认沙箱中验证简短图内文字、密集标注、邻近标题去重、无文字图、旧任务升级和清洗对照；1.0.0 的路径调用、纠错与恢复验收保留为未改行为的历史证据。Claude Code、WorkBuddy 为兼容目标，未做业务实测；macOS、WSL 及 Codex GUI 交互待验。
 
 ## 第一次使用
 

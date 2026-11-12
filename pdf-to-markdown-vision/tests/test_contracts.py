@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,12 @@ def test_newer_installed_skill_reruns_all_pages_in_same_task_after_move(pdf, tmp
     installation = tmp_path / "new-installation"
     shutil.copytree(SKILL, installation, ignore=shutil.ignore_patterns(".venv", "__pycache__", ".pytest_cache", "tests"))
     source = installation / "SKILL.md"
-    source.write_text(source.read_text(encoding="utf-8").replace('version: "1.0.0"', 'version: "1.0.1"').replace("v1.0.0｜", "v1.0.1｜"), encoding="utf-8")
+    source_text = source.read_text(encoding="utf-8")
+    match = re.search(r'^  version: "(\d+\.\d+\.\d+)"$', source_text, re.M)
+    assert match
+    current = match[1]
+    upgraded = f"{int(current.split('.')[0]) + 1}.0.0"
+    source.write_text(source_text.replace(f'version: "{current}"', f'version: "{upgraded}"').replace(f"v{current}｜", f"v{upgraded}｜"), encoding="utf-8")
     env = dict(os.environ, UV_PROJECT_ENVIRONMENT=sys.prefix)
     result = subprocess.run([sys.executable, str(installation / "scripts/workflow.py"), "resume", "--task", str(moved),
                              "--owner", "b", "--vision", "available"], env=env, capture_output=True,
@@ -32,7 +38,7 @@ def test_newer_installed_skill_reruns_all_pages_in_same_task_after_move(pdf, tmp
     resumed = json.loads(result.stdout)
     assert resumed["task_id"] == started["task_id"]
     assert resumed["pending_pages"] == [1, 2]
-    assert resumed["run"]["skill_version"] == "1.0.1"
+    assert resumed["run"]["skill_version"] == upgraded
     assert (moved / started["run"]["snapshot"] / "SKILL.md").is_file()
     assert (moved / resumed["run"]["snapshot"] / "SKILL.md").is_file()
     assert command("status", "--task", task)["pending_pages"] == [2]
