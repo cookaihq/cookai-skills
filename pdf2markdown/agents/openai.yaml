@@ -1,4 +1,0 @@
-interface:
-  display_name: "PDF to Markdown"
-  short_description: "云端转换 PDF，逐页核验修订，在本地交付 Markdown、图片和三栏预览"
-  default_prompt: "使用 $pdf2markdown 将这个 PDF 上传到 AIHub Doc2X 转换，对照全部页图核验并修订，将最终 Markdown、图片、核验报告和三栏预览保存到我指定的本地文件夹；中断后继续同一任务。"
