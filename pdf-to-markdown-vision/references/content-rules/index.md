@@ -4,7 +4,7 @@
 
 | ID | 主题与读取条件 |
 | --- | --- |
-| `reading-order` | [阅读顺序与图文关联](reading-order.md) |
+| `reading-order` | [阅读顺序与图文关联](reading-order.md)：多栏、图文归属、相邻列表的同组延续或独立分隔 |
 | `visual-unit` | [完整视觉单元保留](visual-unit.md)：保存整图时必读，区分简短图内文字、密集标注与独立图注 |
 | `table-groups` | [表格语义分组与拆分](table-groups.md) |
 | `merged-conditions` | [合并单元格与共同条件的适用范围](merged-conditions.md) |

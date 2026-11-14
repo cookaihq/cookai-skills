@@ -193,7 +193,7 @@ wheels = [
 
 [[package]]
 name = "pdf-to-markdown-vision"
-version = "1.0.1"
+version = "1.0.2"
 source = { virtual = "." }
 dependencies = [
     { name = "filelock" },

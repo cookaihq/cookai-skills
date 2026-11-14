@@ -97,3 +97,41 @@ def test_empty_text_region_still_requires_content(pdf, command, tmp_path):
     command("submit-page", "--task", task, "--writer", writer, "--page", 1, "--input", path, expect=2)
     state = command("status", "--task", task)
     assert state["pending_pages"] == [1] and state["current_result"] is None
+
+
+@pytest.mark.parametrize("parts,expected", [
+    (["- Contents A\n- Contents B", "* Bandwidth: 100 MHz\n* Memory: 500 Mpoints"], ["bullet_list_open"] * 2),
+    (["1. First procedure\n2. Next step", "1) Other procedure\n2) Next step"], ["ordered_list_open"] * 2),
+    (["- Bandwidth: 100 MHz", "- Memory: 500 Mpoints"], ["bullet_list_open"]),
+    (["## Contents\n\n- Contents A", "## Specifications\n\n- Bandwidth: 100 MHz"], ["bullet_list_open"] * 2),
+])
+def test_host_list_boundaries_survive_assembly_cleaning_and_source_mapping(pdf, command, tmp_path, parts, expected):
+    # The host chooses semantic boundaries; geometric regions alone cannot do so.
+    profile = tmp_path / "profile.md"
+    profile.write_text("Retain all source information and semantic groups.", encoding="utf-8")
+    start = command("start", pdf, "--project", tmp_path, "--pages", "1", "--owner", "a", "--vision", "available", "--cleaning", profile)
+    task, writer = Path(start["task_dir"]), start["writer"]
+    command("render", "--task", task, "--writer", writer, "--page", 1)
+    blocks = [{"id": f"region-{i}", "bbox": [0, i / 2, 1, (i + 1) / 2], "markdown": value,
+               "rules": ["reading-order"], "reason": "Synthetic semantic boundary chosen by the test host"}
+              for i, value in enumerate(parts)]
+    path = tmp_path / "page.json"
+    path.write_text(json.dumps({"review": "Synthetic program contract, not a vision test", "blocks": blocks}), encoding="utf-8")
+    page = command("submit-page", "--task", task, "--writer", writer, "--page", 1, "--input", path)
+    draft = command("finish", "--task", task, "--writer", writer)
+    raw = (task / draft["input_dir"] / "raw.md").read_text(encoding="utf-8")
+    clean = tmp_path / "clean.json"
+    clean.write_text(json.dumps({"markdown": raw, "review": "No source text matched for removal", "changes": []}), encoding="utf-8")
+    command("submit-cleaning", "--task", task, "--writer", writer, "--input", clean)
+    final = command("finish", "--task", task, "--writer", writer)
+    result = task / final["current_result"]
+    assert final["status"] == "complete"
+    for item in (task / page["path"] / "raw.md", result / "raw.md", result / "cleaned.md", result / "document.md"):
+        text = item.read_text(encoding="utf-8")
+        tokens = MarkdownIt("commonmark", {"html": False}).parse(text)
+        assert [t.type for t in tokens if t.type in {"bullet_list_open", "ordered_list_open"}] == expected
+        assert not any(t.type in {"hr", "html_block"} for t in tokens)
+    provenance = json.loads((result / "provenance.json").read_text(encoding="utf-8"))
+    for block, original in zip(provenance["pages"][0]["blocks"], parts):
+        assert "\n".join(raw.splitlines()[block["line_start"] - 1:block["line_end"]]) == original
+    assert provenance["outputs"]["cleaned.md"] == provenance["outputs"]["raw.md"]
