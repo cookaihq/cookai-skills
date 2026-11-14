@@ -30,6 +30,8 @@ uv run --frozen --project <skill-dir> <skill-dir>/scripts/workflow.py config-ui 
 
 The page shows all four methods, real capability/model evidence, effective source, project/global scopes, independent file drafts, and a per-new-task ask switch. Low-frequency ASR/output/source controls are collapsed. Save once performs candidate validation, atomic write and readback; there is no autosave or second confirmation. Refresh retains editing drafts for conflict repair while hiding revealed stored secrets. Saving a connection does not call a model. Tracked credential targets are refused; new private writes prepare narrow Git ignores.
 
+Choose the save scope above the vision form. If that file has no vision group, the form shows the effective inherited method, model and ask switch as read-only, with the source identified. Clear “沿用其他来源的图像识别配置” to start an independent unsaved group; enter its complete connection in that file. Inherited connection values and keys are not copied into the new group. Checking it again previews removal through the real loader and writes only on Save. The form distinguishes inherited, saved and draft values; a lower-priority saved group may remain overridden by the source shown in the effective banner. Switching scope retains separate drafts and never saves them.
+
 Listen only on loopback with a random port and private fragment-token authentication, CSRF/Origin checks and an activity-based 60-minute idle expiry. Runtime records live under the actual user's `.cache/video-to-markdown/ui/` (or the explicitly selected runtime directory). Authorizing global config requires reopening with `--use-local-key`; a disabled layer remains uninspected and read-only.
 
 ## Delivering a page link

@@ -1,8 +1,8 @@
 ---
 name: video-to-markdown
 metadata:
-  version: "4.1.0"
-description: v4.1.0｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
+  version: "4.1.1"
+description: v4.1.1｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
 compatibility: Claude Code, Codex and WorkBuddy are required targets; native model routing depends on actual session capabilities. Requires uv >= 0.8, ffmpeg, ffprobe and a usable vision route unless visuals are explicitly skipped. Cloud transcription uses installed AIhub Audio or user-authorized Lark CLI >=1.0.98,<2. Native Windows uses PowerShell. See README for tested scope.
 ---
 

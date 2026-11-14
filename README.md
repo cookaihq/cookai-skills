@@ -39,7 +39,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | skill-configuration-and-artifacts-ui | 1.2.0 | [skill-configuration-and-artifacts-ui/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv1.2.0) |
-| video-to-markdown | 4.1.0 | [video-to-markdown/v4.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv4.1.0) |
+| video-to-markdown | 4.1.1 | [video-to-markdown/v4.1.1](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv4.1.1) |
 <!-- release-table:end -->
 
 Hermes 手机接入 0.1.0 与 FRP Launch 1.6.0 的已验范围及待验事项见各自 README；Windows/Android 基础文字收发已验证，macOS 等其余场景按说明继续验收。

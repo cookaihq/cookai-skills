@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.1.1
+
+- Fix the configuration form showing a default main Agent and enabled per-task questions when the selected file actually inherits a fixed method/model and `ask_each_task: false`. Show inherited values read-only, identify their source, and distinguish saved settings from unsaved independent drafts.
+- Move save scope and the inheritance control above the vision form. Keep file drafts separate; preview removal with the real loader, preserve drafts after validation failures, and show when a lower-priority save remains overridden. Independent connections never copy another layer's model, Base URL or Key.
+- Windows Codex: 150 script tests passed; real-browser synthetic configuration checks passed for inheritance, scopes/drafts/reset, save/readback/removal, remote connection isolation and desktop/390px layouts. Reuse the unaffected 4.1.0 vision-notice and conversion evidence. Mac acceptance remains pending; no external model or transcription service was invoked.
+
 ## 4.1.0
 
 - Require a user-visible vision notice before recognition for new selections, fixed configurations, resumed tasks and route switches. Start/resume/switch results include a safe `vision_notice`, including transcription-pending and completed/draft recovery paths.
