@@ -46,6 +46,16 @@ For main/native selection, resume an awaiting task with `--vision-method main-ag
 
 For independent Agents use `method: independent-agent`, `runtime: codex`, `protocol: responses`. Base URL and Key alone do not constitute an Agent. No local model is installed. `vision-models --vision-config <file>` queries `/models` without inference; the result only proves catalog visibility. If actual execution model cannot be verified, explain the limit and obtain an explicit choice to use `accept_unverified_model: true` (or `--accept-unverified-model`). Do not silently accept a mismatch. A returned model alias differing from the requested ID needs investigation or explicit route selection, not normalization by guesswork.
 
+## Announce before recognition
+
+For every task that will use image recognition, send a user-visible notice after the route is selected and before its first image call. This applies to a new choice, automatic reuse of a fixed configuration, task resume and a user-requested route switch. `start`, `resume` and successful `vision-switch` return `vision_notice` from the saved task route, including while transcription is pending. Relay its `message` or equivalent wording in the conversation; a tool's JSON output or private state alone does not count as informing the user.
+
+Include the selected method, planned model ID (or its absence), execution host, remote service origin and independent runtime where applicable, and configuration source. Describe a selected/configured model as a plan. The CLI's `model_verification: unverified` does not prove execution identity, even if a model catalog lists that ID. Add actual model identity only when supported by trusted current runtime metadata; when it is unavailable, explicitly say that the actual model is unverified. State any known unverified image/account capability as well. Main-Agent routes without a model ID must say that the current conversation model will be used and its exact ID has not been obtained; never infer it from a default, catalog or model self-report.
+
+The notice's `image_capability` and `account_availability` describe saved selection-time evidence, not a fresh service check. Unknown values remain `null`; for native/remote model routes the message states each unverified capability. Main-Agent routes report the saved session's image input evidence without claiming a separate account check. The notice itself performs no model request.
+
+Keep credentials, private connection-file contents, signed links and request records out of the notice. The service origin is sufficient; private URL paths are omitted. Use the saved route on resume, preserving the original selection and source. Announce a changed route before its first affected recognition; identical information need not be repeated for every image or batch within the same run. This is a status notice followed by execution under the existing choices and authorizations. For an explicitly skipped visual task, report the skip and proceed with subtitles/audio without announcing future recognition.
+
 ## Execute every dispatch
 
 All commands use `uv run --frozen --project <skill-dir> <skill-dir>/scripts/workflow.py` followed by the operation below. In PowerShell use one command line or PowerShell continuation, not Bash backslashes.

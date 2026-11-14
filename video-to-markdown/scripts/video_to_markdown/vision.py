@@ -104,6 +104,46 @@ def safe_route(route: dict) -> dict:
     return {key: value for key, value in route.items() if key != "api_key"}
 
 
+def public_notice(manifest: dict) -> dict | None:
+    """Describe the saved plan without loading credentials or claiming execution."""
+    saved = manifest["vision"]
+    route = saved.get("route")
+    if not saved["enabled"] or not route:
+        return None
+    method = route["method"]
+    host = saved.get("host") or manifest["settings"].get("host", "codex")
+    model = route.get("model") or None
+    source = saved.get("source") or "unknown"
+    caps = saved.get("capabilities") or {}
+    model_info: dict = next((item for item in caps.get("models", []) if item["id"] == model), {})
+    image_capability = caps.get("main_vision") if method == "main-agent" else model_info.get("vision") if method == "host-agent" else None
+    account_availability = model_info.get("available") if method == "host-agent" else None
+    notice = {"method": method, "label": LABELS[method], "host": host,
+              "model": model, "model_verification": "unverified", "config_source": source,
+              "image_capability": image_capability, "account_availability": account_availability}
+    execution = "执行宿主：" + host
+    if method in {"api", "independent-agent"}:
+        # A service origin identifies the destination without exposing private
+        # URL paths, connection files, credentials or request records.
+        url = urllib.parse.urlsplit(route["base_url"])
+        service = urllib.parse.urlunsplit((url.scheme, url.netloc, "", "", ""))
+        protocol = route.get("protocol", "responses" if method == "independent-agent" else "chat-completions")
+        notice.update(service=service, protocol=protocol)
+        execution += "；服务：" + service + "（" + protocol + "）"
+        if method == "independent-agent":
+            notice["runtime"] = route.get("runtime", "codex")
+            execution += "；独立运行器：" + notice["runtime"]
+    model_text = (model + "（选定/配置值，实际执行模型尚未核验）" if model else
+                  "当前主会话模型（脚本尚未取得可核验的模型 ID）")
+    if image_capability is not True:
+        model_text += "；图片能力尚未核验"
+    if method != "main-agent" and account_availability is not True:
+        model_text += "；账号可用性尚未核验"
+    notice["message"] = ("后续如需图像识别，将采用" + LABELS[method] + "（" + method + "）；" +
+                         execution + "；模型：" + model_text + "；配置来源：" + source + "。")
+    return notice
+
+
 def select(task_dir: Path, manifest: dict, resolved: config.ResolvedConfig, *, host: str,
            caps: dict, override: dict | None = None, credential_ref: str | None = None, persist: bool = True) -> dict:
     vision = manifest["vision"]

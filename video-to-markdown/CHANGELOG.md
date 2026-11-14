@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.1.0
+
+- Require a user-visible vision notice before recognition for new selections, fixed configurations, resumed tasks and route switches. Start/resume/switch results include a safe `vision_notice`, including transcription-pending and completed/draft recovery paths.
+- Identify the saved method, planned model, host/service, independent runtime and configuration source. Separate configured model IDs from verified execution identity; main conversations without an exposed model ID say so. Omit keys, private service paths and connection/request records. Explicit visual skips return no vision notice.
+- Windows: 150 script tests, mypy and pinned official/workspace Skill validation passed. The current Codex conversation loaded the candidate source and completed fixed-choice notice, saved-route resume, actual image inspection, screenshot review, delivery and completed-task recovery; explicit skips returned no vision notice. No new conversation or external model/ASR service was used. Mac acceptance is pending; unaffected 4.0.0 behavior retains its recorded verification scope.
+
 ## 4.0.0
 
 - Select vision once per task from four choices presented together: main Agent, native host/model, independent Codex Agent with a custom connection, or a Chat Completions image API. Writing and ASR remain independent. Native model catalogs/capabilities come from actual session evidence; unavailable and unverified paths are shown honestly, and model mismatches never trigger silent fallback.

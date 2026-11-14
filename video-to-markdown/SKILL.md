@@ -1,8 +1,8 @@
 ---
 name: video-to-markdown
 metadata:
-  version: "4.0.0"
-description: v4.0.0｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
+  version: "4.1.0"
+description: v4.1.0｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
 compatibility: Claude Code, Codex and WorkBuddy are required targets; native model routing depends on actual session capabilities. Requires uv >= 0.8, ffmpeg, ffprobe and a usable vision route unless visuals are explicitly skipped. Cloud transcription uses installed AIhub Audio or user-authorized Lark CLI >=1.0.98,<2. Native Windows uses PowerShell. See README for tested scope.
 ---
 
@@ -56,6 +56,8 @@ uv run --frozen --project <skill-dir> <skill-dir>/scripts/workflow.py resume --t
 ```
 
 Resume checks source/audio identity and retains the saved ASR provider and vision route, regardless of changed defaults. A task lock prevents concurrent operations, including final renaming. Preserve receipts and known IDs; stop on `submission_unknown`. V4 supports task schema 4 only: preserve unsupported tasks and report the format without migration, recreation or resubmission. A requested route change uses `vision-switch` with the first affected batch and a reason.
+
+Before the first image recognition after starting, resuming or switching routes, send the user the [mandatory vision notice](references/vision-routing.md#announce-before-recognition). Relay the returned `vision_notice` even when a fixed configuration was reused or transcription is still pending.
 
 ## Inspect Every Batch
 

@@ -21,6 +21,7 @@ The invocation directory, project root, and Skill directory are separate facts:
 ## Agent Loop
 
 1. Run `start` or `resume` and inspect its JSON result.
+   Relay any `vision_notice` according to [the mandatory notice rule](vision-routing.md#announce-before-recognition), including with fixed settings and pending transcription, before the first image call in this run.
    If it returns a transcription action, follow [transcription.md](transcription.md) before continuing. Exit code zero alone does not mean transcription or the document is complete. Always relay default/identity save results and dependency result-check notices, including after a successful resume.
 2. If visuals are explicitly skipped, use subtitle/audio coverage and proceed to writing. No-audio visual tasks have an empty transcript with a verified `no_audio` source.
 3. For enabled visuals, choose once through [vision-routing.md](vision-routing.md), then run `batch` and execute every returned dispatch with that route. Originals, contact sheets and results share a saved parent batch. A batch is not complete merely because its contact sheet was opened.

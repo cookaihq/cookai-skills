@@ -19,6 +19,11 @@ def _print(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def _print_task(value: dict, manifest: dict) -> None:
+    notice = vision.public_notice(manifest)
+    _print({**value, **({"vision_notice": notice} if notice else {})})
+
+
 def _runtime_config(args) -> tuple[Path, config.ResolvedConfig]:
     cwd = Path.cwd().resolve()
     resolved = config.resolve(cwd=cwd, use_home=bool(getattr(args, "use_local_key", False)) and not getattr(args, "no_global_config", False), read_vision=not bool(getattr(args, "skip_visuals", False)))
@@ -182,7 +187,7 @@ def _start_prepared(args, task_dir, manifest, private, resolved, source_policy, 
     state.save_manifest(task_dir, manifest)
     pending_vision = _choose_vision(args, task_dir, manifest, resolved)
     if pending_vision:
-        _print(pending_vision)
+        _print_task(pending_vision, manifest)
         return 0
     pending_asr = _prepare_transcript(
         task_dir=task_dir,
@@ -195,11 +200,11 @@ def _start_prepared(args, task_dir, manifest, private, resolved, source_policy, 
         options=vars(args),
     )
     if pending_asr:
-        _print(pending_asr)
+        _print_task(pending_asr, manifest)
         return 0
     _finish_preparation(task_dir, manifest, resolved, source_path)
     pending = [item["batch_id"] for item in manifest["batches"] if item["status"] == "ready_for_observation"]
-    _print(
+    _print_task(
         {
             "task_dir": str(task_dir),
             "document": str(task_dir / manifest["artifacts"]["document"]),
@@ -208,7 +213,7 @@ def _start_prepared(args, task_dir, manifest, private, resolved, source_policy, 
             "next_action": "inspect_batch" if manifest["vision"]["enabled"] else "write_document",
             "next_batch_id": pending[0] if pending else None,
             **asr.public_status(private),
-        }
+        }, manifest
     )
     return 0
 
@@ -237,13 +242,13 @@ def command_resume(args) -> int:
         media.verify_audio(task_dir, manifest["audio_for_asr"])
     pending_vision = _choose_vision(args, task_dir, manifest, resolved)
     if pending_vision:
-        _print(pending_vision)
+        _print_task(pending_vision, manifest)
         return 0
     if manifest.get("draft_delivered_once"):
         validation = review.validate_task(task_dir, manifest, allow_draft=True)
         manifest["stage"] = "draft_delivered" if validation.get("draft_ready") and delivery.copy_is_current(task_dir, manifest) else "draft_validated" if validation.get("draft_ready") else manifest["stage"]
         state.save_manifest(task_dir, manifest)
-        _print({"task_dir": str(task_dir), "stage": manifest["stage"], "next_action": "draft_delivered" if manifest["stage"] == "draft_delivered" else "repair_artifacts", "validation": validation})
+        _print_task({"task_dir": str(task_dir), "stage": manifest["stage"], "next_action": "draft_delivered" if manifest["stage"] == "draft_delivered" else "repair_artifacts", "validation": validation}, manifest)
         return 0 if validation.get("draft_ready") else 1
     if manifest.get("stage") == "complete" or manifest.get("completed_once"):
         manifest["completed_once"] = True
@@ -252,7 +257,7 @@ def command_resume(args) -> int:
         if copied:
             manifest["stage"] = "complete"
             state.save_manifest(task_dir, manifest)
-        _print(
+        _print_task(
             {
                 "task_dir": str(task_dir),
                 "stage": manifest["stage"],
@@ -262,7 +267,7 @@ def command_resume(args) -> int:
                 "copy_directory": manifest["delivery"]["copy_directory"],
                 "asr_task_id": manifest.get("asr", {}).get("task_id"),
                 **asr.public_status(private),
-            }
+            }, manifest
         )
         return 0 if validation["complete"] else 1
     if not (task_dir / "transcript.json").exists():
@@ -277,7 +282,7 @@ def command_resume(args) -> int:
             options=vars(args),
         )
         if pending_asr:
-            _print(pending_asr)
+            _print_task(pending_asr, manifest)
             return 0
     _finish_preparation(task_dir, manifest, resolved, source_path)
     pending = [
@@ -285,7 +290,7 @@ def command_resume(args) -> int:
         for item in manifest.get("batches") or []
         if item.get("status") in {"ready_for_observation", "needs_resample"}
     ]
-    _print(
+    _print_task(
         {
             "task_dir": str(task_dir),
             "stage": manifest["stage"],
@@ -294,7 +299,7 @@ def command_resume(args) -> int:
             "next_batch_id": pending[0] if pending else None,
             "asr_task_id": manifest.get("asr", {}).get("task_id"),
             **asr.public_status(private),
-        }
+        }, manifest
     )
     return 0
 
@@ -453,7 +458,10 @@ def command_vision(args) -> int:
         result = clarity.accept_screenshots(task_dir, manifest) if args.accept else {"dispatches": clarity.screenshot_dispatches(task_dir, manifest)}
     else:
         raise WorkflowError("unknown vision operation")
-    _print(result)
+    if args.command == "vision-switch":
+        _print_task(result, manifest)
+    else:
+        _print(result)
     return 0
 
 
