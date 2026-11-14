@@ -1,7 +1,7 @@
 [project]
 name = "as-session-launcher"
 # Distribution mirror of SKILL.md metadata.version; update together.
-version = "1.1.0"
+version = "1.2.0"
 requires-python = ">=3.13,<3.14"
 dependencies = []
 

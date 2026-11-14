@@ -1,8 +1,14 @@
 # AS · Agent 会话启动器
 
+## 快速打开配置
+
+Codex 发送 `$as 配置` 或 `$as 打开设置页面`；Claude Code 将 `$` 换为 `/`，WorkBuddy 明确选中本 Skill 后发送相同短语。配置/设置的八种短语均可直接打开已有页面，返回有效链接和实际空闲期限；缺少业务配置也能打开。附带业务正文或启动参数时继续原业务流程。
+
+1.2.0 配置快捷入口已在 Windows 原生 Codex 0.169.0 默认沙箱完成实际调用、页面授权 HTTP 访问和停止验证；macOS 待验，Claude Code 未实测，WorkBuddy 本批按用户决定跳过。此次未调用付费业务或重跑完整业务流程。
+
 在 Orca 的当前项目和分支中，新开一个 Agent 会话。你可以保存每个 Agent 的默认模型与思考强度，用短代码选择预设，并自动发送首条消息；加上 `-r`，让新会话先读取当前会话的原始记录再接手。
 
-当前版本 **[1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.1.0)**，包含常用配置初始化、默认值快捷采用、调用解析与原始记录交接。Windows Codex 默认沙箱的完整启动验收仍受访问限制阻塞，macOS 尚待实机验收，具体范围见下文。
+当前版本 **[1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.2.0)**，包含常用配置初始化、默认值快捷采用、调用解析与原始记录交接。Windows Codex 默认沙箱的完整启动验收仍受访问限制阻塞，macOS 尚待实机验收，具体范围见下文。
 
 ## 开始前
 

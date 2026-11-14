@@ -1,12 +1,18 @@
 ---
 name: video-to-markdown
 metadata:
-  version: "4.1.1"
-description: v4.1.1｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
+  version: "4.2.0"
+description: v4.2.0｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
 compatibility: Claude Code, Codex and WorkBuddy are required targets; native model routing depends on actual session capabilities. Requires uv >= 0.8, ffmpeg, ffprobe and a usable vision route unless visuals are explicitly skipped. Cloud transcription uses installed AIhub Audio or user-authorized Lark CLI >=1.0.98,<2. Native Windows uses PowerShell. See README for tested scope.
 ---
 
 # video-to-markdown
+
+## 配置页面快捷入口
+
+先分流：显式调用本 Skill 后，内容去掉首尾空白后恰为 `配置`、`配置页面`、`打开配置`、`打开配置页面`、`设置`、`设置页面`、`打开设置`、`打开设置页面` 中任一项时，直接按[配置快捷分支](references/configuration.md#配置页面快捷入口)执行 `config-ui start`，返回有效链接与实际期限后结束。本分支先于更新检查及转换工作流读取，不查视频、字幕、转写依赖或模型可用性，不创建转换任务。
+
+仅这些完整短语进入快捷分支；带业务正文、预设、参数或字面 `--` 的请求继续原流程。
 
 Convert one video into a source-faithful GFM document. The main Agent orchestrates and writes; the selected vision route performs all image judgments, including supplements, second-pass review and final screenshots. ASR remains independent. A pending action is not a completed transcription or document.
 

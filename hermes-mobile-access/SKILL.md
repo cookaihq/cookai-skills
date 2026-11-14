@@ -1,12 +1,18 @@
 ---
 name: hermes-mobile-access
-description: v0.2.0｜将 Android Hermes Mobile 接入当前 Windows 或 macOS 上的 Hermes Desktop 后端，复用已有 FRP，检查认证、恢复端口变化并管理连接。适用于手机接入、连接排障和停用。
+description: v0.3.0｜将 Android Hermes Mobile 接入当前 Windows 或 macOS 上的 Hermes Desktop 后端，复用已有 FRP，检查认证、恢复端口变化并管理连接。适用于手机接入、连接排障和停用。
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 compatibility: Claude Code, Codex or WorkBuddy with a local shell and uv >= 0.8. Requires frpc-launch >= 1.6.0. Windows with Android basic text chat is tested; macOS, reconnect history and Desktop restart/sleep recovery remain unverified. The access process must run as the Hermes owner.
 ---
 
 # Hermes 手机接入
+
+## 配置页面快捷入口
+
+先分流：显式调用本 Skill 后，内容去掉首尾空白后恰为 `配置`、`配置页面`、`打开配置`、`打开配置页面`、`设置`、`设置页面`、`打开设置`、`打开设置页面` 中任一项时，直接按[配置协议的快捷分支](references/configuration.md#配置页面快捷入口)打开现有配置页，返回有效链接与实际期限后结束。本分支先于更新检查和后端发现；保留真实连接选择及同用户校验，不探测域名、不启动 FRP 或发送聊天。
+
+仅这些完整短语进入快捷分支；带业务正文、预设、参数或字面 `--` 的请求继续原流程。
 
 **0.1.0 已验证 Windows 后端与 Android 的基础文字消息往返。** Windows 已通过公网 HTTPS、独立密钥准入、真实 profile REST、WS 探活、停止及进程退出后 FRP 清理/重连；Codex 安装及合成回归通过。macOS、重连历史同步、Desktop 重启/睡眠恢复及其余手机场景仍待验，不能报告全部场景通过。Windows 默认 Codex 沙箱使用另一系统账号时，真实接入仍返回 `backend_user_mismatch`，不绕过同用户校验。
 
@@ -38,7 +44,7 @@ uv run --frozen --project <skill> python -B <skill>/scripts/hermes_mobile_access
 - 连接/排障：`plan` 报告缺项和域名访问结果，`doctor` 核对运行状态与 FRP 来源。目标、密钥保存及接入范围已获授权后执行 `connect`；先验证隔离的公网准入，再开放后端并核验 REST/WS。`awaiting_mobile` 表示等待手机验收，失败会清理本实例。所需证据与恢复边界见 [接入与验收](references/connection.md)。
 - 状态/断开：`status` / `disconnect` 仅针对所选稳定 ID。停止成功只表明本实例进程停止，仍需核对公网入口及已有流关闭。保持 Desktop 和其他 FRP 项目运行。
 
-配置协议、来源错误、保存冲突和运行绑定见 [配置协议](references/configuration.md)。配置页面只监听 loopback；交付链接旁注明 **📱 仅本机访问，跨设备需要 FRP / Tailscale**。页面使用后可 `configure stop`；默认 60 分钟无操作到期，不随业务连接公开页面。
+配置协议、来源错误、保存冲突和运行绑定见 [配置协议](references/configuration.md)。配置页面只监听 loopback；交付采用本次有效链接和实际剩余空闲期限。首次附一条填好实际项目路径的重开请求：“请打开项目【实际路径】中 hermes-mobile-access 的配置页，给我新的访问链接。”以及“手机访问：告诉 Agent‘我要用手机打开这个页面。’”同会话重发同页面只给链接与期限。页面使用后可 `configure stop`；默认 60 分钟无操作到期，不随业务连接公开页面。
 
 ## 结果与接续
 

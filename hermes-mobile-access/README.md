@@ -1,5 +1,11 @@
 # Hermes 手机接入
 
+## 快速打开配置
+
+Codex 发送 `$hermes-mobile-access 配置` 或 `$hermes-mobile-access 打开设置页面`；Claude Code 将 `$` 换为 `/`，WorkBuddy 明确选中本 Skill 后发送相同短语。配置/设置的八种短语均可直接打开已有页面，返回有效链接和实际空闲期限；缺少业务配置也能打开。附带业务正文或启动参数时继续原业务流程。
+
+0.3.0 配置快捷入口已在 Windows 原生 Codex 0.169.0 默认沙箱完成实际调用、页面授权 HTTP 访问和停止验证；macOS 待验，Claude Code 未实测，WorkBuddy 本批按用户决定跳过。此次未调用付费业务或重跑完整业务流程。
+
 目标是让 Android Hermes Mobile 连接当前 Windows 或 macOS 电脑上的 Hermes Desktop，通过已有 FRP 使用完整 HTTPS 地址。
 
 **0.1.0 已通过 Windows 后端与 Android 的基础文字消息收发。** 已实现发现、命名连接/UI、独立密钥认证、域名预检、后台连接/恢复及独立 FRP。Windows 另已验证公网 HTTPS、认证拒绝、真实 profile REST、WS 探活、进程退出后 FRP 停止及重连。macOS、重连历史同步、Desktop 重启/睡眠恢复及其余手机场景仍待实测；首版不表示这些场景已全部验收。
@@ -10,9 +16,9 @@
 
 将下面的请求交给你正在使用的 Codex、Claude Code 或 WorkBuddy：
 
-> 请从 https://github.com/cookaihq/cookai-skills 安装 hermes-mobile-access v0.2.0，并准备同仓的 frpc-launch v1.6.0，保留我的已有配置，验证当前 Agent 能发现和调用。已有运行连接请沿用原项目与来源重新连接，应用本次版本。
+> 请从 https://github.com/cookaihq/cookai-skills 安装 hermes-mobile-access v0.3.0，并准备同仓的 frpc-launch v1.6.0，保留我的已有配置，验证当前 Agent 能发现和调用。已有运行连接请沿用原项目与来源重新连接，应用本次版本。
 
-固定版本入口为 [hermes-mobile-access/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access/v0.2.0)，安装其中的 `hermes-mobile-access/`；FRP Launch 需要 1.6.0 起提供的消费者接口 v1。宿主使用同一份 Skill；Codex 通常使用 `~/.agents/skills/`，Claude Code 使用 `~/.claude/skills/`，WorkBuddy 使用 `~/.workbuddy/skills/`。本版已完成 Codex 安装与合成回归，其他两者保留兼容入口但未实测。
+固定版本入口为 [hermes-mobile-access/v0.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access/v0.3.0)，安装其中的 `hermes-mobile-access/`；FRP Launch 需要 1.6.0 起提供的消费者接口 v1。宿主使用同一份 Skill；Codex 通常使用 `~/.agents/skills/`，Claude Code 使用 `~/.claude/skills/`，WorkBuddy 使用 `~/.workbuddy/skills/`。本版已完成 Codex 安装与合成回归，其他两者保留兼容入口但未实测。
 
 ## 配置与使用
 

@@ -1,5 +1,11 @@
 # 配置与稳定连接
 
+## 配置页面快捷入口
+
+沿用 `SKILL.md` 的锁定命令入口和真实项目、个人配置启用、保存范围及已明确的连接/FRP 上下文。已有准确连接 ID 时直接传 `--connection`；否则只运行 `connections list` 取得实际集合与默认项。无连接也能打开配置页；唯一连接或有效默认按原选择协议处理，多个连接且无法唯一确定目标、默认失效时先让用户选择，不猜第一条。
+
+然后直接 `configure start`。它已内建探活、同归属复用及失效重启；结果未确定才以相同上下文 `configure status` 核查。无需提前 `discover`、`profiles`、`doctor`、`plan` 或 `probe-domain`。页面所需真实身份、配置来源和后端所有者校验继续保留；校验失败如实显示，不造候选。只交付有效链接与实际剩余空闲期限，不连接 FRP、不调用聊天，也不因保存自动接入。
+
 业务键按进程环境 → 调用项目 `.env.hermes-mobile-access` → `.env.local` → `.env` → 显式启用的个人 `~/.config/hermes-mobile-access/.env` 读取。不搜索父目录、其他 Skill 或备份；FRP 的凭证始终由 FRP Launch 自己加载。
 
 `HMA_CONNECTION` 保存默认稳定 ID，`HMA_CONNECTIONS_JSON` 保存 `{"schema_version":1,"connections":{...}}`。ID 为程序生成的 `hma_<32位小写十六进制>`；连接显示名称按 Unicode NFC、去首尾空白与 casefold 比较唯一，1–64 字符，可含中文和空格。

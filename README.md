@@ -28,18 +28,18 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 <!-- release-table:begin -->
 | 目标 | 版本 | Release |
 |---|---|---|
-| agent-instructions-update | 0.1.1 | [agent-instructions-update/v0.1.1](https://github.com/cookaihq/cookai-skills/releases/tag/agent-instructions-update%2Fv0.1.1) |
-| as | 1.1.0 | [as/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.1.0) |
+| agent-instructions-update | 0.2.0 | [agent-instructions-update/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/agent-instructions-update%2Fv0.2.0) |
+| as | 1.2.0 | [as/v1.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/as%2Fv1.2.0) |
 | bilibili-charge-download | 1.0.0 | [bilibili-charge-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/bilibili-charge-download%2Fv1.0.0) |
 | exit-ip | 1.1.0 | [exit-ip/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/exit-ip%2Fv1.1.0) |
 | frpc-launch | 1.6.0 | [frpc-launch/v1.6.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.6.0) |
 | git-setup | 1.0.2 | [git-setup/v1.0.2](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv1.0.2) |
-| hermes-mobile-access | 0.2.0 | [hermes-mobile-access/v0.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access%2Fv0.2.0) |
+| hermes-mobile-access | 0.3.0 | [hermes-mobile-access/v0.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access%2Fv0.3.0) |
 | pdf-to-markdown-vision | 1.0.1 | [pdf-to-markdown-vision/v1.0.1](https://github.com/cookaihq/cookai-skills/releases/tag/pdf-to-markdown-vision%2Fv1.0.1) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
-| skill-configuration-and-artifacts-ui | 1.3.0 | [skill-configuration-and-artifacts-ui/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv1.3.0) |
-| video-to-markdown | 4.1.1 | [video-to-markdown/v4.1.1](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv4.1.1) |
+| skill-configuration-and-artifacts-ui | 1.4.0 | [skill-configuration-and-artifacts-ui/v1.4.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv1.4.0) |
+| video-to-markdown | 4.2.0 | [video-to-markdown/v4.2.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv4.2.0) |
 <!-- release-table:end -->
 
 Hermes 手机接入 0.1.0 与 FRP Launch 1.6.0 的已验范围及待验事项见各自 README；Windows/Android 基础文字收发已验证，macOS 等其余场景按说明继续验收。
