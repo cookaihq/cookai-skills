@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "examples"))
 from skill_ui import UIError
 from skill_ui.server import Server
 from skill_ui.storage import JsonConfig
+from skill_ui.contracts import public_config
 from studio_adapter import Studio
 from layers_adapter import LayeredStudio
 
@@ -97,6 +98,46 @@ class CoreTests(unittest.TestCase):
         result=store.save({"ordered":{"op":"unset"}},store.snapshot()["revision"],"project")
         self.assertEqual(result["fields"][1]["effective"]["value"],["c"])
         self.assertEqual(result["fields"][1]["effective"]["source"],"default")
+
+    def test_partial_save_keeps_missing_prerequisite_and_rejects_invalid_edits(self):
+        server, opener = self.server("configuration")
+        self.login(server, opener)
+        state = self.request(server, opener, "/api/state")[1]["config"]
+        self.assertEqual(state["readiness"], {"ready": False, "missing": ["api_key"]})
+        self.assertEqual(state["presentation"]["focus"], ["format", "retain"])
+        request = {"target": "project", "revision": state["revision"], "changes": {"format": {"op": "set", "value": "纯文本"}}}
+        code, preview, _ = self.request(server, opener, "/api/preview", request)
+        self.assertEqual(code, 200)
+        self.assertEqual(preview["config"]["validation_errors"], [])
+        self.assertEqual(preview["config"]["readiness"]["missing"], ["api_key"])
+        path = self.project / "demo-state/settings.json"
+        self.assertFalse(path.exists())
+        code, saved, _ = self.request(server, opener, "/api/save", request)
+        self.assertEqual(code, 200)
+        self.assertFalse(saved["config"]["readiness"]["ready"])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"format": "纯文本"})
+        request.update(revision=saved["config"]["revision"], changes={"days": {"op": "set", "value": "bad number"}})
+        self.assertEqual(self.request(server, opener, "/api/save", request)[0], 422)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"format": "纯文本"})
+
+    def test_readiness_defaults_dependencies_empty_and_presentation_projection(self):
+        store = JsonConfig(self.project / "settings.json", [
+            {"id": "count", "label": "Count", "type": "number", "required": True, "default": 0},
+            {"id": "enabled", "label": "Enabled", "type": "boolean", "required": True, "default": False},
+            {"id": "token", "label": "Token", "sensitive": True, "required": True, "depends_on": {"enabled": True}},
+        ])
+        state = store.snapshot()
+        state["presentation"] = {"title": "Example", "focus": ["count"], "private": "not public"}
+        self.assertEqual(public_config(state)["readiness"], {"ready": True, "missing": []})
+        self.assertNotIn("private", public_config(state)["presentation"])
+        candidate = store.preview({"enabled": {"op": "set", "value": True}}, state["revision"], "project")
+        self.assertEqual(candidate["readiness"]["missing"], ["token"])
+        self.assertTrue(candidate["validation_errors"])
+        with self.assertRaises(UIError):
+            store.save({"enabled": {"op": "set", "value": True}}, state["revision"], "project")
+        self.assertFalse(store.path.exists())
+        store.path.write_text('{"enabled":true,"token":""}', encoding="utf-8")
+        self.assertEqual(public_config(store.snapshot())["readiness"]["missing"], ["token"])
 
     def test_layer_preview_masking_and_exact_target_save(self):
         server, opener = self.server("configuration", adapter_class=LayeredStudio)

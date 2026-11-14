@@ -11,7 +11,7 @@ from pathlib import Path
 import secrets
 
 from skill_ui import UIError
-from skill_ui.storage import active, apply_changes, atomic_json, file_lock, private_directory, prepare_private_write, validation_errors
+from skill_ui.storage import active, apply_changes, atomic_json, file_lock, private_directory, prepare_private_write, validation_errors, missing_required
 from studio_adapter import Studio
 
 
@@ -119,8 +119,10 @@ class LayeredDemo:
                                active=active(field, values), targets=targets, effective=result, rows=rows))
         issues = validation_errors(self.fields, values, changes or {})
         issues.extend(f["label"] + "：" + f["effective"].get("message", "配置无效") for f in fields if f["effective"]["status"] in ("error", "invalid"))
+        missing = missing_required(self.fields, values)
         return dict(revision=revision, layers=layers, fields=fields, default_targets={"project": "project_plugin_local", "global": "plugin_env"},
-                    validation="本地类型、依赖与必需项校验（未验证 API 连通性）", validation_errors=list(dict.fromkeys(issues)),
+                    readiness={"ready": not missing and not issues, "missing": missing},
+                    validation="本次修改的类型、依赖与完整性校验（未验证 API 连通性）", validation_errors=list(dict.fromkeys(issues)),
                     note="合成分层示例：所有项目／全局文件都位于当前演示目录，不读取真实配置。")
 
     def snapshot(self):
@@ -174,7 +176,8 @@ class LayeredStudio(Studio):
         self.store = LayeredDemo(project)
 
     def config(self):
-        return dict(self.store.snapshot(), task={"id": "layers-demo", "binding": str(self.project),
+        return dict(self.store.snapshot(), presentation={"title": "配置内容工作室", "focus": ["model", "format"]},
+                    task={"id": "layers-demo", "binding": str(self.project),
                     "continuation": "继续当前演示项目的 layers-demo 任务，先核对配置和原任务授权。"})
 
 

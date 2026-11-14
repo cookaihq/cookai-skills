@@ -44,6 +44,18 @@ class LayerTests(unittest.TestCase):
             self.assertEqual(self.field("api_key", preview)["effective"]["source"], "plugin_env")
         self.assertIn("api_key", json.loads(self.store.path("project_local").read_text()))
 
+    def test_unrelated_layered_save_with_missing_required_and_real_clear_fallback(self):
+        self.write("plugin_env", {"timeout": 90})
+        self.write("project_local", {})
+        before = self.store.snapshot()
+        self.assertEqual(before["readiness"]["missing"], ["endpoint", "api_key"])
+        saved = self.store.save({"timeout": {"op": "set", "value": 0}}, before["revision"], "project_local")
+        self.assertFalse(saved["readiness"]["ready"])
+        self.assertEqual(self.field("timeout", saved)["effective"]["value"], 0)
+        cleared = self.store.save({"timeout": {"op": "unset"}}, saved["revision"], "project_local")
+        self.assertEqual(self.field("timeout", cleared)["effective"]["source"], "plugin_env")
+        self.assertEqual(json.loads(self.store.path("project_local").read_text()), {})
+
     def test_same_scope_priority_environment_and_shadowed_write(self):
         self.write("project_skill", {"model":"detail-v2"})
         self.write("project_env", {"retries":0})

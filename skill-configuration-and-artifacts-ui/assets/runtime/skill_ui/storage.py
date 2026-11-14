@@ -275,11 +275,18 @@ def apply_changes(values, fields, changes):
     return result
 
 
+def missing_required(fields, effective):
+    """Business readiness, independent of whether an unrelated edit can be saved."""
+    return [f["id"] for f in fields if active(f, effective) and f.get("required")
+            and effective.get(f["id"]) in (None, "", [])]
+
+
 def validation_errors(fields, effective, changes):
     errors = []
     for field in fields:
         name = field["id"]
-        if active(field, effective) and field.get("required") and effective[name] in (None, "", []):
+        related = name in changes or any(key in changes for key in field.get("depends_on", {}))
+        if related and name in missing_required([field], effective):
             errors.append("请补齐：" + field["label"])
         if name in changes and not active(field, effective) and changes[name]["op"] == "set":
             errors.append(field["label"] + "当前不适用，请先核对关联设置。")
@@ -319,7 +326,9 @@ class JsonConfig:
                                active=active(f, effective), targets=[] if f.get("readonly") else ["project"],
                                effective={"value": value, "source": "project" if present else "default" if "default" in f else None, "status": status},
                                rows=[{"layer": "project", "present": present, "value": values.get(f["id"]), "status": "effective" if present else "missing"}]))
-        return {"revision": revision, "validation": "本地格式与必需项校验",
+        missing = missing_required(self.fields, effective)
+        return {"revision": revision, "validation": "本次修改的格式与关联完整性校验（未验证 API 连通性）",
+                "readiness": {"ready": not missing, "missing": missing},
                 "default_targets": {"project": "project"},
                 "layers": [{"id": "project", "name": self.path.name, "path": str(self.path), "scope": "project",
                             "scope_label": "仅此项目", "readonly": False, "enabled": True}],

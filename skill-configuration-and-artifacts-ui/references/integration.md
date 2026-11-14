@@ -28,9 +28,9 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 
 | 方法 | 输入/输出与职责 |
 | --- | --- |
-| `config()` | `{revision, layers, fields, default_targets?, validation_errors?, validation?, note?, task?}`；返回真实加载器计算的生效结果、每层状态及允许的保存目标。敏感字段用 `sensitive: true`，核心对生效值和所有层的值脱敏 |
+| `config()` | `{revision, layers, fields, default_targets?, presentation?, readiness?, validation_errors?, validation?, note?, task?}`；返回真实加载器计算的生效结果、每层状态及允许的保存目标。敏感字段用 `sensitive: true`，核心对生效值和所有层的值脱敏 |
 | `preview(changes, revision, target)` | 变更为 `{field_id: {op: "set", value: ...} 或 {op: "unset"}}`，`target` 是层 ID；校验修订号和目标，内存应用所选文件的修改，再用同一加载逻辑解析。返回候选 config，`validation_errors` 为安全消息列表；不写文件、不写保存回执 |
-| `save(changes, revision, target)` | 再次校验全部输入、目标写权限、revision、类型、枚举、依赖与必需项，原子保存所选文件，重新加载后返回 config。不能信任先前预览；失败抛安全的 `UIError`，不部分保存 |
+| `save(changes, revision, target)` | 再次校验输入、目标写权限、revision、类型、枚举、依赖及关联完整性，原子保存所选文件，重新加载后返回 config。不相关的必要缺项不阻止有效修改；不能信任先前预览；失败抛安全的 `UIError`，不部分保存 |
 | `artifacts()` | `{items, note?}`，将真实记录映射成可显示条目。集合条目仅 `id/title` 必需，其余按实际业务提供 |
 | `resource(id)` | 返回 `Resource(Path或bytes, mime, name)`；只允许已归属本项目且允许用户取用的成果。ID 查白名单，不把请求 ID 拼成文件路径 |
 | `extensions()` | 可选 `{文件名: 已打包文件Path}`，仅登记开发者可信 JS/CSS。JS 导出 `register(add)`，调用 `add(renderer名称, (container,data,helpers)=>...)`；示例展示回执 |
@@ -55,11 +55,17 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 
 `default_targets` 映射范围到默认保存层，例如 `{"project":"project_local","global":"plugin_env"}`；不表示读取优先级。单 JSON 目标同样返回一层及上述字段结构，无需伪造全局层。缺少 `layers` 的旧适配器明确报协议迁移错误，不静默计算继承。
 
+`presentation` 可提供安全的 `title/description/focus/initial_target`，其中 `focus` 为本次优先展示的字段 ID 列表，`initial_target` 为初始写入层 ID。Agent 在每次打开时可通过启动参数 `--fields api_key,format --target project_local` 覆盖默认展示；只传 ID，不传值或密钥。未知 ID 被忽略，URL 不增加写权限。明确给空 `--fields ""` 仅先显示必要缺项；未指定焦点且没有缺项时，模板展示前三个非高级适用项作为兜底，业务应声明合适的默认焦点。页面把当前必要缺项并入默认字段，后续保持这些字段的位置；依赖新激活的缺项也会加入。
+
+初始保存目标依次采用有效的本次 `target`、适配器 `initial_target`、相关字段已有的可写来源、声明的个人通用默认文件、项目默认文件。切换范围沿用该范围的上次选择或相关已有来源。字段 `targets` 和只读限制仍逐项检查，不允许写入的字段提供可用位置或只读说明。默认文件须由开发者声明，不能由读取优先级代替。
+
+`readiness: {ready: boolean, missing: [字段ID]}` 描述业务是否已具备必要配置，不作为保存按钮的阻塞条件。核心在脱敏前补算 active + required 的空值或错误状态，保留适配器声明的业务缺项。`validation_errors` 仅放本次保存阻塞错误，不能把所有未填写必要项一律塞入。`storage.missing_required` 与 `validation_errors` 分别提供示例计算；后者保留已修改必需项、关联依赖和原子记录约束。真实业务的就绪条件与保存约束由原加载器定义，格式检查不代替业务鉴权。
+
 普通状态、预览和保存响应中的敏感 `value` 由核心替换为 `mask/configured`；嵌套记录必须整体标为敏感或由适配器拆成安全展示，不向通用元数据塞原值。眼睛接口 `/api/reveal` 接收 `{id, revision, target}`，`target:null` 查看当前生效值，层 ID 查看该层值；均复核 revision。掩码永远不是保存值。帮助、错误、任务与来源文字也不得含凭证。
 
 `/api/preview` 与 `/api/save` 接收同样的 `{changes, revision, target}`。修订号覆盖所有影响生效结果的文件、进程注入和启用开关；预览无副作用。不同文件的草稿彼此独立，保存一个文件后仍保留其他草稿，并以新快照重新预览。外部更改冲突返回 409，用户重载核对前不写入。
 
-`task` 可包含安全的 `id/binding/continuation`。保存后服务写入独立实例的 `saved.json`，`status` 返回当前实例回执。等待中的 Agent 核对原任务、项目、授权和输入绑定，且配置满足后继续；已结束会话用 continuation 提示词。核心不执行业务请求。
+`task` 可包含安全的 `id/binding/continuation`。保存后服务写入独立实例的 `saved.json`，`status` 返回当前实例回执。页面留在原处并提示用户发送“配置已保存，请继续。”；Agent 收到后核对原任务、项目、授权、输入绑定和配置是否满足，再接续。核心不执行业务请求。
 
 产物条目按需提供 `kind/task/summary/status/metadata/resource/url/copy_text/preview`。`url` 仅允许 HTTP(S)，不提供失效链接。内置预览为 text、markdown（安全基础文本排版）、image、audio、video、table、comparison；复杂 Markdown/PDF/交互视图采用按目标确认的渲染器。`custom` 使用 `renderer/data`；定制视图通过 DOM textContent 插入不可信数据。下载采用分块和单 Range；超大集合或重型文档需适配器分页、摘要或定制视图，不能把全库塞入浏览器。
 
@@ -76,7 +82,7 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/ui.py start --ada
 uv run --frozen --project <本Skill> python <本Skill>/scripts/ui.py start --adapter <本Skill>/examples/studio_adapter.py --project <演示项目> --page artifacts --runtime-dir <演示项目>/tmp/ui
 ```
 
-必要配置入口在返回 URL 的 fragment 前加 `?mode=required`，主动管理用 `?mode=all`（默认）。`status`、`stop` 使用相同 adapter/project/page/runtime-dir 参数；每个页面独立停止。`--idle-seconds` 默认 3600，短期限仅用于验收。
+每次 `start` 可传 `--fields api_key,format` 与 `--target project_local`，返回 URL 会在 fragment 前携带对应 `fields/target` 查询参数；复用同一服务也能返回不同焦点链接。首次补填可传空字段列表；主动查看或修改由 Agent 根据上下文选 ID，无需用户选择场景。旧 `mode/advanced` 查询不再控制新表单，升级业务入口时一并移除。`status`、`stop` 使用相同 adapter/project/page/runtime-dir 参数；每个页面独立停止。`--idle-seconds` 默认 3600，短期限仅用于验收。
 
 审阅分层交互时，将配置示例的 adapter 换为 `<本Skill>/examples/layers_adapter.py`。它在演示项目的 `demo-layers/` 创建合成 JSON 文件，首次为项目本地文件写入假 Key，为全局共享文件写入其余基础项；不读写真实全局目录。它与单文件示例共用同一页面和接口，实际业务仍使用自己的配置协议。
 

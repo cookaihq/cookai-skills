@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from urllib.request import ProxyHandler, Request, build_opener
+from urllib.parse import urlencode
 
 from .contracts import UIError
 from .server import Server
@@ -105,6 +106,8 @@ def main():
     parser.add_argument("--runtime-dir", type=Path, required=True, help="Ignored private directory outside the install")
     parser.add_argument("--idle-seconds", type=int, default=3600)
     parser.add_argument("--public-origin", help="Exact verified proxy origin; networking is configured separately")
+    parser.add_argument("--fields", help="Comma-separated configuration field IDs to show for this opening (no values)")
+    parser.add_argument("--target", help="Initial configuration write target ID; adapter permissions still apply")
     args = parser.parse_args()
     args.adapter, args.project = args.adapter.resolve(), args.project.resolve()
     if not args.adapter.is_file() or not args.project.is_dir():
@@ -158,7 +161,9 @@ def main():
         if record:
             output.update(instance=record["instance"], page=record["page"], project=record["project"], lifetime=record["lifetime"])
             if args.command == "start":
-                output["url"] = record["public_origin"] + "/#" + record["token"]
+                context = {k: v for k, v in {"fields": args.fields, "target": args.target}.items() if v is not None} if args.page == "configuration" else {}
+                query = "?" + urlencode(context) if context else ""
+                output["url"] = record["public_origin"] + "/" + query + "#" + record["token"]
         saved = directory / "saved.json"
         if record and saved.exists():
             receipt = json.loads(saved.read_text(encoding="utf-8"))

@@ -40,6 +40,7 @@ class Studio(Adapter):
 
     def config(self):
         return dict(self.store.snapshot(), note="合成演示：这里的保存仅写入所指定演示项目，不调用外部服务。",
+                    presentation={"title":"配置内容工作室", "focus":["format", "retain"]},
                     task={"id":"demo-interview-001","binding":str(self.project),
                           "continuation":"继续当前演示项目的 demo-interview-001 任务；先核对配置和原任务授权。"})
 

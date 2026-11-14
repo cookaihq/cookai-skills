@@ -21,6 +21,9 @@ class Adapter:
     """Implement only the page(s) selected for the target. Methods run under a lock.
 
     Config: revision, layers (in loader order), fields, default_targets, validation_errors.
+    readiness {ready, missing: field IDs} describes business prerequisites, not save errors.
+    Optional presentation {title, description, focus: field IDs, initial_target} supplies
+    opening defaults. URL fields/target may select another view, never grant write access.
     Fields: id (UI identity), config_key (actual key/path, no values), label, type, sensitive, required, advanced, readonly, active, group,
     help, choices, depends_on, targets, effective {source, status, value, message},
     rows [{layer, present, status, value, message}]. The adapter owns resolution.
@@ -62,6 +65,16 @@ def public_config(snapshot):
     if "layers" not in snapshot:
         raise UIError("contract", "配置适配器需要迁移到分层协议；请同时升级适配器和共用核心。", 422)
     result = {k: snapshot[k] for k in ("revision", "task", "validation", "note", "default_targets", "validation_errors") if k in snapshot}
+    presentation = snapshot.get("presentation", {})
+    result["presentation"] = {k: presentation[k] for k in ("title", "description", "focus", "initial_target") if k in presentation}
+    # Compute before masking; adapters may additionally report business-specific missing conditions.
+    missing = [f["id"] for f in snapshot["fields"] if f.get("active", True) and f.get("required")
+               and (f["effective"].get("value") in (None, "", []) or f["effective"].get("status") in ("missing", "error", "invalid"))]
+    readiness = snapshot.get("readiness", {})
+    missing = list(dict.fromkeys([*missing, *readiness.get("missing", [])]))
+    known = {f["id"] for f in snapshot["fields"]}
+    result["readiness"] = {"missing": [name for name in missing if name in known],
+                           "ready": not missing and readiness.get("ready", True)}
     layer_keys = ("id", "name", "scope", "scope_label", "path", "readonly", "enabled", "message")
     result["layers"] = [{k: layer[k] for k in layer_keys if k in layer} for layer in snapshot["layers"]]
     result["fields"] = []

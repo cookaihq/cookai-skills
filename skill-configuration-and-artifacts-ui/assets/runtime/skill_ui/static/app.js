@@ -17,8 +17,7 @@ async function api(path, data) {
   return body;
 }
 function fail(error) {
-  document.body.classList.remove('config-editing');
-  configurationUI.opened=false;configurationUI.invalidate();configurationUI.revealed={};
+  configurationUI.invalidate();configurationUI.revealed={};
   if (error.status === 410 || error.status === 401) ended = true;
   root.innerHTML = `<div class="shell"><div class="empty"><h1>${ended ? '页面已结束' : '暂时无法读取'}</h1><p>${e(error.message)}</p>${ended ? '<p>请让 Agent 重新打开此页面。已保存的配置和产物仍然保留。</p>' : '<button data-action="reload">重试</button>'}</div></div>`;
   root.setAttribute('aria-busy','false');
@@ -34,7 +33,7 @@ function header() {
   const artifacts = state.page === 'artifacts';
   return `<header class="topbar"><div class="identity"><span class="symbol" aria-hidden="true">${artifacts?'▧':'⚙'}</span><div><strong>${e(state.title)}</strong><small>当前项目 · <code>${e(state.project)}</code></small></div></div><div class="session"><div class="session-line"><strong id="countdown"></strong>${artifacts?`<label><input id="residency" type="checkbox" ${state.lifetime.resident?'checked':''}>常驻</label>`:''}<button class="text-button" data-action="stop">结束页面</button></div><small>${artifacts?'常驻会持续占用系统资源；仅对本次服务有效。':'实际操作会延长使用时间，保存后可结束页面。'}</small></div></header>${artifacts&&state.lifetime.resident?'<div class="notice">本次产物服务正在常驻，会持续占用系统资源。取消常驻后重新开始 60 分钟空闲倒计时。</div>':''}`;
 }
-function footer() { return '<footer class="footer"><span>仅查看当前项目 · 结束页面不会删除数据或停止业务任务</span><span>Skill UI</span></footer>'; }
+function footer() { return `<footer class="footer"><span>${state.page==='configuration'?'配置按所选位置保存':'仅查看当前项目'} · 结束页面不会删除数据或停止业务任务</span><span>Skill UI</span></footer>`; }
 function navigate(changes, replace = false) {
   history.replaceState({...history.state,scroll:window.scrollY}, '', location.href);
   const url = new URL(location.href);
@@ -89,7 +88,6 @@ root.addEventListener('click', async event=>{
   const action=button.dataset.action,id=button.dataset.id;
   try {
     if(action==='reload')await load();
-    if(action==='mode')navigate({mode:button.dataset.mode});
     if(action==='layout')navigate({layout:button.dataset.layout});
     if(action==='open'){if(value('view')!=='detail')collectionScroll=window.scrollY;navigate({view:'detail',id});}
     if(action==='back'){navigate({view:'collection',id:null,info:null});window.scrollTo(0,collectionScroll);}
@@ -97,7 +95,6 @@ root.addEventListener('click', async event=>{
     if(action==='info')navigate({info:value('info')==='1'?null:'1'},true);
     if(action==='copy'){const a=state.artifacts.items.find(a=>a.id===value('id'));await navigator.clipboard.writeText(a.copy_text??a.preview.text);toast('已复制');}
     if(action==='stop'){await api('/api/stop',{});ended=true;fail({status:410,message:'此页面服务已结束。'});}
-    if(action==='copy-continuation'){await navigator.clipboard.writeText(configurationUI.snapshot.task.continuation);toast('已复制');}
   }catch(error){if(['reload'].includes(action)||error.status===410||error.status===401)fail(error);else toast(error.message);}
 });
 root.addEventListener('input',event=>{
@@ -111,7 +108,6 @@ root.addEventListener('input',event=>{
 });
 root.addEventListener('change',async event=>{
   const input=event.target;
-  if(input.id==='advanced')navigate({advanced:input.checked?'1':null});
   if(input.id==='type-filter')navigate({type:input.value});
   if(input.id==='task-filter')navigate({task:input.value});
   if(input.id==='residency'){try{life(await api('/api/residency',{resident:input.checked}));render();}catch(error){input.checked=!input.checked;toast(error.message);}}
