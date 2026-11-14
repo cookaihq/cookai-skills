@@ -17,6 +17,11 @@ WORKFLOW = SKILL_DIR / "scripts" / "workflow.py"
 
 
 def run_workflow(cwd: Path, *arguments: str, expect: int = 0) -> dict:
+    if arguments[0] == "start":
+        caps = cwd / "session-capabilities.json"
+        caps.write_text(json.dumps({"schema_version": 1, "host": "codex", "source": "synthetic test host",
+                                    "main_vision": True, "models": []}), encoding="utf-8")
+        arguments = (*arguments, "--vision-method", "main-agent", "--capabilities", str(caps))
     result = subprocess.run(
         [sys.executable, str(WORKFLOW), *arguments],
         cwd=cwd,
@@ -29,6 +34,25 @@ def run_workflow(cwd: Path, *arguments: str, expect: int = 0) -> dict:
     )
     assert result.returncode == expect, result.stderr
     return json.loads(result.stdout) if result.stdout.strip() else {}
+
+
+def record_dispatches(cwd, task, observation_file=None, *, screenshots=False):
+    result = run_workflow(cwd, "screenshot-review" if screenshots else "batch", "--task-dir", str(task))
+    for dispatch in result["dispatches"]:
+        run_workflow(cwd, "vision-begin", "--task-dir", str(task), "--dispatch-id", dispatch["dispatch_id"])
+        payload = state.read_json(task / dispatch["input"])
+        incoming = state.read_json(observation_file) if observation_file else {"schema_version": 1, "observations": []}
+        if not screenshots:
+            for obs in incoming["observations"]:
+                allowed = {f["frame_id"] for f in payload["frames"]}
+                obs["evidence_frame_ids"] = [f for f in obs["evidence_frame_ids"] if f in allowed] or [payload["frames"][0]["frame_id"]]
+        incoming["checks"] = [{"frame_id": f["frame_id"], "readable": True, "same_content": True, "reason": "synthetic fixture original verified"}
+                              for f in payload["frames"]] if screenshots else []
+        temporary = cwd / "dispatch-result.json"
+        state.atomic_write_json(temporary, incoming)
+        run_workflow(cwd, "vision-record", "--task-dir", str(task), "--dispatch-id", dispatch["dispatch_id"], "--input", str(temporary))
+    if screenshots:
+        run_workflow(cwd, "screenshot-review", "--task-dir", str(task), "--accept")
 
 
 def make_video(tmp_path: Path) -> Path:
@@ -146,16 +170,7 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    run_workflow(
-        tmp_path,
-        "record-observations",
-        "--task-dir",
-        str(task_dir),
-        "--batch-id",
-        "batch-0001",
-        "--input",
-        str(initial_observation),
-    )
+    record_dispatches(tmp_path, task_dir, initial_observation)
 
     resampled = run_workflow(
         tmp_path,
@@ -170,6 +185,7 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
         "00:00:03.000",
         "--interval-ms",
         "250",
+        "--issue-id", "moving-square",
         "--reason",
         "Confirm the movement between the sparse first-pass frames.",
     )
@@ -182,17 +198,8 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
     ]
     revised_observation = tmp_path / "observations-2.json"
     revised_observation.write_text(json.dumps(revised), encoding="utf-8")
-    recorded = run_workflow(
-        tmp_path,
-        "record-observations",
-        "--task-dir",
-        str(task_dir),
-        "--batch-id",
-        "batch-0001",
-        "--input",
-        str(revised_observation),
-    )
-    assert recorded["observations"][0]["revision"] == 2
+    record_dispatches(tmp_path, task_dir, revised_observation)
+    assert state.read_json(task_dir / "visual-observations.json")["latest"][0]["revision"] >= 2
 
     run_workflow(
         tmp_path, "adaptive-review", "--task-dir", str(task_dir),
@@ -255,6 +262,7 @@ def test_offline_end_to_end_with_frames_resampling_gif_and_resume(tmp_path: Path
             ],
         },
     )
+    record_dispatches(tmp_path, task_dir, screenshots=True)
     validated = run_workflow(tmp_path, "validate", "--task-dir", str(task_dir))
     assert validated["complete"] is True
 

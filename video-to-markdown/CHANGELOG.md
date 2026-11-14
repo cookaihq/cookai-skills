@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.0.0
+
+- Select vision once per task from four choices presented together: main Agent, native host/model, independent Codex Agent with a custom connection, or a Chat Completions image API. Writing and ASR remain independent. Native model catalogs/capabilities come from actual session evidence; unavailable and unverified paths are shown honestly, and model mismatches never trigger silent fallback.
+- Add a local configuration page with real dotenv preview, project/global source display, private credentials, atomic save/readback, CSRF protection and 60-minute idle expiry. Fixed host-specific routes or per-new-task questions share the CLI's loader.
+- Sample 5-second periodic candidates plus scene/local-region changes, retaining every original through capacity splits. Preserve parent batch context, immutable input hashes, model receipts, request accounting and route-change invalidation.
+- Verify original-resolution PNG against decoded PTS, including long GOP, fractional FPS and nonzero starts. Rank dense neighbors with FFmpeg blurdetect; the selected viewer must confirm readable matching content before replacing evidence or final screenshots.
+- Support explicit visual skipping, verified no-audio visual-only tasks, persistent two-round per-issue budgets and timed unresolved drafts distinct from complete delivery. Preserve raw API responses and ambiguous outcomes without blind replay.
+- **Breaking:** task schema 4 rejects schema 3 and older without migration, recreation or ASR resubmission; `vision-record`/route adapters replace the former `record-observations` CLI. Previously completed documents remain intact. Output naming/copy rules and ASR provider policy continue unchanged.
+- Permit supplemental observations to combine new frames with previously inspected same-batch evidence, rechecking saved input and image hashes; prepared or foreign-batch work does not count as inspected evidence.
+- Windows: 137 tests, mypy, official/workspace Skill validation, real configuration-page save/readback and desktop/mobile layout checks passed. Actual Codex CLI 0.167.2 completed main-Agent vision with supplied subtitles, dense supplementation, final screenshot checks, portable delivery and completed-task resume. The existing sandbox image-path restriction required presenting the same image bytes through the host's image output tool; permissions were unchanged and the temporary Skill mount was restored. Mac 待验; other native hosts/models and real external model/transcription services remain untested.
+
 ## 3.0.0
 
 - **Breaking output contract:** default to `data/video-to-markdown/YYYYMMDDHHMMSS-<complete-video-filename>/`, with the complete video extension retained in the Markdown filename. Task timestamps now use seconds.

@@ -53,7 +53,10 @@ def video_server(video, *, content_length=None, responses=()):
 
 def run_workflow(cwd, *arguments, expected=0, environment=None, error=None):
     if arguments[0] == "start":
-        arguments = (*arguments, "--project-root", str(cwd))
+        caps = cwd / "session-capabilities.json"
+        caps.write_text(json.dumps({"schema_version": 1, "host": "codex", "source": "synthetic test host",
+                                    "main_vision": True, "native_agent": False, "models": []}), encoding="utf-8")
+        arguments = (*arguments, "--project-root", str(cwd), "--vision-method", "main-agent", "--capabilities", str(caps))
     env = os.environ.copy()
     if environment:
         env.update(environment)

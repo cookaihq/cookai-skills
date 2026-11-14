@@ -34,13 +34,15 @@ def _frame_ids(batch_state: dict) -> set[str]:
             for item in round_record.get("frames", [])
             if isinstance(item, dict) and isinstance(item.get("frame_id"), str)
         )
+    for search in batch_state.get("clarity_searches", []):
+        result.update(f["frame_id"] for f in search.get("frames", []))
     return result
 
 
 def latest_observations(document: dict) -> list[dict]:
     latest: dict[str, dict] = {}
     for revision in document.get("revisions") or []:
-        if not isinstance(revision, dict):
+        if not isinstance(revision, dict) or revision.get("invalidated"):
             continue
         for item in revision.get("observations") or []:
             if isinstance(item, dict) and isinstance(item.get("observation_id"), str):
@@ -58,15 +60,21 @@ def record(
     manifest: dict,
     batch_id: str,
     input_document: dict,
+    receipt_id: str | None = None,
 ) -> dict:
     if not isinstance(input_document, dict) or input_document.get("schema_version") != 1:
         raise ObservationError("observation input must use schema_version 1")
+    if not manifest.get("vision", {}).get("enabled", True):
+        raise ObservationError("visual observations are disabled for this task")
     incoming = input_document.get("observations")
     if not isinstance(incoming, list) or not incoming:
         raise ObservationError("observation input must contain a non-empty observations array")
     summary, batch_state = sampling.load_batch(task_dir, manifest, batch_id)
     valid_frames = _frame_ids(batch_state)
     existing = state.read_json(task_dir / "visual-observations.json")
+    previous_receipt = next((r for r in existing.get("revisions", []) if receipt_id and r.get("receipt_id") == receipt_id), None)
+    if previous_receipt:
+        return previous_receipt
     previous_by_id = {item["observation_id"]: item for item in latest_observations(existing)}
     revision_number = int(batch_state.get("observation_revisions", 0)) + 1
     normalized = []
@@ -122,15 +130,15 @@ def record(
             "batch_revision": revision_number,
             "recorded_at": state.utc_now(),
             "observations": normalized,
+            "receipt_id": receipt_id,
         }
     )
     existing["latest"] = latest_observations(existing)
     state.atomic_write_json(task_dir / "visual-observations.json", existing)
     batch_state["observation_revisions"] = revision_number
     state.atomic_write_json(task_dir / summary["state_path"], batch_state)
-    unresolved = any(
-        item["confidence"] == "uncertain" or item["needs_resample"] for item in normalized
-    )
+    unresolved = any(item["confidence"] == "uncertain" or item["needs_resample"]
+                     for item in existing["latest"] if item["batch_id"] == batch_id)
     summary["status"] = "needs_resample" if unresolved else "observed"
     state.save_manifest(task_dir, manifest)
     return {"batch_id": batch_id, "revision": revision_number, "observations": normalized}

@@ -110,7 +110,7 @@ def test_missing_copy_can_be_repaired_without_transcription(tmp_path):
 
 def test_invalid_document_cannot_be_finalized(tmp_path):
     task = prepared(tmp_path)
-    (task / "assets/frames/frame-000000000000.jpg").unlink()
+    (task / "assets/frames/frame-000000000000.png").unlink()
     with pytest.raises(delivery.DeliveryError, match="document validation failed"):
         finish(task, keep_name=True)
     assert not (tmp_path / "copies").exists()

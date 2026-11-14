@@ -1,3 +1,5 @@
 # Canonical update adapters must remain byte-identical on Windows checkouts.
 /scripts/check_update.sh text eol=lf
 /scripts/check_update.ps1 text eol=lf
+# Keep vendored UI runtime hashes stable across operating systems.
+/scripts/skill_ui/** text eol=lf

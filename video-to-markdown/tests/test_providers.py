@@ -20,7 +20,10 @@ def isolated_configuration(monkeypatch, tmp_path):
 
 def invoke(capsys, *args, code=0):
     if args[0] == "start":
-        args = (*args, "--project-root", str(Path.cwd()))
+        caps = Path.cwd() / "session-capabilities.json"
+        caps.write_text(json.dumps({"schema_version": 1, "host": "codex", "source": "synthetic test host",
+                                    "main_vision": True, "models": []}), encoding="utf-8")
+        args = (*args, "--project-root", str(Path.cwd()), "--vision-method", "main-agent", "--capabilities", str(caps))
     result = cli.main(list(map(str, args)))
     output = capsys.readouterr()
     assert result == code, output.out + output.err
@@ -580,7 +583,7 @@ def test_default_save_failure_does_not_undo_task_only_switch(tmp_path, video, ca
     assert not (tmp_path / ".env").exists()
 
 
-@pytest.mark.parametrize("old_schema", [1, 2])
+@pytest.mark.parametrize("old_schema", [1, 2, 3])
 def test_legacy_task_is_preserved_and_never_resubmitted(tmp_path, video, capsys, monkeypatch, old_schema):
     from video_to_markdown import external
     started = invoke(capsys, "start", "--video", video)
@@ -596,7 +599,7 @@ def test_legacy_task_is_preserved_and_never_resubmitted(tmp_path, video, capsys,
     monkeypatch.setattr(external, "execute", never_execute)
     assert cli.main(["resume", "--task-dir", str(task)]) == 1
     output = capsys.readouterr()
-    assert "v3 does not resume older tasks" in output.err
+    assert "resumes only schema 4" in output.err
     assert {str(path.relative_to(task)): path.read_bytes() for path in task.rglob("*") if path.is_file()} == before
 
 
@@ -640,6 +643,7 @@ def test_aihub_persistence_receipt_is_replayed_before_continue(tmp_path, video, 
         return external.Result(0, json.dumps(value))
     mock_dependency(monkeypatch, execute)
     assert cli.main(["start", "--video", str(video), "--project-root", str(tmp_path),
+                     "--skip-visuals", "transcription persistence fixture",
                      "--aihub-plugin-dir", str(aihub_plugin), "--request", "完整转写"]) == 1
     capsys.readouterr()
     private_path.rmdir()

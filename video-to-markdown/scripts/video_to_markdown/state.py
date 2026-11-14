@@ -14,7 +14,7 @@ from . import __version__, private_files
 
 
 SCHEMA_VERSION = 1
-TASK_SCHEMA_VERSION = 3
+TASK_SCHEMA_VERSION = 4
 SKILL_VERSION = __version__
 MANIFEST_NAME = "manifest.json"
 PRIVATE_RELATIVE = Path(".state") / "private.json"
@@ -29,7 +29,7 @@ def task_lock(task_dir: Path):
     """Lock before reading mutable task state; the OS releases it after a crash."""
     lock_manifest = read_json(task_dir / MANIFEST_NAME)
     if lock_manifest.get("schema_version") != TASK_SCHEMA_VERSION:
-        raise StateError("unsupported task schema: v3 does not resume older tasks; no transcription was resubmitted")
+        raise StateError("unsupported task schema: this version resumes only schema 4; files were preserved and no transcription was resubmitted")
     if os.name == "nt":
         import win32api
         import win32event
@@ -169,6 +169,8 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict, document_name: s
             "url_expiry_notice": None,
         },
         "batches": [],
+        "vision": {"enabled": True, "status": "awaiting_selection", "route": None,
+                   "dispatches": [], "model_calls": 0, "issues": {}, "screenshot_reviews": []},
         "artifacts": {
             "document": document_name,
             "transcript": "transcript.json",
@@ -204,7 +206,7 @@ def load_task(task_dir_value: str | os.PathLike[str]) -> tuple[Path, dict, dict]
     if not isinstance(manifest, dict) or not isinstance(private, dict):
         raise StateError("task state must be JSON objects")
     if manifest.get("schema_version") != TASK_SCHEMA_VERSION:
-        raise StateError("unsupported task schema: v3 does not resume older tasks; no transcription was resubmitted")
+        raise StateError("unsupported task schema: this version resumes only schema 4; files were preserved and no transcription was resubmitted")
     if private.get("schema_version") != TASK_SCHEMA_VERSION:
         raise StateError("unsupported private state schema")
     if manifest.get("task_id") != private.get("task_id"):

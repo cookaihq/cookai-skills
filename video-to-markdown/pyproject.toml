@@ -1,6 +1,6 @@
 [project]
 name = "video-to-markdown"
-version = "3.0.0"
+version = "4.0.0"
 description = "Deterministic media preparation and validation for the video-to-markdown Agent Skill"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,3 +22,7 @@ addopts = "-q"
 check_untyped_defs = true
 ignore_missing_imports = true
 incremental = false
+
+[[tool.mypy.overrides]]
+module = ["skill_ui.*"]
+follow_imports = "skip"

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from video_to_markdown import review, state
+from video_to_markdown import review, state, vision
 
 
 def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
@@ -15,7 +15,7 @@ def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
     source = task / "source" / "video.mp4"
     source.write_bytes(b"video")
     source_hash, source_size = state.sha256_file(source)
-    frame = task / "assets" / "frames" / "frame-000000000000.jpg"
+    frame = task / "assets" / "frames" / "frame-000000000000.png"
     frame.write_bytes(b"frame")
     frame_hash, frame_size = state.sha256_file(frame)
     batch = {
@@ -28,6 +28,8 @@ def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
                 {
                     "frame_id": "frame-000000000000",
                     "pts_ms": 0,
+                    "pts_verified": True,
+                    "crop": None,
                     "path": str(frame),
                     "sha256": frame_hash,
                     "size_bytes": frame_size,
@@ -69,6 +71,12 @@ def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
         "revision": 1,
         "confidence": "certain",
         "needs_resample": False,
+        "start_ms": 0,
+        "end_ms": 1000,
+        "description": "synthetic fixture title",
+        "evidence_frame_ids": ["frame-000000000000"],
+        "motion_dependent": False,
+        "resample_reason": None,
     }
     state.atomic_write_json(
         task / "visual-observations.json",
@@ -79,7 +87,7 @@ def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
         },
     )
     (task / "document.md").write_text(
-        "# Opening\n\n![frame](assets/frames/frame-000000000000.jpg)\n",
+        "# Opening\n\n![frame](assets/frames/frame-000000000000.png)\n",
         encoding="utf-8",
     )
     state.atomic_write_json(
@@ -93,7 +101,7 @@ def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
                     "end_ms": 1000,
                     "classification": "represented_by_screenshot",
                     "document_anchor": "#opening",
-                    "media": ["assets/frames/frame-000000000000.jpg"],
+                    "media": ["assets/frames/frame-000000000000.png"],
                     "observation_ids": ["visual-1"],
                     "transcript_segment_ids": ["segment-000001"],
                     "reason": None,
@@ -101,6 +109,16 @@ def fixture_task(tmp_path: Path) -> tuple[Path, dict]:
             ],
         },
     )
+    manifest["vision"].update(status="selected", route={"method": "main-agent"})
+    prepared = vision.prepare_dispatch(task, manifest, "batch-0001")[0]
+    prepared["status"] = "complete"
+    from video_to_markdown import clarity
+    checks = clarity.screenshot_dispatches(task, manifest)
+    for dispatch in checks:
+        vision.record_result(task, manifest, dispatch["dispatch_id"], {"schema_version": 1, "observations": [], "checks": [
+            {"frame_id": "frame-000000000000", "readable": True, "same_content": True, "reason": "synthetic quality fixture"}]}, actual_model=None)
+    clarity.accept_screenshots(task, manifest)
+    state.save_manifest(task, manifest)
     return task, manifest
 
 

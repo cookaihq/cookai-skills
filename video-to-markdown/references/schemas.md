@@ -2,7 +2,7 @@
 
 The runtime performs strict structural and referential validation. Times are integer milliseconds from the beginning of the source video.
 
-The manifest and private task state use schema version 3. Transcript/observation/review artifacts retain their individual schema version 1. Older task state is rejected without migration or resubmission. The private directory contains operation intents, raw receipts, provider run records and Feishu identity confirmation; do not publish it.
+The manifest and private task state use schema version 4. Transcript/observation/review artifacts retain schema version 1. Unsupported task state is preserved and rejected without migration or resubmission. Private state includes model inputs/responses, credential references, operation intents and provider receipts; publish only the document and referenced media.
 
 ## Transcript Timing
 
@@ -34,11 +34,12 @@ The example above is a supplied subtitle with a recorded boundary adjustment. Ne
 
 ## Observation Input
 
-Submit one object per `record-observations` call:
+Submit a selected-viewer result through `vision-record` (host/main) or the executable route adapter:
 
 ```json
 {
   "schema_version": 1,
+  "checks": [],
   "observations": [
     {
       "observation_id": "batch-0001-title-card",
@@ -64,7 +65,22 @@ Rules:
 - `needs_resample: true` requires a non-empty `resample_reason`.
 - `uncertain` cannot be silently changed to `certain`; record a new revision with new evidence.
 
-The runtime adds `batch_id`, `revision`, `recorded_at`, and disposition fields.
+The runtime adds `batch_id`, `revision`, `recorded_at`, and receipt fields. Supplement or clarity frames may support a new revision; use the same fact's existing ID. Route switches invalidate affected revisions rather than deleting history.
+
+For clarity and final screenshot dispatches use checks only:
+
+```json
+{
+  "schema_version": 1,
+  "observations": [],
+  "checks": [
+    {"frame_id": "frame-000000000000", "readable": true, "same_content": true,
+     "reason": "The title and labels are readable and the operation state matches the reference."}
+  ]
+}
+```
+
+Every supplied original, including a reference, needs exactly one check. `same_content` refers to the provided reference for clarity work and the cited fact/page for final screenshots. A negative result must state the actual issue. Observation dispatches contain no checks; check dispatches contain no observations.
 
 ## Review Report
 
@@ -80,7 +96,7 @@ Write `<task-dir>/review-report.json`:
       "end_ms": 4200,
       "classification": "represented_by_screenshot",
       "document_anchor": "#opening-title",
-      "media": ["assets/frames/frame-000000000000.jpg"],
+      "media": ["assets/frames/frame-000000000000.png"],
       "observation_ids": ["batch-0001-title-card"],
       "transcript_segment_ids": [],
       "reason": null
@@ -105,10 +121,13 @@ Allowed classifications:
 - `represented_by_screenshot`
 - `represented_by_gif`
 - `deliberately_skipped`
+- `unresolved` (draft only)
 
 Intervals are half-open `[start_ms, end_ms)`, sorted, adjacent, non-overlapping, and together cover `[0, duration_ms)`. A represented interval must cite a document anchor and at least one observation or transcript segment. Screenshot/GIF classifications must also cite existing media of the matching type. A deliberately skipped interval requires a concrete reason.
 
-Every final visual observation and every transcript segment must be referenced by at least one interval. Unresolved observations (`uncertain` or `needs_resample`) always block completion.
+Every final visual observation and transcript segment must be referenced. Unresolved observations (`uncertain` or `needs_resample`) block full completion. In a draft, give each an `unresolved` interval containing its full time range, exact start time and reason in the Markdown, and `issue_ids` referencing exhausted two-round issues covering that gap (or a genuinely exhausted saved model-call cap). Mark the document visibly `待复核草稿` or `DRAFT`. Missing observation dispatches require an unresolved interval covering the unobserved batch; a localized unreadable detail does not invalidate the already observed remainder. `deliberately_skipped` cannot conceal unreadable content.
+
+When the user explicitly skips visuals, `visual-observations.json` has `status: skipped`, the saved reason and no revisions; no visual artifacts/review records are fabricated. Coverage then cites actual subtitles/speech. A verified no-audio visual task has `transcript.source.kind: no_audio` and `segments: []`.
 
 ## Timestamped Plain Text
 

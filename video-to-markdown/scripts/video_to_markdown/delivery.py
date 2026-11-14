@@ -85,6 +85,10 @@ def recover_rename(task_dir: Path) -> Path:
             if relocated != document:
                 state.atomic_write_json(entry, relocated)
         manifest = _rebase(manifest, old, new)
+        # Dispatch inputs contain absolute evidence paths. Relocation changes their
+        # serialized bytes, so repair the hashes as part of the same recovery.
+        for dispatch in manifest.get("vision", {}).get("dispatches", []):
+            dispatch["input_sha256"] = state.sha256_file(task_dir / dispatch["input"])[0]
     manifest["task_dir_name"] = task_dir.name
     manifest["delivery"].pop("rename_pending")
     manifest["delivery"]["status"] = "named"
@@ -173,11 +177,11 @@ def copy_is_current(task_dir: Path, manifest: dict) -> bool:
         return False
 
 
-def finalize(task_dir: Path, *, title: str | None, keep_name: bool, copy_directory: str | None) -> dict:
+def finalize(task_dir: Path, *, title: str | None, keep_name: bool, copy_directory: str | None, draft: bool = False) -> dict:
     task_dir = recover_rename(task_dir)
     task_dir, manifest, _ = state.load_task(task_dir)
-    result = review.validate_task(task_dir, manifest)
-    if not result["complete"]:
+    result = review.validate_task(task_dir, manifest, allow_draft=draft)
+    if not result["complete"] and not (draft and result.get("draft_ready")):
         raise DeliveryError("document validation failed: %s" % "; ".join(result["blockers"]))
     settings = manifest["delivery"]
     decision = "content-title" if title is not None else "keep-name" if keep_name else settings["name_decision"]
@@ -203,8 +207,8 @@ def finalize(task_dir: Path, *, title: str | None, keep_name: bool, copy_directo
     state.save_manifest(task_dir, manifest)
     task_dir = recover_rename(task_dir)
     task_dir, manifest, _ = state.load_task(task_dir)
-    validation = review.validate_task(task_dir, manifest)
-    if not validation["complete"]:
+    validation = review.validate_task(task_dir, manifest, allow_draft=draft)
+    if not validation["complete"] and not (draft and validation.get("draft_ready")):
         raise DeliveryError("renamed task failed validation: %s" % "; ".join(validation["blockers"]))
     manifest["delivery"]["status"] = "copying"
     state.save_manifest(task_dir, manifest)
@@ -224,8 +228,10 @@ def finalize(task_dir: Path, *, title: str | None, keep_name: bool, copy_directo
         raise DeliveryError("%s; resume finalize with --task-dir %s" % (exc, task_dir)) from exc
     settings = manifest["delivery"]
     settings.update(status="complete", files=receipt)
-    manifest["stage"] = "complete"
+    manifest["stage"] = "draft_delivered" if draft and not validation["complete"] else "complete"
+    if manifest["stage"] == "draft_delivered":
+        manifest["draft_delivered_once"] = True
     state.save_manifest(task_dir, manifest)
     copied = str(Path(settings["copy_directory"]) / document_name) if settings["copy_directory"] else None
     return {"task_dir": str(task_dir), "document": str(task_dir / document_name),
-            "copy_document": copied, "stage": "complete", "validation": validation}
+            "copy_document": copied, "stage": manifest["stage"], "validation": validation}

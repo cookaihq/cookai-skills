@@ -32,15 +32,15 @@ def _windows_identity():
     return user
 
 
-def protect(path: Path, mode: int) -> None:
+def protect(path: Path, mode: int, *, assign_owner: bool = True) -> None:
     if os.name != "nt":
         os.chmod(path, mode)
         return
     with _windows_errors(path, "protect private state"):
-        _protect_windows(path)
+        _protect_windows(path, assign_owner=assign_owner)
 
 
-def _protect_windows(path: Path) -> None:
+def _protect_windows(path: Path, *, assign_owner: bool = True) -> None:
     import win32con
     import win32security
     import ntsecuritycon
@@ -53,8 +53,8 @@ def _protect_windows(path: Path) -> None:
         acl.AddAccessAllowedAceEx(win32security.ACL_REVISION, flags, ntsecuritycon.FILE_ALL_ACCESS, identity)
     win32security.SetNamedSecurityInfo(
         str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-        | win32security.OWNER_SECURITY_INFORMATION
-        | win32security.PROTECTED_DACL_SECURITY_INFORMATION, user, None, acl, None,
+        | (win32security.OWNER_SECURITY_INFORMATION if assign_owner else 0)
+        | win32security.PROTECTED_DACL_SECURITY_INFORMATION, user if assign_owner else None, None, acl, None,
     )
 
 

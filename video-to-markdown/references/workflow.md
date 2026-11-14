@@ -22,24 +22,26 @@ The invocation directory, project root, and Skill directory are separate facts:
 
 1. Run `start` or `resume` and inspect its JSON result.
    If it returns a transcription action, follow [transcription.md](transcription.md) before continuing. Exit code zero alone does not mean transcription or the document is complete. Always relay default/identity save results and dependency result-check notices, including after a successful resume.
-2. Run `batch` for the next batch whose status is `ready_for_observation`.
-3. Inspect every contact sheet. Open original frames for text and small details.
-4. Record observations. A batch is not complete merely because its contact sheet was opened.
+2. If visuals are explicitly skipped, use subtitle/audio coverage and proceed to writing. No-audio visual tasks have an empty transcript with a verified `no_audio` source.
+3. For enabled visuals, choose once through [vision-routing.md](vision-routing.md), then run `batch` and execute every returned dispatch with that route. Originals, contact sheets and results share a saved parent batch. A batch is not complete merely because its contact sheet was opened.
+4. Save supported observations and unresolved details through `vision-record` (native/main) or `vision-run` (API/independent). Follow the same route for supplements; the writing Agent uses returned facts when another model is selected.
 5. After all first-pass batches, run at least one second-pass decision over the observation set. Use `resample` where evidence is incomplete; otherwise persist the no-resampling decision with `adaptive-review --reason ...`.
 6. Generate GIFs only where motion is information.
 7. Write the returned `document` path, then `review-report.json` with that document's filename.
-8. Run `validate`. Resolve every reported blocker and rerun.
+8. Review final screenshots through `screenshot-review`, selected-route execution and `--accept`. Run `validate`; repair blockers. Bounded unresolved work uses timed draft intervals and the `--draft` flag on adaptive review, validation and finalization.
 9. Follow the naming decision in SKILL.md, then run `finalize --title <title>` or `finalize --keep-name`. It applies the final names and produces the requested copy. Return the paths from the command, including the optional copy.
 
 ## Finalization and Recovery
 
-Validation certifies the document and evidence; `stage: validated` still requires finalization. A naming decision is saved before renaming. The directory and document change together, including managed-source, frame, contact-sheet and dependency paths. Recovery replays an unfinished rename under the task lock, whose identity survives directory renaming. V3 does not resume older task schemas.
+Validation checks structural evidence and coverage; semantic fidelity still requires the selected viewer and writing Agent. `validated` still requires finalization. Naming is saved before renaming. Directory/document/internal dispatch paths change together; recovery replays unfinished renames under a lock whose identity survives the move. V4 supports task schema 4 only and preserves unsupported tasks without migration or resubmission.
 
-The copy is `<copy-directory>/<final-document-filename>`. Its PNG/JPEG/GIF references point into the adjacent `<final-document-name-without-.md>.assets/`; only referenced media is copied. Relative URLs are encoded for spaces, Unicode and punctuation. Keep the Markdown and that directory together when moving or sharing them. Private state, audio, source video and unused frames are excluded.
+The copy is `<copy-directory>/<final-document-filename>`. Its PNG/GIF references point into adjacent `<final-document-name-without-.md>.assets/`; only referenced media is copied. Relative URLs are encoded for spaces, Unicode and punctuation. Keep these together when sharing. Private state, audio, source video and unused frames are excluded.
 
 Every copy target is checked before writing. Existing identical bytes can be reused; different bytes fail without overwrite. Each file is published atomically. If delivery is interrupted, run `finalize --task-dir <current-directory>` again; missing files are completed and the saved title is reused. A conflict can be resolved using `--copy-dir <another-directory>`. A new naming decision is not accepted after naming has begun.
 
 If the process stops during renaming, use the printed final directory if it exists, otherwise the original directory. `resume`, `validate` and `finalize` repair saved pending path changes before using the task. No transcription is repeated for a task that already reached validation. `resume` rechecks the document and copy; a missing or changed copy returns `next_action: finalize`, not a successful delivery claim.
+
+Drafts use `draft_validated` and `draft_delivered`, never complete-success. Resume keeps their saved route, issue budgets and timed gaps. Repair local artifacts/results without repeating a possibly executed model request. An explicit route switch archives and invalidates only affected work; finish its saved intent before resuming.
 
 ## Observation Rules
 

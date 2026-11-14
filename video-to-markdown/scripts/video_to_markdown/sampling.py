@@ -12,8 +12,7 @@ from . import media, state
 
 
 BATCH_MS = 300_000
-PERIODIC_MS = 30_000
-MAX_FIRST_PASS_FRAMES = 40
+PERIODIC_MS = 5_000
 CONTACT_COLUMNS = 4
 CONTACT_ROWS = 3
 
@@ -39,22 +38,15 @@ def split_batches(duration_ms: int) -> list[dict]:
     return batches
 
 
-def _dedupe_candidates(values: list[tuple[int, str]], *, minimum_gap_ms: int = 500) -> list[dict]:
+def _dedupe_candidates(values: list[tuple[int, str]], *, minimum_gap_ms: int = 0) -> list[dict]:
     merged: list[dict] = []
     for timestamp, reason in sorted(values):
-        if merged and timestamp - merged[-1]["requested_ms"] < minimum_gap_ms:
+        if merged and timestamp == merged[-1]["requested_ms"]:
             if reason not in merged[-1]["reasons"]:
                 merged[-1]["reasons"].append(reason)
             continue
         merged.append({"requested_ms": timestamp, "reasons": [reason]})
-    if len(merged) <= MAX_FIRST_PASS_FRAMES:
-        return merged
-    selected = []
-    for index in range(MAX_FIRST_PASS_FRAMES):
-        source_index = round(index * (len(merged) - 1) / (MAX_FIRST_PASS_FRAMES - 1))
-        selected.append(merged[source_index])
-    by_time = {item["requested_ms"]: item for item in selected}
-    return [by_time[key] for key in sorted(by_time)]
+    return merged
 
 
 def first_pass_candidates(
@@ -78,7 +70,15 @@ def first_pass_candidates(
         ffmpeg_bin=ffmpeg_bin,
     ):
         values.append((timestamp, "scene_change"))
-    return _dedupe_candidates(values)
+    local = media.local_change_candidates(source, start_ms=start_ms, end_ms=end_ms, ffmpeg_bin=ffmpeg_bin)
+    for candidate in local:
+        values.append((candidate["requested_ms"], "local_region_change"))
+    merged = _dedupe_candidates(values)
+    scores = {c["requested_ms"]: c for c in local}
+    for candidate in merged:
+        if candidate["requested_ms"] in scores:
+            candidate["local_change_signal"] = scores[candidate["requested_ms"]]
+    return merged
 
 
 def _contact_sheet_page(frames: list[dict], destination: Path) -> None:
@@ -144,6 +144,8 @@ def prepare_first_pass(
     ffmpeg_bin: str,
     ffprobe_bin: str,
 ) -> None:
+    if not manifest.get("vision", {}).get("enabled", True):
+        raise SamplingError("visual sampling is disabled for this task")
     if not manifest.get("batches"):
         manifest["batches"] = split_batches(manifest["source"]["duration_ms"])
         state.save_manifest(task_dir, manifest)
@@ -175,6 +177,10 @@ def prepare_first_pass(
             "start_ms": batch["start_ms"],
             "end_ms": batch["end_ms"],
             "first_pass": {"frames": frames, "contact_sheets": sheets},
+            "candidates": candidates,
+            "detectors": {"periodic_ms": PERIODIC_MS, "scene_threshold": 0.30,
+                          "local_tile_threshold": 0.045, "local_interval_ms": 500,
+                          "note": "screening signals; no guarantee of detecting every information change"},
             "resampling_rounds": [],
             "observation_revisions": 0,
         }
@@ -229,7 +235,10 @@ def resample(
     crop: tuple[int, int, int, int] | None,
     ffmpeg_bin: str,
     ffprobe_bin: str,
+    issue_id: str | None = None,
 ) -> dict:
+    if not manifest.get("vision", {}).get("enabled", True):
+        raise SamplingError("visual resampling is disabled for this task")
     summary, batch_state = load_batch(task_dir, manifest, batch_id)
     if not reason.strip():
         raise SamplingError("resampling reason is required")
@@ -241,6 +250,9 @@ def resample(
     requested = list(range(start_ms, end_ms, interval))
     if len(requested) > 60:
         raise SamplingError("resampling would exceed 60 frames; increase --interval-ms")
+    from .vision import begin_issue
+    issue_id = issue_id or "%s:%d:%d:%s" % (batch_id, start_ms, end_ms, crop)
+    begin_issue(task_dir, manifest, issue_id, start_ms=start_ms, end_ms=end_ms, reason=reason)
     frames: list[dict] = []
     for timestamp in requested:
         frame = media.extract_frame(
@@ -261,6 +273,7 @@ def resample(
     )
     record = {
         "round": round_number,
+        "issue_id": issue_id,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "reason": reason.strip(),
@@ -289,6 +302,8 @@ def make_gif(
     ffmpeg_bin: str,
     ffprobe_bin: str,
 ) -> dict:
+    if not manifest.get("vision", {}).get("enabled", True):
+        raise SamplingError("GIF generation is disabled for this task")
     duration_ms = manifest["source"]["duration_ms"]
     if not purpose.strip():
         raise SamplingError("GIF purpose is required")

@@ -14,6 +14,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from functools import lru_cache
+from bisect import bisect_left
 from pathlib import Path
 from typing import Callable
 
@@ -368,37 +370,32 @@ def format_timecode(milliseconds: int) -> str:
     return "%02d:%02d:%02d.%03d" % (hours, minutes, seconds, millis)
 
 
-def nearest_frame_pts(source: Path, target_ms: int, ffprobe_bin: str) -> int:
-    target_seconds = max(0.0, target_ms / 1000.0)
-    start_seconds = max(0.0, target_seconds - 1.0)
-    result = _run(
-        [
-            ffprobe_bin,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-read_intervals",
-            "%.6f%%+3" % start_seconds,
-            "-show_entries",
-            "frame=best_effort_timestamp_time",
-            "-of",
-            "csv=p=0",
-            str(source),
-        ],
-        timeout=120,
-        operation="frame PTS lookup",
-    )
-    values = []
-    for line in result.stdout.decode("utf-8", "replace").splitlines():
-        try:
-            values.append(int(round(float(line.strip().split(",")[0]) * 1000)))
-        except (ValueError, IndexError):
-            continue
+@lru_cache(maxsize=4)
+def _frame_index(path: str, size: int, modified_ns: int, ffprobe_bin: str) -> tuple[float, tuple[int, ...]]:
+    # Index actual decoded frames once. A short seek window may end before the
+    # requested frame on a long GOP and must never be used as a PTS authority.
+    result = _run([ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-show_frames",
+                   "-show_entries", "format=start_time:frame=best_effort_timestamp_time", "-of", "json", path],
+                  timeout=1800, operation="decoded frame index")
+    document = json.loads(result.stdout)
+    origin = float(document.get("format", {}).get("start_time", 0) or 0)
+    values = sorted({round((float(f["best_effort_timestamp_time"]) - origin) * 1000)
+                     for f in document.get("frames", []) if f.get("best_effort_timestamp_time") is not None})
+    values = [v for v in values if v >= 0]
     if not values:
-        raise MediaError("ffprobe returned no frame PTS near %s" % format_timecode(target_ms))
-    after = [item for item in values if item >= target_ms]
-    return min(after) if after else min(values, key=lambda item: abs(item - target_ms))
+        raise MediaError("ffprobe returned no decoded video timestamps")
+    return origin, tuple(values)
+
+
+def frame_index(source: Path, ffprobe_bin: str) -> tuple[float, tuple[int, ...]]:
+    info = source.stat()
+    return _frame_index(str(source.resolve()), info.st_size, info.st_mtime_ns, ffprobe_bin)
+
+
+def nearest_frame_pts(source: Path, target_ms: int, ffprobe_bin: str) -> int:
+    _, values = frame_index(source, ffprobe_bin)
+    position = bisect_left(values, max(0, target_ms))
+    return values[min(position, len(values) - 1)]
 
 
 def extract_frame(
@@ -411,6 +408,7 @@ def extract_frame(
     crop: tuple[int, int, int, int] | None = None,
 ) -> dict:
     actual_ms = nearest_frame_pts(source, requested_ms, ffprobe_bin)
+    origin, _ = frame_index(source, ffprobe_bin)
     suffix = ""
     filters = []
     if crop is not None:
@@ -418,7 +416,7 @@ def extract_frame(
         filters.append("crop=%d:%d:%d:%d" % (width, height, x, y))
         suffix = "-crop-%d-%d-%d-%d" % crop
     frame_id = "frame-%012d%s" % (actual_ms, suffix)
-    destination = output_dir / (frame_id + ".jpg")
+    destination = output_dir / (frame_id + ".png")
     if not destination.exists():
         output_dir.mkdir(parents=True, exist_ok=True)
         command = [
@@ -426,23 +424,36 @@ def extract_frame(
             "-nostdin",
             "-hide_banner",
             "-loglevel",
-            "error",
+            "info",
+            "-copyts",
             "-ss",
-            "%.6f" % (actual_ms / 1000.0),
+            "%.6f" % (max(0, actual_ms - 1) / 1000.0),
             "-i",
             str(source),
             "-frames:v",
             "1",
         ]
-        if filters:
-            command.extend(["-vf", ",".join(filters)])
-        command.extend(["-q:v", "2", str(destination)])
-        _run(command, timeout=180, operation="frame extraction")
+        # Millisecond rounding can otherwise seek past a 29.97 fps frame.
+        filters.insert(0, "select='gte(t,%.9f)'" % (origin + (actual_ms - 0.5) / 1000))
+        filters.append("showinfo")
+        temporary = output_dir / ("." + uuid.uuid4().hex + ".png")
+        command.extend(["-vf", ",".join(filters), "-fps_mode", "passthrough", "-update", "1", str(temporary)])
+        try:
+            result = _run(command, timeout=180, operation="frame extraction")
+            match = re.search(r"n:\s*0\s+pts:\s*-?\d+\s+pts_time:([-0-9.]+)", result.stderr.decode("utf-8", "replace"))
+            decoded_ms = round((float(match.group(1)) - origin) * 1000) if match else None
+            if decoded_ms is None or abs(decoded_ms - actual_ms) > 1 or not temporary.is_file():
+                raise MediaError("decoded image PTS does not match the frame index; no frame published")
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
     digest, size = state.sha256_file(destination)
     return {
         "frame_id": frame_id,
         "requested_ms": requested_ms,
         "pts_ms": actual_ms,
+        "source_pts_ms": round(origin * 1000) + actual_ms,
+        "pts_verified": True,
         "timestamp": format_timecode(actual_ms),
         "path": str(destination),
         "sha256": digest,
@@ -452,6 +463,53 @@ def extract_frame(
 
 
 SCENE_PTS = re.compile(r"pts_time:([0-9.]+)")
+
+
+def blur_score(path: Path, ffmpeg_bin: str, crop: tuple[int, int, int, int] | None = None) -> float:
+    filters = []
+    if crop:
+        x, y, width, height = crop
+        filters.append("crop=%d:%d:%d:%d" % (width, height, x, y))
+    filters.append("blurdetect")
+    result = _run([ffmpeg_bin, "-nostdin", "-hide_banner", "-i", str(path), "-vf", ",".join(filters),
+                   "-an", "-f", "null", "-"], timeout=120, operation="FFmpeg blurdetect")
+    match = re.search(r"blur mean:\s*([0-9.]+)", result.stderr.decode("utf-8", "replace"))
+    if not match or not math.isfinite(float(match.group(1))):
+        raise MediaError("blurdetect returned no finite score; inspect the original with the selected vision route")
+    return float(match.group(1))
+
+
+def local_change_candidates(source: Path, *, start_ms: int, end_ms: int, ffmpeg_bin: str,
+                            threshold: float = 0.045) -> list[dict]:
+    """A calibrated screening signal, not a semantic fast/slow classifier.
+
+    At 2 Hz compare a 4x4 grid of normalized grayscale differences. Local UI
+    changes can cross a tile threshold while whole-scene scores remain small.
+    Events shorter than the analysis interval can still be missed.
+    """
+    from PIL import Image, ImageChops, ImageStat
+    duration = (end_ms - start_ms) / 1000
+    result = _run([ffmpeg_bin, "-nostdin", "-hide_banner", "-ss", str(start_ms / 1000),
+                   "-t", str(duration), "-i", str(source), "-vf", "select='isnan(prev_selected_t)+gte(t-prev_selected_t,0.5)',scale=160:96,format=gray,showinfo",
+                   "-an", "-fps_mode", "vfr", "-f", "rawvideo", "-"], timeout=max(180, duration * 4), operation="local change screening")
+    timestamps = [start_ms + round(float(m.group(1)) * 1000) for m in SCENE_PTS.finditer(result.stderr.decode("utf-8", "replace"))]
+    frame_size = 160 * 96
+    count = len(result.stdout) // frame_size
+    if count != len(timestamps):
+        raise MediaError("local change frames and PTS disagree")
+    previous = None
+    candidates = []
+    for index, pts in enumerate(timestamps):
+        current = Image.frombytes("L", (160, 96), result.stdout[index * frame_size:(index + 1) * frame_size])
+        if previous is not None:
+            delta = ImageChops.difference(previous, current)
+            score = max(ImageStat.Stat(delta.crop((x, y, x + 40, y + 24))).mean[0] / 255
+                        for y in range(0, 96, 24) for x in range(0, 160, 40))
+            if score >= threshold and start_ms <= pts < end_ms:
+                candidates.append({"requested_ms": pts, "score": round(score, 6), "threshold": threshold,
+                                   "signal": "local_region_change", "analysis_interval_ms": 500})
+        previous = current
+    return candidates
 
 
 def scene_candidates(
