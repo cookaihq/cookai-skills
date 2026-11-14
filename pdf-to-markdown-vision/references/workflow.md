@@ -50,6 +50,8 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
 
 3. 打开返回页目录内的图片检查边界。裁错、漏注释时修订页 JSON 并重提。`fail-page --page 2 --reason "可核实的失败原因"` 保存失败，继续其他独立页。
 
+页组装保留区域内的 Markdown 标记，只以空行连接区域；区域边界本身不保证渲染后列表独立。按 `reading-order` 在页 JSON 的 `markdown` 中表达语义边界。清洗时保留仍适用的列表标记及同组关系，检查组装前后和清洗前后的实际渲染。
+
 ## 清洗与完成
 
 `finish` 组装本轮目标范围。若返回 `needs-cleaning`，读取返回的 `input_dir/raw.md` 和 `run.cleaning.path`，按 [清洗协议](cleaning.md) 提交清洗后再 `finish`。不要把待清洗当作完成。

@@ -1,8 +1,8 @@
 ---
 name: pdf-to-markdown-vision
-description: v1.0.1｜使用宿主 Agent 的视觉能力，将本地 PDF 或可直接下载的 PDF 链接转为忠实的 Markdown 和图片，保留图文关系、表格条件和公式。支持可选清洗、中断续跑、处理规则咨询，以及指定任务的结果追溯与排错。
+description: v1.0.2｜使用宿主 Agent 的视觉能力，将本地 PDF 或可直接下载的 PDF 链接转为忠实的 Markdown 和图片，保留图文关系、表格条件和公式。支持可选清洗、中断续跑、处理规则咨询，以及指定任务的结果追溯与排错。
 metadata:
-  version: "1.0.1"
+  version: "1.0.2"
 compatibility: Requires a host with native image viewing, uv >= 0.8 and Python 3.13. Supports Codex, Claude Code and WorkBuddy.
 ---
 
@@ -33,5 +33,7 @@ Windows 原生执行 `scripts/check_update.ps1`；macOS/Bash 执行 `scripts/che
 5. 针对疑点最多追加两次局部放大（默认 180 dpi，补查 300 dpi），记录原因。仍不清楚则保留区域证据及阻塞疑点，不猜写。用 `submit-page` 保存，实际打开生成的裁图确认边界、标注和清晰度；裁图有误修订本页。页失败用 `fail-page` 记录并继续其他独立页。空间不足暂停新增处理。
 6. 选定清洗时读取 [清洗与配置](references/cleaning.md)，按快照从未清洗结果生成清洗结果并记录变化。普通重洗复用有效未清洗页；改变识别或裁图时重做相关页。无清洗要求保留全部原文，包括重复页眉、脚注、安全提示和表头。
 7. 用 `finish` 检查、组装并交付。只有完整且无阻塞疑点的结果自动采用；阶段结果列明缺口。打开交付 Markdown，核对关键数字、单位、公式、表格条件、图文归属及实际图片。返回 Markdown、图片目录、任务 README 的可访问文件链接，说明完成/失败/待复核范围、耗时和可获取用量；未知用量写“无法测量”。正常完成由程序清理可再生缓存，失败/中断保留。
+
+相邻列表按 `reading-order` 判断归属并检查交付 Markdown 的实际渲染；独立列表应分开，同一列表不因留白、底色或断行误拆。仅有源码空行不算显示核验。
 
 每轮使用同一 writer，结束或主动中断调用 `finish` / `pause` 释放归属。占用冲突读取返回的 owner 和接续信息；确认原执行者已停止才显式接管。同任务只支持单设备单写入者。

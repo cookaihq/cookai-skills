@@ -1,7 +1,7 @@
 [project]
 name = "pdf-to-markdown-vision"
 # Generated mirror; the authoritative behavior version is SKILL.md metadata.version.
-version = "1.0.1"
+version = "1.0.2"
 requires-python = ">=3.13,<3.14"
 dependencies = [
   "pypdfium2>=4.30,<6",

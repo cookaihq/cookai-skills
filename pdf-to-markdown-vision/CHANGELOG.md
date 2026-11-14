@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2 — 2026-11-14
+
+- 相邻独立列表保留语义边界，在 Markdown 渲染后分别成组并留白；同一列表跨普通留白、装饰底色和条目换行仍保持连续，沿用原有标题分隔。
+- 保持 reading-order 规则 ID、CLI、页 JSON 和清洗接口；未清洗及清洗结果均保留列表标记和来源映射。
+- Windows 原生 Codex CLI 0.169.0 已在 workspace-write 默认沙箱中完成真实 MXO 3 页面及合成边界验收；CommonMark 和当前审阅页已用真实浏览器核验。macOS、WSL、Codex GUI、Claude Code、WorkBuddy 和下游检索未实测。
+
 ## 1.0.1 — 2026-11-13
 
 - 简短图内文字进入图片替代文本，密集标注按对象归组；保留原图注、独立正文和表格，避免重复转写邻近已有文字。
