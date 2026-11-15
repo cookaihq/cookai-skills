@@ -47,9 +47,10 @@ def inspect(target):
         conflicts = ["unmanaged destination"]
     if target.exists() and any(p.is_symlink() for p in target.rglob("*")):
         conflicts.append("symlink in destination")
-    return {"package": "skill-configuration-and-artifacts-ui", "version": VERSION, "files": expected}, {
+    manifest = {"package": "skill-configuration-and-artifacts-ui", "version": VERSION, "files": expected}
+    return manifest, {
         "target": str(target), "current_version": previous.get("version") if previous else None, "version": VERSION,
-        "status": "conflict" if conflicts else "current" if existing == expected and previous else "ready",
+        "status": "conflict" if conflicts else "current" if existing == expected and previous == manifest else "ready",
         "conflicts": conflicts, "changed": sorted(name for name in set(existing) | set(expected) if existing.get(name) != expected.get(name))}
 
 

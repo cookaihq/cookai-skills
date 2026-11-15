@@ -223,5 +223,27 @@ class CoreTests(unittest.TestCase):
         self.assertIn("server.py",json.loads(conflict.stdout)["conflicts"])
         self.assertTrue((target/"server.py").read_bytes().endswith(b"# local customization\n"))
 
+    def test_vendor_refreshes_version_when_runtime_unchanged(self):
+        target = self.project / "business/shared/skill_ui"
+        command = [sys.executable, str(ROOT / "scripts/vendor.py"), "--target", str(target)]
+        apply_command = command + ["--apply", "--staging-dir", str(self.project / "tmp")]
+        first = subprocess.run(apply_command, capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        manifest_path = target / ".vendor.json"
+        expected = json.loads(manifest_path.read_text(encoding="utf-8"))
+        runtime = {p.relative_to(target): p.read_bytes() for p in target.rglob("*")
+                   if p.is_file() and p != manifest_path}
+        manifest_path.write_text(json.dumps({**expected, "version": "0.0.0"}), encoding="utf-8")
+        preview = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual(json.loads(preview.stdout)["status"], "ready")
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["version"], "0.0.0")
+        applied = subprocess.run(apply_command, capture_output=True, text=True)
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertEqual(json.loads(applied.stdout)["status"], "applied")
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), expected)
+        self.assertEqual(runtime, {p.relative_to(target): p.read_bytes() for p in target.rglob("*")
+                                   if p.is_file() and p != manifest_path})
+
 
 if __name__ == "__main__":unittest.main()
