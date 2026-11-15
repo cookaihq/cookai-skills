@@ -213,6 +213,8 @@ class CoreTests(unittest.TestCase):
         first=subprocess.run(command+["--apply","--staging-dir",str(self.project/"tmp")],capture_output=True,text=True)
         self.assertEqual(first.returncode,0,first.stdout+first.stderr)
         original=(target/"server.py").read_bytes()
+        # A clean Windows checkout may use CRLF while the manifest hashes LF.
+        (target/"server.py").write_bytes(original.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
         current=subprocess.run(command+["--apply"],capture_output=True,text=True)
         self.assertEqual(json.loads(current.stdout)["status"],"current")
         (target/"server.py").write_bytes(original+b"\n# local customization\n")

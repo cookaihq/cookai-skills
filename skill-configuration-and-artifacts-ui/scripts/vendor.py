@@ -18,8 +18,14 @@ SOURCE = ROOT / "assets" / "runtime" / "skill_ui"
 VERSION = re.search(r'^  version: "([^"]+)"$', (ROOT / "SKILL.md").read_text(encoding="utf-8"), re.M)[1]
 
 
+def source_bytes(path):
+    # Git may check text out as CRLF on Windows. Hash and ship the canonical LF
+    # bytes so a clean checkout is not mistaken for a local customization.
+    return path.read_bytes().replace(b'\r\n', b'\n')
+
+
 def files(root):
-    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+    return {p.relative_to(root).as_posix(): hashlib.sha256(source_bytes(p)).hexdigest()
             for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.name != ".vendor.json"}
 
 
@@ -66,6 +72,9 @@ def main():
         staging.mkdir(parents=True)
         candidate, backup = staging / "candidate", staging / "previous"
         shutil.copytree(SOURCE, candidate, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for path in candidate.rglob('*'):
+            if path.is_file():
+                path.write_bytes(source_bytes(path))
         (candidate / ".vendor.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         # Recheck immediately before rename. A concurrent writer must still use the same integration lock/protocol.
         if inspect(target)[1] != report:
