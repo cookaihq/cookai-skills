@@ -1,3 +1,4 @@
+from scope_requests import file_edit
 """Private saves exercised against real, isolated Git repositories."""
 import json
 import os
@@ -38,7 +39,7 @@ class ConfigSaveTests(unittest.TestCase):
         return result.stdout
 
     def save(self):
-        return self.store.save(self.changes, self.store.snapshot()["revision"], "project")
+        return self.store.save(file_edit("project", self.changes), self.store.snapshot()["revision"])
 
     def ignored(self, path):
         self.git("check-ignore", "--quiet", "--", str(path))
@@ -65,11 +66,11 @@ class ConfigSaveTests(unittest.TestCase):
 
     def test_preview_and_invalid_save_do_not_prepare_files(self):
         revision = self.store.snapshot()["revision"]
-        self.store.preview(self.changes, revision, "project")
+        self.store.preview(file_edit("project", self.changes), revision)
         for changes, rev, target in ((self.changes, revision, "other"), (self.changes, "stale", "project"),
                                      ({"key": {"op": "unset"}}, revision, "project")):
             with self.assertRaises(UIError):
-                self.store.save(changes, rev, target)
+                self.store.save(file_edit(target, changes), rev)
         self.assertFalse(self.path.parent.exists())
         self.assertFalse((self.project / ".gitignore").exists())
 
@@ -118,12 +119,12 @@ class ConfigSaveTests(unittest.TestCase):
         revision = self.store.snapshot()["revision"]
         with patch("skill_ui.storage._append_ignore", side_effect=PermissionError("synthetic")):
             with self.assertRaises(UIError) as error:
-                self.store.save(self.changes, revision, "project")
+                self.store.save(file_edit("project", self.changes), revision)
         self.assertEqual(error.exception.code, "git")
         self.assertNotIn(self.changes["key"]["value"], error.exception.message)
         self.assertFalse(self.path.exists())
         self.assertEqual(self.store.snapshot()["revision"], revision)
-        self.store.save(self.changes, revision, "project")
+        self.store.save(file_edit("project", self.changes), revision)
 
     def test_replace_failure_keeps_previous_config_and_cleans_temporary(self):
         self.save()
@@ -131,7 +132,7 @@ class ConfigSaveTests(unittest.TestCase):
         revision = self.store.snapshot()["revision"]
         with patch("skill_ui.storage.os.replace", side_effect=PermissionError("synthetic")):
             with self.assertRaises(PermissionError):
-                self.store.save({"key": {"op": "set", "value": "replacement"}}, revision, "project")
+                self.store.save(file_edit("project", {"key": {"op": "set", "value": "replacement"}}), revision)
         self.assertEqual(self.path.read_bytes(), before)
         self.assertFalse(list(self.path.parent.glob("*.tmp")))
         self.assertEqual(self.store.snapshot()["revision"], revision)

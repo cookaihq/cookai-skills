@@ -44,11 +44,11 @@ class Studio(Adapter):
                     task={"id":"demo-interview-001","binding":str(self.project),
                           "continuation":"继续当前演示项目的 demo-interview-001 任务；先核对配置和原任务授权。"})
 
-    def preview(self, changes, revision, target):
-        return self.store.preview(changes, revision, target)
+    def preview(self, changes, revision):
+        return self.store.preview(changes, revision)
 
-    def save(self, changes, revision, target):
-        self.store.save(changes, revision, target)
+    def save(self, changes, revision):
+        self.store.save(changes, revision)
         return self.config()
 
     def artifacts(self):

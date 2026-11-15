@@ -1,3 +1,4 @@
+from scope_requests import file_edit
 import json
 import os
 from pathlib import Path
@@ -28,7 +29,7 @@ class LayerTests(unittest.TestCase):
         return next(f for f in (snapshot or self.store.snapshot())["fields"] if f["id"] == name)
 
     def preview(self, target, changes):
-        return self.store.preview(changes, self.store.snapshot()["revision"], target)
+        return self.store.preview(file_edit(target, changes), self.store.snapshot()["revision"])
 
     def write(self, layer, data):
         self.store.path(layer).write_text(json.dumps(data), encoding="utf-8")
@@ -49,10 +50,10 @@ class LayerTests(unittest.TestCase):
         self.write("project_local", {})
         before = self.store.snapshot()
         self.assertEqual(before["readiness"]["missing"], ["endpoint", "api_key"])
-        saved = self.store.save({"timeout": {"op": "set", "value": 0}}, before["revision"], "project_local")
+        saved = self.store.save(file_edit("project_local", {"timeout": {"op": "set", "value": 0}}), before["revision"])
         self.assertFalse(saved["readiness"]["ready"])
         self.assertEqual(self.field("timeout", saved)["effective"]["value"], 0)
-        cleared = self.store.save({"timeout": {"op": "unset"}}, saved["revision"], "project_local")
+        cleared = self.store.save(file_edit("project_local", {"timeout": {"op": "unset"}}), saved["revision"])
         self.assertEqual(self.field("timeout", cleared)["effective"]["source"], "plugin_env")
         self.assertEqual(json.loads(self.store.path("project_local").read_text()), {})
 
@@ -75,10 +76,10 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(before["default_targets"]["project"], "project_plugin_local")
         changes = {"api_key": {"op": "set", "value": "synthetic-plugin-secret"},
                    "model": {"op": "set", "value": "speed-v1"}}
-        preview = self.store.preview(changes, before["revision"], "project_plugin_local")
+        preview = self.store.preview(file_edit("project_plugin_local", changes), before["revision"])
         self.assertFalse(self.store.path("project_plugin_local").exists())
         self.assertEqual(self.field("model", preview)["effective"]["value"], "speed-v1")
-        saved = self.store.save(changes, before["revision"], "project_plugin_local")
+        saved = self.store.save(file_edit("project_plugin_local", changes), before["revision"])
         self.assertNotIn("synthetic-plugin-secret", json.dumps(public_config(saved)))
         for change in ({"op": "unset"}, {"op": "set", "value": ""}):
             projected = self.preview("project_plugin_local", {"model": change, "api_key": change})
@@ -97,7 +98,7 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(self.field("model")["effective"]["status"], "default")
         self.store.global_enabled = True
         self.assertEqual(self.field("model")["effective"]["status"], "error")
-        with self.assertRaises(UIError): self.store.save({"model":{"op":"set","value":"detail-v2"}}, self.store.snapshot()["revision"], "project_local")
+        with self.assertRaises(UIError): self.store.save(file_edit("project_local", {"model":{"op":"set","value":"detail-v2"}}), self.store.snapshot()["revision"])
 
     def test_atomic_record_not_merged_and_failure_not_saved(self):
         self.write("plugin_skill_env", {"binding":{"identity":"global", "workspace":"global", "resource":"complete"}})
@@ -105,7 +106,7 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(self.field("binding")["effective"]["status"], "invalid")
         self.assertNotIn("resource", self.field("binding")["effective"]["value"])
         before = self.store.path("project_local").read_bytes()
-        with self.assertRaises(UIError): self.store.save({"format":{"op":"set","value":"jpeg"}}, self.store.snapshot()["revision"], "project_local")
+        with self.assertRaises(UIError): self.store.save(file_edit("project_local", {"format":{"op":"set","value":"jpeg"}}), self.store.snapshot()["revision"])
         self.assertEqual(before, self.store.path("project_local").read_bytes())
         fixed = self.preview("project_env", {"binding":{"op":"unset"}})
         self.assertEqual(self.field("binding", fixed)["effective"]["source"], "plugin_skill_env")
@@ -117,10 +118,10 @@ class LayerTests(unittest.TestCase):
         self.assertTrue(preview["validation_errors"])
         original = self.store.snapshot()["revision"]
         self.write("project_skill", {"format":"webp"})
-        with self.assertRaises(UIError): self.store.save({"retries":{"op":"set","value":3}}, original, "plugin_env")
+        with self.assertRaises(UIError): self.store.save(file_edit("plugin_env", {"retries":{"op":"set","value":3}}), original)
         original = self.store.snapshot()["revision"]
         self.store.environment = {"retries":0}
-        with self.assertRaises(UIError): self.store.preview({}, original, "project_local")
+        with self.assertRaises(UIError): self.store.preview(file_edit("project_local", {}), original)
 
     def test_masking_every_layer_and_unknown_keys_preserved(self):
         self.write("project_local", {"api_key":"demo-secret-middle-9999", "unrelated":"retain"})
@@ -128,7 +129,7 @@ class LayerTests(unittest.TestCase):
         self.assertNotIn("secret-middle", json.dumps(data))
         self.assertNotIn("demo-global-key-0001", json.dumps(data))
         self.assertNotIn("default", self.field("api_key", data))
-        self.store.save({"retries":{"op":"set","value":0}}, self.store.snapshot()["revision"], "project_local")
+        self.store.save(file_edit("project_local", {"retries":{"op":"set","value":0}}), self.store.snapshot()["revision"])
         self.assertEqual(json.loads(self.store.path("project_local").read_text())["unrelated"], "retain")
         with self.assertRaises(UIError): self.preview("project_skill", {"api_key":{"op":"set", "value":"demo-new"}})
 

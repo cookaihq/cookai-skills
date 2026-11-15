@@ -12,6 +12,8 @@ import secrets
 
 from skill_ui import UIError
 from skill_ui.storage import active, apply_changes, atomic_json, file_lock, private_directory, prepare_private_write, validation_errors, missing_required
+from skill_ui.scopes import ScopePlanner, annotate_snapshot
+from skill_ui.transactions import JsonTransaction
 from studio_adapter import Studio
 
 
@@ -50,7 +52,10 @@ class LayeredDemo:
         self.environment, self.global_enabled = {}, True
         self.fields = FIELDS
         private_directory(self.directory, owner_path=self.project)
+        self.transaction = JsonTransaction(self.directory / 'transaction.json',
+                                           [self.path(name) for name, *_ in LAYER_DEFS if name != 'process'], self.project)
         with file_lock(self.directory / "layers.lock"):
+            self.transaction.recover()
             if not (self.directory / "initialized.json").exists():
                 for name, values in {
                     "plugin_env": dict(model="balanced-v1", endpoint="https://api.demo.invalid/v1", api_key="demo-global-key-0001", timeout=90, retries=2, format="png"),
@@ -66,7 +71,8 @@ class LayeredDemo:
     def layers(self):
         return [dict(id=name, name=label, scope=scope, scope_label=impact,
                      path="演示进程（只读，不读取真实环境）" if name == "process" else str(self.path(name)),
-                     readonly=name == "process", enabled=scope != "global" or self.global_enabled)
+                     readonly=name == "process", enabled=scope != "global" or self.global_enabled,
+                     exists=name == 'process' or self.path(name).exists())
                 for name, label, scope, impact in LAYER_DEFS]
 
     def _read(self):
@@ -94,7 +100,7 @@ class LayeredDemo:
                 return dict(value=None, source=layer["id"], status="error", message=errors[layer["id"]])
         for layer in self.layers():
             value = data[layer["id"]].get(field["id"])
-            if layer["enabled"] and value is not None and value != "":
+            if layer["enabled"] and value is not None and not (isinstance(value, str) and not value.strip()):
                 if field["id"] == "binding" and (not isinstance(value, dict) or set(value) != {"identity", "workspace", "resource"} or not all(isinstance(v, str) and v.strip() for v in value.values())):
                     return dict(value=value, source=layer["id"], status="invalid", message="绑定记录不完整；不会从其他层补齐。")
                 return dict(value=value, source=layer["id"], status="set")
@@ -113,59 +119,71 @@ class LayeredDemo:
                 value = data[lid].get(name)
                 if not layer["readonly"] and (not field.get("sensitive") or layer["scope"] != "project" or lid in ("project_plugin_local", "project_local") or present):
                     targets.append(lid)
-                status = "skipped" if not layer["enabled"] else "error" if lid in errors else "missing" if not present else "empty" if value is None or value == "" else "effective" if result["source"] == lid else "shadowed"
+                status = "skipped" if not layer["enabled"] else "error" if lid in errors else "missing" if not present else "empty" if value is None or isinstance(value, str) and not value.strip() else "effective" if result["source"] == lid else "shadowed"
                 rows.append(dict(layer=lid, present=present, value=value, status=status, message=errors.get(lid, "")))
             fields.append(dict(field, config_key="$[" + json.dumps(name, ensure_ascii=False) + "]",
                                active=active(field, values), targets=targets, effective=result, rows=rows))
         issues = validation_errors(self.fields, values, changes or {})
         issues.extend(f["label"] + "：" + f["effective"].get("message", "配置无效") for f in fields if f["effective"]["status"] in ("error", "invalid"))
         missing = missing_required(self.fields, values)
-        return dict(revision=revision, layers=layers, fields=fields, default_targets={"project": "project_plugin_local", "global": "plugin_env"},
+        return annotate_snapshot(dict(revision=revision, layers=layers, fields=fields, default_targets={"project": "project_plugin_local", "global": "plugin_env"},
                     readiness={"ready": not missing and not issues, "missing": missing},
                     validation="本次修改的类型、依赖与完整性校验（未验证 API 连通性）", validation_errors=list(dict.fromkeys(issues)),
-                    note="合成分层示例：所有项目／全局文件都位于当前演示目录，不读取真实配置。")
+                    note="合成分层示例：所有项目／全局文件都位于当前演示目录，不读取真实配置。"), self.key)
 
     def snapshot(self):
+        if self.transaction.journal.exists():
+            with file_lock(self.directory / 'layers.lock', protect_git=True, owner_path=self.project):
+                self.transaction.recover()
         return self._snapshot(*self._read())
 
-    def _candidate(self, changes, revision, target):
+    def _candidate(self, changes, revision):
         data, current, errors = self._read()
         if current != revision:
             raise UIError("conflict", "配置已变化，草稿已保留；请重新载入并核对。", 409)
         snapshot = self._snapshot(data, current, errors)
-        layer = next((l for l in snapshot["layers"] if l["id"] == target), None)
-        if layer is None or layer["readonly"] or target in errors:
-            raise UIError("target", "所选配置层不可写。")
-        if not isinstance(changes, dict):
-            raise UIError("changes", "变更格式无效。")
-        for name in changes:
-            field = next((f for f in snapshot["fields"] if f["id"] == name), None)
-            if field is None or target not in field["targets"]:
-                raise UIError("target", "此字段不能保存到所选文件。")
-        # This loader treats explicit empty strings as fallthrough for every ordinary field.
-        nonempty_changes = {k: v for k, v in changes.items() if not isinstance(v, dict) or v.get("op") != "set" or v.get("value") != ""}
-        candidate = apply_changes(data[target], self.fields, nonempty_changes)
-        for name in changes.keys() - nonempty_changes.keys():
-            candidate[name] = ""
-        data[target] = candidate
-        return data, self._snapshot(data, current, errors, changes)
+        def project(files):
+            projected, submitted = deepcopy(data), {}
+            for target, edits in files.items():
+                if target in errors:
+                    raise UIError('target', '所选配置层无法读取。', 422)
+                # Explicit empty strings fall through; false, 0 and [] remain values.
+                nonempty = {k: v for k, v in edits.items() if not (v['op'] == 'set' and isinstance(v.get('value'), str) and not v['value'].strip())}
+                projected[target] = apply_changes(projected[target], self.fields, nonempty)
+                for name in edits.keys() - nonempty.keys():
+                    projected[target][name] = edits[name]['value']
+                for name, edit in edits.items():
+                    if name not in submitted or edit['op'] == 'set':
+                        submitted[name] = edit
+            return self._snapshot(projected, current, errors, submitted), {self.path(target): projected[target] for target in files}
+        return ScopePlanner(snapshot, self.key, project).plan(changes, revision)
 
-    def preview(self, changes, revision, target):
-        return self._candidate(changes, revision, target)[1]
+    def preview(self, changes, revision):
+        self.snapshot()
+        return self._candidate(changes, revision)[0]
 
-    def save(self, changes, revision, target):
+    def save(self, changes, revision):
         if not changes:
             raise UIError("changes", "没有待保存的修改。")
-        _, candidate = self._candidate(changes, revision, target)
+        self.snapshot()
+        candidate, updates = self._candidate(changes, revision)
         if candidate["validation_errors"]:
             raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
-        prepare_private_write(self.path(target), owner_path=self.project)
+        if not updates:
+            return self.snapshot()
         with file_lock(self.directory / "layers.lock", protect_git=True, owner_path=self.project):
-            data, candidate = self._candidate(changes, revision, target)
+            self.transaction.recover()
+            candidate, updates = self._candidate(changes, revision)
             if candidate["validation_errors"]:
                 raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
-            atomic_json(self.path(target), data[target], owner_path=self.project, protect_git=True)
-        return self.snapshot()
+            def verify():
+                saved = self._snapshot(*self._read())
+                for field in saved['fields']:
+                    expected = next(f for f in candidate['fields'] if f['id'] == field['id'])
+                    if field['effective'] != expected['effective']:
+                        raise UIError('verification', '保存后来源核对失败，已停止本次切换。', 409)
+                return saved
+            return self.transaction.commit(updates, verify)
 
 
 class LayeredStudio(Studio):

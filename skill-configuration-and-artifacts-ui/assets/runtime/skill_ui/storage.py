@@ -11,6 +11,7 @@ import stat
 import subprocess
 
 from .contracts import UIError
+from .scopes import ScopePlanner, annotate_snapshot
 
 
 def _windows_owner(path):
@@ -278,7 +279,7 @@ def apply_changes(values, fields, changes):
 def missing_required(fields, effective):
     """Business readiness, independent of whether an unrelated edit can be saved."""
     return [f["id"] for f in fields if active(f, effective) and f.get("required")
-            and effective.get(f["id"]) in (None, "", [])]
+            and (effective.get(f["id"]) is None or isinstance(effective.get(f["id"]), str) and not effective[f["id"]].strip())]
 
 
 def validation_errors(fields, effective, changes):
@@ -327,42 +328,44 @@ class JsonConfig:
                                effective={"value": value, "source": "project" if present else "default" if "default" in f else None, "status": status},
                                rows=[{"layer": "project", "present": present, "value": values.get(f["id"]), "status": "effective" if present else "missing"}]))
         missing = missing_required(self.fields, effective)
-        return {"revision": revision, "validation": "本次修改的格式与关联完整性校验（未验证 API 连通性）",
+        return annotate_snapshot({"revision": revision, "validation": "本次修改的格式与关联完整性校验（未验证 API 连通性）",
                 "readiness": {"ready": not missing, "missing": missing},
                 "default_targets": {"project": "project"},
                 "layers": [{"id": "project", "name": self.path.name, "path": str(self.path), "scope": "project",
-                            "scope_label": "仅此项目", "readonly": False, "enabled": True}],
-                "fields": fields, "validation_errors": validation_errors(self.fields, effective, changes or {})}
+                            "scope_label": "仅此项目", "readonly": False, "enabled": True, "exists": self.path.exists()}],
+                "fields": fields, "validation_errors": validation_errors(self.fields, effective, changes or {})}, self.key)
 
     def snapshot(self):
         return self._snapshot(*self._read())
 
-    def _candidate(self, changes, revision, target):
-        if target != "project":
-            raise UIError("target", "请选择有效的保存文件。")
+    def _candidate(self, changes, revision):
         values, current = self._read()
-        if current != revision:
-            raise UIError("conflict", "配置已被其他操作修改。草稿仍保留，请重新载入后核对。", 409)
-        values = apply_changes(values, self.fields, changes)
-        return values, self._snapshot(values, current, changes)
+        def project(files):
+            edits = files.get("project", {})
+            candidate = apply_changes(values, self.fields, edits)
+            return self._snapshot(candidate, current, edits), {"project": candidate}
+        return ScopePlanner(self._snapshot(values, current), self.key, project).plan(changes, revision)
 
-    def preview(self, changes, revision, target):
-        return self._candidate(changes, revision, target)[1]
+    def preview(self, changes, revision):
+        return self._candidate(changes, revision)[0]
 
-    def save(self, changes, revision, target):
+    def save(self, changes, revision):
         if not isinstance(changes, dict) or not changes:
             raise UIError("changes", "没有待保存的修改。")
         # Reject invalid targets/edits and stale revisions before preparing any files.
-        _, candidate = self._candidate(changes, revision, target)
+        candidate, modifications = self._candidate(changes, revision)
         if candidate["validation_errors"]:
             raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
+        if not modifications:
+            return self.snapshot()
         prepare_private_write(self.path, owner_path=self.owner_path)
         # Existing business directories retain their ACL; only new directories/files are tightened.
         if not self.path.parent.exists():
             private_directory(self.path.parent, owner_path=self.owner_path if self.owner_path.exists() else None)
         with file_lock(self.path.with_suffix(self.path.suffix + ".lock"), protect_git=True, owner_path=self.owner_path):
-            values, candidate = self._candidate(changes, revision, target)
+            candidate, modifications = self._candidate(changes, revision)
             if candidate["validation_errors"]:
                 raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
-            atomic_json(self.path, values, owner_path=self.owner_path, protect_git=True)
+            if modifications:
+                atomic_json(self.path, modifications["project"], owner_path=self.owner_path, protect_git=True)
         return self.snapshot()

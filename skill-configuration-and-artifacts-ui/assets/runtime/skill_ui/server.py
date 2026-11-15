@@ -256,14 +256,18 @@ class Handler(BaseHTTPRequestHandler):
                             return self.send(200, {"value": record.get("value", "")})
                     raise UIError("field", "此字段不支持查看原值。")
                 if path == "/api/preview":
-                    snapshot = server.adapter.preview(data.get("changes"), data.get("revision"), data.get("target"))
+                    if "target" in data:
+                        raise UIError("contract", "请更新页面和适配器，使用逐项范围提交。", 422)
+                    snapshot = server.adapter.preview(data.get("changes"), data.get("revision"))
                     return self.send(200, {"config": public_config(snapshot)})
                 if path == "/api/save":
-                    snapshot = server.adapter.save(data.get("changes"), data.get("revision"), data.get("target"))
+                    if "target" in data:
+                        raise UIError("contract", "请更新页面和适配器，使用逐项范围提交。", 422)
+                    snapshot = server.adapter.save(data.get("changes"), data.get("revision"))
                     public = public_config(snapshot)
                     receipt = {"instance": server.instance, "project": str(server.project), "revision": snapshot["revision"],
                                "task": snapshot.get("task"), "validation": snapshot.get("validation", "适配器校验"),
-                               "target": data.get("target"), "saved_at": time.time()}
+                               "saved_at": time.time()}
                     atomic_json(server.directory / "saved.json", receipt, owner_path=server.project)
                     logging.info("config_saved instance=%s", server.instance)
                     return self.send(200, {"config": public, "receipt": receipt})

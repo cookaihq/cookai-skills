@@ -1,3 +1,4 @@
+from scope_requests import file_edit
 import http.cookiejar
 import json
 import os
@@ -69,14 +70,14 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(state["config"]["fields"][0]["effective"]["configured"])
         first = state["config"]["revision"]
         secret = "demo-key-middle-private-987654"
-        code, saved, _ = self.request(server,opener,"/api/save",{"target":"project","revision":first,"changes":{"api_key":{"op":"set","value":secret}}})
+        code, saved, _ = self.request(server,opener,"/api/save",{'revision': first, 'changes': file_edit("project", {"api_key":{"op":"set","value":secret}})})
         self.assertEqual(code,200)
         self.assertNotIn(secret,json.dumps(saved))
         self.assertNotIn("middle-private",json.dumps(saved))
         self.assertNotIn(secret,(self.project/"saved.json").read_text(encoding="utf-8"))
         current = saved["config"]["revision"]
         self.assertEqual(self.request(server,opener,"/api/reveal",{"revision":current,"id":"api_key"})[1]["value"],secret)
-        self.assertEqual(self.request(server,opener,"/api/save",{"target":"project","revision":first,"changes":{"format":{"op":"set","value":"纯文本"}}})[0],409)
+        self.assertEqual(self.request(server,opener,"/api/save",{'revision': first, 'changes': file_edit("project", {"format":{"op":"set","value":"纯文本"}})})[0],409)
         self.assertEqual(json.loads((self.project/"demo-state/settings.json").read_text(encoding="utf-8"))["api_key"],secret)
         self.assertEqual(self.request(server,opener,"/api/reveal",{"revision":first,"id":"api_key"})[0],409)
 
@@ -91,11 +92,11 @@ class CoreTests(unittest.TestCase):
         old=path.read_bytes()
         for changes in ({"key":{"op":"unset"}}, {"count":{"op":"set","value":True}},
                         {"enabled":{"op":"set","value":False},"count":{"op":"set","value":3}}):
-            with self.assertRaises(UIError):store.save(changes,revision,"project")
+            with self.assertRaises(UIError):store.save(file_edit("project", changes), revision)
             self.assertEqual(path.read_bytes(),old)
-        store.save({"ordered":{"op":"set","value":["z","a"]}},revision,"project")
+        store.save(file_edit("project", {"ordered":{"op":"set","value":["z","a"]}}), revision)
         self.assertEqual(json.loads(path.read_text()),{"unknown":"keep","key":"existing","ordered":["z","a"]})
-        result=store.save({"ordered":{"op":"unset"}},store.snapshot()["revision"],"project")
+        result=store.save(file_edit("project", {"ordered":{"op":"unset"}}), store.snapshot()["revision"])
         self.assertEqual(result["fields"][1]["effective"]["value"],["c"])
         self.assertEqual(result["fields"][1]["effective"]["source"],"default")
 
@@ -105,7 +106,7 @@ class CoreTests(unittest.TestCase):
         state = self.request(server, opener, "/api/state")[1]["config"]
         self.assertEqual(state["readiness"], {"ready": False, "missing": ["api_key"]})
         self.assertEqual(state["presentation"]["focus"], ["format", "retain"])
-        request = {"target": "project", "revision": state["revision"], "changes": {"format": {"op": "set", "value": "纯文本"}}}
+        request = {'revision': state["revision"], 'changes': file_edit("project", {"format": {"op": "set", "value": "纯文本"}})}
         code, preview, _ = self.request(server, opener, "/api/preview", request)
         self.assertEqual(code, 200)
         self.assertEqual(preview["config"]["validation_errors"], [])
@@ -130,11 +131,11 @@ class CoreTests(unittest.TestCase):
         state["presentation"] = {"title": "Example", "focus": ["count"], "private": "not public"}
         self.assertEqual(public_config(state)["readiness"], {"ready": True, "missing": []})
         self.assertNotIn("private", public_config(state)["presentation"])
-        candidate = store.preview({"enabled": {"op": "set", "value": True}}, state["revision"], "project")
+        candidate = store.preview(file_edit("project", {"enabled": {"op": "set", "value": True}}), state["revision"])
         self.assertEqual(candidate["readiness"]["missing"], ["token"])
         self.assertTrue(candidate["validation_errors"])
         with self.assertRaises(UIError):
-            store.save({"enabled": {"op": "set", "value": True}}, state["revision"], "project")
+            store.save(file_edit("project", {"enabled": {"op": "set", "value": True}}), state["revision"])
         self.assertFalse(store.path.exists())
         store.path.write_text('{"enabled":true,"token":""}', encoding="utf-8")
         self.assertEqual(public_config(store.snapshot())["readiness"]["missing"], ["token"])
@@ -143,7 +144,7 @@ class CoreTests(unittest.TestCase):
         server, opener = self.server("configuration", adapter_class=LayeredStudio)
         self.login(server, opener)
         state = self.request(server, opener, "/api/state")[1]["config"]
-        request = {"target":"project_local", "revision":state["revision"], "changes":{"api_key":{"op":"unset"}}}
+        request = {'revision': state["revision"], 'changes': file_edit("project_local", {"api_key":{"op":"unset"}})}
         files = {p:p.read_bytes() for p in server.adapter.store.directory.glob("*.json")}
         code, preview, _ = self.request(server, opener, "/api/preview", request)
         self.assertEqual(code, 200)
@@ -157,7 +158,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.request(server, opener, "/api/reveal", {"id":"api_key", "target":"../bad", "revision":state["revision"]})[0], 400)
         code, saved, _ = self.request(server, opener, "/api/save", request)
         self.assertEqual(code, 200)
-        self.assertEqual(saved["receipt"]["target"], "project_local")
+        self.assertEqual(saved["receipt"]["revision"], saved["config"]["revision"])
         self.assertEqual(files[server.adapter.store.path("plugin_env")], server.adapter.store.path("plugin_env").read_bytes())
         self.assertEqual(self.request(server, opener, "/api/preview", request)[0], 409)
         self.assertEqual(self.request(server, opener, "/configuration.js", decode=False)[0], 200)

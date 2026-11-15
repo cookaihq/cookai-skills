@@ -13,10 +13,13 @@ async function api(path, data) {
   const options = data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(data)};
   const response = await fetch(path, {...options, cache:'no-store'});
   const body = await response.json();
-  if (!response.ok) { const error = new Error(body.message || '请求失败'); error.status = response.status; throw error; }
+  if (!response.ok) { const error = new Error(body.message || '请求失败'); error.status = response.status; if(state&&[401,410].includes(error.status))fail(error); throw error; }
   return body;
 }
 function fail(error) {
+  if(state?.page==='configuration'&&configurationUI.snapshot&&[401,410].includes(error.status)){
+    ended=true;configurationUI.expire();root.setAttribute('aria-busy','false');return;
+  }
   configurationUI.invalidate();configurationUI.revealed={};
   if (error.status === 410 || error.status === 401) ended = true;
   root.innerHTML = `<div class="shell"><div class="empty"><h1>${ended ? '页面已结束' : '暂时无法读取'}</h1><p>${e(error.message)}</p>${ended ? '<p>请让 Agent 重新打开此页面。已保存的配置和产物仍然保留。</p>' : '<button data-action="reload">重试</button>'}</div></div>`;
