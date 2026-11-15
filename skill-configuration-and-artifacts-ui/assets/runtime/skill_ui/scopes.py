@@ -158,4 +158,3 @@ class ScopePlanner:
         candidate['scope_plans'] = plans
         candidate['unchanged_fields'] = unchanged
         return candidate, modifications
-
