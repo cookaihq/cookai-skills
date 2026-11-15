@@ -57,7 +57,7 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 
 `presentation` 可提供安全的 `title/description/focus/initial_target`，其中 `focus` 为本次优先展示的字段 ID 列表，`initial_target` 为初始写入层 ID。Agent 在每次打开时可通过启动参数 `--fields api_key,format --target project_local` 覆盖默认展示；只传 ID，不传值或密钥。未知 ID 被忽略，URL 不增加写权限。明确给空 `--fields ""` 仅先显示必要缺项；未指定焦点且没有缺项时，模板展示前三个非高级适用项作为兜底，业务应声明合适的默认焦点。页面把当前必要缺项并入默认字段，后续保持这些字段的位置；依赖新激活的缺项也会加入。
 
-逐字段初始目标依次采用有效的本次 `target`／适配器 `initial_target`、本项已有可写来源、允许的全局默认文件、其余允许文件。无有效文件来源且 `effective.empty:true` 时突出默认保存位置，不打生效勾。后续清空输入不改已有草稿目标；只查看范围沿用上次查看的文件，不能移动草稿。字段 `targets` 和只读限制仍逐项检查，不允许写入的字段提供可用位置或只读说明。默认文件须由开发者声明，不能由读取优先级代替。
+逐字段初始目标依次采用本项已有可写来源、有效的本次 `target`／适配器 `initial_target`、允许的全局默认文件、其余允许文件。入口指定的默认位置只影响没有可写保存来源的项。无有效文件来源且 `effective.empty:true` 时突出默认保存位置，不打生效勾。后续清空输入不改已有草稿目标；只查看范围沿用上次查看的文件，不能移动草稿。字段 `targets` 和只读限制仍逐项检查，不允许写入的字段提供可用位置或只读说明。默认文件须由开发者声明，不能由读取优先级代替。
 
 `readiness: {ready: boolean, missing: [字段ID]}` 描述业务是否已具备必要配置，不作为保存按钮的阻塞条件。核心在脱敏前补算 active + required 的空值或错误状态，保留适配器声明的业务缺项。`validation_errors` 仅放本次保存阻塞错误，不能把所有未填写必要项一律塞入。`storage.missing_required` 与 `validation_errors` 分别提供示例计算；后者保留已修改必需项、关联依赖和原子记录约束。真实业务的就绪条件与保存约束由原加载器定义，格式检查不代替业务鉴权。
 
@@ -80,6 +80,8 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 `scope_plans` 仅公开 `target/state/cleanup/writes_target/conflict/choice_token/input_changed/uses_target/message`；`state` 为 `ready/choice/blocked`。层和字段白名单必须在任何写入前验证。更高只读／不可读来源阻断切换，目标值相同仍可能需要清理。修订号覆盖所有参与来源、进程注入与开关；单项依赖不能借用本次未提交字段。
 
 共用前端的扩展 API：`draftValue(id)`、`stage(id,change)`、`requestSwitch(id,target,mode)`、`save(id或ID数组)`、`selectionHTML(id)`、`subscribe(listener)`。业务选择器读写主表同一草稿，沿用服务端子集预览、差异选择、未知结果和到期状态；不能自行直接 POST 后清空同名草稿。关闭／重开读取共享草稿，只提交改过或明确转存的字段。`save` 成功返回 `{saved:true, config}`，需选择或失败时不返回成功。扩展自己的按钮须订阅 `busy/expired/uncertain/needsReview` 状态，过期不再应用；用现有反馈区承接冲突，不要求重做已确认视觉。
+
+扩展在未编辑转存前先只读预览，用 `selectionHTML(id,intent,plan)` 展示尚未创建主表意图的处理计划；计划就绪后才允许保存。清理信息包含准确文件路径、共享影响及清理不会随撤销恢复的提示。真正提交仍调用 `requestSwitch` 与 `save`。
 
 扩展通过 `stage` 写入时须立即同步主表可见输入，不等预览成功；否则到期或错误时会显示旧值而隐藏最新草稿。主表或其他入口保存成功后，扩展同步消费对应字段已经完成的转存标记；后续只改收藏等其他项时，不得因残留标记再次提交已保存字段。未消费的选择与目标仍须保留并按新快照核对。
 

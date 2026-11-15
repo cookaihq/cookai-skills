@@ -23,6 +23,15 @@ test('inspection and clearing a project input do not move its draft target',()=>
   assert.equal(ui.fieldTarget('a'),'project');assert.equal(ui.payload().files.project.a.value,'edited');assert.deepEqual(ui.payload().switches,{});
   ui.stage('a',{op:'set',value:''});assert.equal(ui.fieldTarget('a'),'project');
 });
+
+test('an entry default applies only when the field has no writable saved source',()=>{
+  const ui=fixture(),state=snapshot();state.presentation={initial_target:'project'};
+  delete ui.snapshot;ui.set(state);
+  ui.stage('b',{op:'set',value:'edited-global'});
+  assert.equal(ui.fieldTarget('b'),'global');
+  assert.equal(ui.payload().files.global.b.value,'edited-global');
+  assert.equal(ui.fieldTarget('empty'),'project');
+});
 test('choices expire on new input, destination or snapshot revision',()=>{
   const ui=fixture();ui.requestSwitch('a','global');Object.assign(ui.switchIntents.a,{choice:'target',choice_token:'old'});
   ui.stage('a',{op:'set',value:'new'});assert.equal(ui.switchIntents.a.choice,undefined);
@@ -40,4 +49,27 @@ test('unknown save result blocks retry until reread; expiry preserves typed inpu
   let saves=0;const ui=fixture(async(path)=>{if(path==='/api/save'){saves++;throw Error('lost response');}return{config:snapshot()};});
   ui.stage('a',{op:'set',value:'keep-this'});await ui.save('a');assert.equal(ui.uncertain,true);await ui.save('a');assert.equal(saves,1);assert.equal(ui.draftValue('a'),'keep-this');
   ui.set(snapshot());assert.equal(ui.uncertain,false);ui.expire();assert.equal(ui.draftValue('a'),'keep-this');assert.equal(ui.canSave(),false);await ui.save('a');assert.equal(saves,1);
+});
+
+test('rereading a completed pure switch consumes its lost-response intent',async()=>{
+  const projected=snapshot();projected.fields[0].effective={value:'target-b',source:'global',empty:false};projected.fields[0].edit_revision='a-global-b';
+  let saves=0;
+  const ui=fixture(async path=>{if(path==='/api/save'){saves++;throw Error('lost response');}return{config:projected};});
+  ui.requestSwitch('a','global','existing');await ui.save('a');
+  assert.equal(ui.uncertain,true);assert.equal(saves,1);
+  const reread=structuredClone(projected);reread.revision='r2';ui.set(reread);
+  assert.equal(ui.count(),0);assert.equal(ui.hasFieldDraft('a'),false);
+  assert.equal(ui.needsReview.a,undefined);assert.deepEqual(ui.payload().switches,{});
+});
+
+test('a switch plan names every cleaned file and its shared impact before applying',async()=>{
+  const state=snapshot();state.layers[0].scope_label='Project shared impact';
+  state.scope_plans={a:{target:'global',state:'ready',cleanup:['project'],message:'Switch is ready'}};
+  let inspected;const response=new Promise(resolve=>{inspected=resolve;});
+  const ui=fixture(async()=>{inspected();return{config:state};});
+  ui.set(state);ui.queuePreview=Configuration.prototype.queuePreview;
+  ui.requestSwitch('a','global','existing');await response;await Promise.resolve();
+  const html=ui.selectionHTML('a');
+  assert.match(html,/\/project\/\.env/);assert.match(html,/Project shared impact/);
+  assert.match(html,/不会.*恢复/);
 });

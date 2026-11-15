@@ -63,10 +63,11 @@ export class Configuration {
   expire(message='页面访问已结束，不能继续保存。未保存内容保留在当前页，可先复制；请让 Agent 重新打开页面。'){
     this.expired=true;this.invalidate();this.fileRemoval=null;this.revealed={};this.savedRevealed={};this.error=message;this.paint();this.notify();
   }
-  selectionHTML(id){const intent=this.switchIntents?.[id];return intent?switchInfoHTML.call(this,this.field(id),intent,this.preview?.scope_plans?.[id]):'';}
+  selectionHTML(id,intent=this.switchIntents?.[id],plan=this.preview?.scope_plans?.[id]){return intent?switchInfoHTML.call(this,this.field(id),intent,plan):'';}
   draftValue(id){const edit=this.changes()[id];return edit?.op==='set'?edit.value:edit?.op==='unset'?null:this.field(id).effective.value;}
   requestSwitch(id,target,mode='input'){
     if(this.busy||this.expired||this.uncertain||!this.targets(this.field(id)).some(layer=>layer.id===target))return false;
+    delete this.pendingSwitchRevisions?.[id];
     if(this.field(id).effective.source===target)delete this.switchIntents[id];
     else if(this.switchIntents[id]?.target!==target||this.switchIntents[id]?.mode!==mode)this.switchIntents[id]={target,mode};
     this.queuePreview();return true;
@@ -116,6 +117,9 @@ Configuration.prototype.set = function(snapshot) {
   this.savedRevealed={};
   baseSet.call(this,snapshot);
   this.needsReview??={};this.switchIntents??={};this.inspectedScopes??={};this.scopeFiles??={};
+  // A lost response may already have applied a pure switch. Compare the whole
+  // checked field projection using its opaque server fingerprint, including secrets.
+  for(const f of snapshot.fields)if(this.pendingSwitchRevisions?.[f.id]&&this.pendingSwitchRevisions[f.id]===f.edit_revision)this.clearDraft(f.id);
   if(previous)for(const f of snapshot.fields) {
     const old=previous.fields.find(n=>n.id===f.id);
     if(this.hasFieldDraft(f.id)&&old?.edit_revision!==f.edit_revision)this.needsReview[f.id]=true;
@@ -134,7 +138,7 @@ Configuration.prototype.set = function(snapshot) {
 Configuration.prototype.fieldTarget = function(id) {return this.fieldTargets?.[id] || '';};
 Configuration.prototype.defaultFieldTarget = function(f) {
   const targets=this.targets(f);
-  return targets.find(l=>l.id===this.initialTarget)?.id || targets.find(l=>l.id===f.effective.source)?.id ||
+  return targets.find(l=>l.id===f.effective.source)?.id || targets.find(l=>l.id===this.initialTarget)?.id ||
     targets.find(l=>l.id===this.snapshot.default_targets?.global)?.id || targets[0]?.id || '';
 };
 Configuration.prototype.scopeTarget = function(f,scope) {
@@ -173,6 +177,7 @@ Configuration.prototype.selectFieldTarget = function(id,target) {
 };
 Configuration.prototype.stage = function(id,change,raw) {
   if(this.expired||!this.writable(this.field(id)))return;
+  delete this.pendingSwitchRevisions?.[id];
   this.fileRemoval=null;
   const target=this.fieldTarget(id),f=this.field(id),explicit=this.fileEdits?.[target]?.has(id);
   const unchanged=!explicit&&change.op==='set'&&(!f.sensitive&&JSON.stringify(change.value)===JSON.stringify(f.effective.value)||f.sensitive&&change.value==='');
@@ -270,6 +275,10 @@ Configuration.prototype.save = async function(only,removal) {
         for(const id of (Array.isArray(only)?only:[only]))(this.singleErrors??={})[id]=checked.config.validation_errors;
       return;
     }
+    for(const id of Object.keys(changes.switches)){
+      const expected=checked.config.fields.find(field=>field.id===id)?.edit_revision;
+      if(expected)(this.pendingSwitchRevisions??={})[id]=expected;
+    }
     writing=true;
     const result=await this.api('/api/save',{revision,changes});
     const consumed=new Set([...Object.values(changes.files).flatMap(c=>Object.keys(c)),...Object.keys(changes.switches)]);
@@ -281,6 +290,7 @@ Configuration.prototype.save = async function(only,removal) {
     return {saved:true,config:result.config};
   } catch(error) {
     this.uncertain=writing&&(!error.status||error.status>=500);
+    if(!this.uncertain)for(const id of Object.keys(changes.switches))delete this.pendingSwitchRevisions?.[id];
     this.error=this.expired?this.error:this.uncertain?'保存结果尚未确认。请重新载入核对，草稿已保留；不会自动重试。':error.message;
     this.toast(this.error);
   } finally {
@@ -295,6 +305,7 @@ Configuration.prototype.clearDraft = function(id) {
     this.fileEdits?.[target]?.delete(id);
   }
   delete (this.switchIntents||{})[id];delete (this.needsReview||{})[id];
+  delete this.pendingSwitchRevisions?.[id];
   delete (this.singleErrors||{})[id];
   this.fieldTargets[id]=this.defaultFieldTarget(this.field(id));
 };
@@ -486,7 +497,14 @@ Configuration.prototype.fieldHTML=function(f){
 };
 function switchInfoHTML(f,intent,plan) {
   const target=this.layer(intent.target),choice=intent.choice;
-  return `<section class="switch-plan" aria-label="${esc(f.label)}的切换处理"><div class="switch-plan-head"><strong>准备使用：${esc(scopeNames[target.scope])} · ${esc(target.name.replace(/^(项目|全局) · /,''))}</strong><button type="button" data-config="cancel-switch" data-id="${esc(f.id)}" ${this.busy?'disabled':''}>取消切换</button></div><p class="${plan?.state==='blocked'?'error':''}">${esc(plan?.message||'正在核对本项内容与生效位置…')}</p>${plan?.conflict?`<div class="switch-choices" role="radiogroup" aria-label="${esc(f.label)}有不同内容，选择要使用的内容">${[['input','保存我填写的内容','替换目标文件里原有的这一项。'],['target','使用目标已有内容','应用成功后放弃本项未保存修改。']].map(([value,label,help])=>`<button type="button" role="radio" aria-checked="${choice===value}" data-config="choose-content" data-id="${esc(f.id)}" data-layer="${esc(intent.target)}" data-choice="${value}" ${this.busy?'disabled':''}><span class="choice-dot" aria-hidden="true"></span><span><strong>${label}</strong><small>${help}</small></span></button>`).join('')}</div>`:''}${plan?.state==='ready'?`<button type="button" class="switch-commit" data-config="apply-field" data-id="${esc(f.id)}" data-layer="${esc(intent.target)}" data-mode="${esc(intent.mode||'existing')}" ${this.busy||this.uncertain||this.needsReview?.[f.id]?'disabled':''}>${choice==='target'||plan.uses_target?'使用已有内容':'保存并使用'}</button>`:''}</section>`;
+  const cleanup=(plan?.cleanup||[]).map(id=>this.layer(id));
+  return `<section class="switch-plan" aria-label="${esc(f.label)}的切换处理">
+    <div class="switch-plan-head"><strong>准备使用：${esc(scopeNames[target.scope])} · ${esc(target.name.replace(/^(项目|全局) · /,''))}</strong><button type="button" data-config="cancel-switch" data-id="${esc(f.id)}" ${this.busy?'disabled':''}>取消切换</button></div>
+    <code class="switch-file-path">${esc(target.path)}</code><p>${esc(target.scope_label)}</p>
+    <p class="${plan?.state==='blocked'?'error':''}">${esc(plan?.message||'正在核对本项内容与生效位置…')}</p>
+    ${cleanup.length?`<p>将删除以下文件中的本项，其他设置保留：</p><ul class="switch-cleanup">${cleanup.map(layer=>`<li><strong>${esc(layer.name)}</strong><code class="switch-file-path">${esc(layer.path)}</code><span>${esc(layer.scope_label)}</span></li>`).join('')}</ul><p>已保存的清理不会因撤销草稿恢复。</p>`:''}
+    ${plan?.conflict?`<div class="switch-choices" role="radiogroup" aria-label="${esc(f.label)}有不同内容，选择要使用的内容">${[['input','保存我填写的内容','替换目标文件里原有的这一项。'],['target','使用目标已有内容','应用成功后放弃本项未保存修改。']].map(([value,label,help])=>`<button type="button" role="radio" aria-checked="${choice===value}" data-config="choose-content" data-id="${esc(f.id)}" data-layer="${esc(intent.target)}" data-choice="${value}" ${this.busy?'disabled':''}><span class="choice-dot" aria-hidden="true"></span><span><strong>${label}</strong><small>${help}</small></span></button>`).join('')}</div>`:''}
+    ${plan?.state==='ready'?`<button type="button" class="switch-commit" data-config="apply-field" data-id="${esc(f.id)}" data-layer="${esc(intent.target)}" data-mode="${esc(intent.mode||'existing')}" ${this.busy||this.uncertain||this.needsReview?.[f.id]?'disabled':''}>${choice==='target'||plan.uses_target?'使用已有内容':'保存并使用'}</button>`:''}</section>`;
 }
 function fileRemovalHTML(f,layer) {
   const removal=this.fileRemoval;

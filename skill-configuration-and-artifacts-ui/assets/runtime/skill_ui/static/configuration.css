@@ -211,3 +211,6 @@ html:has(.config-shell){scroll-padding-bottom:140px}
 
 .scope-block.is-default{border-color:#8ca6dc;background:#f1f5ff;box-shadow:inset 0 0 0 1px #d7e3ff}
 .scope-block.is-default small{color:#4267a8}
+.switch-file-path { display: block; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; white-space: normal; }
+.switch-cleanup { padding-left: 20px; }
+.switch-cleanup li + li { margin-top: 10px; }
