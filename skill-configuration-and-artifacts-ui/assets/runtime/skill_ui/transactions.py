@@ -74,7 +74,7 @@ class JsonTransaction:
         except (OSError, ValueError, TypeError, KeyError):
             raise UIError('recovery', '上次保存的恢复记录需要检查；已停止后续保存。', 409) from None
 
-    def commit(self, updates, verify):
+    def commit(self, updates, verify, *, check=None):
         if self.journal.exists():
             raise UIError('recovery', '请先回读并恢复上次保存。', 409)
         entries = []
@@ -87,6 +87,11 @@ class JsonTransaction:
             before = self.read(path)
             if before != after:
                 entries.append((path, before, after))
+        # Recheck the loader inputs after capturing before-bytes, so a change
+        # between candidate construction and this transaction is not adopted
+        # silently as a new baseline. Each write still checks its own bytes.
+        if check is not None:
+            check()
         if not entries:
             return verify()
         record = {'state': 'applying', 'entries': [dict(path=str(path), **{

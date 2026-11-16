@@ -29,6 +29,9 @@ class Adapter:
     opening defaults. URL fields/target may select another view, never grant write access.
     Fields: id (UI identity), config_key (actual key/path, no values), label, type, sensitive, required, advanced, readonly, active, group,
     help, choices, depends_on, targets, effective {source, status, value, message},
+    optional directory_scope ('global'/'project'), default (absolute root), anchor
+    (fixed selector file). directory_targets maps edited field IDs to projected
+    absolute destination files; the business adapter owns root resolution/policy.
     rows [{layer, present, status, value, message}]. The adapter owns resolution.
     Types: text, number, boolean, select, list, json. depends_on maps field IDs to values.
     Artifacts need only id and title; optional kind, task, summary, preview, resource,
@@ -67,7 +70,7 @@ def masked(value):
 def public_config(snapshot):
     if "layers" not in snapshot or snapshot.get("configuration_protocol") != "field-scopes-v1":
         raise UIError("contract", "配置适配器需要迁移到逐项范围协议；请同时升级适配器和共用核心。", 422)
-    result = {k: snapshot[k] for k in ("configuration_protocol", "revision", "task", "validation", "note", "default_targets", "validation_errors") if k in snapshot}
+    result = {k: snapshot[k] for k in ("configuration_protocol", "revision", "directory_revision", "task", "validation", "note", "default_targets", "validation_errors") if k in snapshot}
     presentation = snapshot.get("presentation", {})
     result["presentation"] = {k: presentation[k] for k in ("title", "description", "focus", "initial_target") if k in presentation}
     # Compute before masking; adapters may additionally report business-specific missing conditions.
@@ -82,7 +85,8 @@ def public_config(snapshot):
     result["layers"] = [{k: layer[k] for k in layer_keys if k in layer} for layer in snapshot["layers"]]
     result["fields"] = []
     allowed = ("id", "config_key", "label", "type", "sensitive", "required", "advanced", "readonly", "active", "group", "help",
-               "choices", "choice_labels", "depends_on", "targets", "effect", "edit_revision")
+               "choices", "choice_labels", "depends_on", "targets", "effect", "edit_revision",
+               "directory_scope", "default", "anchor")
     for field in snapshot["fields"]:
         item = {k: field[k] for k in allowed if k in field}
         def public_value(record, keys):
@@ -100,4 +104,7 @@ def public_config(snapshot):
         result["scope_plans"] = {key: {name: plan[name] for name in plan_keys if name in plan}
                                  for key, plan in snapshot["scope_plans"].items() if key in known}
     result["unchanged_fields"] = [key for key in snapshot.get("unchanged_fields", []) if key in known]
+    if "directory_targets" in snapshot:
+        result["directory_targets"] = {key: path for key, path in snapshot["directory_targets"].items()
+                                       if key in known and isinstance(path, str)}
     return result

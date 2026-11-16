@@ -29,7 +29,7 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 | 方法 | 输入/输出与职责 |
 | --- | --- |
 | `config()` | `{configuration_protocol:"field-scopes-v1", revision, layers, fields, default_targets?, presentation?, readiness?, validation_errors?, validation?, note?, task?}`；返回真实加载器计算的生效结果、每层状态及允许的保存目标。敏感字段用 `sensitive: true`，核心对生效值和所有层的值脱敏 |
-| `preview(changes, revision)` | `changes` 为 `{files, switches?, file_edits?}`，具体结构见下文。校验 revision 与逐字段目标，在内存中应用完整提交，用原加载器解析；返回候选 config、安全的 `validation_errors` 和 `scope_plans`。不写文件、忽略规则或回执 |
+| `preview(changes, revision)` | `changes` 为 `{files, switches?, file_edits?, directory_revision?}`，具体结构见下文。校验 revision 与逐字段目标，在内存中应用完整提交，用原加载器解析；返回候选 config、安全的 `validation_errors` 和 `scope_plans`。不写文件、忽略规则或回执 |
 | `save(changes, revision)` | 复核同一结构、revision、类型、允许目标与关联约束，事务提交本次所有文件与必要高层清理，回读验证来源后返回 config。不得信任先前预览；失败抛安全 `UIError`，不部分保存 |
 | `artifacts()` | `{items, note?}`，将真实记录映射成可显示条目。集合条目仅 `id/title` 必需，其余按实际业务提供 |
 | `resource(id)` | 返回 `Resource(Path或bytes, mime, name)`；只允许已归属本项目且允许用户取用的成果。ID 查白名单，不把请求 ID 拼成文件路径 |
@@ -85,7 +85,7 @@ uv run --frozen --project <本Skill> python <本Skill>/scripts/vendor.py --targe
 
 扩展通过 `stage` 写入时须立即同步主表可见输入，不等预览成功；否则到期或错误时会显示旧值而隐藏最新草稿。主表或其他入口保存成功后，扩展同步消费对应字段已经完成的转存标记；后续只改收藏等其他项时，不得因残留标记再次提交已保存字段。未消费的选择与目标仍须保留并按新快照核对。
 
-局部成功只消费本次字段，其余草稿保留并比较 `edit_revision`；已保存基线变了要求人工核对，所有旧 choice token 作废。HTTP 409 保留草稿；保存结果未知先回读，不自动重发。JSON 分层合成示例使用 `transactions.JsonTransaction` 的私有 journal、文件白名单、失败精确回滚和中断恢复；这是新 JSON 存储可选示例，不代替已有业务事务。锁只协调同协议写入者，不提供任意外部读取者的跨文件瞬时隔离。
+局部成功只消费本次字段，其余草稿保留并比较 `edit_revision`；已保存基线变了要求人工核对，所有旧 choice token 作废。HTTP 409 保留草稿；保存结果未知先回读，不自动重发。JSON 分层合成示例使用 `transactions.JsonTransaction` 的私有 journal、文件白名单、失败精确回滚和中断恢复；这是新 JSON 存储可选示例，不代替已有业务事务。目录示例传入可选 `commit(..., check=复核函数)`，在事务捕获 before 之后、写 journal 之前复核当前和候选根的所有读取输入，逐文件替换前仍检查 before。锁只协调同协议写入者，不提供任意外部读取者的跨文件瞬时隔离。
 
 `task` 可包含安全的 `id/binding/continuation`。保存后服务写入独立实例的 `saved.json`，`status` 返回当前实例回执。页面留在原处并提示用户发送“配置已保存，请继续。”；Agent 收到后核对原任务、项目、授权、输入绑定和配置是否满足，再接续。核心不执行业务请求。
 
@@ -95,7 +95,19 @@ Windows 私有运行目录和保存文件仅向执行账号及所选项目所有
 
 ## 运行示例与业务入口
 
-2.0.0 是配置协议的不兼容升级：1.4.0 支持的 `preview/save(changes,revision,target)` 改为二参数 envelope，HTTP preview/save 不再接收旧顶层 `target`，返回 422。原配置适配器与扩展调用方不能只替换核心；须添加 `field-scopes-v1`、逐项注解、组合投影与原事务接续，并将业务选择器接入共享草稿。共用配置模板、两个包内示例及 Studio 6.4.0 已迁移。其他业务固定副本（包括 Tikin）保持原版本，只有在目标自身获准升级、适配器与调用方迁移及验收后才替换。产物适配器协议不变。
+### 目录字段与组合投影
+
+2.1.0 在 `field-scopes-v1` 上增加可选目录字段；没有声明的适配器继续使用原表单。目录字段声明 `directory_scope:"global"|"project"`、`type:"text"`、真实 `config_key`、`default`（完整默认根）、`anchor`（固定保存文件）和只含该锚点的 `targets`。它的 effective/rows 同样由真实加载器计算。共用 UI 据此显示顶部收起面板，空值或“恢复默认”提交该项的 unset，共享原 `files/switches/file_edits` 草稿与底部保存，不接受任意浏览路径命令。
+
+适配器先用 `directories.selector_edits(snapshot, request)` 提取目录项，在内存中投影固定锚点后调用原加载器取得候选根与允许目标。再用 `retarget_request(current, prospective, request, destination)` 重映射明确业务编辑；`destination(field, old_layer)` 由业务适配器返回新层 ID，负责相对文件、settings.json、退出来源和路径政策。函数校验原／新白名单及固定目录目标，移除等于原基线的普通编辑，保留与新根值相同但原来有修改的意图；不读取磁盘、不创建文件、不定义业务目录。目录项不允许范围切换。
+
+将重映射后的 envelope 交给 `ScopePlanner`，规划快照使用 `planning_snapshot(current, prospective)`：保留原有效值作为当前输入和差异比较基线，文件行、白名单和修订仍来自候选根。这样未编辑的“保存当前内容”不会误转存新根值，`existing` 模式仍选择目标已有内容。原组合投影与事务同时提交固定锚点及候选根业务文件。返回 `directory_targets:{字段ID:实际完整目标文件}`，只含本次编辑／切换的准确位置；公开投影仅保留已声明字段的路径，前端据此展示目标，并从候选 `layers` 解释新来源。
+
+目录预览另返回 `directory_revision`，绑定投影目录选择后、业务编辑前的全部候选来源。全表保存的 `changes` envelope 必须原样附带它；适配器调用 `check_directory_revision(request, prospective_revision, saving=True)`，缺失或新根文件已变化均返回 409 并保留草稿。普通预览可不传；带旧 token 的保存前复核也必须拒绝变化。新草稿重新预览时移除旧 token，局部业务保存不借用未提交目录的 token。原 `revision` 继续保护当前来源，事务内再核对所有候选输入，提交后通过真实加载器回读；不能只按旧根 revision 放行。
+
+默认目录、Key 名、环境优先、普通 Skill 回退是否退出、空值语义、写入权限及事务均属业务适配器，核心没有 AIhub/Tikin 默认值。参考 `examples/directories_adapter.py`：默认 JSON 文件保存目录项，先解析根再读取业务与全局 settings.json；所有自定义根限制在所选演示项目的 `demo-directories/` 中，不读取真实 home。将下方配置示例命令的 adapter 换成此文件即可体验。该限制仅保护合成演示，不能照搬成真实业务路径政策。
+
+2.0.0 是配置协议的不兼容升级：1.4.0 支持的 `preview/save(changes,revision,target)` 改为二参数 envelope，HTTP preview/save 不再接收旧顶层 `target`，返回 422。原配置适配器与扩展调用方不能只替换核心；须添加 `field-scopes-v1`、逐项注解、组合投影与原事务接续，并将业务选择器接入共享草稿。共用配置模板、包内示例、Studio 和本批获准接入的 Tikin 已迁移。其他业务固定副本保持原版本，只有在目标自身获准升级、适配器与调用方迁移及验收后才替换。产物适配器协议不变。
 
 先创建一个已忽略的合成项目目录。以下是两个可独立选用的模板示例命令；只启动已选择的页面，两个都选才分别启动。共用核心当前按 `--page` 提供独立页面，不代表定制统一界面也须采用此结构：
 

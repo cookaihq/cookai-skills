@@ -10,8 +10,22 @@ PROTOCOL = 'field-scopes-v1'
 
 
 def validate_request(request):
-    if not isinstance(request, dict) or 'files' not in request or set(request) - {'files', 'switches', 'file_edits'}:
+    if not isinstance(request, dict) or 'files' not in request or set(request) - {'files', 'switches', 'file_edits', 'directory_revision'}:
         raise UIError('contract', '配置请求需要迁移到逐项范围协议；请同时更新页面和适配器。', 422)
+    if 'directory_revision' in request and not isinstance(request['directory_revision'], str):
+        raise UIError('changes', '目录修订无效，请重新预览。', 422)
+    files, switches, explicit = (request.get(key, {}) for key in ('files', 'switches', 'file_edits'))
+    if not all(isinstance(value, dict) for value in (files, switches, explicit)) or any(
+            not isinstance(changes, dict) for changes in files.values()):
+        raise UIError('changes', '变更格式无效。', 422)
+    for changes in files.values():
+        for change in changes.values():
+            if not isinstance(change, dict) or change.get('op') not in ('set', 'unset') or change.get('op') == 'set' and 'value' not in change:
+                raise UIError('changes', '变更格式无效。', 422)
+    if any(not isinstance(intent, dict) for intent in switches.values()) or any(
+            not isinstance(keys, list) or any(not isinstance(key, str) or key not in files.get(target, {}) for key in keys)
+            for target, keys in explicit.items()):
+        raise UIError('changes', '文件操作与本次提交不一致。', 422)
 
 
 def annotate_snapshot(snapshot, secret, empty=None):

@@ -1,8 +1,8 @@
 ---
 name: skill-configuration-and-artifacts-ui
-description: v2.0.0｜为新建或已有 Skill / Plugin 设计、接入和改造配置与产物 UI；评估必要性、确认展示方案，并提供配置中心、产物集合与专注预览的共用规则和代码。适用于 Skill 开发及界面改造。
+description: v2.1.0｜为新建或已有 Skill / Plugin 设计、接入和改造配置与产物 UI；评估必要性、确认展示方案，并提供配置中心、产物集合与专注预览的共用规则和代码。适用于 Skill 开发及界面改造。
 metadata:
-  version: "2.0.0"
+  version: "2.1.0"
 ---
 
 # Skill 配置与产物 UI
@@ -26,6 +26,8 @@ metadata:
 涉及产物时读取 [产物规则](references/artifacts.md)；启动任意页面前读取 [生命周期与访问](references/access-and-lifetime.md)。按调查结果仅列出实际涉及的展示内容、页面和待选项。新界面或明显变化先做可运行的合成数据预览，用户确认后真实接入。已确认且仍适用的界面无需再选一次。
 
 ## 3. 接入或改造
+
+涉及配置管理时按 [完整配置目录](references/configuration.md#完整配置目录) 接入全局／当前项目目录设置，默认路径、Key 与来源退出策略由目标适配器声明。先解析固定默认位置的普通目录设置，再读取选定根内的完整业务配置；共用模板使用已确认的顶部收起入口、共享草稿及底部保存。实现及验收分别按 [目录字段与组合投影](references/integration.md#目录字段与组合投影) 和 [验收规则](references/acceptance.md) 执行。
 
 目标已有配置 UI 时，在目标 `SKILL.md` 的业务准备前接入[配置页面快捷入口](references/access-and-lifetime.md#配置页面快捷入口)：显式 Skill 调用后的八种完整配置/设置短语直接复用原页面入口。保留真实项目和身份，先取得可用链接与实际期限，交付后结束；业务正文继续原流程。本开发 Skill 自身不启动业务配置页。
 

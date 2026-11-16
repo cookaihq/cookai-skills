@@ -23,6 +23,9 @@ export class Configuration {
   fields(){return this.snapshot.fields;}
   field(id){return this.fields().find(f=>f.id===id);}
   layer(id){return this.snapshot.layers.find(l=>l.id===id);}
+  projectedLayer(id){return this.preview?.layers.find(l=>l.id===id)||this.layer(id);}
+  directoryFields(){return this.fields().filter(f=>['global','project'].includes(f.directory_scope));}
+  directoryToggleHTML(){return this.directoryFields().length?`<button type="button" class="directory-toggle" data-config="directories" aria-controls="configuration-directories" aria-expanded="${!!this.directoriesOpen}" ${this.busy||this.expired?'disabled':''}>配置文件位置 <span class="directory-arrow" aria-hidden="true">⌄</span></button>`:'';}
   row(f,target){return f.rows.find(r=>r.layer===target)||{};}
   after(f){return this.preview?.fields.find(n=>n.id===f.id)||f;}
   missing(){return (this.preview||this.snapshot).readiness?.missing||[];}
@@ -77,7 +80,7 @@ const baseSet=Configuration.prototype.set;
 const baseOnClick=Configuration.prototype.onClick;
 function sourceDescription(row) {
   if(row.source==='default')return '默认设置';
-  const layer=this.layer(row.source);
+  const layer=this.projectedLayer(row.source);
   return layer?.scope==='project'?'此项目的设置':layer?.scope==='global'?'通用设置':this.source(row);
 }
 function sourceValue(f, row) {
@@ -161,7 +164,7 @@ Configuration.prototype.count = function() {
 };
 Configuration.prototype.payload = function(only) {
   const files=Object.fromEntries(Object.entries(this.pendingFiles()).map(([target,changes])=>[target,Object.fromEntries(Object.entries(changes).filter(([id])=>includesField(only,id)))]).filter(([,changes])=>Object.keys(changes).length));
-  return {files,switches:Object.fromEntries(Object.entries(this.switchIntents||{}).filter(([id])=>includesField(only,id))),
+  return {files,...(!only&&this.preview?.directory_revision?{directory_revision:this.preview.directory_revision}:{}),switches:Object.fromEntries(Object.entries(this.switchIntents||{}).filter(([id])=>includesField(only,id))),
     file_edits:Object.fromEntries(Object.entries(this.fileEdits||{}).map(([target,ids])=>[target,[...ids].filter(id=>(includesField(only,id))&&files[target]?.[id])]))};
 };
 Configuration.prototype.writable = function(f) {
@@ -311,7 +314,7 @@ Configuration.prototype.clearDraft = function(id) {
 };
 Configuration.prototype.controlHTML = function(f) {
   const edit=this.changes()[f.id], raw=this.inputs[this.fieldTarget(f.id)]?.[f.id];
-  const saved=edit?.op==='unset'?null:edit?.op==='set'?edit.value:f.effective.value;
+  const saved=edit?.op==='unset'?(f.directory_scope?f.default:null):edit?.op==='set'?edit.value:f.effective.value;
   const base=`id="field-${esc(f.id)}" data-config-field="${esc(f.id)}" aria-describedby="error-${esc(f.id)} result-${esc(f.id)}" ${this.busy?'disabled':''}`;
   if(f.sensitive) {
     const revealed=this.revealed[`${f.id}:input`];
@@ -328,6 +331,11 @@ Configuration.prototype.onClick = async function(event) {
   const button=event.target.closest('[data-config]');
   if(!button||button.disabled||this.busy||this.expired)return;
   const action=button.dataset.config,id=button.dataset.id,layer=button.dataset.layer;
+  if(action==='directories'){this.directoriesOpen=!this.directoriesOpen;this.rerender();return;}
+  if(action==='reset-directory') {
+    if(!this.uncertain&&this.field(id)?.directory_scope&&this.writable(this.field(id)))this.stage(id,{op:'unset'});
+    return;
+  }
   if(action==='inspect-scope'||action==='close-source') {
     this.fileRemoval=null;
     const scope=button.dataset.scope;
@@ -360,7 +368,7 @@ Configuration.prototype.onClick = async function(event) {
   }
   if(action==='choose-content') {
     const plan=this.preview?.scope_plans?.[id],intent=this.switchIntents[id];
-    if(!plan||!intent||plan.target!==layer)return;
+    if(!plan||!intent||intent.target!==layer)return;
     intent.choice=button.dataset.choice;intent.choice_token=plan.choice_token;
     this.queuePreview();this.rerender();return;
   }
@@ -433,15 +441,18 @@ Configuration.prototype.paint = function() {
     document.getElementById(`field-${f.id}`)?.setAttribute('aria-invalid',String(messages.length>0));
     const destination=document.getElementById(`destination-${f.id}`);
     if(destination) {
-      const intent=this.switchIntents?.[f.id],place=intent?this.layer(intent.target):current;
-      destination.textContent=intent?`待切换到：${scopeNames[place.scope]} · ${place.name.replace(/^(项目|全局) · /,'')}；应用前保留输入与当前来源。`:pending.length&&current?`待保存：${scopeNames[current.scope]} · ${current.name.replace(/^(项目|全局) · /,'')}；查看其他位置不会更改它。`:'';
+      const intent=this.switchIntents?.[f.id],place=intent?this.projectedLayer(this.preview?.scope_plans?.[f.id]?.target)||this.layer(intent.target):current;
+      const path=this.preview?.directory_targets?.[f.id]||place?.path;
+      destination.textContent=intent?`待切换到：${scopeNames[place.scope]} · ${path}；应用前保留输入与当前来源。`:pending.length&&current?`待保存：${scopeNames[current.scope]} · ${path}`:'';
       destination.hidden=!pending.length&&!intent;
     }
     paintSourceInfo.call(this,f);
     node.innerHTML='';
     if(pending.length&&this.preview&&(!this.switchIntents?.[f.id]||this.preview.scope_plans?.[f.id]?.state==='ready')) {
       node.innerHTML=`<p class="config-note edit-preview">保存后，此项目使用：${esc(sourceValue(f,next.effective))} · ${esc(sourceDescription.call(this,next.effective))}</p>`;
-      if(edit?.op==='set'&&edit.value!==''&&next.effective.source!==target)
+      const projectedPath=this.preview.directory_targets?.[f.id];
+      const destinationSource=projectedPath?this.preview.layers.find(l=>l.path===projectedPath)?.id:target;
+      if(edit?.op==='set'&&edit.value!==''&&next.effective.source!==destinationSource)
         node.innerHTML+='<p class="config-note">这里的修改会保存；此项目已有优先使用的设置。</p>';
     } else if(!pending.length&&(!this.layer(f.effective.source)||f.effective.source==='process')) {
       node.innerHTML=`<p class="config-note">${f.effective.source?'当前使用'+esc(sourceDescription.call(this,f.effective))+'。':'这一项还没有填写。'}</p>`;
@@ -475,9 +486,10 @@ Configuration.prototype.paint = function() {
 };
 Configuration.prototype.html = function() {
   const pending=new Set(Object.values(this.drafts).flatMap(changes=>Object.keys(changes)));
-  const eligible=this.fields().filter(f=>this.after(f).active!==false||pending.has(f.id));
+  const eligible=this.fields().filter(f=>!f.directory_scope&&(this.after(f).active!==false||pending.has(f.id)));
   const primary=eligible.filter(f=>this.visible.has(f.id)),other=eligible.filter(f=>!this.visible.has(f.id));
   return `<section class="content context-content"><form id="configuration-form" novalidate>
+    ${this.directoriesHTML()}
     <div class="heading"><div><h1>${esc(this.snapshot.presentation?.title||'配置设置')}</h1><p>${esc(this.snapshot.presentation?.description||'展开设置位置，查看详情或切换生效位置。')}</p></div><button type="button" data-config="reload" ${this.busy?'disabled':''}>重新载入</button></div>
     <div id="config-readiness" role="status"></div>
     ${this.snapshot.note?`<p class="config-note prototype-note">${esc(this.snapshot.note)}</p>`:''}
@@ -485,6 +497,11 @@ Configuration.prototype.html = function() {
     ${other.length?this.detail('other',`其他设置 <span class="detail-count">${other.length}</span>`,[...new Set(other.map(f=>f.group||'其他'))].map(group=>`<section class="context-group"><h2>${esc(group)}</h2>${other.filter(f=>(f.group||'其他')===group).map(f=>this.fieldHTML(f)).join('')}</section>`).join(''),'other-settings'):''}
     <footer class="context-save" aria-label="保存配置"><div class="save-controls"><div class="save-status-line"><span id="config-save-count"></span><span id="save-effect"></span></div><button type="submit" class="primary" id="config-save">保存修改</button></div><div id="config-feedback" role="status" aria-live="polite"></div></footer>
   </form></section>`;
+};
+
+Configuration.prototype.directoriesHTML=function(){
+  const fields=this.directoryFields();if(!fields.length)return '';
+  return `<section id="configuration-directories" class="directory-settings" ${this.directoriesOpen?'':'hidden'} aria-label="配置文件位置"><div class="directory-body"><h2>配置文件位置</h2><p class="directory-intro">分别设置全局和当前项目的完整配置目录，留空使用默认位置。</p>${fields.map(f=>`<section class="directory-field" data-field="${esc(f.id)}"><div class="directory-label"><label for="field-${esc(f.id)}">${esc(f.label)}</label><button type="button" class="text-button" data-config="reset-directory" data-id="${esc(f.id)}" ${!this.writable(f)||this.busy||this.uncertain?'disabled':''}>恢复默认</button></div><p class="field-help">${esc(f.help||'默认：'+f.default)}</p><div class="field-value">${this.writable(f)?this.controlHTML(f):`<div class="readonly-value">${esc(sourceValue(f,f.effective))}</div>`}</div><p class="directory-save-path">目录设置保存在：<code>${esc(f.anchor)}</code><br><code>${esc(f.config_key||f.id)}</code>${f.effective.source==='process'?' · 进程环境优先':''}</p><p class="field-destination" id="destination-${esc(f.id)}" hidden></p><p class="field-error error" id="error-${esc(f.id)}"></p><div class="field-result" id="result-${esc(f.id)}"></div><button type="button" class="text-button undo" data-config="undo" data-id="${esc(f.id)}" ${!this.hasFieldDraft(f.id)?'hidden':''}>撤销本项修改</button></section>`).join('')}<p class="directory-footnote">与下方设置一起保存。切换目录不搬迁已有配置；同次修改的设置写入新目录，未修改项不复制。工作目录与任务产物位置不变。</p></div></section>`;
 };
 
 Configuration.prototype.fieldHTML=function(f){
@@ -496,8 +513,8 @@ Configuration.prototype.fieldHTML=function(f){
   ${!writable?`<p class="config-note">${this.after(f).active===false?'当前不适用，请核对关联设置。':'此项当前只读。'}</p>`:''}<p class="field-error error" id="error-${esc(f.id)}"></p><div class="field-result" id="result-${esc(f.id)}"></div><button type="button" class="text-button undo" data-config="undo" data-id="${esc(f.id)}" ${!this.hasFieldDraft(f.id)?'hidden':''}>撤销本项修改</button></section>`;
 };
 function switchInfoHTML(f,intent,plan) {
-  const target=this.layer(intent.target),choice=intent.choice;
-  const cleanup=(plan?.cleanup||[]).map(id=>this.layer(id));
+  const target=this.projectedLayer(plan?.target)||this.layer(intent.target),choice=intent.choice;
+  const cleanup=(plan?.cleanup||[]).map(id=>this.projectedLayer(id));
   return `<section class="switch-plan" aria-label="${esc(f.label)}的切换处理">
     <div class="switch-plan-head"><strong>准备使用：${esc(scopeNames[target.scope])} · ${esc(target.name.replace(/^(项目|全局) · /,''))}</strong><button type="button" data-config="cancel-switch" data-id="${esc(f.id)}" ${this.busy?'disabled':''}>取消切换</button></div>
     <code class="switch-file-path">${esc(target.path)}</code><p>${esc(target.scope_label)}</p>

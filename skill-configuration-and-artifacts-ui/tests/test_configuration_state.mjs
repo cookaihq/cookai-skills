@@ -73,3 +73,42 @@ test('a switch plan names every cleaned file and its shared impact before applyi
   assert.match(html,/\/project\/\.env/);assert.match(html,/Project shared impact/);
   assert.match(html,/不会.*恢复/);
 });
+
+test('directory controls share drafts, stay outside ordinary groups, and reset at the anchor',async()=>{
+  const ui=fixture(),state=snapshot();
+  state.fields.push({id:'custom_location',config_key:'CUSTOM_LOCATION',label:'全局配置目录',type:'text',
+    directory_scope:'global',default:'/defaults',anchor:'/defaults/config.json',targets:['global'],
+    edit_revision:'directory-1',effective:{value:'/defaults',source:'default',empty:false},rows:[]});
+  ui.set(state);
+  assert.match(ui.directoryToggleHTML(),/aria-expanded="false"/);
+  assert.match(ui.html(),/id="configuration-directories"[^>]*hidden/);
+  ui.stage('custom_location',{op:'set',value:'/new root'});
+  ui.stage('b',{op:'set',value:'business edit'});
+  await ui.onClick({target:{closest:()=>({dataset:{config:'directories'}})}});
+  assert.match(ui.directoryToggleHTML(),/aria-expanded="true"/);
+  assert.equal(ui.draftValue('custom_location'),'/new root');
+  assert.equal(ui.payload().files.global.b.value,'business edit');
+  const html=ui.html();
+  assert.equal((html.match(/data-config-field="custom_location"/g)||[]).length,1);
+  assert.ok(html.indexOf('configuration-directories')<html.indexOf('class="heading"'));
+  await ui.onClick({target:{closest:()=>({dataset:{config:'reset-directory',id:'custom_location'}})}});
+  assert.deepEqual(ui.payload().files.global.custom_location,{op:'unset'});
+  assert.equal(ui.payload().files.global.b.value,'business edit');
+  assert.match(ui.html(),/value="\/defaults"/);
+});
+
+test('directory preview revision binds full saves and expires when drafts change',async()=>{
+  const requests=[];
+  const ui=fixture(async(path,request)=>{requests.push([path,request]);return {config:snapshot()};});
+  ui.stage('b',{op:'set',value:'business edit'});
+  ui.preview={...snapshot(),directory_revision:'candidate-roots-1'};
+  assert.equal(ui.payload().directory_revision,'candidate-roots-1');
+  assert.equal(ui.payload('b').directory_revision,undefined);
+  assert.equal(ui.payload(['b']).directory_revision,undefined);
+  await ui.save();
+  assert.equal(requests.length,2);
+  for(const [,request]of requests)assert.equal(request.changes.directory_revision,'candidate-roots-1');
+  ui.preview={...snapshot(),directory_revision:'candidate-roots-2'};
+  ui.stage('b',{op:'set',value:'another edit'});
+  assert.equal(ui.payload().directory_revision,undefined);
+});

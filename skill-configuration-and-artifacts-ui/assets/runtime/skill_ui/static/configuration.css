@@ -214,3 +214,26 @@ html:has(.config-shell){scroll-padding-bottom:140px}
 .switch-file-path { display: block; margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; white-space: normal; }
 .switch-cleanup { padding-left: 20px; }
 .switch-cleanup li + li { margin-top: 10px; }
+.config-shell .identity > div {min-width:0;}
+.config-shell .identity small.directory-project-line {display:flex; align-items:baseline; column-gap:12px; row-gap:2px; flex-wrap:wrap;}
+.directory-project-path {min-width:0; overflow-wrap:anywhere;}
+.config-shell .directory-toggle {display:inline-flex; align-items:center; gap:5px; flex-shrink:0; min-height:0; padding:0; border:0; background:transparent; border-radius:3px; cursor:pointer; font:inherit; line-height:1.8; font-weight:400; color:#6b7280; text-decoration:underline; text-decoration-color:#c8cdd4; text-underline-offset:3px; white-space:nowrap;}
+.config-shell .directory-toggle:hover {background:transparent; color:#2b3749;}
+.config-shell .directory-toggle:focus-visible {outline:2px solid #5d78b8; outline-offset:4px;}
+.directory-arrow {font-size:13px; text-decoration:none; transition:transform .15s;}
+.directory-toggle[aria-expanded="true"] .directory-arrow {transform:rotate(180deg);}
+.directory-settings {margin:0 0 26px; border:0; padding:0; color:var(--muted, #697281);}
+.directory-settings[hidden] {display:none;}
+.directory-body {padding:18px 20px 8px; border:1px solid #e1e5eb; border-radius:10px; background:#fafbfc;}
+.directory-body h2 {margin:0 0 6px; font-size:14px; color:#273446; font-weight:600;}
+.directory-intro {margin:0 0 19px; font-size:12px; color:#697281;}
+.directory-field {margin:0 0 20px;}
+.directory-label {display:flex; align-items:center; justify-content:space-between; gap:12px; color:#273446; font-weight:600; font-size:13px;}
+.directory-label .text-button {font-size:12px; font-weight:400; padding:2px 0;}
+.directory-field .field-help {margin:4px 0 9px; font-size:12px;}
+.directory-field input {width:100%; min-width:0; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px;}
+.directory-save-path {font-size:11px; color:#7d8591; margin:8px 0 0; overflow-wrap:anywhere; line-height:1.7;}
+.directory-save-path code {background:none; padding:0; color:inherit; font-size:11px;}
+.directory-footnote {border-top:1px solid #e6e9ee; padding-top:11px; color:#7d8591; font-size:11px; line-height:1.8;}
+.directory-field .field-result:empty, .directory-field .field-error:empty {display:none;}
+@media(max-width:540px) {.directory-body {padding:14px 14px 5px;} .directory-save-path code {display:block;} .directory-field input {font-size:12px;}}
