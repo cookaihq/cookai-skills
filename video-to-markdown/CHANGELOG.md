@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.2.3
+
+- Repair the AIhub Studio 6.5.1 / Audio 6.4.1 public CLI adapter while preserving the legacy 1.x contract. Pass the complete local audio to modern plan/run and let the dependency own measured preprocessing, uploads, model confirmation and fragment recovery.
+- Adopt complete merged JSON with global seconds, actual word times and fragment-local speaker IDs; retain accompanying TXT as raw evidence without duplicating text. Reject incomplete text alignment and invalid timing.
+- Recover timestamped run records after a lost response, preserve known tasks and unknown uploads, and retain stopped modern plans without starting another provider. Keep the original schema-4 task UUID and creation-version field on resume; no manifest-version upgrade command is introduced.
+- Windows: 170 script tests and four offline tests against the unchanged installed CLI passed; no real ASR request was sent. Native Codex workspace-write/unelevated reproduces the dependency's ffprobe EPERM and verifies the Video preflight receipt with zero submissions. Full native dependency acceptance is blocked on the AIhub subprocess fix; macOS and full business conversion remain pending.
+
 ## 4.2.2
 
 - Fix the first manifest replacement under Windows native Codex workspace-write/unelevated. Private file DACLs include the owner's current logon SID to satisfy restricted-token access checks; directory defaults and schema 4 remain unchanged.

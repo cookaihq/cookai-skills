@@ -387,10 +387,49 @@ def write_transcript(task_dir: Path, value: dict) -> None:
     state.atomic_write_json(task_dir / "transcript.json", value)
 
 
+def _merged_aihub_segments(raw: dict) -> list[dict]:
+    """AIhub 6.5's merged file already carries source/fragment offsets in seconds."""
+    rows = raw.get("segments")
+    if raw.get("schema_version") != 1 or not isinstance(rows, list) or not rows:
+        raise TranscriptError("unsupported merged transcription; raw artifacts preserved")
+    if not isinstance(raw.get("text"), str) or re.sub(r"\s+", "", raw["text"]) != re.sub(
+        r"\s+", "", "".join(str(row.get("text", "")) for row in rows if isinstance(row, dict))
+    ):
+        raise TranscriptError("merged full text differs from its segments; raw artifacts preserved")
+
+    def unit(row: dict) -> dict:
+        if not isinstance(row, dict) or row.get("text_alignment") == "unverified":
+            raise TranscriptError("merged text alignment is unverified; raw artifacts preserved")
+        start, end = row.get("start"), row.get("end")
+        start_ms, end_ms = _seconds_to_ms(start), _seconds_to_ms(end)
+        result: dict[str, Any] = {"raw_start": start, "raw_end": end, "start_ms": start_ms, "end_ms": end_ms,
+                  "text": re.sub(r"\s+", " ", str(row.get("text") or "")).strip(),
+                  "timestamp_precision_ms": max(_number_precision_ms(start) or 1, _number_precision_ms(end) or 1)
+                  if start_ms is not None and end_ms is not None else None,
+                  "timing_granularity": "segment"}
+        for key in ("speaker", "channel", "source_index", "part_index"):
+            if key in row:
+                result[key] = row[key]
+        if row.get("words"):
+            words = [unit(word) for word in row["words"]]
+            if any(type(word["start_ms"]) is not int or type(word["end_ms"]) is not int
+                   or start_ms is None or end_ms is None
+                   or not start_ms <= word["start_ms"] < word["end_ms"] <= end_ms for word in words):
+                raise TranscriptError("merged word timing is invalid; raw artifacts preserved")
+            if re.sub(r"\s+", "", "".join(word["text"] for word in words)) == re.sub(r"\s+", "", result["text"]):
+                result["words"] = words
+                result["timing_granularity"] = "word"
+        return result
+
+    return [unit(row) for row in rows]
+
+
 def normalize_aihub_files(documents: list, *, model: str | None, language: str | None) -> dict:
     segments = []
     for raw in documents:
-        if isinstance(raw, dict) and "transcripts" in raw:
+        if isinstance(raw, dict) and raw.get("time_unit") == "seconds":
+            normalized = _merged_aihub_segments(raw)
+        elif isinstance(raw, dict) and "transcripts" in raw:
             normalized = _paraformer_sentences(raw)
         else:
             results = raw if isinstance(raw, list) else raw.get("results", [raw]) if isinstance(raw, dict) else []

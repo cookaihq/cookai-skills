@@ -11,6 +11,19 @@ from . import external, state, transcript
 DEFINITE_FAILURES = {"not_submitted", "remote_failed", "failed", "no_compatible_model", "attempt_limit", "preflight_failed", "configuration_required"}
 
 
+def _contract_profile(version: str) -> str | None:
+    """Select a reviewed CLI contract, not an open-ended major-version regex."""
+    parsed = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not parsed:
+        return None
+    major, minor, patch = map(int, parsed.groups())
+    if major == 1 and minor >= 3:
+        return "legacy-upload"
+    if major == 6 and minor == 5 and patch >= 1:
+        return "local-transcription"
+    return None
+
+
 def _inside(path_value: str, root: Path) -> Path:
     path = Path(path_value).resolve()
     if not path.is_relative_to(root.resolve()):
@@ -42,8 +55,8 @@ def advance(task: Path, manifest: dict, private: dict, *, audio_path: Path, **op
         package = json.loads((root / "package.json").read_text(encoding="utf-8"))
         skill = (root / "skills/aihub-audio/SKILL.md").read_text(encoding="utf-8")
         version = package.get("version", "")
-        valid = re.fullmatch(r"1\.(\d+)\.(\d+)", version)
-        if package.get("name") != "aihub-studio" or not valid or int(valid[1]) < 3 or not re.search(r"^name:\s*aihub-audio\s*$", skill, re.M):
+        profile = _contract_profile(version)
+        if package.get("name") != "aihub-studio" or not profile or not re.search(r"^name:\s*aihub-audio\s*$", skill, re.M):
             return local_failure("aihub_dependency_contract_unsupported")
     except (OSError, ValueError):
         return local_failure("aihub_dependency_unavailable")
@@ -75,11 +88,15 @@ def advance(task: Path, manifest: dict, private: dict, *, audio_path: Path, **op
     # A run record is written by AIhub before its first generation submission.
     # Recover it after a lost wrapper response; never issue another `run`.
     if not provider.get("run_record") and "aihub-run" in private.get("operations", {}):
-        candidates = list(output_dir.glob("aihub-run-*/run.json"))
+        # 6.5 uses YYYYMMDDHHmmss-title-run-8hex; 1.3 used aihub-run-UUID.
+        # Search only this dependency root's immediate task children, then check
+        # the record identity. An ambiguous/missing record never permits new run.
+        candidates = list(output_dir.glob("*/run.json"))
         if len(candidates) == 1:
-            candidate = state.read_json(candidates[0])
+            candidate_path = _inside(str(candidates[0]), output_dir)
+            candidate = state.read_json(candidate_path)
             if candidate.get("kind") == "aihub-run" and candidate.get("skill") == "aihub-audio":
-                provider["run_record"] = str(candidates[0].resolve())
+                provider["run_record"] = str(candidate_path)
                 state.save_private(task, private)
     receipt_keys = ["aihub-run"] + sorted((key for key in private.get("operations", {}) if re.fullmatch(r"aihub-continue-\d+", key)), key=lambda key: int(key.rsplit("-", 1)[1]))
     pending_receipt = next((key for key in receipt_keys if key not in provider.get("consumed_receipts", []) and (task / ".state" / ("receipt-" + key + ".json")).is_file()), None)
@@ -95,24 +112,32 @@ def advance(task: Path, manifest: dict, private: dict, *, audio_path: Path, **op
         key = "aihub-continue-" + str(provider.get("continuations", 0))
         result = external.write_once(task, private, key, command("continue", "--record", str(record), "--wait-seconds", "30"), cwd=cwd, timeout=60)
     else:
-        if audio_path.stat().st_size > 20 * 1024 * 1024:
+        legacy_upload = profile == "legacy-upload" or "aihub-upload" in private.get("operations", {})
+        if legacy_upload and audio_path.stat().st_size > 20 * 1024 * 1024:
             return {"action": "audio_limit", "failed": "aihub_audio_exceeds_20_mib"}
         doctor = external.execute(command("doctor"), cwd=cwd, timeout=30)
         doctor_value = external.json_output(doctor.stdout)
         if doctor.returncode or not isinstance(doctor_value, dict) or doctor_value.get("status") != "ok":
-            return local_failure("aihub_local_preflight_failed")
-        upload_input = task / ".state" / "aihub-upload.json"
-        state.atomic_write_json(upload_input, {"path": str(audio_path), "file_name": audio_path.name})
-        uploaded = external.write_once(task, private, "aihub-upload", command("upload", "--input-file", str(upload_input)), cwd=cwd, timeout=60)
-        upload = external.json_output(uploaded.stdout)
-        if uploaded.timed_out or not isinstance(upload, dict):
-            return {"action": "submission_unknown"}
-        if upload.get("status") in DEFINITE_FAILURES:
-            return {"action": "repair_aihub_dependency", "failed": "aihub_upload_not_submitted"}
-        if upload.get("status") != "ok" or not isinstance(upload.get("url"), str) or not upload["url"].startswith(("https://", "http://")):
-            return {"action": "submission_unknown"}
+            receipt = task / ".state" / "aihub-doctor.json"
+            state.atomic_write_json(receipt, doctor.record())
+            return {**local_failure("aihub_local_preflight_failed"), "dependency_receipt": str(receipt)}
+        audio_input = str(audio_path.resolve())
+        if legacy_upload:
+            # Retain an already attempted 1.x upload when loading 6.5 too. Never
+            # bypass a missing/uncertain upload receipt by starting a local run.
+            upload_input = task / ".state" / "aihub-upload.json"
+            state.atomic_write_json(upload_input, {"path": str(audio_path), "file_name": audio_path.name})
+            uploaded = external.write_once(task, private, "aihub-upload", command("upload", "--input-file", str(upload_input)), cwd=cwd, timeout=60)
+            upload = external.json_output(uploaded.stdout)
+            if uploaded.timed_out or not isinstance(upload, dict):
+                return {"action": "submission_unknown"}
+            if upload.get("status") in DEFINITE_FAILURES:
+                return {"action": "repair_aihub_dependency", "failed": "aihub_upload_not_submitted"}
+            if upload.get("status") != "ok" or not isinstance(upload.get("url"), str) or not upload["url"].startswith(("https://", "http://")):
+                return {"action": "submission_unknown"}
+            audio_input = upload["url"]
         request_path = task / ".state" / "aihub-request.json"
-        request = {"operation": "audio-transcribe", "inputs": {"audios": [upload["url"]]},
+        request = {"operation": "audio-transcribe", "inputs": {"audios": [audio_input]},
                    "original_request": provider["original_request"],
                    "review_requirements": [{"id": "transcription", "text": "Transcribe all audio faithfully with actual timestamps; preserve original language and speakers. Do not summarize or translate.", "priority": "required"}]}
         state.atomic_write_json(request_path, request)
@@ -131,7 +156,7 @@ def advance(task: Path, manifest: dict, private: dict, *, audio_path: Path, **op
     if value.get("task_id"):
         provider["task_id"] = value["task_id"]
     provider["last_status"] = value.get("status")
-    if value.get("status") == "persistence_failed" and provider.get("task_id"):
+    if value.get("status") == "persistence_failed" and provider.get("task_id") and profile == "legacy-upload":
         provider["known_task_recovery"] = True
     if key.startswith("aihub-continue-"):
         provider["continuations"] = int(key.rsplit("-", 1)[1]) + 1
@@ -139,12 +164,19 @@ def advance(task: Path, manifest: dict, private: dict, *, audio_path: Path, **op
         provider["consumed_receipts"].append(key)
     state.save_private(task, private)
     details = {"run_record": provider.get("run_record"), "dependency_receipt": str(task / ".state" / ("receipt-" + key + ".json"))}
-    if result.timed_out or not value.get("status") or value.get("status") == "submission_unknown":
+    if result.timed_out or not value.get("status") or value.get("status") in {"submission_unknown", "upload_unknown"}:
         return {"action": "submission_unknown", **details}
     status = value["status"]
-    if status == "persistence_failed" and provider.get("task_id"):
+    if status == "persistence_failed" and provider.get("task_id") and profile == "legacy-upload":
         return {"action": "recover_aihub_known_task", "task_id": provider["task_id"], **details,
                 "dependency_command": command("task", "--task-id", provider["task_id"], "--media", "audio", "--output-dir", str(output_dir / "recovery"), "--wait-seconds", "30")}
+    if profile == "local-transcription" and provider.get("run_record"):
+        if status == "merge_failed":
+            return {"action": "repair_transcript_timing", **details}
+        if status in DEFINITE_FAILURES | {"preprocessing_failed", "transcription_failed", "upload_rejected"}:
+            # A modern run can contain accepted/successful fragments even when
+            # the aggregate plan stops. Preserve it; do not restart via Feishu.
+            return {"action": "repair_aihub_dependency", "reason": "aihub_" + status, **details}
     if status in DEFINITE_FAILURES:
         return {"action": "repair_aihub_dependency", "failed": "aihub_" + status, **details}
     if status == "confirmation_required":
@@ -164,13 +196,16 @@ def advance(task: Path, manifest: dict, private: dict, *, audio_path: Path, **op
     try:
         for file in files:
             path = _inside(file["path"], output_dir)
-            if path.suffix.lower() != ".json" or not path.is_file() or path.stat().st_size != file["bytes"]:
+            if not path.is_file() or path.stat().st_size != file["bytes"]:
                 return {"action": "repair_aihub_result", **details}
-            raw_documents.append(state.read_json(path))
             raw_paths.append(str(path.relative_to(task)))
+            if path.suffix.lower() == ".json":
+                raw_documents.append(state.read_json(path))
+            elif profile != "local-transcription" or path.suffix.lower() != ".txt":
+                return {"action": "repair_aihub_result", **details}
         document = transcript.normalize_aihub_files(raw_documents, model=value.get("model"), language=options.get("language"))
         transcript.apply_timeline(document, manifest)
-    except (state.StateError, transcript.TranscriptError, KeyError, TypeError):
+    except (OSError, state.StateError, transcript.TranscriptError, KeyError, TypeError):
         return {"action": "repair_transcript_timing", **details}
     document["source"]["raw_artifacts"] = raw_paths
     document["upstream"] = {"raw_artifacts": raw_paths}
