@@ -41,24 +41,22 @@ def _windows_owner(path):
 
 
 def _private_windows(path, owner_path):
+    if path.is_dir():
+        raise UIError("path", "私有文件保护仅用于文件；目录沿用系统与父目录默认权限。")
     current = subprocess.check_output(["whoami", "/user", "/fo", "csv", "/nh"], text=True).strip().split(",")[-1].strip('"')
     owners = {current, _windows_owner(owner_path)}
-    permissions = "(OI)(CI)F" if path.is_dir() else "F"
     command = ["icacls", str(path), "/inheritance:r"]
     for sid in sorted(owners):
-        command.extend(["/grant:r", f"*{sid}:{permissions}"])
+        command.extend(["/grant:r", f"*{sid}:F"])
     subprocess.run(command, check=True, capture_output=True, timeout=10)
 
 
 def private_directory(path, owner_path=None):
+    """Keep the pinned caller API; directory permissions follow OS/parent defaults."""
     path = Path(path)
     if path.is_symlink():
         raise UIError("path", "运行目录不能是符号链接。")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name == "nt":
-        _private_windows(path, owner_path or path.parent)
-    else:
-        path.chmod(0o700)
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -348,7 +346,7 @@ class JsonConfig:
         if candidate["validation_errors"]:
             raise UIError("validation", "；".join(candidate["validation_errors"]), 422)
         prepare_private_write(self.path, owner_path=self.owner_path)
-        # Existing business directories retain their ACL; only new directories/files are tightened.
+        # Directories retain OS/parent defaults; private files use the existing file policy.
         if not self.path.parent.exists():
             private_directory(self.path.parent, owner_path=self.owner_path if self.owner_path.exists() else None)
         with file_lock(self.path.with_suffix(self.path.suffix + ".lock"), protect_git=True, owner_path=self.owner_path):

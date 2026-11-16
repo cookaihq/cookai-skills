@@ -1,6 +1,9 @@
 {
   "package": "skill-configuration-and-artifacts-ui",
   "version": "1.2.0",
+  "local_patches": {
+    "storage.py": "video-to-markdown 4.2.1: directory creation and reuse retain OS/parent defaults; upstream files hashes below remain the unmodified 1.2.0 baseline so vendor upgrades detect this patch as a conflict."
+  },
   "files": {
     "contracts.py": "759a0c35254abda8badecf4936ee2f157249b130ad1a776dd4589eea335c22af",
     "LICENSE": "5cee4207cdeaee01d3da8de51576ceaa06b24f47dae32294f02c769690e143f5",

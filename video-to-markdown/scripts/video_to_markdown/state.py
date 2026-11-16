@@ -71,19 +71,18 @@ def canonical_json(value: Any) -> bytes:
 
 def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.name == ".state":
-        private_files.protect(path.parent, 0o700)
     temporary = path.parent / (".%s.%s.%s" % (path.name, os.getpid(), uuid.uuid4().hex))
     descriptor = None
     try:
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
-            mode,
-        )
-        os.fchmod(descriptor, mode)
         if os.name == "nt" and mode == 0o600:
-            private_files.protect(temporary, mode)
+            descriptor = private_files.create_private_file(temporary)
+        else:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                mode,
+            )
+            os.fchmod(descriptor, mode)
         offset = 0
         while offset < len(data):
             offset += os.write(descriptor, data[offset:])
@@ -147,7 +146,6 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict, document_name: s
         ".state/batches",
     ):
         (task_dir / relative).mkdir(parents=True, exist_ok=True)
-    private_files.protect(task_dir / ".state", 0o700)
     task_id = str(uuid.uuid4())
     created = utc_now()
     manifest = {
@@ -197,7 +195,6 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict, document_name: s
 def load_task(task_dir_value: str | os.PathLike[str]) -> tuple[Path, dict, dict]:
     task_dir = Path(task_dir_value).expanduser().resolve()
     try:
-        private_files.verify_private(task_dir / ".state", 0o700)
         private_files.verify_private(task_dir / PRIVATE_RELATIVE, 0o600)
     except (OSError, ValueError) as exc:
         raise StateError(str(exc)) from exc

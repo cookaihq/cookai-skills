@@ -225,8 +225,8 @@ def test_download_observes_server_retry_after_before_retrying(tmp_path, video):
     assert requests[1][1] - requests[0][1] >= 2
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows private-state ACL contract")
-def test_resume_rejects_a_private_directory_that_inherits_permissions(tmp_path, video):
+@pytest.mark.skipif(os.name != "nt", reason="Windows private-file ACL contract")
+def test_resume_accepts_inherited_directories_but_rejects_exposed_private_files(tmp_path, video):
     import win32security
 
     subtitle = tmp_path / "speech.srt"
@@ -235,9 +235,16 @@ def test_resume_rejects_a_private_directory_that_inherits_permissions(tmp_path, 
     task_dir = Path(started["task_dir"])
     private_dir = task_dir / ".state"
     descriptor = win32security.GetFileSecurity(str(private_dir), win32security.DACL_SECURITY_INFORMATION)
+    assert not descriptor.GetSecurityDescriptorControl()[0] & win32security.SE_DACL_PROTECTED
+    run_workflow(tmp_path, "resume", "--task-dir", task_dir)
+    private_file = private_dir / "private.json"
+    descriptor = win32security.GetFileSecurity(str(private_file), win32security.DACL_SECURITY_INFORMATION)
+    acl = descriptor.GetSecurityDescriptorDacl()
+    acl.AddAccessAllowedAce(win32security.ACL_REVISION, 0x1F01FF,
+                           win32security.ConvertStringSidToSid("S-1-1-0"))
     win32security.SetNamedSecurityInfo(
-        str(private_dir), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-        | win32security.UNPROTECTED_DACL_SECURITY_INFORMATION,
-        None, None, descriptor.GetSecurityDescriptorDacl(), None,
+        str(private_file), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION,
+        None, None, acl, None,
     )
-    run_workflow(tmp_path, "resume", "--task-dir", task_dir, expected=1)
+    run_workflow(tmp_path, "resume", "--task-dir", task_dir, expected=1,
+                 error="grants access beyond its Windows owner/system/admins")

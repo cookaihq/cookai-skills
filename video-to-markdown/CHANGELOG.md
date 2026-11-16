@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.2.1
+
+- Preserve OS/parent permission defaults for task roots, all subdirectories including `.state`, later state writes/recovery and the bundled configuration runtime. Remove directory-mode/DACL tightening and the requirement for private directories to disable inheritance.
+- Retain private-file ACLs and atomic writes. Create Windows private temporary files with the existing owner/SYSTEM/Administrators DACL and verify it before writing, avoiding post-creation owner/DACL edits that native sandbox backends can reject or ignore. Other users' grants remain invalid.
+- Document public recovery when initialization stopped before an official task UUID existed; preserve old partial directories and require separate, narrowly scoped authorization for any old-directory permission repair. The frozen UI 1.2.0 storage backport is marked in its vendor manifest; the shared UI product is not upgraded.
+- Windows native tests: 152 passed. Codex 0.169.0 workspace-write loaded 4.2.1 and passed directory initialization/recovery acceptance under mxc and the configured default backend (the latter with the same portable ffmpeg prepared inside the test workspace). This is separate from full media conversion; macOS acceptance remains pending. No cloud ASR, vision request or original business task is run for this repair.
+
 ## 4.1.1
 
 - Fix the configuration form showing a default main Agent and enabled per-task questions when the selected file actually inherits a fixed method/model and `ask_each_task: false`. Show inherited values read-only, identify their source, and distinguish saved settings from unsaved independent drafts.

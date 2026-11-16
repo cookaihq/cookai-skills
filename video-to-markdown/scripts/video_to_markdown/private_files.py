@@ -33,6 +33,8 @@ def _windows_identity():
 
 
 def protect(path: Path, mode: int, *, assign_owner: bool = True) -> None:
+    if path.is_dir():
+        raise ValueError("private-file protection requires a file; directories retain inherited defaults: %s" % path)
     if os.name != "nt":
         os.chmod(path, mode)
         return
@@ -41,16 +43,9 @@ def protect(path: Path, mode: int, *, assign_owner: bool = True) -> None:
 
 
 def _protect_windows(path: Path, *, assign_owner: bool = True) -> None:
-    import win32con
     import win32security
-    import ntsecuritycon
 
-    user = _windows_identity()
-    acl = win32security.ACL()
-    flags = (win32con.OBJECT_INHERIT_ACE | win32con.CONTAINER_INHERIT_ACE) if path.is_dir() else 0
-    for identity in (user, win32security.ConvertStringSidToSid("S-1-5-18"),
-                     win32security.ConvertStringSidToSid("S-1-5-32-544")):
-        acl.AddAccessAllowedAceEx(win32security.ACL_REVISION, flags, ntsecuritycon.FILE_ALL_ACCESS, identity)
+    user, acl = _private_acl_windows()
     win32security.SetNamedSecurityInfo(
         str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
         | (win32security.OWNER_SECURITY_INFORMATION if assign_owner else 0)
@@ -58,7 +53,51 @@ def _protect_windows(path: Path, *, assign_owner: bool = True) -> None:
     )
 
 
+def _private_acl_windows():
+    import ntsecuritycon
+    import win32security
+
+    user = _windows_identity()
+    acl = win32security.ACL()
+    for identity in (user, win32security.ConvertStringSidToSid("S-1-5-18"),
+                     win32security.ConvertStringSidToSid("S-1-5-32-544")):
+        acl.AddAccessAllowedAceEx(win32security.ACL_REVISION, 0, ntsecuritycon.FILE_ALL_ACCESS, identity)
+    return user, acl
+
+
+def create_private_file(path: Path) -> int:
+    """Create an exclusive Windows temporary file with its DACL before any data is written."""
+    import msvcrt
+    import pywintypes
+    import win32con
+    import win32file
+    import win32security
+
+    _, acl = _private_acl_windows()
+    security = win32security.SECURITY_DESCRIPTOR()
+    security.SetSecurityDescriptorDacl(True, acl, False)
+    security.SetSecurityDescriptorControl(win32security.SE_DACL_PROTECTED, win32security.SE_DACL_PROTECTED)
+    attributes = pywintypes.SECURITY_ATTRIBUTES()
+    attributes.SECURITY_DESCRIPTOR = security
+    with _windows_errors(path, "create private state file"):
+        handle = win32file.CreateFile(
+            str(path), win32con.GENERIC_WRITE, win32con.FILE_SHARE_READ, attributes,
+            win32con.CREATE_NEW, win32con.FILE_ATTRIBUTE_NORMAL, None,
+        )
+    try:
+        # Some native sandbox backends ignore post-creation ACL changes. Verify
+        # the creation-time policy before writing, without changing owner or directories.
+        verify_private(path, 0o600)
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_WRONLY | os.O_BINARY)
+        handle.Detach()  # the CRT descriptor now owns this handle
+        return descriptor
+    finally:
+        handle.Close()
+
+
 def verify_private(path: Path, mode: int) -> None:
+    if path.is_dir():
+        raise ValueError("private-file verification requires a file; directory permissions follow inherited defaults: %s" % path)
     if os.name != "nt":
         if stat.S_IMODE(path.stat().st_mode) != mode:
             raise ValueError("private state requires mode %04o: %s" % (mode, path))
@@ -73,8 +112,6 @@ def _verify_windows(path: Path) -> None:
     descriptor = win32security.GetFileSecurity(
         str(path), win32security.DACL_SECURITY_INFORMATION | win32security.OWNER_SECURITY_INFORMATION,
     )
-    if path.is_dir() and not descriptor.GetSecurityDescriptorControl()[0] & win32security.SE_DACL_PROTECTED:
-        raise ValueError("private state directory must not inherit Windows permissions: %s" % path)
     sid_string = win32security.ConvertSidToStringSid
     owner = sid_string(_windows_identity())
     if sid_string(descriptor.GetSecurityDescriptorOwner()) != owner:

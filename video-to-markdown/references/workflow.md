@@ -8,7 +8,7 @@ The invocation directory, project root, and Skill directory are separate facts:
 2. Resolve the project root from `--project-root`, otherwise `git rev-parse --show-toplevel`, otherwise `$PWD`.
 3. Resolve the output base from `VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR`, otherwise the project root.
 4. Unless `--output-parent` was supplied, append `data/video-to-markdown/`.
-5. Create `YYYYMMDDHHMMSS-<complete-original-video-filename>/` without overwriting an existing path. The timestamp is local time to seconds. A same-second collision fails explicitly; use another output parent or start after the next second, never overwrite a task.
+5. Create `YYYYMMDDHHMMSS-<complete-original-video-filename>/` without overwriting an existing path. Task/subdirectory/runtime permissions use OS/parent defaults, including `.state/`; later writes and recovery do not tighten them. Private files retain their separate protection. The timestamp is local time to seconds. A same-second collision fails explicitly; use another output parent or start after the next second, never overwrite a task.
 6. Set the initial document to `<complete-original-video-filename>.md`, preserving the video extension. Resolve `--copy-dir` relative to the invocation directory. Without it, use the original local video's parent; URL inputs have no extra copy. This destination is independent of source storage policy and `--output-parent`.
 
 `VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR` is independent:
@@ -43,6 +43,14 @@ Every copy target is checked before writing. Existing identical bytes can be reu
 If the process stops during renaming, use the printed final directory if it exists, otherwise the original directory. `resume`, `validate` and `finalize` repair saved pending path changes before using the task. No transcription is repeated for a task that already reached validation. `resume` rechecks the document and copy; a missing or changed copy returns `next_action: finalize`, not a successful delivery claim.
 
 Drafts use `draft_validated` and `draft_delivered`, never complete-success. Resume keeps their saved route, issue budgets and timed gaps. Repair local artifacts/results without repeating a possibly executed model request. An explicit route switch archives and invalidates only affected work; finish its saved intent before resuming.
+
+### Early Initialization Failure
+
+`resume --task-dir` requires the real schema-4 `manifest.json` and `.state/private.json` with the same saved task UUID. A directory name, business request ID or timestamp is not that UUID. Missing initialization records produce a failure; this is not a supported task to reconstruct by hand. Preserve the directory and report which initialization step completed, without publishing private records.
+
+Before any new `start`, reconcile the original execution log and known provider/operation IDs. An uncertain upload, ASR or model request must be reconciled through its provider's public recovery path first; missing local state alone does not prove no external write occurred. If the original execution is confirmed stopped before those actions, the caller may start once with the original frozen inputs/options in a fresh output parent. Keep the old partial directory; obtain the new task's actual ID and returned paths from the successful public `start`. The business caller handles any version/binding update through its own public protocol. Never edit private JSON, fabricate a UUID or modify a business ledger to make recovery appear successful.
+
+This version does not change permissions on old directories. If an old task root or `.state/` prevents access, report its exact resolved directory and inspect inheritance/link boundaries. A separately authorized, directory-only repair may enable inheritance on the specifically listed directory (Windows: `icacls <exact-directory> /inheritance:e`). Inspect and verify each target independently; do not use `/T`, reset ACLs, change owners, touch files or broaden project/global permissions. On other operating systems, propose a separately scoped operation after inspecting the actual parent/default policy. After access is restored, use public `resume` only when genuine initialization records exist; otherwise follow the preceding early-failure protocol.
 
 ## Observation Rules
 

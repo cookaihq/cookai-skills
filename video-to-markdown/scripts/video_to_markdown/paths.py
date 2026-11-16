@@ -143,7 +143,7 @@ def create_task_directory(parent: Path, name: str) -> Path:
     parent.mkdir(parents=True, exist_ok=True)
     task_dir = parent / safe_leaf(name)
     try:
-        task_dir.mkdir(mode=0o700)
+        task_dir.mkdir()
     except FileExistsError as exc:
         raise PathError("task directory already exists: %s" % task_dir) from exc
     return task_dir.resolve()
