@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.2.2
+
+- Fix the first manifest replacement under Windows native Codex workspace-write/unelevated. Private file DACLs include the owner's current logon SID to satisfy restricted-token access checks; directory defaults and schema 4 remain unchanged.
+- Renew legacy manifest/private session access only with existing file-level WRITE_DAC, verifying owner/privacy and rejecting aliases or unrelated grants. Restricted callers cannot automatically repair inaccessible legacy files; no escalation or directory/global ACL change is attempted.
+- Preserve the original atomic-write error if temporary-file deletion also fails.
+- Windows: 156 tests, native Codex 0.169.0 discovery and public start/resume under unelevated and mxc, repeated private/manifest/batch replacement and 276-character manifest paths passed. Synthetic supplied subtitles reached writing_document with no ASR or vision requests; full conversion and macOS remain outside this acceptance.
+
 ## 4.2.1
 
 - Preserve OS/parent permission defaults for task roots, all subdirectories including `.state`, later state writes/recovery and the bundled configuration runtime. Remove directory-mode/DACL tightening and the requirement for private directories to disable inheritance.

@@ -1,8 +1,8 @@
 ---
 name: video-to-markdown
 metadata:
-  version: "4.2.1"
-description: v4.2.1｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
+  version: "4.2.2"
+description: v4.2.2｜Turn one local or directly downloadable video into source-faithful Markdown with timestamped speech, screenshots, short GIFs and resumable coverage review. Transcription uses AIhub Audio or Feishu Minutes; supplied subtitles bypass both. Use for 视频转文档、带截图的视频笔记 or video to Markdown. Not for pure ASR, one-off video Q&A, downloading/editing video or automatic publishing.
 compatibility: Claude Code, Codex and WorkBuddy are required targets; native model routing depends on actual session capabilities. Requires uv >= 0.8, ffmpeg, ffprobe and a usable vision route unless visuals are explicitly skipped. Cloud transcription uses installed AIhub Audio or user-authorized Lark CLI >=1.0.98,<2. Native Windows uses PowerShell. See README for tested scope.
 ---
 
@@ -63,7 +63,7 @@ uv run --frozen --project <skill-dir> <skill-dir>/scripts/workflow.py resume --t
 
 Resume checks source/audio identity and retains the saved ASR provider and vision route, regardless of changed defaults. A task lock prevents concurrent operations, including final renaming. Preserve receipts and known IDs; stop on `submission_unknown`. V4 supports task schema 4 only: preserve unsupported tasks and report the format without migration, recreation or resubmission. A requested route change uses `vision-switch` with the first affected batch and a reason.
 
-Task, hidden-state and runtime directories retain OS/parent defaults throughout creation, writes and recovery. Private state files retain their file protection; never tighten directory permissions. If initialization failed before manifest/private state and an official task UUID existed, follow [early initialization recovery](references/workflow.md#early-initialization-failure) instead of inventing state or treating the directory timestamp as an ID.
+Task, hidden-state and runtime directories retain OS/parent defaults throughout creation, writes and recovery. Private state files retain their file protection; never tighten directory permissions. Windows files allow the owner, SYSTEM, Administrators and the owner's current logon session so restricted owner tokens can replace/read them. For legacy-file access failures, follow [private-file recovery](references/workflow.md#windows-private-file-access); do not disable the sandbox or broaden directory ACLs. If initialization failed before manifest/private state and an official task UUID existed, follow [early initialization recovery](references/workflow.md#early-initialization-failure) instead of inventing state or treating the directory timestamp as an ID.
 
 Before the first image recognition after starting, resuming or switching routes, send the user the [mandatory vision notice](references/vision-routing.md#announce-before-recognition). Relay the returned `vision_notice` even when a fixed configuration was reused or transcription is still pending.
 

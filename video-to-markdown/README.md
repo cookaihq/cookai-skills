@@ -12,7 +12,7 @@ Codex 发送 `$video-to-markdown 配置` 或 `$video-to-markdown 打开设置页
 
 把下面这段话复制给正在使用的 Claude Code、Codex 或 WorkBuddy：
 
-> 请从 https://github.com/cookaihq/cookai-skills 安装 video-to-markdown，保留已有配置，检查当前宿主能否发现和调用它，并告诉我实际安装的版本。
+> 请优先从 https://github.com/cookaihq/cookai-skills 安装仓内 video-to-markdown，遇到网络故障时自动尝试 https://cnb.cool/zhidateam/tannt/tannt-skills.git；保留已有配置，检查当前宿主能否发现和调用它，并告诉我实际安装的版本与来源。
 
 Agent 会检查 uv、ffmpeg、ffprobe。Claude Code 的独立 Skill 入口是 `/video-to-markdown`，Codex 是 `$video-to-markdown`；也可以说明“用 video-to-markdown 整理这个视频”。WorkBuddy 应从本机实际支持的本地 Skill 入口安装并点名调用；其本地安装、Plugin 加载与开放平台上架是不同入口，不需要为了使用本 Skill 上架。
 
@@ -128,7 +128,9 @@ data/video-to-markdown/20261108132559-a8f93.mp4-表格筛选教程/a8f93.mp4-表
 
 4.2.1 起，任务、所有子目录（包括 `.state/`）和配置页运行目录沿用系统及父目录默认权限；后续保存和恢复也不收紧目录。私有文件继续单独保护，旧目录不会被自动改权。
 
-本批在 Windows 原生通过 152 项测试，并由 Codex 0.169.0 的 `workspace-write` 实际加载 4.2.1，验证 mxc 及配置默认后端的七个目录读写、后续状态保存、重复恢复和缺少正式 ID 的处理。默认后端使用任务内准备的同一份 ffmpeg 便携依赖。仅验证到初始化／恢复，不代表完整媒体转换；未调用 ASR 或识图，macOS 及其他宿主本批待验。
+4.2.2 修复 Windows 原生 Codex `workspace-write/unelevated` 首次保存任务记录时的拒绝访问，私有文件允许原用户及其当前登录会话访问。已有私有文件仅在调用者本来具有文件改权能力时更新登录会话权限；不能读取或更新的旧文件会保留并报告，不自动修目录或放宽沙箱。
+
+本批在 Windows 原生通过 156 项测试。Codex 0.169.0 的原生执行器在 `workspace-write/unelevated` 及 mxc 下验证公开启动、正式任务记录、覆盖保存、重复恢复、276 字符路径及七个目录默认权限；Codex 原生发现入口指向被测 4.2.2 源码。使用合成视频和现成字幕，仅验证到 `writing_document`，不代表完整媒体转换；ASR 与识图请求为 0，macOS 及其他宿主本批待验。
 
 如果创建目录后就报拒绝访问，可以说：“先检查这个部分目录是否已经生成正式任务 ID，以及是否发生过上传或转写，保留原文件，按公开恢复入口处理。”缺少真实初始化记录时不能直接续跑：先核对原执行已停止且没有未对账的外部请求，再用原输入在新的输出位置开始；旧部分目录保留。已有真实任务 ID 时使用原任务的恢复入口。旧目录确需改权时，Agent 须说明准确目标与影响并单独取得授权，不递归处理其他文件或目录。
 

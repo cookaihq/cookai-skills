@@ -44,6 +44,14 @@ If the process stops during renaming, use the printed final directory if it exis
 
 Drafts use `draft_validated` and `draft_delivered`, never complete-success. Resume keeps their saved route, issue budgets and timed gaps. Repair local artifacts/results without repeating a possibly executed model request. An explicit route switch archives and invalidates only affected work; finish its saved intent before resuming.
 
+### Windows Private File Access
+
+From 4.2.2, Windows private files grant access to their owner, SYSTEM, Administrators and the owner's current logon session. This lets native restricted owner tokens create, read, atomically replace and delete temporary state files without changing directory permissions. Temporary-file cleanup errors retain the original write/replace exception.
+
+Loading a task verifies its manifest/private files and renews their session ACE only when the caller already has file-level WRITE_DAC. The renewal uses a file handle, rejects directories, reparse points, multiple hard links, other owners and grants to unrelated identities, and preserves file content and task IDs. Previous logon SIDs must resolve to the same owner or an expired session; other lookup failures are rejected.
+
+Legacy files can remain unreadable or unwritable to a restricted token that cannot update their DACL. Report the exact file and failed operation, preserve the state and stop; do not change directory/global ACLs, elevate or disable the sandbox. A caller that already has the owner's necessary file rights can renew the manifest/private session access on load. This does not recursively repair old task files or authorize a separate owner-permission operation on business data. New tasks need no legacy repair.
+
 ### Early Initialization Failure
 
 `resume --task-dir` requires the real schema-4 `manifest.json` and `.state/private.json` with the same saved task UUID. A directory name, business request ID or timestamp is not that UUID. Missing initialization records produce a failure; this is not a supported task to reconstruct by hand. Preserve the directory and report which initialization step completed, without publishing private records.

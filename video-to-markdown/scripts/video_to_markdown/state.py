@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,12 +92,17 @@ def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
         descriptor = None
         private_files.replace_file(temporary, path)
     finally:
+        primary_error = sys.exception()
         if descriptor is not None:
             os.close(descriptor)
         try:
             temporary.unlink()
         except FileNotFoundError:
             pass
+        except OSError as cleanup_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note("Temporary state cleanup also failed: %s (%s)" % (temporary, cleanup_error))
 
 
 def atomic_write_json(path: Path, value: Any, *, mode: int = 0o600) -> None:
@@ -195,7 +201,8 @@ def initialize_task(task_dir: Path, *, settings_snapshot: dict, document_name: s
 def load_task(task_dir_value: str | os.PathLike[str]) -> tuple[Path, dict, dict]:
     task_dir = Path(task_dir_value).expanduser().resolve()
     try:
-        private_files.verify_private(task_dir / PRIVATE_RELATIVE, 0o600)
+        for relative in (MANIFEST_NAME, PRIVATE_RELATIVE):
+            private_files.ensure_private_access(task_dir / relative, 0o600)
     except (OSError, ValueError) as exc:
         raise StateError(str(exc)) from exc
     manifest = read_json(task_dir / MANIFEST_NAME)
