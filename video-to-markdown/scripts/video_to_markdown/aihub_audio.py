@@ -19,7 +19,7 @@ def _contract_profile(version: str) -> str | None:
     major, minor, patch = map(int, parsed.groups())
     if major == 1 and minor >= 3:
         return "legacy-upload"
-    if major == 6 and minor == 5 and patch >= 1:
+    if major == 6 and (minor == 5 and patch >= 1 or minor == 6):
         return "local-transcription"
     return None
 
@@ -67,12 +67,12 @@ def advance(task: Path, manifest: dict, private: dict, *, audio_path: Path, **op
         return {"action": "record_original_request"}
     if provider.get("plugin_dir") and provider["plugin_dir"] != str(root) and provider.get("run_record"):
         previous_version = str(provider.get("version", ""))
-        compatible_patch = (profile == "local-transcription" and _contract_profile(previous_version) == profile
-                            and tuple(map(int, version.split("."))) >= tuple(map(int, previous_version.split("."))))
-        # Host updates install patches in a new versioned directory. An explicit
-        # reviewed 6.5 replacement can continue the existing run; cross-contract
+        compatible_replacement = (profile == "local-transcription" and _contract_profile(previous_version) == profile
+                                  and tuple(map(int, version.split("."))) >= tuple(map(int, previous_version.split("."))))
+        # Host updates install into a new versioned directory. An explicit
+        # reviewed 6.5/6.6 replacement continues the saved run; cross-contract
         # replacements and downgrades still require restoring its dependency.
-        if not options.get("aihub_plugin_dir") or not compatible_patch:
+        if not options.get("aihub_plugin_dir") or not compatible_replacement:
             return {"action": "restore_aihub_dependency"}
     provider.update(plugin_dir=str(root), version=version)
     manifest.setdefault("dependencies", {})["aihub-audio"] = {"version": version, "source": str(root)}
