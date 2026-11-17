@@ -1,6 +1,8 @@
 """Public Video recovery against the AIhub Studio 6.5 / Audio 6.4 contract."""
 import json
+import os
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -166,6 +168,57 @@ def test_current_dependency_does_not_repeat_a_legacy_unknown_upload(tmp_path, vi
     resumed = invoke(capsys, "resume", "--task-dir", started["task_dir"])
     assert resumed["provider"] == "aihub-audio" and resumed["next_action"] == "submission_unknown"
     assert calls.count("upload") == 1 and "run" not in calls
+
+
+@pytest.mark.parametrize("version,initial_status,action", [
+    ("6.5.3", "download_failed", "continue_aihub_audio"),
+    ("6.5.2", "download_failed", "continue_aihub_audio"),
+    ("6.5.3", "upload_unknown", "submission_unknown"),
+    ("6.5.3", "confirmation_required", "confirm_aihub_audio"),
+    ("6.5.1", "download_failed", "restore_aihub_dependency"),
+    ("1.3.0", "download_failed", "restore_aihub_dependency"),
+    ("6.6.0", "download_failed", "restore_aihub_dependency"),
+])
+def test_saved_current_run_explicit_patch_path_change(tmp_path, video, capsys, monkeypatch, current_plugin,
+                                                    version, initial_status, action):
+    (current_plugin / "package.json").write_text('{"name":"aihub-studio","version":"6.5.2"}')
+    replacement = tmp_path / "replacement-plugin"
+    shutil.copytree(current_plugin, replacement)
+    (replacement / "package.json").write_text(json.dumps({"name": "aihub-studio", "version": version}))
+    calls = []
+    record = None
+
+    def execute(argv, **kwargs):
+        nonlocal record
+        command = argv[argv.index("--skill") - 1]
+        calls.append(command)
+        assert "--confirm" not in argv
+        if command == "run":
+            record = saved_run(argv)
+        if command == "continue":
+            assert Path(argv[argv.index("--record") + 1]) == record
+            assert str(replacement / "scripts" / ("aihub.ps1" if os.name == "nt" else "aihub.mjs")) in argv
+        if command in {"run", "continue"}:
+            return external.Result(2, json.dumps({"status": initial_status, "run_record": str(record),
+                                                  "task_id": "same-synthetic-child"}))
+        assert command in {"doctor", "plan"}
+        return external.Result(0, '{"status":"ok"}')
+
+    mock_dependency(monkeypatch, execute)
+    first = invoke(capsys, "start", "--video", video, "--aihub-plugin-dir", current_plugin, "--request", "完整转写")
+    task = Path(first["task_dir"])
+    before = state.read_json(task / "manifest.json")
+    resumed = invoke(capsys, "resume", "--task-dir", task, "--aihub-plugin-dir", replacement)
+    assert resumed["next_action"] == action
+    allowed = action != "restore_aihub_dependency"
+    assert calls == ["doctor", "plan", "run"] + (["continue"] if allowed else [])
+    after = state.read_json(task / "manifest.json")
+    assert after["task_id"] == before["task_id"] and after["skill_version"] == before["skill_version"]
+    assert after["dependencies"]["aihub-audio"] == {
+        "source": str(replacement if allowed else current_plugin), "version": version if allowed else "6.5.2"}
+    _, _, private = state.load_task(task)
+    assert private["transcription"]["providers"]["aihub-audio"]["run_record"] == str(record)
+    assert str(current_plugin / "scripts" / ("aihub.ps1" if os.name == "nt" else "aihub.mjs")) in private["operations"]["aihub-run"]["argv"]
 
 
 @pytest.mark.parametrize("segment", [
