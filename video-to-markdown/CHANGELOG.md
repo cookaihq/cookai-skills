@@ -4,7 +4,7 @@
 
 - Accept the reviewed AIhub Studio 6.6.x / Audio 6.5.0 local-transcription contract alongside 6.5.x from 6.5.1 and the existing legacy contract. Explicit new Plugin paths can resume the original run at the same or a newer supported version; downgrades, 6.7+, 7.x and unknown versions remain rejected.
 - Document explicit review-credential recovery for delivered local ASR. Preserve original ASR identity, files, receipts and review history; only an explicit new-review decision permits dependency `review --recheck`. Mismatched, inconclusive and unavailable checks keep the Video review gate.
-- Windows candidate validation: 184 script tests passed. Six offline complete-Plugin 6.5.3→6.6.0 scenarios passed in native Codex workspace-write/unelevated with network disabled, including interrupted/query recovery, uncertain upload, model confirmation and new review credentials without another ASR. Formal 6.6.0 installation consumption remains pending; macOS, other hosts, real cloud ASR and full business conversion are untested.
+- Windows validation: 184 script tests passed. Six offline complete-Plugin 6.5.3→6.6.0 scenarios passed against both development source and the formal Codex-installed 6.6.0 package in native Codex workspace-write/unelevated with network disabled, including interrupted/query recovery, uncertain upload, model confirmation and new review credentials without another ASR. Formal-package follow-ups preserved old 4.2.3 tasks after the old cache disappeared and queried a checking review without repeating it; a second pending recheck was rejected. macOS, other hosts, real cloud ASR and full business conversion are untested.
 
 ## 4.2.3
 
