@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.3.0
+
+- Resolve the independent Codex Agent from the configured executable, the verified current Codex session, or PATH.
+- Configure separate request retry and response stream recovery budgets. Both default to five attempts after the first request or disconnect. The independent route resumes existing Responses streams by ID and cursor.
+- Windows Codex CLI 0.169.0 discovered the installed Skill and completed its `vision-run` workflow against a local Responses fixture. One request retry and two stream recoveries used the configured budgets. Reopening the completed dispatch returned the saved result. macOS and a live vision service remain pending.
+
 ## 4.2.4
 
 - Accept the reviewed AIhub Studio 6.6.x / Audio 6.5.0 local-transcription contract alongside 6.5.x from 6.5.1 and the existing legacy contract. Explicit new Plugin paths can resume the original run at the same or a newer supported version; downgrades, 6.7+, 7.x and unknown versions remain rejected.

@@ -36,8 +36,9 @@ def test_selected_route_reaches_start_output_without_credentials(tmp_path, video
     if method in {"api", "independent-agent"}:
         route.update(base_url="https://vision.example:8443/private-service-path", api_key="synthetic-private-key")
     if method == "independent-agent":
-        which = vision.shutil.which
-        monkeypatch.setattr(vision.shutil, "which", lambda name: "synthetic-codex" if name == "codex" else which(name))
+        launch = vision.codex_launch.Launch(("synthetic-codex",), "test")
+        monkeypatch.setattr(vision.codex_launch, "resolve", lambda *_args, **_kwargs: launch)
+        monkeypatch.setattr(vision.codex_launch, "probe", lambda _launch: None)
     route_file = tmp_path / "private-route.json"
     state.atomic_write_json(route_file, route)
     started = call(capsys, "start", "--video", video, "--subtitle", subtitle, "--project-root", tmp_path,

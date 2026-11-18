@@ -410,7 +410,7 @@ def command_finalize(args) -> int:
 
 def command_vision(args) -> int:
     if args.command == "vision-options":
-        _print(vision.options(vision.capabilities(args.capabilities, host=args.host or "codex")))
+        _print(vision.options(vision.capabilities(args.capabilities, host=args.host or "codex"), use_home=args.use_local_key))
         return 0
     if args.command == "vision-models":
         _print(vision.model_catalog(state.read_json(Path(args.vision_config).resolve())))
@@ -435,7 +435,7 @@ def command_vision(args) -> int:
                                       actual_model=received["actual_model"],
                                       model_calls=received.get("usage", {}).get("model_calls", 1), already_reserved=True)
     elif args.command == "vision-run":
-        result = vision.execute(task_dir, manifest, args.dispatch_id)
+        result = vision.execute(task_dir, manifest, args.dispatch_id, host=args.host)
     elif args.command == "vision-begin":
         record, _ = vision.dispatch_input(task_dir, manifest, args.dispatch_id)
         result = vision.reserve_call(task_dir, manifest, record)
@@ -554,6 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     opts = subparsers.add_parser("vision-options")
     opts.add_argument("--host", choices=vision.HOSTS)
+    opts.add_argument("--use-local-key", action="store_true")
     opts.add_argument("--capabilities")
     opts.set_defaults(handler=command_vision)
     catalog = subparsers.add_parser("vision-models")
@@ -589,6 +590,8 @@ def build_parser() -> argparse.ArgumentParser:
         op.set_defaults(handler=command_vision)
         if name.startswith("vision-"):
             op.add_argument("--dispatch-id", required=True)
+        if name == "vision-run":
+            op.add_argument("--host", choices=vision.HOSTS)
         if name == "vision-record":
             op.add_argument("--input", required=True)
             op.add_argument("--actual-model")

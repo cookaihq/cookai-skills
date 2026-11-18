@@ -24,6 +24,21 @@ Task state saves only the safe route and credential source reference. A task-onl
 
 `VIDEO_TO_MARKDOWN_ASR_PROVIDER` and Feishu identity retain the transcription rules. AIhub ASR credentials stay with AIhub Audio. The vision connection is independent of ASR.
 
+### 独立 Agent 启动与恢复
+
+下列变量按进程环境、调用目录的 `.env.video-to-markdown`、`.env.local`、`.env`、已启用的个人全局配置逐项读取。可以通过 `vision-options` 核对配置来源。
+
+| 配置项 | 默认值 | 用途 |
+|---|---|---|
+| `VIDEO_TO_MARKDOWN_CODEX_EXECUTABLE` | 自动选择 | 依次采用显式路径、经过核验的当前 Codex 会话路径或 PATH 中的 `codex`。 |
+| `VIDEO_TO_MARKDOWN_REQUEST_MAX_RETRIES` | 5 | 明确未发送或明确限流拒绝后的重试次数，0–100。 |
+| `VIDEO_TO_MARKDOWN_STREAM_MAX_RETRIES` | 5 | 首次断流后接续原响应的次数，0–100。 |
+| `VIDEO_TO_MARKDOWN_RETRY_BACKOFF_BASE_MS` | 1000 | 指数退避的起始等待，单位毫秒。 |
+| `VIDEO_TO_MARKDOWN_RETRY_BACKOFF_MAX_MS` | 16000 | 指数退避上限，单位毫秒。服务冷却时间可超过此值。 |
+| `VIDEO_TO_MARKDOWN_RESPONSES_BACKGROUND` | `false` | 服务支持且用户允许保留响应时设为 `true`，启用 Responses 后台存储。 |
+
+调度从任务原始调用目录读取这些设置，单次调度共用 600 秒预算。断流后通过已有响应 ID 和游标接续。服务无法检索原响应时，任务记录保留响应 ID 和冷却截止时间。
+
 ## Start, check, stop
 
 Use the pinned runtime and the actual invocation project, not the Skill installation directory:

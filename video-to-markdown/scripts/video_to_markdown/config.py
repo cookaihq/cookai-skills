@@ -6,11 +6,22 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .codex_transport import Recovery
+
 PROVIDERS = ("aihub-audio", "feishu-minutes")
 PROVIDER_KEY = "VIDEO_TO_MARKDOWN_ASR_PROVIDER"
 VISION_KEY = "VIDEO_TO_MARKDOWN_VISION"
 IDENTITY_KEYS = tuple("VIDEO_TO_MARKDOWN_FEISHU_" + suffix for suffix in ("PROFILE", "APP_ID", "USER_OPEN_ID"))
+CODEX_KEYS = {
+    "executable": "VIDEO_TO_MARKDOWN_CODEX_EXECUTABLE",
+    "request_retries": "VIDEO_TO_MARKDOWN_REQUEST_MAX_RETRIES",
+    "stream_retries": "VIDEO_TO_MARKDOWN_STREAM_MAX_RETRIES",
+    "backoff_base_ms": "VIDEO_TO_MARKDOWN_RETRY_BACKOFF_BASE_MS",
+    "backoff_max_ms": "VIDEO_TO_MARKDOWN_RETRY_BACKOFF_MAX_MS",
+    "responses_background": "VIDEO_TO_MARKDOWN_RESPONSES_BACKGROUND",
+}
 KNOWN_NAMES = (
+    *CODEX_KEYS.values(),
     PROVIDER_KEY, "VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR", "VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR",
     "FFMPEG_BIN", "FFPROBE_BIN", "VIDEO_TO_MARKDOWN_ASR_MODEL", VISION_KEY, *IDENTITY_KEYS,
 )
@@ -98,27 +109,77 @@ def vision_group(raw: str | None) -> dict | None:
         raise ConfigError(VISION_KEY + " must contain a valid atomic vision configuration (no values printed)") from exc
 
 
-def resolve(environ: dict[str, str] | None = None, cwd: str | os.PathLike[str] | None = None,
-            *, use_home: bool = False, home_config_dir: str | os.PathLike[str] | None = None,
-            overrides: dict[str, dict[str, str]] | None = None, read_vision: bool = True) -> ResolvedConfig:
+def _home_file(home_config_dir):
+    return (Path(home_config_dir) if home_config_dir is not None else Path.home() / ".config" / "video-to-markdown") / ".env"
+
+
+def _layers(environ, cwd, *, use_home, home_config_dir=None, overrides=None):
     env = dict(os.environ if environ is None else environ)
     invocation = (Path.cwd() if cwd is None else Path(cwd)).resolve()
-    home_file = (Path(home_config_dir) if home_config_dir is not None else Path.home() / ".config" / "video-to-markdown") / ".env"
+    home_file = _home_file(home_config_dir)
     layers = [("process environment", env)]
     for name in (".env.video-to-markdown", ".env.local", ".env"):
         path = invocation / name
-        layers.append((str(path), (overrides or {}).get(str(path), _read_dotenv(path))))
+        values = overrides[str(path)] if overrides is not None and str(path) in overrides else _read_dotenv(path)
+        layers.append((str(path), values))
     if use_home:
-        layers.append((str(home_file), (overrides or {}).get(str(home_file), _read_dotenv(home_file))))
+        values = overrides[str(home_file)] if overrides is not None and str(home_file) in overrides else _read_dotenv(home_file)
+        layers.append((str(home_file), values))
+    return layers
+
+
+def _pick(layers, sources, field, key):
+    for source, values in layers:
+        value = (values.get(key) or "").strip()
+        if value:
+            sources[field] = source
+            return value
+    return None
+
+
+@dataclass(frozen=True)
+class CodexSettings:
+    executable: str | None
+    recovery: Recovery
+    sources: dict[str, str]
+
+
+def codex_settings(cwd, *, use_home=False, home_config_dir=None, environ=None, overrides=None) -> CodexSettings:
+    settings = Recovery()
+    sources: dict[str, str] = {}
+    layers = _layers(environ, cwd, use_home=use_home, home_config_dir=home_config_dir, overrides=overrides)
+
+    def get(field):
+        return _pick(layers, sources, field, CODEX_KEYS[field])
+
+    def integer(field, low, high):
+        value = get(field)
+        if value is None:
+            return getattr(settings, field)
+        if not re.fullmatch(r"[0-9]{1,6}", value) or not low <= int(value) <= high:
+            raise ConfigError(f"{CODEX_KEYS[field]} must be an integer in [{low}, {high}]")
+        return int(value)
+
+    resumable = get("responses_background")
+    if resumable is not None and resumable.lower() not in {"true", "false"}:
+        raise ConfigError(CODEX_KEYS["responses_background"] + " must be true or false")
+    recovery = Recovery(integer("request_retries", 0, 100), integer("stream_retries", 0, 100),
+                        integer("backoff_base_ms", 1, 60000), integer("backoff_max_ms", 1, 60000),
+                        (resumable or "false").lower() == "true")
+    if recovery.backoff_max_ms < recovery.backoff_base_ms:
+        raise ConfigError(CODEX_KEYS["backoff_max_ms"] + " must be at least " + CODEX_KEYS["backoff_base_ms"])
+    return CodexSettings(get("executable"), recovery, sources)
+
+
+def resolve(environ: dict[str, str] | None = None, cwd: str | os.PathLike[str] | None = None,
+            *, use_home: bool = False, home_config_dir: str | os.PathLike[str] | None = None,
+            overrides: dict[str, dict[str, str]] | None = None, read_vision: bool = True) -> ResolvedConfig:
+    layers = _layers(environ, cwd, use_home=use_home, home_config_dir=home_config_dir, overrides=overrides)
+    home_file = _home_file(home_config_dir)
     sources: dict[str, str] = {}
 
     def one(field: str, key: str) -> str | None:
-        for source, values in layers:
-            value = (values.get(key) or "").strip()
-            if value:
-                sources[field] = source
-                return value
-        return None
+        return _pick(layers, sources, field, key)
 
     provider = one("asr_provider", PROVIDER_KEY) or "aihub-audio"
     if provider not in PROVIDERS:

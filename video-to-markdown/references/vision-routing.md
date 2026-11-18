@@ -68,6 +68,8 @@ All commands use `uv run --frozen --project <skill-dir> <skill-dir>/scripts/work
 
 For alternate vision routes the main Agent reads returned observations rather than opening video frames itself. Forward original-detail, second-pass and screenshot judgments through the same route. A host tool that cannot deliver images, select the requested model or honor current execution constraints is unavailable for that task; present repair/reselection choices instead of falling back.
 
+The independent Codex route uses the launch and recovery settings in [configuration.md](configuration.md#独立-agent-启动与恢复). It owns both recovery budgets and disables the custom Codex provider’s nested retries. It recovers a stream by reading the existing response with its ID and cursor. The dispatch records retries, reconnects and any remaining service cooldown. For an exhausted budget, check the existing work using the response ID in the saved dispatch.
+
 API responses are saved privately before interpretation. A timeout/ambiguous write is not automatically replayed. Use `vision-reconcile` to accept a saved parsed response after repairing a local validation issue; an invalid JSON response remains available as `raw_response` for inspection and an evidence-preserving repair. HTTP rejections retain status and full `Retry-After`; a dispatch allows at most three network attempts. Network retries do not reset issue budgets. An optional exact request cap works for the API adapter; an Agent path without reliable internal request metering rejects that cap. Counts marked unknown are not exact bills.
 
 ## Sampling and second pass

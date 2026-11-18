@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from skill_ui.contracts import UIError, public_config
-from video_to_markdown import config
+from video_to_markdown import codex_launch, config
 from video_to_markdown.ui_adapter import VideoAdapter
 
 
@@ -19,6 +19,38 @@ def adapter(tmp_path, **kwargs):
 
 def edits(**values):
     return {k: {"op": "set", "value": v} for k, v in values.items()}
+
+
+def test_independent_capability_uses_the_pages_project_and_global_scope(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    user_config = project / "home"
+    user_config.mkdir()
+    (project / ".env.video-to-markdown").write_text("VIDEO_TO_MARKDOWN_STREAM_MAX_RETRIES=0\n")
+    (user_config / ".env").write_text("VIDEO_TO_MARKDOWN_REQUEST_MAX_RETRIES=2\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VIDEO_TO_MARKDOWN_REQUEST_MAX_RETRIES", "9")
+
+    def resolve(cwd, **kwargs):
+        assert cwd == project
+        assert kwargs["environ"] == {}
+        return codex_launch.Launch(("synthetic-codex",), "test")
+
+    monkeypatch.setattr(codex_launch, "resolve", resolve)
+    monkeypatch.setattr(codex_launch, "probe", lambda launch: None)
+
+    def independent(use_home):
+        snapshot = adapter(project, use_home=use_home).config()
+        caps = next(f for f in snapshot["fields"] if f["id"] == "capabilities")["effective"]["value"]
+        return next(choice for choice in caps["choices"] if choice["method"] == "independent-agent")
+
+    project_only = independent(False)
+    assert project_only["recovery"]["stream_retries"] == 0
+    assert project_only["recovery"]["request_retries"] == 5
+    with_global = independent(True)
+    assert with_global["recovery"]["stream_retries"] == 0
+    assert with_global["recovery"]["request_retries"] == 2
+    assert with_global["recovery_sources"]["request_retries"] == str(user_config / ".env")
 
 
 def test_preview_uses_real_loader_without_writes_and_save_reads_back(tmp_path):

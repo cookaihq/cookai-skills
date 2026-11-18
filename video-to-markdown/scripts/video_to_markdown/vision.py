@@ -10,7 +10,6 @@ import copy
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import time
 import urllib.error
@@ -20,7 +19,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from . import config, observations, sampling, state
+from . import codex_launch, codex_transport, config, observations, sampling, state
 
 METHODS = ("main-agent", "host-agent", "independent-agent", "api")
 HOSTS = ("codex", "claude-code", "workbuddy")
@@ -87,7 +86,31 @@ def capabilities(path: str | None = None, *, host: str = "codex") -> dict:
             "manual_model": None, "note": "尚未取得当前会话能力；静态目录不能代替账号可用列表。"}
 
 
-def options(caps: dict) -> dict:
+def _independent_runtime(cwd: Path, *, host: str | None, use_home: bool = False,
+                         home_config_dir: Path | None = None, environ: dict[str, str] | None = None,
+                         overrides: dict[str, dict[str, str]] | None = None):
+    settings = config.codex_settings(cwd, use_home=use_home, home_config_dir=home_config_dir,
+                                     environ=environ, overrides=overrides)
+    try:
+        launch = codex_launch.resolve(cwd, explicit=settings.executable,
+                                      explicit_source=settings.sources.get("executable"), host=host, environ=environ)
+        codex_launch.probe(launch)
+    except codex_launch.LaunchError as exc:
+        raise VisionError(str(exc)) from None
+    return launch, settings
+
+
+def options(caps: dict, *, cwd: Path | None = None, use_home: bool = False,
+            home_config_dir: Path | None = None, environ: dict[str, str] | None = None,
+            overrides: dict[str, dict[str, str]] | None = None) -> dict:
+    try:
+        launch, settings = _independent_runtime(cwd or Path.cwd(), host=caps["host"], use_home=use_home,
+                                                home_config_dir=home_config_dir, environ=environ, overrides=overrides)
+        independent = {"available": True, "reason": "Codex CLI + Responses 兼容远程服务",
+                       "executable_source": launch.source, "recovery": vars(settings.recovery),
+                       "recovery_sources": settings.sources}
+    except (VisionError, config.ConfigError) as exc:
+        independent = {"available": False, "reason": str(exc)}
     return {"host": caps["host"], "source": caps["source"], "models": caps.get("models", []),
             "choices": [
                 {"method": "main-agent", "label": LABELS["main-agent"], "available": caps.get("main_vision"),
@@ -95,7 +118,7 @@ def options(caps: dict) -> dict:
                 {"method": "host-agent", "label": LABELS["host-agent"], "available": caps.get("native_agent"),
                  "reason": "需要宿主支持指定模型及图片输入；列表未知时仅在路由能力已确认后手填"},
                 {"method": "independent-agent", "label": LABELS["independent-agent"],
-                 "available": bool(shutil.which("codex")), "reason": "Codex CLI + Responses 兼容远程服务；图片能力需验证"},
+                 **independent},
                 {"method": "api", "label": LABELS["api"], "available": True,
                  "reason": "Chat Completions 兼容图片接口；模型与鉴权需配置"}]}
 
@@ -151,6 +174,7 @@ def select(task_dir: Path, manifest: dict, resolved: config.ResolvedConfig, *, h
         return {"next_action": "write_document", "vision": "skipped", "reason": vision["reason"]}
     if vision.get("route"):
         return {"next_action": "inspect_batch", "vision": vision}
+    invocation = Path(manifest["settings"].get("invocation_cwd") or Path.cwd())
     group = resolved.vision or {}
     route = override
     source = "task option" if override else resolved.sources.get("vision")
@@ -159,7 +183,7 @@ def select(task_dir: Path, manifest: dict, resolved: config.ResolvedConfig, *, h
     if route is None:
         manifest["stage"] = "awaiting_vision_selection"
         state.save_manifest(task_dir, manifest)
-        return {"next_action": "choose_vision_once", **options(caps),
+        return {"next_action": "choose_vision_once", **options(caps, cwd=invocation, use_home=resolved.use_home),
                 "suggested": config.public_vision(group), "task_dir": str(task_dir)}
     validate_route(route, complete=True)
     method = route["method"]
@@ -175,8 +199,9 @@ def select(task_dir: Path, manifest: dict, resolved: config.ResolvedConfig, *, h
             raise VisionError("selected model is absent from the actual model list; manual routing is not confirmed")
         if (model is None or model.get("vision") is not True or model.get("available") is not True) and not route.get("accept_unverified_model"):
             raise VisionError("model image/account capability is unverified; explicitly accept this limitation or verify it first")
-    if method == "independent-agent" and not shutil.which(route.get("runtime", "codex")):
-        raise VisionError("independent Agent runtime is unavailable: install Codex CLI first")
+    if method == "independent-agent":
+        _independent_runtime(invocation, host=host, use_home=resolved.use_home,
+                             home_config_dir=resolved.home_file.parent)
     if group.get("call_limit") is not None and (method == "independent-agent" or (method != "api" and caps.get("request_metering") is not True)):
         raise VisionError("this Agent path cannot enforce an exact internal model-request cap; use an API route or explicitly remove the cap")
     if method in {"api", "independent-agent"} and source == "task option" and not credential_ref:
@@ -553,44 +578,42 @@ def api_request(route: dict, payload: dict, *, opener=urllib.request.urlopen, on
     return result, reply.get("model"), {**reply.get("usage", {}), "model_calls": 1}
 
 
-def codex_command() -> list[str]:
-    executable = shutil.which("codex")
-    if not executable:
-        raise VisionError("Codex CLI is unavailable")
-    if os.name == "nt" and Path(executable).suffix.lower() in {".cmd", ".bat", ".ps1"}:
-        # Avoid cmd.exe reinterpreting connection fields and TOML argument quotes.
-        launcher = Path(executable).parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
-        node = shutil.which("node")
-        if node and launcher.is_file():
-            return [node, str(launcher)]
-        raise VisionError("cannot resolve this Windows Codex shim safely; use the official npm launcher or a native codex.exe in PATH")
-    return [executable]
-
-
-def run_codex(route: dict, payload: dict, task_dir: Path, *, runner=subprocess.run) -> tuple[dict, str | None, dict]:
-    # No model weights or local inference; the CLI talks to the chosen remote provider.
-    executable = codex_command()
+def run_codex(route: dict, payload: dict, task_dir: Path, *, launch: codex_launch.Launch,
+              recovery: codex_transport.Recovery, runner=subprocess.run, on_transport=None) -> tuple[dict, str | None, dict]:
     directory = task_dir / ".state" / "vision" / (payload["dispatch_id"] + "-agent")
     directory.mkdir(parents=True, exist_ok=True)
     output = directory / "result.json"
-    # Provider overrides apply only to this child process. Key never appears in argv.
-    command = [*executable, "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
-               "--ignore-rules", "--sandbox", "read-only", "--json", "--cd", str(directory),
-               "--model", route["model"], "-c", 'model_provider="video_vision"',
-               "-c", 'model_providers.video_vision.name="Video vision"',
-               "-c", "model_providers.video_vision.base_url=" + json.dumps(route["base_url"]),
-               "-c", 'model_providers.video_vision.env_key="VIDEO_VISION_RUNTIME_KEY"',
-               "-c", 'model_providers.video_vision.wire_api="responses"',
-               "--output-last-message", str(output)]
-    for frame in [*payload.get("contact_sheets", []), *payload["frames"]]:
-        command.extend(["--image", frame["path"]])
-    command.append("-")
-    env = dict(os.environ, VIDEO_VISION_RUNTIME_KEY=route["api_key"])
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    completed = runner(command, input=json.dumps(payload, ensure_ascii=False).encode(), env=env,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, check=False, creationflags=flags)
-    if completed.returncode:
-        raise VisionError("independent Agent failed; no silent model or method switch (runtime output withheld to protect credentials)")
+    # The remote Key stays in this process. The child authenticates only to a per-dispatch loopback listener.
+    with codex_transport.serve(route, recovery) as (endpoint, token, transport):
+        command = [*launch.argv, "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
+                   "--ignore-rules", "--sandbox", "read-only", "--json", "--cd", str(directory),
+                   "--model", route["model"], "-c", 'model_provider="video_vision"',
+                   "-c", 'model_providers.video_vision.name="Video vision"',
+                   "-c", "model_providers.video_vision.base_url=" + json.dumps(endpoint),
+                   "-c", 'model_providers.video_vision.env_key="VIDEO_VISION_RUNTIME_KEY"',
+                   "-c", 'model_providers.video_vision.wire_api="responses"',
+                   "-c", "model_providers.video_vision.request_max_retries=0",
+                   "-c", "model_providers.video_vision.stream_max_retries=0",
+                   "-c", "model_providers.video_vision.stream_idle_timeout_ms=600000",
+                   "-c", "model_providers.video_vision.supports_websockets=false",
+                   "-c", "features.unbounded_connection_retries=false",
+                   "--output-last-message", str(output)]
+        for frame in [*payload.get("contact_sheets", []), *payload["frames"]]:
+            command.extend(["--image", frame["path"]])
+        command.append("-")
+        env = dict(os.environ, VIDEO_VISION_RUNTIME_KEY=token)
+        no_proxy = ",".join(value for value in (env.get("NO_PROXY"), env.get("no_proxy"), "127.0.0.1") if value)
+        env.update(NO_PROXY=no_proxy, no_proxy=no_proxy)
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            completed = runner(command, input=json.dumps(payload, ensure_ascii=False).encode(), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, check=False, creationflags=flags)
+        finally:
+            if on_transport:
+                on_transport({**transport.snapshot(), "executable_source": launch.source})
+        if completed.returncode:
+            reason = transport.last_failure or "codex_cli_failed"
+            raise VisionError(f"independent Agent failed ({reason}); check the saved dispatch before requesting new work")
     events = []
     for line in completed.stdout.splitlines():
         try:
@@ -605,7 +628,7 @@ def run_codex(route: dict, payload: dict, task_dir: Path, *, runner=subprocess.r
                                            "note": "CLI does not expose every internal model request; count remains unknown"}
 
 
-def execute(task_dir: Path, manifest: dict, dispatch_id: str, *, opener=urllib.request.urlopen, runner=subprocess.run) -> dict:
+def execute(task_dir: Path, manifest: dict, dispatch_id: str, *, opener=urllib.request.urlopen, runner=subprocess.run, host: str | None = None) -> dict:
     record, payload = dispatch_input(task_dir, manifest, dispatch_id)
     if record["status"] == "complete":
         return record
@@ -624,7 +647,10 @@ def execute(task_dir: Path, manifest: dict, dispatch_id: str, *, opener=urllib.r
     if route["method"] == "independent-agent" and manifest["vision"].get("call_limit") is not None:
         raise VisionError("Codex runner cannot enforce an exact internal model-request cap; choose a metered route or remove the cap explicitly")
     if route["method"] == "independent-agent":
-        codex_command()  # Check local launcher before reserving a possible remote call.
+        invocation = Path(manifest["settings"].get("invocation_cwd") or Path.cwd())
+        # A saved route's original host describes selection, not the current session.
+        launch, settings = _independent_runtime(invocation, host=host,
+                                                use_home=manifest["settings"].get("use_home", False))
     attempt = reserve_call(task_dir, manifest, record)
     def save_response(raw: bytes) -> None:
         relative = ".state/vision/" + dispatch_id + "-raw-response.json"
@@ -634,7 +660,16 @@ def execute(task_dir: Path, manifest: dict, dispatch_id: str, *, opener=urllib.r
         attempt["status"] = "response_received"
         state.save_manifest(task_dir, manifest)
     try:
-        result, actual, usage = api_request(route, payload, opener=opener, on_response=save_response) if route["method"] == "api" else run_codex(route, payload, task_dir, runner=runner)
+        if route["method"] == "api":
+            result, actual, usage = api_request(route, payload, opener=opener, on_response=save_response)
+        else:
+            def save_transport(details):
+                record["transport"] = details
+                if details["retry_not_before"] is not None:
+                    record["retry_not_before"] = details["retry_not_before"]
+
+            result, actual, usage = run_codex(route, payload, task_dir, launch=launch, recovery=settings.recovery,
+                                              runner=runner, on_transport=save_transport)
         # Persist the received result before interpretation so a validation error never causes a duplicate request.
         state.atomic_write_json(task_dir / (".state/vision/" + dispatch_id + "-received.json"),
                                 {"result": result, "actual_model": actual, "usage": usage})

@@ -110,8 +110,10 @@ class VideoAdapter(Adapter):
                            "sensitive": field == "api_key", "group": "vision" if field not in SCALARS else "advanced",
                            "targets": [l["id"] for l in layers if not l["readonly"]],
                            "effective": {"source": source or "default", "status": "configured" if source else "default", "value": current}, "rows": rows})
+        capabilities = vision.options(self.caps, cwd=self.project, use_home=self.use_home,
+                                      home_config_dir=self.targets["global"].parent, environ=self.env, overrides=overrides)
         fields.append({"id": "capabilities", "config_key": "current-session capability evidence", "label": "宿主能力", "type": "json", "readonly": True,
-                       "effective": {"source": self.caps["source"], "status": "reported", "value": vision.options(self.caps)}, "rows": []})
+                       "effective": {"source": self.caps["source"], "status": "reported", "value": capabilities}, "rows": []})
         return {"revision": self.revision(), "layers": layers, "fields": fields, "default_targets": ["project", "global"],
                 "note": "全局已显式启用" if self.use_home else "全局未启用；本次任务不会读取全局配置",
                 "validation_errors": [], "validation": "真实 dotenv 加载器校验及保存后回读"}

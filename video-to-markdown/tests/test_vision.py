@@ -223,19 +223,22 @@ def test_long_gop_fractional_fps_png_matches_exact_decoded_pts(tmp_path, offset)
             assert image.size == (160, 90)
 
 
-def test_independent_agent_gets_key_only_via_environment_and_unknown_request_count_is_honest(tmp_path, monkeypatch):
+def test_independent_agent_keeps_remote_key_in_transport_and_counts_unknown_requests_honestly(tmp_path):
     task, manifest, dispatch = api_task(tmp_path)
     _, payload = vision.dispatch_input(task, manifest, dispatch["dispatch_id"])
     route = {**vision.connection(manifest), "method": "independent-agent", "runtime": "codex", "protocol": "responses"}
-    monkeypatch.setattr(vision.shutil, "which", lambda _: "/synthetic/codex")
+    launch = vision.codex_launch.Launch(("/synthetic/codex",), "test")
     def runner(command, **kwargs):
         assert "synthetic-private-key" not in json.dumps(command)
-        assert kwargs["env"]["VIDEO_VISION_RUNTIME_KEY"] == "synthetic-private-key"
+        assert kwargs["env"]["VIDEO_VISION_RUNTIME_KEY"] != "synthetic-private-key"
+        assert "model_providers.video_vision.request_max_retries=0" in command
+        assert "model_providers.video_vision.stream_max_retries=0" in command
         assert "--sandbox" in command and command[command.index("--sandbox") + 1] == "read-only"
         path = Path(command[command.index("--output-last-message") + 1])
         state.atomic_write_json(path, result_for(payload))
         return subprocess.CompletedProcess(command, 0, b'{"type":"turn.completed","usage":{}}\n', b"")
-    value, actual, usage = vision.run_codex(route, payload, task, runner=runner)
+    value, actual, usage = vision.run_codex(route, payload, task, launch=launch,
+                                            recovery=vision.codex_transport.Recovery(), runner=runner)
     assert actual is None and usage["model_calls"] is None
     assert value["schema_version"] == 1
 
