@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, rm, lstat } from 'node:fs/promises';
 import { join, resolve, relative } from 'node:path';
 import { spawn } from 'node:child_process';
-import { repositoryFixture, registerRepositories } from './fixtures/repositories.mjs';
+import { cli, repositoryFixture, registerRepositories } from './fixtures/repositories.mjs';
 import { gitService } from './fixtures/git-service.mjs';
 import { prepareAuth, authSelection } from '../scripts/git-setup/auth.mjs';
 import { installCredentialHelper } from '../scripts/git-setup/credential-install.mjs';
@@ -73,6 +73,52 @@ test('native Git uses a self-contained helper; preview is read-only and installa
   assert.ok((await readFile(join(f.project, '.git/config'))).equals(installed), 'repeat installation changed config');
   await writeFile(done.helper.path, helper.replaceAll('\n', '\r\n'));
   assert.equal((await installCredentialHelper(f.project, { targets: [url] })).status, 'planned');
+});
+
+test('credential preparation and the native helper use the same unambiguous default filenames', async () => {
+  const f = await fixture();
+  const github = 'https://github.com/team-name/repo-name.git';
+  const cnb = 'https://cnb.cool/team/sub_group/repo-name.git';
+  const directory = join(f.project, '.credentials', 'repositories');
+  const legacy = join(directory, 'team%2Dname--repo%2Dname.github-token');
+  const info = (...args) => f.run(cli, ['credential-info', '--project', f.project, '--url', github, ...args]);
+  const prepare = (target, ...args) => f.run(cli, ['credential-prepare', '--project', f.project, '--url', target, '--apply', ...args]);
+
+  assert.equal((await prepare(github, '--credential-file', legacy)).credentialFile, legacy);
+  await writeFile(legacy, 'synthetic-legacy-token');
+  assert.deepEqual((await info()).required, ['credential-prepare']);
+  const explicit = await info('--credential-file', legacy);
+  assert.equal(explicit.status, 'selected');
+  assert.equal(explicit.source.file, legacy);
+
+  const cases = new Map([
+    [github, 'team+name--repo+name.github-token'],
+    ['https://github.com/team-name/repo_name', 'team+name--repo_name.github-token'],
+    ['https://github.com/a--b/c', 'a++b--c.github-token'],
+    ['https://github.com/a/b--c', 'a--b++c.github-token'],
+    [cnb, 'team--sub_group--repo+name.cnb-url'],
+  ]);
+  for (const [target, filename] of cases) {
+    const result = await prepare(target);
+    assert.equal(result.status, 'awaiting_credentials', JSON.stringify(result));
+    assert.equal(result.created, true);
+    assert.equal(result.credentialFile, join(directory, filename));
+    assert.equal((await lstat(result.credentialFile)).size, 0);
+  }
+
+  await writeFile(join(directory, cases.get(github)), 'synthetic-github-token');
+  await writeFile(join(directory, cases.get(cnb)), 'https://cnb:synthetic-cnb-token@cnb.cool/team/sub_group/repo-name');
+  await f.git(f.project, 'remote', 'set-url', 'origin', github);
+  await f.git(f.project, 'remote', 'add', 'backup', cnb);
+  const { plan } = await install(f, { targets: [github, cnb] });
+  assert.deepEqual(plan.effects.sourceUpdates, []);
+  await assert.rejects(lstat(join(directory, 'sources.local.md')), { code: 'ENOENT' });
+  for (const [target, token] of [[github, 'synthetic-github-token'], [cnb, 'synthetic-cnb-token']]) {
+    const result = await native(f, 'fill', `url=${target}\n\n`);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(result.stdout.split(/\r?\n/).includes(`password=${token}`));
+  }
+  assert.equal(await readFile(legacy, 'utf8'), 'synthetic-legacy-token');
 });
 
 test('rotation is immediate; approve/reject never change the credential and unknown targets cannot use a fallback', async () => {

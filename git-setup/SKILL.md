@@ -1,8 +1,8 @@
 ---
 name: git-setup
 metadata:
-  version: "1.0.2"
-description: v1.0.2｜检查和设置项目 Git，维护项目 Git 使用说明及 Agent 规则引用；支持 GitHub/CNB 凭证来源选择、明确请求的发布、单向同步与本地/GitHub Issue。
+  version: "2.0.0"
+description: v2.0.0｜检查和设置项目 Git，维护项目 Git 使用说明及 Agent 规则引用；支持 GitHub/CNB 凭证来源选择、明确请求的发布、单向同步与本地/GitHub Issue。
 compatibility: Requires Node.js >=20 and Git >=2.29. Shared instructions for Claude Code, Codex and WorkBuddy; gh is optional for GitHub authentication.
 ---
 
@@ -45,6 +45,8 @@ Git 检出安装：macOS/Linux 执行本 Skill 的 scripts/check_update.sh；Win
 GitHub HTTPS 默认复用项目为完整目标配置的 Token，并做本次验证，不再要求在项目 Token 与全局 gh 之间二选一。发现全局 gh 已登录时只作信息提示，不列为默认或推荐；只有用户明确选择全局 gh（或可核验的同目标、同作用范围已确认选择）才使用明确账号。项目 Token 缺失、失效或权限不足时报告目标、来源与问题，按用户明确决定处理，不静默回退全局 gh。
 
 来源由本次明确输入、项目规则或可选的 .credentials/repositories/sources.local.md 决定；没有其他已确认来源时，CLI 使用目标仓库的标准 Token 路径。项目规则指定自定义文件或 environment 时，Agent 将该来源传入 CLI，不扫描其他文件。CNB 文件继续保存单行带 cnb 用户名与 Token 的完整鉴权 URL。本机记录只保存目标、方式、文件路径/账号，不含 Token、ready/pending 或历史 Token 指纹。能从规则重建时不额外保存来源记录。文件里的 Token 轮换后，下次直接读取并作当前验证；同一操作中变化则停止重查。
+
+发现 1.x 的标准凭证文件名时，按[文件名迁移说明](references/authentication.md#从-1x-迁移标准文件名)处理已获授权的文件与调用方，再准备新文件或继续鉴权。
 
 新文件用 credential-prepare 准备被忽略的空文件，已有文件原样保留。准备后在回复提供返回的完整可点击路径、格式、目标和本次用途；等待用户明确“已填写”才读取。等待需要跨轮且不能从现有任务重建时，只保存必要非敏感恢复信息。文件非空不等于用户已回复；不要把 Token 发回对话。真实凭证保存仍须已有明确授权。
 

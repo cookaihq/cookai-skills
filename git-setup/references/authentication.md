@@ -8,11 +8,19 @@ Git 不会自动发现 .credentials/repositories。项目规则指向 Git 使用
 - CNB：单行 https://cnb:<TOKEN>@cnb.cool/<完整仓库路径>。Token 中 URL 特殊字符先百分号编码。允许 UTF-8 BOM 与一个末尾换行；不接受多行字段、引号或额外文本。Git 用户名固定 cnb。
 - environment 是明确选择的 GitHub 环境来源；加载顺序见 [配置](configuration.md)，不会自动回退到它。
 
-管理仓关系须明确且可核验。主检出保管 .credentials/repositories/<完整路径各段的连字符转为 %2D，再用双连字符连接>.github-token 或 .cnb-url，Worktree 不复制凭证。已登记子仓可由管理主检出保管，但每个完整远端仍独立选择；URL 相同不证明两个 clone 共用管理关系。
+管理仓关系须明确且可核验。标准凭证位于管理主检出的 `.credentials/repositories/`。将完整仓库路径各段内的 `-` 写成 `+`，以 `--` 连接各段，最后加 `.github-token` 或 `.cnb-url`。例如 `github.com/team-name/my_repo` 对应 `team+name--my_repo.github-token`，`cnb.cool/team/sub-group/my-repo` 对应 `team--sub+group--my+repo.cnb-url`。Worktree 复用管理主检出的文件。已登记子仓可由管理主检出保管，每个完整远端独立选择来源。管理关系须有独立的登记依据。
 
 选择优先级：本次 sources 或参数 → 可选 sources.local.md 中同目标已确认来源 → GitHub/CNB 的确定文件路径。Agent 先读项目规则，将其指定的自定义 Token 文件或 environment 来源传入 CLI；脚本不解析 Markdown、不扫描其他凭证。没有其他选择时 GitHub 使用 github-token，缺文件报告 credential-prepare，空文件报告 credentials-filled；不因全局 gh 已登录而改选。失效或权限不足时报告原目标与来源，保留来源，按用户明确决定修复或更换；网络失败单独报告。
 
 非敏感本机记录保存于管理主检出的 .credentials/repositories/sources.local.md，包含唯一 json fenced array：每项 {url,method,file?,account?}。文件路径相对管理主检出，gh 用 account。gh 记录仅可保存用户明确选择的全局账号，复用前核对原选择仍适用于本次目标与范围，不能把检测到登录当作确认。项目共同规定写入 Git 使用说明。本机差异有必要记住时，沿已明确选择调用 source-save --input - --apply；没有此需要则不创建文件。setup、read、publish、sync、GitHub Issue 与仓库 API 共用此选择规则。
+
+## 从 1.x 迁移标准文件名
+
+2.0.0 的默认查找使用 `+` 命名。迁移前按完整远端和管理主检出核对旧文件及实际调用方。显式使用的自定义文件沿既有来源配置读取。
+
+1. 核对旧文件是普通、单链接文件，且新旧路径均未被跟踪、已被 Git 忽略。若忽略规则逐文件匹配，先让新路径也受忽略。目标名已有文件时先核对来源和用途，保留两份文件。
+2. 在原目录将旧标准文件名中的 `%2D` 改成 `+`，保留原内容和文件权限。同步项目 Git 说明、脚本中的固定路径及 `sources.local.md` 中对应的 `file`。需要保存本机来源时用 `source-save`。
+3. 已登记的独立 Git helper 内嵌生成时的命名逻辑。沿该项目现有接入流程更新实际登记的 helper，或让它通过 `sources.local.md` 显式绑定新路径。更新后用 `credential-info` 确认 Skill 实际选中新路径。使用普通 Git 的项目还需从实际 Git 入口验证已登记的 helper。
 
 ## 准备、验证与安全边界
 

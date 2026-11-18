@@ -2,7 +2,7 @@
 
 帮你为项目设置 Git，明确多仓项目的主要仓库，并把“这个项目怎样用 Git”写进项目说明、从 Agent 规则中引用。后续 Agent 会按说明定位仓库、读取凭证并执行获授权的操作。
 
-当前版本 **1.0.2**。需要 Node.js 20+、Git 2.29+；没有额外 npm/Python 包或本地模型。普通终端、IDE、CI 使用既有鉴权，不会自动读取 .credentials/repositories。
+当前版本 **2.0.0**。需要 Node.js 20+、Git 2.29+；没有额外 npm/Python 包或本地模型。普通终端、IDE、CI 使用既有鉴权，不会自动读取 .credentials/repositories。
 
 ## 安装与第一次使用
 
@@ -64,11 +64,17 @@ GitHub 默认使用项目为该仓库配置的 Token，并验证本次能否使�
 
 自动检查更新默认开启，失败不阻塞业务；实际更新逐次确认。可以说“关闭 git-setup 的自动检查更新”，它只设置个人 .config/git-setup/.env 中的 AUTO_UPDATE_CHECK=0。
 
+**从 1.x 升级到 2.0.0** 时，请迁移 GitHub 和 CNB 默认凭证文件名中的 `%2D`。例如 `team--my%2Drepo.github-token` 改为 `team--my+repo.github-token`。已有独立 Git helper 的项目也需要更新 helper 或显式绑定新路径。详见[文件名迁移说明](references/authentication.md#从-1x-迁移标准文件名)。
+
+> 使用 git-setup 迁移这个项目的旧默认凭证文件名。核对新路径已被 Git 忽略且未跟踪，在原目录改名并更新实际引用。如果项目登记了独立 Git helper，请更新它或显式绑定新路径。迁移后核对实际来源，隐藏凭证值。
+
 **1.0.0 为不兼容升级。** 原持久 helper、鉴权绑定和生成运行包接口已删除。已有安装先清点并迁移实际调用方，验证后删除旧入口和无人引用的旧运行包；不会自动改真实凭证或删除其他 helper。可以说“将这个项目迁移到 Git 文档方案，先列出调用方与影响，再在我已授权范围内迁移并删除旧实现”。
 
 ## 支持状态
 
-1.0.2 的默认规则路径已在 Windows 原生 Codex 0.166.0（workspace-write 沙箱）验收：省略路径后生成 docs/agents/git-repository-operations.md、保留原规则、重复执行不增加入口、已有正文继续复用；独立新会话能仅从项目 AGENTS.md 读取该正文。相关自动化回归 9/9 通过。macOS 本版本实机验收待完成；本次离线文档验收不代表真实远端鉴权、IDE 按钮或其他宿主通过。
+2.0.0 已在 Windows 原生 Codex 0.170.0 的 workspace-write 沙箱验证 GitHub 和三级 CNB 凭证文件准备及回读。31 项相关自动化回归通过，覆盖独立 helper 对新路径的读取。macOS 实机验收待完成。
+
+1.0.2 的默认规则路径已在 Windows 原生 Codex 0.166.0（workspace-write 沙箱）验收：省略路径后生成 docs/agents/git-repository-operations.md、保留原规则、重复执行不增加入口、已有正文继续复用；独立新会话能仅从项目 AGENTS.md 读取该正文。相关自动化回归 9/9 通过。1.0.2 的 macOS 测试尚无实机结果；本次离线文档验收不代表真实远端鉴权、IDE 按钮或其他宿主通过。
 
 当前工作副本的主要仓库与规则复用改动正在验收；普通 Git / IDE 的按需只读 helper 已完成模块实现和 Windows 本地合成 HTTPS 测试，公开接入命令尚待定名集成。尚未把它安装到真实项目，也未验证实际 IDE 按钮。它不会成为普通 setup 的默认安装项。
 

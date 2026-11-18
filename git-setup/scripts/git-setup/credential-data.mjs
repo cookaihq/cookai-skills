@@ -15,7 +15,14 @@ export function authTarget(url) {
   const parts = repository.split('/');
   if (parts.length < 2 || (parsed.hostname === 'github.com' && parts.length !== 2) || parts.some(part => !/^[A-Za-z0-9_.-]+$/.test(part) || part === '.' || part === '..')) credentialFail('invalid_auth_target', '凭证目标必须是完整组织及仓库路径。');
   const host = parsed.hostname;
-  return { host, repository, key: `${host}/${host === 'github.com' ? repository.toLowerCase() : repository}`, url: `https://${host}/${repository}`, filename: `${parts.map(part => part.replaceAll('-', '%2D')).join('--')}.${host === 'github.com' ? 'github-token' : 'cnb-url'}` };
+  const filenameStem = parts.map(part => part.replaceAll('-', '+')).join('--');
+  return {
+    host,
+    repository,
+    key: `${host}/${host === 'github.com' ? repository.toLowerCase() : repository}`,
+    url: `https://${host}/${repository}`,
+    filename: `${filenameStem}.${host === 'github.com' ? 'github-token' : 'cnb-url'}`,
+  };
 }
 
 export const cnbCredentialFormat = target => '单行 https://cnb:<访问令牌>@cnb.cool/' + target.repository;
