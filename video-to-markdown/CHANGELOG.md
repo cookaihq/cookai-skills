@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.4.0
+
+- Start configuration with explicit inherit, per-task question and fixed-method strategies. Present optional saved connections as suggestions when each task still needs a choice.
+- Preserve independent drafts across inheritance and file navigation, consume only submitted drafts, show other pending files, and remove edits that return to the saved baseline.
+- Keep saved Keys when replacement input is cleared. Provide separate delete/cancel actions, retain atomic same-file connections, and distinguish unavailable capability from unverified capability and future-use settings.
+- Preserve input on conflicts, response loss, service stop and expiry. Require reload/review before applying an outdated draft; recover a lost save response from a session-local request receipt without replaying the save.
+- Reuse unchanged UI CLI capability evidence for at most 30 seconds, invalidating it when runtime configuration changes. This avoids repeated process discovery during preview/validation/readback; task execution still performs live checks.
+- Windows Codex: 201 Python tests and 12 frontend state tests passed; real HTTP/browser checks covered configuration saves, recovery, desktop/390px layout and keyboard controls. macOS and other hosts remain untested in this batch. No external model or transcription request was made.
+
 ## 4.3.0
 
 - Resolve the independent Codex Agent from the configured executable, the verified current Codex session, or PATH.

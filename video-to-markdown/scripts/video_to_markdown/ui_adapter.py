@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import time
 import uuid
 from pathlib import Path
 
@@ -35,6 +36,10 @@ class VideoAdapter(Adapter):
         self.env = dict(os.environ if environ is None else environ)
         self.caps = caps or vision.capabilities(host=host)
         self.secret = secrets.token_bytes(32)
+        self.last_save: dict | None = None
+        self._capability_cache: dict | None = None
+        self._capability_cache_key: tuple | None = None
+        self._capability_cache_until = 0.0
         home = (Path(home_config_dir) if home_config_dir else Path.home() / ".config" / "video-to-markdown") / ".env"
         self.targets = {"project": self.project / ".env.video-to-markdown", "local": self.project / ".env.local",
                         "env": self.project / ".env", "global": home}
@@ -110,10 +115,24 @@ class VideoAdapter(Adapter):
                            "sensitive": field == "api_key", "group": "vision" if field not in SCALARS else "advanced",
                            "targets": [l["id"] for l in layers if not l["readonly"]],
                            "effective": {"source": source or "default", "status": "configured" if source else "default", "value": current}, "rows": rows})
-        capabilities = vision.options(self.caps, cwd=self.project, use_home=self.use_home,
-                                      home_config_dir=self.targets["global"].parent, environ=self.env, overrides=overrides)
+        # Candidate, validation, and readback run in one save. Avoid repeatedly
+        # walking Windows process ancestry and probing the same CLI in that burst.
+        # All runtime settings and their layers invalidate the evidence; tasks
+        # still perform the original live capability check before execution.
+        capability_key = tuple((layer, tuple((key, content.get(key)) for key in config.CODEX_KEYS.values()))
+                               for layer, content in values.items())
+        if self._capability_cache is None or self._capability_cache_key != capability_key or time.monotonic() >= self._capability_cache_until:
+            self._capability_cache = vision.options(self.caps, cwd=self.project, use_home=self.use_home,
+                                                   home_config_dir=self.targets["global"].parent, environ=self.env, overrides=overrides)
+            self._capability_cache_key = capability_key
+            self._capability_cache_until = time.monotonic() + 30
+        capabilities = self._capability_cache
         fields.append({"id": "capabilities", "config_key": "current-session capability evidence", "label": "宿主能力", "type": "json", "readonly": True,
                        "effective": {"source": self.caps["source"], "status": "reported", "value": capabilities}, "rows": []})
+        # Session-local receipt: identifies a completed request without returning
+        # its fields, secret values, or a guessable hash of a secret.
+        fields.append({"id": "save-receipt", "config_key": "current-session save receipt", "label": "保存回执", "type": "json", "readonly": True,
+                       "effective": {"source": "service", "status": "reported", "value": self.last_save}, "rows": []})
         return {"revision": self.revision(), "layers": layers, "fields": fields, "default_targets": ["project", "global"],
                 "note": "全局已显式启用" if self.use_home else "全局未启用；本次任务不会读取全局配置",
                 "validation_errors": [], "validation": "真实 dotenv 加载器校验及保存后回读"}
@@ -129,19 +148,31 @@ class VideoAdapter(Adapter):
             raise UIError("target", "请选择已启用的项目或全局保存文件。")
         if revision != self.revision():
             raise UIError("conflict", "配置已被其他进程修改；草稿保留，请重新载入核对。", 409)
-        if not isinstance(changes, dict) or set(changes) - (set(LABELS) | {"inherit"}):
+        if not isinstance(changes, dict) or set(changes) - (set(LABELS) | {"inherit", "request_id"}):
             raise UIError("field", "包含未知配置字段。")
+        if "inherit" in changes and any(f not in SCALARS and f not in {"inherit", "request_id"} for f in changes):
+            raise UIError("operation", "恢复继承不能同时提交独立图像识别草稿。")
         values = self.values()[target]
         group = config.vision_group(values.get(config.VISION_KEY)) or {"ask_each_task": True, "routes": {}}
         # Copy only this file's group. Never copy a higher layer's connection/Key.
         group = json.loads(json.dumps(group))
-        route = group.setdefault("routes", {}).setdefault(self.host, {})
+        routes = group.setdefault("routes", {})
+        # The UI projects host/any from this same file. Preserve that complete
+        # connection when editing an any route; never borrow from another layer.
+        route = routes.setdefault(self.host, json.loads(json.dumps(routes.get("any", {}))))
         updates: dict[str, str | None] = {}
         for field, operation in changes.items():
             if not isinstance(operation, dict) or operation.get("op") not in {"set", "unset"} or set(operation) - {"op", "value"}:
                 raise UIError("operation", "配置修改操作无效。")
             unset = operation["op"] == "unset"
             value = None if unset else operation.get("value")
+            if field == "request_id":
+                try:
+                    if unset or not isinstance(value, str) or str(uuid.UUID(value)) != value:
+                        raise ValueError()
+                except ValueError:
+                    raise UIError("operation", "保存请求标识无效。") from None
+                continue
             if field == "inherit":
                 if value is not True:
                     raise UIError("operation", "继承操作无效。")
@@ -153,6 +184,8 @@ class VideoAdapter(Adapter):
                 raise UIError("type", "上限必须是正整数，或移除以使用默认值。")
             if field not in {"ask", "accept_unverified_model", "call_limit", "max_images", "max_request_bytes", "max_context_chars"} and not unset and (not isinstance(value, str) or any(c in value for c in "\r\n\0") or "••" in value):
                 raise UIError("type", "字段类型或内容无效；遮盖值不能提交为密钥。")
+            if field == "api_key" and not unset and (not isinstance(value, str) or not value.strip()):
+                raise UIError("operation", "空 Key 不表示删除；请取消替换，或明确删除此文件 Key。")
             if field in SCALARS:
                 updates[SCALARS[field]] = value
             elif field in {"ask", "call_limit"}:
@@ -165,7 +198,7 @@ class VideoAdapter(Adapter):
                 route.pop(field, None)
             else:
                 route[field] = value
-        if any(f not in SCALARS and f != "inherit" for f in changes) and "inherit" not in changes:
+        if any(f not in SCALARS and f not in {"inherit", "request_id"} for f in changes) and "inherit" not in changes:
             # A new method must not retain a stale model/provider from the prior method.
             unused = {"main-agent": {"model", "base_url", "api_key", "runtime", "protocol", "accept_unverified_model"},
                       "host-agent": {"base_url", "api_key", "runtime", "protocol"},
@@ -231,6 +264,8 @@ class VideoAdapter(Adapter):
                 temporary.unlink(missing_ok=True)
         if config.parse_dotenv(path.read_text(encoding="utf-8")) != config.parse_dotenv(text):
             raise UIError("readback", "已写入但回读不一致，请重新载入检查。")
+        self.last_save = {"request_id": changes.get("request_id", {}).get("value"), "target": target,
+                          "before_revision": revision, "after_revision": self.revision()}
         return self.config()
 
 
