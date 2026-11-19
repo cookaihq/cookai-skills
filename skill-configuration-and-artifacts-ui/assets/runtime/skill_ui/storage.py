@@ -14,6 +14,13 @@ from .contracts import UIError
 from .scopes import ScopePlanner, annotate_snapshot
 
 
+def user_state_directory(name, environment=None):
+    """Writable user state, independent of the selected business project."""
+    env = os.environ if environment is None else environment
+    user = Path(env.get('USERPROFILE' if os.name == 'nt' else 'HOME') or Path.home())
+    return (user / '.local' / 'state' / name).resolve()
+
+
 def _windows_owner(path):
     """Read the selected project's owner SID without depending on a shell/user-profile name."""
     import ctypes
@@ -52,14 +59,10 @@ def _private_windows(path, owner_path):
 
 
 def private_directory(path, owner_path=None):
-    path = Path(path)
-    if path.is_symlink():
-        raise UIError("path", "运行目录不能是符号链接。")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name == "nt":
-        _private_windows(path, owner_path or path.parent)
-    else:
-        path.chmod(0o700)
+    path = _checked_path(path, directory=True)
+    path.mkdir(parents=True, exist_ok=True)
+    if not path.is_dir():
+        raise UIError("path", "运行位置必须是目录。")
     return path
 
 
@@ -95,14 +98,18 @@ def _checked_path(path, directory=False):
         except FileNotFoundError:
             continue
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-            raise UIError("path", "保存路径含链接，请使用实际文件位置。")
+            known_directory = (part != path or directory) and part.is_dir() and (
+                part.is_symlink() or getattr(part, 'is_junction', lambda: False)())
+            if known_directory:
+                continue
+            raise UIError("path", f"保存路径含不支持的链接或重定向，请使用实际文件位置：{part}")
         if part != path or directory:
             valid = stat.S_ISDIR(info.st_mode)
         else:
             valid = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
         if not valid:
             raise UIError("path", "保存目标必须是独立普通文件，父路径必须是目录。")
-    return path
+    return path.resolve() if directory else path.parent.resolve() / path.name
 
 
 def _private_parents(path, owner_path=None):
@@ -160,6 +167,10 @@ def prepare_private_write(path, *, temporary_for=None, private_directory=None, o
         directory = path.parent
         while not directory.exists():
             directory = directory.parent
+        # Git is relevant only inside a worktree. Ordinary global saves do not
+        # need Git installed or a writable current project.
+        if not any(os.path.lexists(part / '.git') for part in (directory, *directory.parents)):
+            return
         selectors = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
                      "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"}
         environment = {k: v for k, v in os.environ.items() if k not in selectors}
@@ -359,7 +370,7 @@ class JsonConfig:
         if not modifications:
             return self.snapshot()
         prepare_private_write(self.path, owner_path=self.owner_path)
-        # Existing business directories retain their ACL; only new directories/files are tightened.
+        # Directories inherit the OS defaults; secret files remain protected.
         if not self.path.parent.exists():
             private_directory(self.path.parent, owner_path=self.owner_path if self.owner_path.exists() else None)
         with file_lock(self.path.with_suffix(self.path.suffix + ".lock"), protect_git=True, owner_path=self.owner_path):

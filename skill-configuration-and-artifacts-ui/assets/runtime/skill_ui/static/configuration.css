@@ -237,3 +237,10 @@ html:has(.config-shell){scroll-padding-bottom:140px}
 .directory-footnote {border-top:1px solid #e6e9ee; padding-top:11px; color:#7d8591; font-size:11px; line-height:1.8;}
 .directory-field .field-result:empty, .directory-field .field-error:empty {display:none;}
 @media(max-width:540px) {.directory-body {padding:14px 14px 5px;} .directory-save-path code {display:block;} .directory-field input {font-size:12px;}}
+dialog.scope-confirmation {max-width: min(560px, calc(100vw - 32px)); border: 1px solid #d6d9dc; border-radius: 12px; padding: 24px; color: inherit; background: #fff;}
+dialog.scope-confirmation:modal {overscroll-behavior: contain;}
+dialog.scope-confirmation::backdrop {background: #0006; overflow: hidden; overscroll-behavior: contain;}
+.scope-confirmation code,.scope-confirmation li span {display: block; overflow-wrap: anywhere; margin-top: 4px;}
+.scope-confirmation li {margin: 12px 0;}
+.scope-confirmation fieldset label {display: block; margin: 12px 0;}
+.confirmation-buttons {display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px;}

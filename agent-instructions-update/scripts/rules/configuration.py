@@ -25,17 +25,23 @@ def parse_env(text: str) -> dict[str, str]:
 
 
 def atomic_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from .maintenance import RuleError
     temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8', newline='') as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+    except OSError:
+        raise RuleError('config_write', f'配置尚未提交；请检查文件及目录权限：{path}') from None
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class Settings:
@@ -43,7 +49,7 @@ class Settings:
         self.personal, self.project = personal, project
         self.environment, self.use_personal = environment, use_personal
 
-    def _layers(self) -> list[tuple[str, dict[str, str]]]:
+    def _layers(self, tolerate_errors=False) -> list[tuple[str, dict[str, str]]]:
         layers = [('process', {key: self.environment[key] for key in KEYS.values() if key in self.environment})]
         files = [self.project / '.env.agent-instructions-update', self.project / '.env.local', self.project / '.env']
         if self.use_personal:
@@ -55,6 +61,9 @@ class Settings:
                 content = ''
             except (OSError, UnicodeError):
                 from .maintenance import RuleError
+                if tolerate_errors:
+                    layers.append((str(path), None))
+                    continue
                 raise RuleError('config_unreadable', f'无法读取配置来源：{path}') from None
             layers.append((str(path), parse_env(content)))
         return layers
@@ -86,17 +95,20 @@ class Settings:
                 raise RuleError('binding_paths', '绑定的权威文件必须包含在 paths 中。')
         return normalized
 
-    def read(self, scope: str | None = None) -> dict[str, Any]:
+    def read(self, scope: str | None = None, *, tolerate_errors=False) -> dict[str, Any]:
         from .maintenance import digest, RuleError
         selected_scope = scope or str(self.project)
         if selected_scope not in ('global', str(self.project)):
             raise RuleError('scope', '配置范围须为全局或当前项目。')
-        layers = self._layers()
+        layers = self._layers(tolerate_errors)
         values: dict[str, Any] = {'history_keep': 30, 'binding': None, 'review_models': []}
         sources: dict[str, Any] = {key: 'default' for key in values}
-        try:
-            for field, key in KEYS.items():
+        errors = {}
+        for field, key in KEYS.items():
+            try:
                 for source, items in layers:
+                    if items is None:
+                        raise RuleError('config_unreadable', f'无法读取配置来源：{source}')
                     raw = items.get(key, '')
                     if not raw.strip():
                         continue
@@ -120,29 +132,44 @@ class Settings:
                             values[field] = record
                     sources[field] = source
                     break
-        except (ValueError, TypeError):
-            raise RuleError('config_invalid', '配置值无效；检查历史数量或结构化 JSON，不能静默回退。') from None
+            except (ValueError, TypeError, RuleError) as error:
+                if not tolerate_errors:
+                    if isinstance(error, RuleError):
+                        raise
+                    raise RuleError('config_invalid', f'{key} 配置无效：{source}') from None
+                values[field], sources[field] = None, source
+                errors[field] = getattr(error, 'message', f'{key} 配置值无效：{source}')
         update_path = self.personal/'.env'
         try:
             update_text = update_path.read_text(encoding='utf-8-sig')
         except FileNotFoundError:
             update_text = ''
         except (OSError, UnicodeError):
-            raise RuleError('config_unreadable', f'无法读取更新偏好：{update_path}') from None
+            if not tolerate_errors:
+                raise RuleError('config_unreadable', f'无法读取更新偏好：{update_path}') from None
+            update_text = ''
+            errors['auto_update'] = f'无法读取更新偏好：{update_path}'
         update_flag = parse_env(update_text).get('AUTO_UPDATE_CHECK', '1')
         if update_flag not in ('0', '1'):
-            raise RuleError('config_invalid', 'AUTO_UPDATE_CHECK 须为 0 或 1。')
-        values['auto_update'] = update_flag != '0'
+            if not tolerate_errors:
+                raise RuleError('config_invalid', 'AUTO_UPDATE_CHECK 须为 0 或 1。')
+            errors['auto_update'] = 'AUTO_UPDATE_CHECK 须为 0 或 1。'
+        values['auto_update'] = None if 'auto_update' in errors else update_flag != '0'
         sources['auto_update'] = str(update_path) if 'AUTO_UPDATE_CHECK' in parse_env(update_text) else 'default'
-        return {'values': values, 'sources': sources, 'scope': selected_scope,
+        revisions = {field: digest([selected_scope, [[source, items.get(key) if items is not None else 'unreadable']
+            for source, items in layers], errors.get(field)]) for field, key in KEYS.items()}
+        revisions['auto_update'] = digest([update_flag, errors.get('auto_update')])
+        return {'values': values, 'sources': sources, 'scope': selected_scope, 'errors': errors, 'field_revisions': revisions,
                 'revision': digest([selected_scope, layers, update_text]), 'personal_enabled': self.use_personal,
                 'save_locations': {'personal': str(self.personal / '.env'), 'project': str(self.project / '.env.local')}}
 
     def save(self, data: dict[str, Any]) -> dict[str, Any]:
         from .maintenance import RuleError
-        current = self.read(data.get('scope'))
-        if current['revision'] != data.get('revision'):
-            raise RuleError('config_changed', '配置来源已变化，请刷新后再保存。')
+        from skill_ui.storage import file_lock
+        current = self.read(data.get('scope'), tolerate_errors=True)
+        values = data.get('values')
+        if not isinstance(values, dict) or not values or set(values) - {*KEYS, 'auto_update'}:
+            raise RuleError('config_key', '请提交有效的配置字段。')
         save_scope = data.get('save_scope', 'personal')
         if save_scope not in ('personal', 'project'):
             raise RuleError('config_scope', '保存位置须为个人或当前项目。')
@@ -151,39 +178,57 @@ class Settings:
         path = Path(current['save_locations'][save_scope])
         if path.is_symlink():
             raise RuleError('config_link', '配置保存目标是链接，须先核对实际位置。')
-        content = path.read_text(encoding='utf-8-sig') if path.exists() else ''
-        original = parse_env(content)
-        updates = {}
-        for field, value in data.get('values', {}).items():
-            if field == 'auto_update':
-                if save_scope != 'personal' or type(value) is not bool:
-                    raise RuleError('update_scope', '更新开关仅保存到个人设置，值须为布尔值。')
-                updates['AUTO_UPDATE_CHECK'] = '1' if value else '0'
-                continue
-            if field not in KEYS:
-                raise RuleError('config_key', '未支持的配置字段。')
-            if field == 'history_keep':
-                if type(value) is not int or value < 1:
-                    raise RuleError('retention', '完成任务保留数量须为正整数。')
-                updates[KEYS[field]] = str(value)
-            else:
-                if field == 'binding':
-                    if value is not None:
-                        self.validate_binding(value, str(path))
-                elif not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
-                    raise RuleError('models', '目标模型须为模型 ID 列表。')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        results = {}
+        with file_lock(path.with_name(path.name + '.lock')):
+            current = self.read(data.get('scope'), tolerate_errors=True)
+            try:
+                content = path.read_text(encoding='utf-8-sig') if path.exists() else ''
+            except (OSError, UnicodeError):
+                raise RuleError('config_unreadable', f'无法安全更新目标文件：{path}') from None
+            original, updates = parse_env(content), {}
+            for field, value in values.items():
                 try:
-                    mapping = json.loads(original.get(KEYS[field], '{}'))
-                    mapping[current['scope']] = value
-                except (ValueError, TypeError):
-                    raise RuleError('config_invalid', f'目标文件已有结构化配置损坏：{path}') from None
-                updates[KEYS[field]] = json.dumps(mapping, ensure_ascii=False, separators=(',', ':'))
-        lines = [line for line in content.splitlines() if line.partition('=')[0].strip() not in updates]
-        lines.extend(f'{key}={value}' for key, value in updates.items())
-        if self.read(data.get('scope'))['revision'] != current['revision']:
-            raise RuleError('config_changed', '写入前配置来源已变化。')
-        atomic_text(path, '\n'.join(lines) + '\n')
-        result = self.read(data.get('scope'))
-        result['saved_to'] = str(path)
-        result['overridden'] = [key for key in data.get('values', {}) if result['sources'][key] != str(path)]
-        return result
+                    expected = data.get('field_revisions')
+                    if ((expected is None and current['revision'] != data.get('revision')) or
+                            expected is not None and expected.get(field) != current['field_revisions'][field]):
+                        raise RuleError('config_changed', '本项来源已变化；草稿保留，请重读并核对。')
+                    if field == 'auto_update':
+                        if save_scope != 'personal' or type(value) is not bool:
+                            raise RuleError('update_scope', '更新开关仅保存到个人设置，值须为布尔值。')
+                        updates['AUTO_UPDATE_CHECK'] = '1' if value else '0'
+                    elif field == 'history_keep':
+                        if type(value) is not int or value < 1:
+                            raise RuleError('retention', '完成任务保留数量须为正整数。')
+                        updates[KEYS[field]] = str(value)
+                    else:
+                        if field == 'binding':
+                            if value is not None:
+                                self.validate_binding(value, str(path))
+                        elif not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+                            raise RuleError('models', '目标模型须为模型 ID 列表。')
+                        mapping = json.loads(original.get(KEYS[field], '{}'))
+                        if not isinstance(mapping, dict):
+                            raise ValueError()
+                        mapping[current['scope']] = value
+                        updates[KEYS[field]] = json.dumps(mapping, ensure_ascii=False, separators=(',', ':'))
+                    results[field] = {'status': 'saved'}
+                except (RuleError, ValueError, TypeError) as error:
+                    results[field] = {'status': 'failed', 'code': getattr(error, 'code', 'config_invalid'),
+                        'message': getattr(error, 'message', f'目标文件中的本项 JSON 无法安全更新：{path}')}
+            if updates:
+                fresh = self.read(data.get('scope'), tolerate_errors=True)
+                related = [key for key, outcome in results.items() if outcome['status'] == 'saved']
+                if any(fresh['field_revisions'][key] != current['field_revisions'][key] for key in related):
+                    raise RuleError('config_changed', '写入前相关配置已变化；草稿保留。')
+                latest = path.read_text(encoding='utf-8-sig') if path.exists() else ''
+                lines = [line for line in latest.splitlines() if line.partition('=')[0].strip() not in updates]
+                lines.extend(f'{key}={value}' for key, value in updates.items())
+                atomic_text(path, '\n'.join(lines) + '\n')
+                actual = parse_env(path.read_text(encoding='utf-8-sig'))
+                if any(actual.get(key) != value for key, value in updates.items()):
+                    raise RuleError('config_uncertain', '写入后回读不一致，请保留草稿并重新核对。')
+            result = self.read(data.get('scope'), tolerate_errors=True)
+            result.update(saved_to=str(path), field_results=results,
+                overridden=[key for key, outcome in results.items() if outcome['status'] == 'saved' and result['sources'][key] != str(path)])
+            return result

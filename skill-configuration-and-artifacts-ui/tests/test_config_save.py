@@ -176,16 +176,19 @@ class ConfigSaveTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "ignore")
         self.assertFalse(self.path.exists())
 
-    def test_links_and_invalid_paths_are_rejected(self):
+    def test_known_directory_link_resolves_and_leaf_links_are_rejected(self):
         outside = self.project / "other"
         outside.mkdir()
         try:
             self.path.parent.symlink_to(outside, target_is_directory=True)
         except OSError:
             self.skipTest("OS cannot create a directory symlink")
+        self.save()
+        self.assertEqual(json.loads((outside / 'settings.json').read_text())['key'], self.changes['key']['value'])
+        leaf = self.project / 'leaf.json'
+        leaf.symlink_to(outside / 'settings.json')
         with self.assertRaises(UIError):
-            self.save()
-        self.assertFalse(list(outside.iterdir()))
+            prepare_private_write(leaf)
         with self.assertRaises(UIError):
             prepare_private_write(self.project / ".gitignore")
         with self.assertRaises(UIError):

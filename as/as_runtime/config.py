@@ -68,7 +68,7 @@ class Store:
             raise UIError("invalid_action", "未知初始化操作。")
         state_path = self.path.with_name(self.path.name + ".initialization.json")
         with file_lock(self.path.with_suffix(".lock"), protect_git=True, owner_path=self.path.parent):
-            value, current = self.read()
+            value, current = self.read(tolerant=True)
             try:
                 state = json.loads(state_path.read_bytes())
             except FileNotFoundError:
@@ -85,7 +85,7 @@ class Store:
                 state["handled"] = True
             return {"show": not state["handled"], "revision": current, "settings": value}
 
-    def read(self):
+    def read(self, *, tolerant=False):
         try:
             raw = self.path.read_bytes()
         except FileNotFoundError:
@@ -93,10 +93,60 @@ class Store:
         except OSError:
             raise UIError("config_unreadable", f"无法读取配置：{self.path}") from None
         try:
-            value = validate(json.loads(raw))
+            value = json.loads(raw)
+            if not isinstance(value, dict) or not all(isinstance(value.get(kind), dict) for kind in EMPTY):
+                raise ValueError()
+            if not tolerant:
+                value = validate(value)
         except (ValueError, UnicodeError):
             raise UIError("invalid_config", f"配置不是有效 JSON：{self.path}") from None
         return value, hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def record_revision(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    def save_changes(self, changes, catalog):
+        """Merge submitted records; an invalid independent record keeps its old value."""
+        if not isinstance(changes, list) or not changes or len(changes) > 104:
+            raise UIError('invalid_config', '请提交已修改的默认值或预设。')
+        results = {}
+        with file_lock(self.path.with_suffix('.lock'), protect_git=True, owner_path=self.path.parent):
+            old, revision = self.read(tolerant=True)
+            value = deepcopy(old)
+            for change in changes:
+                if not isinstance(change, dict) or change.get('kind') not in EMPTY or not isinstance(change.get('key'), str):
+                    raise UIError('invalid_config', '配置记录标识无效。')
+                kind, key = change['kind'], change['key']
+                identity = kind + '.' + key
+                if identity in results:
+                    raise UIError('invalid_config', '同一配置记录不能重复提交。')
+                try:
+                    previous, selected = old[kind].get(key), change.get('value')
+                    if change.get('expected') != self.record_revision(previous):
+                        raise UIError('conflict', '本条记录已被其他页面修改；草稿保留，请重新载入核对。', 409)
+                    if selected is not None:
+                        validate({**deepcopy(EMPTY), kind: {key: selected}})
+                        agent = key if kind == 'defaults' else selected['agent']
+                        if (not isinstance(previous, dict) or any(selected.get(name) != previous.get(name)
+                                for name in ('agent', 'model', 'effort'))):
+                            check_choice(agent, selected, catalog)
+                        if kind == 'presets' and key not in value[kind] and len(value[kind]) >= 50:
+                            raise UIError('invalid_config', '最多保存 50 个预设。')
+                        value[kind][key] = deepcopy(selected)
+                    else:
+                        value[kind].pop(key, None)
+                    results[identity] = {'status': 'saved'}
+                except UIError as error:
+                    results[identity] = {'status': 'failed', 'code': error.code, 'message': error.message}
+            if value != old:
+                if self.read(tolerant=True)[1] != revision:
+                    raise UIError('conflict', '保存前文件已变化；草稿保留，请重新载入。', 409)
+                atomic_json(self.path, value, protect_git=True, owner_path=self.path.parent)
+            result = self.read(tolerant=True)
+            if result[0] != value:
+                raise UIError('readback_conflict', '保存后的配置需要重新核对，草稿保留。', 500)
+            return result, results
 
     def save(self, value, revision, catalog, *, initializing=False):
         value = validate(value)

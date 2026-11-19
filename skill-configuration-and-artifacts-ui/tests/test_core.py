@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
@@ -62,6 +63,21 @@ class CoreTests(unittest.TestCase):
     def login(self, server, opener):
         self.assertEqual(self.request(server,opener,"/api/session",{"token":server.token})[0],200)
 
+    def test_save_receipt_is_idempotent_and_receipt_file_failure_does_not_hide_success(self):
+        server, opener = self.server('configuration')
+        self.login(server, opener)
+        request = {'request_id': 'synthetic_request_123', 'revision': server.adapter.config()['revision'],
+                   'changes': file_edit('project', {'format': {'op': 'set', 'value': '纯文本'}})}
+        with patch('skill_ui.server.atomic_json', side_effect=OSError('receipt failure')):
+            saved = self.request(server, opener, '/api/save', request)[1]
+        self.assertEqual(saved['status'], 'saved')
+        self.assertFalse(saved['receipt_persisted'])
+        with patch.object(server.adapter, 'save', side_effect=AssertionError('must not repeat')):
+            self.assertEqual(self.request(server, opener, '/api/save', request)[1], saved)
+            self.assertEqual(self.request(server, opener, '/api/save-result', {'request_id': request['request_id']})[1], saved)
+        request['changes']['files']['project']['format']['value'] = 'Markdown'
+        self.assertEqual(self.request(server, opener, '/api/save', request)[0], 409)
+
     def test_missing_config_boots_mask_reveal_save_conflict(self):
         server, opener = self.server("configuration")
         self.assertEqual(self.request(server,opener,"/api/state")[0],401)
@@ -77,7 +93,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn(secret,(self.project/"saved.json").read_text(encoding="utf-8"))
         current = saved["config"]["revision"]
         self.assertEqual(self.request(server,opener,"/api/reveal",{"revision":current,"id":"api_key"})[1]["value"],secret)
-        self.assertEqual(self.request(server,opener,"/api/save",{'revision': first, 'changes': file_edit("project", {"format":{"op":"set","value":"纯文本"}})})[0],409)
+        self.assertEqual(self.request(server,opener,"/api/save",{'revision': first, 'changes': file_edit("project", {"format":{"op":"set","value":"纯文本"}})})[1]['config']['field_results']['format']['code'],'conflict')
         self.assertEqual(json.loads((self.project/"demo-state/settings.json").read_text(encoding="utf-8"))["api_key"],secret)
         self.assertEqual(self.request(server,opener,"/api/reveal",{"revision":first,"id":"api_key"})[0],409)
 
@@ -160,7 +176,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(saved["receipt"]["revision"], saved["config"]["revision"])
         self.assertEqual(files[server.adapter.store.path("plugin_env")], server.adapter.store.path("plugin_env").read_bytes())
-        self.assertEqual(self.request(server, opener, "/api/preview", request)[0], 409)
+        self.assertEqual(self.request(server, opener, "/api/preview", request)[1]['config']['field_results']['api_key']['code'], 'conflict')
         self.assertEqual(self.request(server, opener, "/configuration.js", decode=False)[0], 200)
 
     def test_auth_origin_csrf_and_page_boundaries(self):

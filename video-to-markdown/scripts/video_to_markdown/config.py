@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .codex_transport import Recovery
@@ -43,6 +43,7 @@ class ResolvedConfig:
     home_file: Path
     feishu_identity: dict[str, str]
     vision: dict | None = None
+    errors: dict[str, str] = field(default_factory=dict)
 
     def public_snapshot(self) -> dict:
         return {
@@ -173,7 +174,8 @@ def codex_settings(cwd, *, use_home=False, home_config_dir=None, environ=None, o
 
 def resolve(environ: dict[str, str] | None = None, cwd: str | os.PathLike[str] | None = None,
             *, use_home: bool = False, home_config_dir: str | os.PathLike[str] | None = None,
-            overrides: dict[str, dict[str, str]] | None = None, read_vision: bool = True) -> ResolvedConfig:
+            overrides: dict[str, dict[str, str]] | None = None, read_vision: bool = True,
+            tolerate_errors: bool = False) -> ResolvedConfig:
     layers = _layers(environ, cwd, use_home=use_home, home_config_dir=home_config_dir, overrides=overrides)
     home_file = _home_file(home_config_dir)
     sources: dict[str, str] = {}
@@ -182,8 +184,9 @@ def resolve(environ: dict[str, str] | None = None, cwd: str | os.PathLike[str] |
         return _pick(layers, sources, field, key)
 
     provider = one("asr_provider", PROVIDER_KEY) or "aihub-audio"
+    errors = {}
     if provider not in PROVIDERS:
-        raise ConfigError(PROVIDER_KEY + " must be aihub-audio or feishu-minutes")
+        errors['asr'] = PROVIDER_KEY + " must be aihub-audio or feishu-minutes"
     identity = {}
     for source, values in layers:
         if any((values.get(key) or "").strip() for key in IDENTITY_KEYS):
@@ -191,12 +194,20 @@ def resolve(environ: dict[str, str] | None = None, cwd: str | os.PathLike[str] |
             sources["feishu_identity"] = source
             break
     if one("legacy_model", "VIDEO_TO_MARKDOWN_ASR_MODEL"):
-        raise ConfigError("VIDEO_TO_MARKDOWN_ASR_MODEL is retired; explicitly migrate its model intent to AIhub Audio before starting (no credentials were moved)")
+        errors['legacy_model'] = "VIDEO_TO_MARKDOWN_ASR_MODEL is retired; explicitly migrate its model intent to AIhub Audio before starting (no credentials were moved)"
+    resolved_vision = None
+    if read_vision:
+        try:
+            resolved_vision = vision_group(one("vision", VISION_KEY))
+        except ConfigError as error:
+            errors['vision'] = str(error)
+    if errors and not tolerate_errors:
+        raise ConfigError(next(iter(errors.values())))
     return ResolvedConfig(
         provider, one("output_base", "VIDEO_TO_MARKDOWN_TASK_OUTPUT_DIR"),
         one("source_video_dir", "VIDEO_TO_MARKDOWN_SOURCE_VIDEO_DIR"),
         one("ffmpeg_bin", "FFMPEG_BIN") or "ffmpeg", one("ffprobe_bin", "FFPROBE_BIN") or "ffprobe",
-        sources, use_home, home_file, identity, vision_group(one("vision", VISION_KEY)) if read_vision else None,
+        sources, use_home, home_file, identity, resolved_vision, errors,
     )
 
 

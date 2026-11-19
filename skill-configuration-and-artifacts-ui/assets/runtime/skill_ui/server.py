@@ -1,4 +1,5 @@
 import hmac
+import hashlib
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -14,6 +15,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .contracts import UIError, public_config
 from .storage import atomic_json
+from .batches import run as configuration_batch
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -40,6 +42,7 @@ class Server(ThreadingHTTPServer):
         self.idle_seconds, self.last_use = idle_seconds, time.monotonic()
         self.resident, self.ended = False, False
         self.lock, self.closed = threading.RLock(), threading.Event()
+        self.save_results = {}
 
     def lifetime(self, renew=False, resident=None):
         with self.lock:
@@ -218,8 +221,10 @@ class Handler(BaseHTTPRequestHandler):
         raise UIError("missing", "此入口不存在。", 404)
 
     def post(self):
-        self.check_origin(post=True)
         data = self.body()
+        # Consume the bounded JSON body before rejecting the request. Closing
+        # a Windows socket with unread bytes can reset an otherwise valid 4xx.
+        self.check_origin(post=True)
         server = self.server
         path = urlsplit(self.path).path
         server.lifetime()
@@ -227,8 +232,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data.get("token"), str) or not hmac.compare_digest(data["token"], server.token):
                 raise UIError("token", "访问链接无效。", 403)
             if path.endswith("/stop"):
-                self.send(200, {"stopped": True})
-                return server.stop()
+                server.stop()
+                return self.send(200, {"stopped": True})
             secure = "; Secure" if self.headers["Origin"].startswith("https:") else ""
             cookie = f"{server.cookie_name}={server.cookie}; HttpOnly; SameSite=Strict; Path=/" + secure
             return self.send(200, {"csrf": server.csrf}, extra={"Set-Cookie": cookie})
@@ -240,8 +245,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/residency":
             return self.send(200, server.lifetime(resident=data.get("resident")))
         if path == "/api/stop":
-            self.send(200, {"stopped": True})
-            return server.stop()
+            server.stop()
+            return self.send(200, {"stopped": True})
         if server.page == "configuration":
             with server.lock:
                 if path == "/api/reveal":
@@ -258,19 +263,51 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/preview":
                     if "target" in data:
                         raise UIError("contract", "请更新页面和适配器，使用逐项范围提交。", 422)
-                    snapshot = server.adapter.preview(data.get("changes"), data.get("revision"))
+                    snapshot = configuration_batch(server.adapter, data.get("changes"), data.get("revision"))
                     return self.send(200, {"config": public_config(snapshot)})
+                if path == '/api/save-result':
+                    record = server.save_results.get(data.get('request_id'))
+                    if record is None:
+                        return self.send(200, {'status': 'unknown', 'config': public_config(server.adapter.config())})
+                    return self.send(200, record['response'])
                 if path == "/api/save":
                     if "target" in data:
                         raise UIError("contract", "请更新页面和适配器，使用逐项范围提交。", 422)
-                    snapshot = server.adapter.save(data.get("changes"), data.get("revision"))
+                    request_id = data.get('request_id') or secrets.token_hex(16)
+                    if not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{16,128}', request_id):
+                        raise UIError('request', '保存请求标识无效。', 422)
+                    fingerprint = hmac.new(server.token.encode(), json.dumps(
+                        [data.get('changes'), data.get('revision')], sort_keys=True).encode(), hashlib.sha256).hexdigest()
+                    previous = server.save_results.get(request_id)
+                    if previous:
+                        if previous['fingerprint'] != fingerprint:
+                            raise UIError('request', '同一保存请求的内容已变化，请重新核对。', 409)
+                        return self.send(200, previous['response'])
+                    if len(server.save_results) >= 512:
+                        raise UIError('session', '本页保存记录已满，请重新打开配置页。', 409)
+                    server.save_results[request_id] = {'fingerprint': fingerprint, 'response': {'status': 'uncertain'}}
+                    try:
+                        snapshot = configuration_batch(server.adapter, data.get("changes"), data.get("revision"), saving=True)
+                    except Exception:
+                        # Batch preflight errors occur before any group writes.
+                        # Per-group failures, including uncertain writes, are returned.
+                        del server.save_results[request_id]
+                        raise
                     public = public_config(snapshot)
                     receipt = {"instance": server.instance, "project": str(server.project), "revision": snapshot["revision"],
                                "task": snapshot.get("task"), "validation": snapshot.get("validation", "适配器校验"),
-                               "saved_at": time.time()}
-                    atomic_json(server.directory / "saved.json", receipt, owner_path=server.project)
-                    logging.info("config_saved instance=%s", server.instance)
-                    return self.send(200, {"config": public, "receipt": receipt})
+                               "saved_at": time.time(), 'request_id': request_id,
+                               'fields': public.get('field_results', {})}
+                    response = {'status': snapshot['save_status'], 'config': public, 'receipt': receipt}
+                    server.save_results[request_id]['response'] = response
+                    # A receipt failure after verified configuration writes is not a failed save.
+                    try:
+                        atomic_json(server.directory / 'saved.json', receipt, owner_path=server.project)
+                    except Exception as error:
+                        logging.warning('config_receipt_failed type=%s', type(error).__name__)
+                        response['receipt_persisted'] = False
+                    logging.info('config_save_completed instance=%s status=%s', server.instance, snapshot['save_status'])
+                    return self.send(200, response)
         raise UIError("missing", "此操作不存在。", 404)
 
     def dispatch(self, action):

@@ -14,6 +14,7 @@ from skill_ui import UIError
 from skill_ui.storage import active, apply_changes, atomic_json, file_lock, private_directory, prepare_private_write, validation_errors, missing_required
 from skill_ui.scopes import ScopePlanner, annotate_snapshot
 from skill_ui.transactions import JsonTransaction
+from skill_ui.batches import dependencies
 from studio_adapter import Studio
 
 
@@ -124,7 +125,15 @@ class LayeredDemo:
             fields.append(dict(field, config_key="$[" + json.dumps(name, ensure_ascii=False) + "]",
                                active=active(field, values), targets=targets, effective=result, rows=rows))
         issues = validation_errors(self.fields, values, changes or {})
-        issues.extend(f["label"] + "：" + f["effective"].get("message", "配置无效") for f in fields if f["effective"]["status"] in ("error", "invalid"))
+        related = set(changes or {})
+        graph = dependencies({'fields': fields})
+        pending = set(related)
+        while pending:
+            additions = graph[pending.pop()] - related
+            related.update(additions)
+            pending.update(additions)
+        issues.extend(f["label"] + "：" + f["effective"].get("message", "配置无效") for f in fields
+                      if (changes is None or f['id'] in related) and f["effective"]["status"] in ("error", "invalid"))
         missing = missing_required(self.fields, values)
         return annotate_snapshot(dict(revision=revision, layers=layers, fields=fields, default_targets={"project": "project_plugin_local", "global": "plugin_env"},
                     readiness={"ready": not missing and not issues, "missing": missing},
@@ -139,8 +148,6 @@ class LayeredDemo:
 
     def _candidate(self, changes, revision):
         data, current, errors = self._read()
-        if current != revision:
-            raise UIError("conflict", "配置已变化，草稿已保留；请重新载入并核对。", 409)
         snapshot = self._snapshot(data, current, errors)
         def project(files):
             projected, submitted = deepcopy(data), {}

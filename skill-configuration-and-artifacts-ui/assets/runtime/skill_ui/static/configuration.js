@@ -68,12 +68,42 @@ export class Configuration {
   }
   selectionHTML(id,intent=this.switchIntents?.[id],plan=this.preview?.scope_plans?.[id]){return intent?switchInfoHTML.call(this,this.field(id),intent,plan):'';}
   draftValue(id){const edit=this.changes()[id];return edit?.op==='set'?edit.value:edit?.op==='unset'?null:this.field(id).effective.value;}
-  requestSwitch(id,target,mode='input'){
+  async requestSwitch(id,target,mode='input'){
     if(this.busy||this.expired||this.uncertain||!this.targets(this.field(id)).some(layer=>layer.id===target))return false;
+    const revision=this.snapshot.revision,generation=this.generation,changes=structuredClone(this.payload(id));
+    const intent={target,mode,choose_content:true};changes.switches[id]=intent;
+    const checked=await this.api('/api/preview',{revision,changes}),plan=checked.config.scope_plans?.[id];
+    if(this.expired||this.snapshot.revision!==revision||generation!==this.generation)return false;
+    if(plan?.state==='blocked')throw Error(plan.message);
+    if(plan?.conflict||plan?.cleanup?.length){
+      const choice=await this.confirmScope(this.field(id),plan,checked.config);
+      if(!choice||this.expired||this.snapshot.revision!==revision||generation!==this.generation)return false;
+      if(plan.conflict)Object.assign(intent,{choice:choice.content,choice_token:plan.choice_token});
+      if(plan.cleanup?.length)intent.cleanup_token=plan.cleanup_token;
+    }
     delete this.pendingSwitchRevisions?.[id];
     if(this.field(id).effective.source===target)delete this.switchIntents[id];
-    else if(this.switchIntents[id]?.target!==target||this.switchIntents[id]?.mode!==mode)this.switchIntents[id]={target,mode};
-    this.queuePreview();return true;
+    else this.switchIntents[id]=intent;
+    const old=this.fieldTarget(id);
+    for(const collection of [this.drafts,this.inputs,this.errors])if(collection[old]&&id in collection[old]){
+      const value=collection[old][id];delete collection[old][id];(collection[target]??={})[id]=value;
+    }
+    this.fieldTargets[id]=target;
+    this.queuePreview();this.rerender();return true;
+  }
+  confirmScope(field,plan,snapshot){
+    const dialog=document.createElement('dialog');dialog.className='scope-confirmation';
+    dialog.setAttribute('aria-labelledby','scope-confirm-title');
+    const layers=(plan.cleanup||[]).map(id=>snapshot.layers.find(layer=>layer.id===id));
+    dialog.innerHTML=`<form method="dialog"><h2 id="scope-confirm-title">确认本项修改</h2>
+      ${layers.length?`<p>保存后将清除以下文件中的「${esc(field.label)}」：</p><ul>${layers.map(layer=>`<li><strong>${esc(field.label)}</strong><code>${esc(field.config_key||field.id)}</code><code>${esc(layer.path)}</code><span>${esc(layer.scope_label)}</span></li>`).join('')}</ul>`:''}
+      ${plan.conflict?`<fieldset><legend>目标已有不同内容，请选择保存后使用的值</legend><label><input type="radio" name="content" value="input" required> 使用当前填写的内容</label><label><input type="radio" name="content" value="target" required> 使用目标已有内容</label></fieldset>`:''}
+      <p>确认只暂存草稿；点击页面底部「保存修改」后才写入文件。</p><div class="confirmation-buttons"><button value="cancel" formnovalidate autofocus>取消</button><button value="confirm" class="primary">确认</button></div></form>`;
+    document.body.append(dialog);
+    return new Promise(resolve=>{dialog.addEventListener('close',()=>{
+      const result=dialog.returnValue==='confirm'?{content:dialog.querySelector('input:checked')?.value}:null;
+      dialog.returnValue='';dialog.remove();resolve(result);
+    },{once:true});dialog.showModal();});
   }
 }
 const baseSet=Configuration.prototype.set;
@@ -109,9 +139,7 @@ function sourceStrip(f) {
     const writable=this.targets(f).some(l=>l.id===target),plan=this.preview?.scope_plans?.[f.id],intent=this.switchIntents?.[f.id];
     const unresolved=intent?.target===target&&plan?.state==='choice';
     const defaultSelected=!this.layer(f.effective.source)&&f.effective.empty===true&&this.layer(this.fieldTarget(f.id))?.scope===scope;
-    const showAction=selected&&writable&&target!==f.effective.source;
-    const label=intent?.target===target&&plan?.state==='ready'&&plan.uses_target||!this.changes()[f.id]&&['effective','shadowed'].includes(row.status)?'使用已有内容':'保存并使用';
-    return `<div class="scope-block ${effective?'is-effective':''} ${defaultSelected?'is-default':''} ${selected?'is-open':''}" data-scope="${scope}"><button type="button" id="scope-${esc(f.id)}-${scope}" class="scope-inspect" data-config="inspect-scope" data-id="${esc(f.id)}" data-scope="${scope}" aria-expanded="${selected}" aria-controls="file-info-${esc(f.id)}" ${this.busy?'disabled':''}><span class="scope-title">${esc(scope==='project'?'项目':scope==='global'?'全局':scope)}${effective?'<span class="scope-effective" role="img" aria-label="当前生效" title="当前生效">✓</span>':''}</span><small>${defaultSelected?'默认保存位置 · ':''}${esc(this.layer(target)?.scope_label||(scope==='project'?'仅当前项目':'多个项目共用'))}</small></button>${showAction?`<button type="button" class="scope-apply" data-config="apply-field" data-id="${esc(f.id)}" data-layer="${esc(target)}" ${this.busy||this.uncertain||unresolved||this.needsReview?.[f.id]?'disabled':''}>${label}</button>`:''}</div>`;
+    return `<div class="scope-block ${effective?'is-effective':''} ${defaultSelected?'is-default':''} ${selected?'is-open':''}" data-scope="${scope}"><button type="button" id="scope-${esc(f.id)}-${scope}" class="scope-inspect" data-config="inspect-scope" data-id="${esc(f.id)}" data-scope="${scope}" aria-expanded="${selected}" aria-controls="file-info-${esc(f.id)}" ${this.busy||this.uncertain?'disabled':''}><span class="scope-title">${esc(scope==='project'?'项目':scope==='global'?'全局':scope)}${effective?'<span class="scope-effective" role="img" aria-label="当前生效" title="当前生效">✓</span>':''}</span><small>${intent?.target===target?'待保存 · ':defaultSelected?'默认保存位置 · ':''}${esc(this.layer(target)?.scope_label||(scope==='project'?'仅当前项目':'多个项目共用'))}</small></button></div>`;
   }).join('')}</div>`;
 }
 Configuration.prototype.set = function(snapshot) {
@@ -127,8 +155,8 @@ Configuration.prototype.set = function(snapshot) {
     const old=previous.fields.find(n=>n.id===f.id);
     if(this.hasFieldDraft(f.id)&&old?.edit_revision!==f.edit_revision)this.needsReview[f.id]=true;
   }
-  // A new loader revision invalidates every previous overwrite/discard choice.
-  for(const intent of Object.values(this.switchIntents)){delete intent.choice;delete intent.choice_token;}
+  // Unrelated saves preserve confirmations; changed field contents invalidate them.
+  for(const [id,intent]of Object.entries(this.switchIntents))if(previous?.fields.find(f=>f.id===id)?.edit_revision!==snapshot.fields.find(f=>f.id===id)?.edit_revision){delete intent.choice;delete intent.choice_token;delete intent.cleanup_token;}
   this.uncertain=false;
   this.fieldTargets??={};
   for(const f of this.fields()) {
@@ -164,7 +192,7 @@ Configuration.prototype.count = function() {
 };
 Configuration.prototype.payload = function(only) {
   const files=Object.fromEntries(Object.entries(this.pendingFiles()).map(([target,changes])=>[target,Object.fromEntries(Object.entries(changes).filter(([id])=>includesField(only,id)))]).filter(([,changes])=>Object.keys(changes).length));
-  return {files,...(!only&&this.preview?.directory_revision?{directory_revision:this.preview.directory_revision}:{}),switches:Object.fromEntries(Object.entries(this.switchIntents||{}).filter(([id])=>includesField(only,id))),
+  return {files,invalid_fields:[...new Set([...Object.values(this.errors).flatMap(errors=>Object.keys(errors)),...Object.keys(this.needsReview||{})])].filter(id=>includesField(only,id)),field_revisions:Object.fromEntries(this.fields().map(field=>[field.id,field.edit_revision])),...(!only&&this.preview?.preview_tokens?{preview_tokens:this.preview.preview_tokens}:{}),switches:Object.fromEntries(Object.entries(this.switchIntents||{}).filter(([id])=>includesField(only,id))),
     file_edits:Object.fromEntries(Object.entries(this.fileEdits||{}).map(([target,ids])=>[target,[...ids].filter(id=>(includesField(only,id))&&files[target]?.[id])]))};
 };
 Configuration.prototype.writable = function(f) {
@@ -187,8 +215,9 @@ Configuration.prototype.stage = function(id,change,raw) {
   if(unchanged)delete (this.drafts[target]||{})[id];else (this.drafts[target]??={})[id]=change;
   if(raw!==undefined)(this.inputs[target]??={})[id]=raw;
   else delete (this.inputs[target]||{})[id];
-  if(this.switchIntents?.[id]){delete this.switchIntents[id].choice;delete this.switchIntents[id].choice_token;}
+  if(this.switchIntents?.[id]){delete this.switchIntents[id].choice;delete this.switchIntents[id].choice_token;delete this.switchIntents[id].cleanup_token;}
   delete (this.singleErrors||{})[id];
+  delete this.saveResults?.[id];
   this.queuePreview();
   // Selector edits must be visible even when the following preview fails/expires.
   if(raw===undefined)this.rerender();
@@ -210,8 +239,8 @@ Configuration.prototype.onInput = function(event) {
   this.stage(id,{op:'set',value},input.value);
 };
 Configuration.prototype.canSave = function() {
-  return !this.busy&&!this.expired&&!this.uncertain&&!Object.keys(this.needsReview||{}).length&&this.count()>0&&!!this.preview&&!this.error&&
-    !Object.values(this.errors).some(errors=>Object.keys(errors).length)&&!this.preview.validation_errors?.length;
+  const ready=this.preview?.field_results?Object.entries(this.preview.field_results).some(([id,result])=>result.status==='ready'&&!this.needsReview?.[id]):!this.preview?.validation_errors?.length;
+  return !this.busy&&!this.expired&&!this.uncertain&&this.count()>0&&!!this.preview&&ready;
 };
 Configuration.prototype.queuePreview = function() {
   if(this.expired)return;
@@ -220,7 +249,7 @@ Configuration.prototype.queuePreview = function() {
   this.invalidate();this.error='';this.message='';this.retrySave=false;
   if(Object.values(this.errors).some(errors=>Object.keys(errors).length))this.error='请先修正标出的格式错误。';
   this.paint();
-  if(!this.count()||this.error||this.composing)return;
+  if(!this.count()||this.composing)return;
   const generation=this.generation,revision=this.snapshot.revision,changes=structuredClone(this.payload());
   this.timer=setTimeout(async()=>{
     try {
@@ -260,45 +289,53 @@ Configuration.prototype.requestFileRemoval = async function(id,target) {
     if(this.fileRemoval===removal){removal.loading=false;paintSourceInfo.call(this,f);}
   }
 };
-Configuration.prototype.save = async function(only,removal) {
-  if(this.busy||this.expired||this.uncertain||(!only&&!this.canSave())||only&&Object.keys(this.needsReview||{}).some(id=>includesField(only,id)))return;
-  if(removal&&(this.fileRemoval!==removal||!removal.ready||removal.revision!==this.snapshot.revision))return;
-  if(!removal&&Object.entries(this.errors).some(([,errors])=>Object.keys(errors).some(id=>includesField(only,id))))return;
-  const changes=structuredClone(removal?removal.changes:this.payload(only)),revision=this.snapshot.revision;
+Configuration.prototype.save = async function() {
+  if(arguments.length)throw new Error('单项保存入口已移除；请暂存草稿并使用底部「保存修改」。');
+  if(this.busy||this.expired||this.uncertain||!this.canSave())return;
+  const changes=structuredClone(this.payload()),revision=this.snapshot.revision;
   this.fileRemoval=null;
   this.invalidate();this.busy=true;this.error='';this.render();
   let writing=false;
   try {
-    // A single-item preview uses only that item's payload and saved dependencies.
+    // Recheck the current draft before committing independent groups.
     const checked=await this.api('/api/preview',{revision,changes});
-    if(checked.config.validation_errors?.length){
-      if(removal){this.error=checked.config.validation_errors.join(' ');return;}
+    if(checked.config.validation_errors?.length&&!Object.values(checked.config.field_results||{}).some(result=>result.status==='ready')){
       this.preview=checked.config;
-      if(only&&!Object.values(checked.config.scope_plans||{}).some(plan=>plan.state!=='ready'))
-        for(const id of (Array.isArray(only)?only:[only]))(this.singleErrors??={})[id]=checked.config.validation_errors;
       return;
     }
-    for(const id of Object.keys(changes.switches)){
+    for(const id of new Set([...Object.values(changes.files).flatMap(edits=>Object.keys(edits)),...Object.keys(changes.switches)])){
+      if(checked.config.field_results?.[id]?.status==='failed')continue;
       const expected=checked.config.fields.find(field=>field.id===id)?.edit_revision;
       if(expected)(this.pendingSwitchRevisions??={})[id]=expected;
     }
     writing=true;
-    const result=await this.api('/api/save',{revision,changes});
-    const consumed=new Set([...Object.values(changes.files).flatMap(c=>Object.keys(c)),...Object.keys(changes.switches)]);
-    if(!removal)for(const id of consumed){this.clearDraft(id);delete this.fieldTargets[id];}
-    else if(!this.hasFieldDraft(only))delete this.fieldTargets[only];
+    this.saveRequestId=crypto.randomUUID().replaceAll('-','');
+    const result=await this.api('/api/save',{revision,changes,request_id:this.saveRequestId});
+    const consumed=new Set(result.config.field_results?Object.entries(result.config.field_results).filter(([,outcome])=>outcome.status==='saved').map(([id])=>id):[...Object.values(changes.files).flatMap(c=>Object.keys(c)),...Object.keys(changes.switches)]);
+    for(const id of consumed){this.clearDraft(id);delete this.fieldTargets[id];}
     this.set(result.config);
-    if(removal)this.toast('已删除这项设置，已核对当前来源。');
-    else this.message=only?'本项已保存并核对生效位置。':'修改已保存并核对生效位置。';
-    return {saved:true,config:result.config};
+    this.saveResults=result.config.field_results||{};
+    this.uncertain=result.status==='uncertain';
+    this.message=consumed.size?`已保存 ${consumed.size} 项${this.count()?'，其余草稿已保留。':'并核对生效位置。'}`:'';
+    return {saved:consumed.size>0,config:result.config};
   } catch(error) {
     this.uncertain=writing&&(!error.status||error.status>=500);
-    if(!this.uncertain)for(const id of Object.keys(changes.switches))delete this.pendingSwitchRevisions?.[id];
+    if(!this.uncertain)this.pendingSwitchRevisions={};
+    if(this.uncertain&&this.saveRequestId){
+      try{
+        const recovered=await this.api('/api/save-result',{request_id:this.saveRequestId});
+        if(recovered.config&&recovered.status!=='unknown'&&recovered.status!=='uncertain'){
+          for(const [id,outcome]of Object.entries(recovered.config.field_results||{}))if(outcome.status==='saved')this.clearDraft(id);
+          this.set(recovered.config);this.saveResults=recovered.config.field_results||{};this.message='已核对原保存请求的结果。';
+          return {saved:Object.values(this.saveResults).some(result=>result.status==='saved'),config:recovered.config};
+        }
+      }catch{}
+    }
     this.error=this.expired?this.error:this.uncertain?'保存结果尚未确认。请重新载入核对，草稿已保留；不会自动重试。':error.message;
     this.toast(this.error);
   } finally {
     this.busy=false;this.render();
-    if(this.count()&&!this.error&&(only||!this.preview?.validation_errors?.length)){const message=this.message;this.queuePreview();this.message=message;this.paint();}
+    if(this.count()&&!this.error&&!this.preview?.validation_errors?.length){const message=this.message;this.queuePreview();this.message=message;this.paint();}
   }
 };
 Configuration.prototype.clearDraft = function(id) {
@@ -324,7 +361,7 @@ Configuration.prototype.controlHTML = function(f) {
   }
   if(f.type==='boolean')return `<label class="context-boolean"><span class="boolean-on">已开启</span><span class="boolean-off">已关闭</span><input ${base} type="checkbox" role="switch" ${saved?'checked':''}></label>`;
   if(f.type==='select')return `<select ${base}><option value="">不单独指定</option>${(f.choices||[]).map(c=>`<option value="${esc(c)}" ${c===saved?'selected':''}>${esc(f.choice_labels?.[c]||c)}</option>`).join('')}</select>`;
-  if(['list','json'].includes(f.type))return `<textarea ${base}>${esc(raw??(f.type==='list'?(saved||[]).join('\n'):JSON.stringify(saved??null,null,2)))}</textarea>${f.type==='list'?'<small>每行一项，按填写顺序使用。</small>':''}`;
+  if(['list','json'].includes(f.type))return `<textarea ${base}>${esc(raw??(f.type==='list'?(Array.isArray(saved)?saved.join('\n'):saved??''):JSON.stringify(saved??null,null,2)))}</textarea>${f.type==='list'?'<small>每行一项，按填写顺序使用。</small>':''}`;
   return `<input ${base} type="${f.type==='number'?'number':'text'}" ${f.type==='number'?'step="any"':''} value="${esc(raw??saved??'')}" placeholder="${esc(edit?.op==='unset'?'将移除此文件中的设置':'')}">`;
 };
 Configuration.prototype.onClick = async function(event) {
@@ -343,7 +380,12 @@ Configuration.prototype.onClick = async function(event) {
       delete this.inspectedScopes[id];delete (this.inspectedFiles||{})[id];
       this.inspectionGeneration=(this.inspectionGeneration||0)+1;
     }
-    else this.selectFieldTarget(id,this.scopeTarget(this.field(id),scope));
+    else {
+      const target=this.scopeTarget(this.field(id),scope);
+      try{if(target!==this.fieldTarget(id)&&this.targets(this.field(id)).some(layer=>layer.id===target)&&!await this.requestSwitch(id,target))return;}
+      catch(error){this.error=error.message;this.paint();return;}
+      this.selectFieldTarget(id,target);
+    }
     this.savedRevealed={};this.rerender();return;
   }
   if(action==='inspect-file') {
@@ -352,33 +394,32 @@ Configuration.prototype.onClick = async function(event) {
     if(previous!==layer) {
       delete (this.savedRevealed||{})[`${id}:${previous}`];
       this.inspectionGeneration=(this.inspectionGeneration||0)+1;
-      if(this.switchIntents?.[id]){delete this.switchIntents[id].choice;delete this.switchIntents[id].choice_token;this.queuePreview();}
     }
+    try{if(layer!==this.fieldTarget(id)&&this.targets(this.field(id)).some(target=>target.id===layer)&&!await this.requestSwitch(id,layer))return;}
+    catch(error){this.error=error.message;this.paint();return;}
     (this.inspectedFiles??={})[id]=layer;
     this.selectFieldTarget(id,layer);this.rerender();return;
   }
   if(action==='apply-field') {
-    const f=this.field(id);
-    if(!this.targets(f).some(l=>l.id===layer))return;
-    if(layer!==f.effective.source) {
-      const previous=this.switchIntents[id],mode=button.dataset.mode||'existing';
-      if(previous?.target!==layer||previous.mode!==mode)this.switchIntents[id]={target:layer,mode};
-    } else delete this.switchIntents[id];
-    await this.save(id);return;
+    try{await this.requestSwitch(id,layer,button.dataset.mode||'input');}catch(error){this.error=error.message;this.paint();}return;
   }
-  if(action==='choose-content') {
-    const plan=this.preview?.scope_plans?.[id],intent=this.switchIntents[id];
-    if(!plan||!intent||intent.target!==layer)return;
-    intent.choice=button.dataset.choice;intent.choice_token=plan.choice_token;
-    this.queuePreview();this.rerender();return;
+  if(action==='cancel-switch') {
+    const target=this.defaultFieldTarget(this.field(id)),old=this.fieldTarget(id);
+    for(const collection of [this.drafts,this.inputs,this.errors])if(collection[old]&&id in collection[old]){
+      const value=collection[old][id];delete collection[old][id];(collection[target]??={})[id]=value;
+    }
+    this.fieldTargets[id]=target;delete this.switchIntents[id];this.queuePreview();this.rerender();return;
   }
-  if(action==='cancel-switch') {delete this.switchIntents[id];this.queuePreview();this.rerender();return;}
   if(action==='review-draft') {delete this.needsReview[id];this.queuePreview();this.rerender();return;}
   if(action==='clear-file'){await this.requestFileRemoval(id,layer);return;}
   if(action==='cancel-file-removal'){this.dismissFileRemoval(true);return;}
   if(action==='confirm-file-removal') {
     const removal=this.fileRemoval;
-    if(removal?.id===id&&removal.target===layer)await this.save(id,removal);
+    if(removal?.id===id&&removal.target===layer&&removal.ready&&removal.revision===this.snapshot.revision){
+      this.clearDraft(id);this.fieldTargets[id]=layer;
+      ((this.fileEdits??={})[layer]??=new Set()).add(id);
+      this.stage(id,{op:'unset'});this.rerender();
+    }
     return;
   }
   if(action==='empty-file') {
@@ -448,7 +489,7 @@ Configuration.prototype.paint = function() {
     }
     paintSourceInfo.call(this,f);
     node.innerHTML='';
-    if(pending.length&&this.preview&&(!this.switchIntents?.[f.id]||this.preview.scope_plans?.[f.id]?.state==='ready')) {
+    if(pending.length&&this.preview&&!messages.length&&this.preview.field_results?.[f.id]?.status!=='failed'&&!this.needsReview?.[f.id]&&(!this.switchIntents?.[f.id]||this.preview.scope_plans?.[f.id]?.state==='ready')) {
       node.innerHTML=`<p class="config-note edit-preview">保存后，此项目使用：${esc(sourceValue(f,next.effective))} · ${esc(sourceDescription.call(this,next.effective))}</p>`;
       const projectedPath=this.preview.directory_targets?.[f.id];
       const destinationSource=projectedPath?this.preview.layers.find(l=>l.path===projectedPath)?.id:target;
@@ -461,9 +502,11 @@ Configuration.prototype.paint = function() {
     if(elsewhere.length)node.innerHTML+=`<p class="config-note">本项另有 ${elsewhere.length} 处文件修改待保存：${elsewhere.map(([layer])=>esc(scopeNames[this.layer(layer)?.scope]+' · '+fileName(this.layer(layer)))).join('、')}。</p>`;
     if(next.effective.message)node.innerHTML+=`<p class="error">${esc(next.effective.message)}</p>`;
     if(this.needsReview?.[f.id])node.innerHTML+=`<p class="error">已保存的本项内容发生变化。输入和原保存位置已保留，请先核对新来源。</p><button type="button" class="text-button" data-config="review-draft" data-id="${esc(f.id)}">已核对，保留这份草稿</button>`;
-    if(this.singleErrors?.[f.id])node.innerHTML+=`<p class="error single-save-error">本项尚未单独保存：${this.singleErrors[f.id].map(esc).join(' ')} 如需同时修改关联项，请使用底部“保存修改”。</p>`;
     const intent=this.switchIntents?.[f.id],plan=this.preview?.scope_plans?.[f.id];
     if(intent)node.innerHTML+=switchInfoHTML.call(this,f,intent,plan);
+    const outcome=this.saveResults?.[f.id]||this.preview?.field_results?.[f.id];
+    if(outcome?.message)node.innerHTML+=`<p class="error">${esc(outcome.message)}</p>`;
+    else if(outcome?.status==='saved')node.innerHTML+='<p class="config-note">本项已保存。</p>';
     const undoNow=field.querySelector('[data-config=undo]');if(undoNow)undoNow.hidden=!this.hasFieldDraft(f.id);
     const strip=field.querySelector('.field-files');if(strip)strip.outerHTML=sourceStrip.call(this,f);
   }
@@ -519,22 +562,21 @@ function switchInfoHTML(f,intent,plan) {
     <div class="switch-plan-head"><strong>准备使用：${esc(scopeNames[target.scope])} · ${esc(target.name.replace(/^(项目|全局) · /,''))}</strong><button type="button" data-config="cancel-switch" data-id="${esc(f.id)}" ${this.busy?'disabled':''}>取消切换</button></div>
     <code class="switch-file-path">${esc(target.path)}</code><p>${esc(target.scope_label)}</p>
     <p class="${plan?.state==='blocked'?'error':''}">${esc(plan?.message||'正在核对本项内容与生效位置…')}</p>
-    ${cleanup.length?`<p>将删除以下文件中的本项，其他设置保留：</p><ul class="switch-cleanup">${cleanup.map(layer=>`<li><strong>${esc(layer.name)}</strong><code class="switch-file-path">${esc(layer.path)}</code><span>${esc(layer.scope_label)}</span></li>`).join('')}</ul><p>已保存的清理不会因撤销草稿恢复。</p>`:''}
-    ${plan?.conflict?`<div class="switch-choices" role="radiogroup" aria-label="${esc(f.label)}有不同内容，选择要使用的内容">${[['input','保存我填写的内容','替换目标文件里原有的这一项。'],['target','使用目标已有内容','应用成功后放弃本项未保存修改。']].map(([value,label,help])=>`<button type="button" role="radio" aria-checked="${choice===value}" data-config="choose-content" data-id="${esc(f.id)}" data-layer="${esc(intent.target)}" data-choice="${value}" ${this.busy?'disabled':''}><span class="choice-dot" aria-hidden="true"></span><span><strong>${label}</strong><small>${help}</small></span></button>`).join('')}</div>`:''}
-    ${plan?.state==='ready'?`<button type="button" class="switch-commit" data-config="apply-field" data-id="${esc(f.id)}" data-layer="${esc(intent.target)}" data-mode="${esc(intent.mode||'existing')}" ${this.busy||this.uncertain||this.needsReview?.[f.id]?'disabled':''}>${choice==='target'||plan.uses_target?'使用已有内容':'保存并使用'}</button>`:''}</section>`;
+    ${cleanup.length?`<p>保存后将清除以下文件中的「${esc(f.label)}」：</p><ul class="switch-cleanup">${cleanup.map(layer=>`<li><strong>${esc(f.label)} · ${esc(f.config_key||f.id)}</strong><code class="switch-file-path">${esc(layer.path)}</code><span>${esc(layer.scope_label)}</span></li>`).join('')}</ul><p>已保存的清理不会因撤销草稿恢复。</p>`:''}
+    ${plan?.conflict&&!intent.choice||cleanup.length&&!intent.cleanup_token?`<button type="button" class="switch-commit" data-config="apply-field" data-id="${esc(f.id)}" data-layer="${esc(intent.target)}" data-mode="${esc(intent.mode||'input')}" ${this.busy||this.uncertain?'disabled':''}>核对切换内容</button>`:'<p>已暂存，点击底部「保存修改」后生效。</p>'}</section>`;
 }
 function fileRemovalHTML(f,layer) {
   const removal=this.fileRemoval;
   if(removal?.id!==f.id||removal.target!==layer)return '';
   const l=this.layer(layer),after=removal.effective;
   return `<div class="file-removal" role="dialog" aria-label="删除${esc(f.label)}" aria-busy="${removal.loading}">
-    <strong>删除这项设置？</strong>
-    <p>仅删除 <code>${esc(l.name.replace(/^(项目|全局) · /,''))}</code> 中的「${esc(f.label)}」，其他设置保留。</p>
+    <strong>暂存这项删除？</strong>
+    <p>保存后将清除「${esc(f.label)}」<code>${esc(f.config_key||f.id)}</code><code>${esc(l.path)}</code>中的这一项，其他设置保留。</p>
     <p>${esc(l.scope_label)} 已删除的原值不会自动恢复。</p>
     ${removal.loading?'<p role="status">正在核对删除后的设置…</p>':after?`<p>删除后，此项目使用：${esc(sourceValue(f,after))} · ${esc(sourceDescription.call(this,after))}</p>`:''}
     ${(removal.errors||[]).map(error=>`<p class="error" role="alert">${esc(error)}</p>`).join('')}
-    ${this.hasFieldDraft(f.id)?'<p>本项未保存的输入会保留，删除后需重新核对。</p>':''}
-    <div class="file-removal-buttons"><button type="button" id="file-remove-cancel-${esc(f.id)}" data-config="cancel-file-removal">取消</button><button type="button" id="file-remove-confirm-${esc(f.id)}" data-config="confirm-file-removal" data-id="${esc(f.id)}" data-layer="${esc(layer)}" ${!removal.ready||this.expired||this.uncertain?'disabled':''}>确认删除</button></div>
+    ${this.hasFieldDraft(f.id)?'<p>确认后，本项未保存的输入将替换为删除草稿。</p>':''}
+    <div class="file-removal-buttons"><button type="button" id="file-remove-cancel-${esc(f.id)}" data-config="cancel-file-removal">取消</button><button type="button" id="file-remove-confirm-${esc(f.id)}" data-config="confirm-file-removal" data-id="${esc(f.id)}" data-layer="${esc(layer)}" ${!removal.ready||this.expired||this.uncertain?'disabled':''}>确认暂存</button></div>
   </div>`;
 }
 function sourceInfoHTML(f) {
@@ -550,7 +592,7 @@ function sourceInfoHTML(f) {
   const canCopy=!this.changes()[f.id]&&layer!==f.effective.source&&operations&&['effective','shadowed'].includes(row.status)&&(f.sensitive||JSON.stringify(row.value)!==JSON.stringify(f.effective.value));
   return `<div class="source-inline-head"><strong>${l.scope==='project'?'项目设置':'全局设置'}</strong><div class="source-inline-controls"><span>按优先顺序排列</span><button type="button" data-config="close-source" data-id="${esc(f.id)}" aria-label="收起${esc(f.label)}的文件详情" ${disabled}>收起详情</button></div></div><div class="inline-files">${files.map(file=>{
     const r=this.row(f,file.id);return `<button type="button" class="inline-file ${file.id===layer?'is-inspected':''}" data-config="inspect-file" data-id="${esc(f.id)}" data-layer="${esc(file.id)}" aria-pressed="${file.id===layer}" ${disabled}><span class="inline-file-label"><span>${esc(file.name.replace(/^(项目|全局) · /,''))}</span>${file.id===layer?`<code class="source-inline-path">${esc(file.path)}</code>`:''}</span><small>${file.id===f.effective.source?'✓ 当前生效':file.exists===false?'未创建':esc(sourceStatuses[r.status]||'未设置')}</small></button>`;
-  }).join('')}</div><div class="source-inline-body"><div class="source-inline-value"><span>这里保存的内容</span><code>${esc(value)}</code></div><div class="source-inline-actions">${f.sensitive&&row.configured?`<button type="button" id="source-reveal-${esc(f.id)}" data-config="reveal-saved" data-id="${esc(f.id)}" data-layer="${esc(layer)}" ${disabled}>${revealed?'隐藏':'显示'}密钥</button>`:''}${operations?`<span class="file-delete-control"><button type="button" id="source-clear-${esc(f.id)}" data-config="clear-file" data-id="${esc(f.id)}" data-layer="${esc(layer)}" aria-haspopup="dialog" aria-expanded="${this.fileRemoval?.id===f.id&&this.fileRemoval.target===layer}" ${editDisabled}>删除这项设置</button>${fileRemovalHTML.call(this,f,layer)}</span><button type="button" id="source-empty-${esc(f.id)}" data-config="empty-file" data-id="${esc(f.id)}" data-layer="${esc(layer)}" ${editDisabled}>清空内容</button>`:''}</div></div><p class="source-inline-help">${esc(l.scope_label)}</p>${layer!==f.effective.source&&this.targets(f).some(t=>t.id===layer)?`<p class="source-inline-help">${upper.length?`使用此处将移除 ${upper.length} 处优先位置的这一项设置：${upper.map(file=>esc(file.name)).join('、')}。这些原值不会自动恢复；其他项与更低位置保留。`:'使用此处会保留其他位置已有的设置。'}</p>`:''}${canCopy?`<div class="copy-current-option"><span>也可以将输入框中的当前内容保存到这里：</span><button type="button" data-config="apply-field" data-id="${esc(f.id)}" data-layer="${esc(layer)}" data-mode="input" ${this.busy||this.uncertain?'disabled':''}>保存当前内容并使用</button></div>`:''}${row.message?`<p class="source-inline-message ${row.status==='error'?'error':''}">${esc(row.message)}</p>`:''}`;
+  }).join('')}</div><div class="source-inline-body"><div class="source-inline-value"><span>这里保存的内容</span><code>${esc(value)}</code></div><div class="source-inline-actions">${f.sensitive&&row.configured?`<button type="button" id="source-reveal-${esc(f.id)}" data-config="reveal-saved" data-id="${esc(f.id)}" data-layer="${esc(layer)}" ${disabled}>${revealed?'隐藏':'显示'}密钥</button>`:''}${operations?`<span class="file-delete-control"><button type="button" id="source-clear-${esc(f.id)}" data-config="clear-file" data-id="${esc(f.id)}" data-layer="${esc(layer)}" aria-haspopup="dialog" aria-expanded="${this.fileRemoval?.id===f.id&&this.fileRemoval.target===layer}" ${editDisabled}>删除这项设置</button>${fileRemovalHTML.call(this,f,layer)}</span><button type="button" id="source-empty-${esc(f.id)}" data-config="empty-file" data-id="${esc(f.id)}" data-layer="${esc(layer)}" ${editDisabled}>清空内容</button>`:''}</div></div><p class="source-inline-help">${esc(l.scope_label)}</p>${layer!==f.effective.source&&this.targets(f).some(t=>t.id===layer)?`<p class="source-inline-help">${upper.length?`保存后将清除 ${upper.length} 处优先位置的这一项设置：${upper.map(file=>esc(file.name)).join('、')}。这些原值不会自动恢复；其他项与更低位置保留。`:'使用此处会保留其他位置已有的设置。'}</p>`:''}${canCopy?`<div class="copy-current-option"><span>将输入框中的当前内容暂存到这里：</span><button type="button" data-config="apply-field" data-id="${esc(f.id)}" data-layer="${esc(layer)}" data-mode="input" ${this.busy||this.uncertain?'disabled':''}>暂存此项切换</button></div>`:''}${row.message?`<p class="source-inline-message ${row.status==='error'?'error':''}">${esc(row.message)}</p>`:''}`;
 }
 function positionFileRemoval() {
   const removal=this.fileRemoval;if(!removal)return;

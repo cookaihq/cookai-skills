@@ -90,13 +90,14 @@ def test_preview_uses_real_loader_without_writes_and_save_reads_back(tmp_path):
     assert next(f for f in saved["fields"] if f["id"] == "method")["effective"]["source"] == "project"
 
 
-def test_changed_lower_priority_layer_invalidates_revision_and_preserves_draft(tmp_path):
+def test_unrelated_concurrent_field_is_preserved(tmp_path):
     ui = adapter(tmp_path)
     revision = ui.config()["revision"]
     (tmp_path / ".env").write_text("FFMPEG_BIN=some-other-ffmpeg\n")
-    with pytest.raises(UIError, match="其他进程"):
-        ui.save(edits(method="main-agent", ask=False), revision, "project")
-    assert not (tmp_path / ".env.video-to-markdown").exists()
+    ui.save(edits(method="main-agent", ask=False), revision, "project")
+    loaded = config.resolve({}, tmp_path)
+    assert loaded.ffmpeg_bin == 'some-other-ffmpeg'
+    assert loaded.vision['routes']['codex']['method'] == 'main-agent'
 
 
 def test_project_connection_never_borrows_global_key_and_disabled_global_not_read(tmp_path):
@@ -172,6 +173,12 @@ def test_background_http_service_saves_without_owner_privilege_and_checks_csrf(t
         saved = request("/api/save", change, snapshot["csrf"])
         assert saved["receipt"]["target"] == "project"
         assert config.resolve({}, project).vision["routes"]["codex"]["method"] == "main-agent"
+        original = saved['config']['revision']
+        partial = request('/api/save', {'target': 'project', 'revision': original,
+            'changes': edits(asr='invalid', output=str(project / 'output'), request_id=str(uuid.uuid4()))}, snapshot['csrf'])
+        assert partial['config']['task']['field_results']['asr']['status'] == 'failed'
+        assert partial['config']['task']['field_results']['output']['status'] == 'saved'
+        assert config.resolve({}, project).output_base == str(project / 'output')
     finally:
         command[3] = "stop"
         subprocess.run(command, check=True, capture_output=True, timeout=30)
@@ -243,7 +250,8 @@ def test_session_receipt_recovers_a_save_without_exposing_or_persisting_request_
     public = public_config(ui.config())
     receipt = next(f for f in public["fields"] if f["id"] == "save-receipt")["effective"]["value"]
     assert receipt == {"request_id": request_id, "target": "project", "before_revision": revision,
-                       "after_revision": public["revision"]}
+                       "after_revision": public["revision"],
+                       "field_results": {'method': {'status': 'saved'}, 'ask': {'status': 'saved'}}}
     text = (tmp_path / ".env.video-to-markdown").read_text()
     assert "request_id" not in text and request_id not in text
 

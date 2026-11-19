@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.5.0 — 2026-11-19
+
+- 输出位置等独立设置可以先保存；视觉模型及其凭证、飞书身份绑定分别保持整组一致。业务未就绪与非法输入分开提示。
+- 统一底部保存，保留失败草稿并核对不确定结果；保存保留无关字段和并发修改。
+- Windows 配置保存回归；macOS 待验，本批 WorkBuddy 免实测。
+
 ## 4.4.0
 
 - Start configuration with explicit inherit, per-task question and fixed-method strategies. Present optional saved connections as suggestions when each task still needs a choice.

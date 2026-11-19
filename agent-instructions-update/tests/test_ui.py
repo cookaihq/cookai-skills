@@ -51,6 +51,20 @@ class UITests(unittest.TestCase):
                 saved = post('/api/rules', {'action':'config.save','data':{'scope':'global','save_scope':'personal',
                     'revision':settings['revision'],'values':{'history_keep':8}}}, csrf)['result']
                 self.assertEqual(saved['values']['history_keep'], 8)
+                pending = {'scope': 'global', 'save_scope': 'personal', 'field_revisions': saved['field_revisions'],
+                           'request_id': 'partial-test', 'values': {'history_keep': 0, 'auto_update': False}}
+                partial = post('/api/rules', {'action': 'config.save', 'data': pending}, csrf)['result']
+                self.assertEqual(partial['field_results']['history_keep']['status'], 'failed')
+                self.assertEqual(partial['field_results']['auto_update']['status'], 'saved')
+                file = base/'personal/.env'
+                before = file.read_bytes()
+                self.assertIn(b'AUTO_UPDATE_CHECK=0', before)
+                self.assertEqual(post('/api/rules', {'action': 'config.save', 'data': pending}, csrf)['result'], partial)
+                self.assertEqual(file.read_bytes(), before)
+                self.assertEqual(post('/api/rules', {'action': 'config.result', 'data': {'request_id': 'partial-test'}}, csrf)['result']['saved'], partial)
+                loaded = cli('call', 'config.read', data={'scope': 'global'})
+                self.assertEqual(loaded['values']['history_keep'], 8)
+                self.assertIs(loaded['values']['auto_update'], False)
                 with self.assertRaises(HTTPError) as residency:
                     post('/api/residency', {'resident':True}, csrf)
                 self.assertEqual(residency.exception.code, 400)

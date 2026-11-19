@@ -15,6 +15,17 @@ function snapshot(files = {}, revision = "one") {
 }
 const saved = { project: { ask: false, method: "api", model: "saved-model", api_key: "synthetic-only" } };
 
+test("unknown earlier write retains an unattempted vision mode draft", () => {
+  const store = new VideoConfigDrafts(snapshot({project: {ask: true, method: "main-agent", output: "old"}}));
+  store.edit("project", "output", "new");
+  store.setMode("project", "fixed");
+  store.rebase(snapshot({project: {ask: true, method: "main-agent", output: "new"}}, "two"), "project",
+    {output: {status: "uncertain", code: "readback"}});
+  assert.equal(store.mode("project"), "fixed");
+  assert.deepEqual(store.changes("project"), {ask: {op: "set", value: false}});
+  assert.deepEqual(store.file("project").edits.output, {op: "set", value: "new"});
+});
+
 test("inherit round trip retains route, model and replacement without submitting them", () => {
   const store = new VideoConfigDrafts(snapshot(saved));
   store.edit("project", "model", "draft-model");

@@ -20,7 +20,7 @@ from skill_ui.storage import atomic_json, file_lock, private_directory
 from .maintenance import Maintenance, RuleError, digest
 
 ROOT = Path(__file__).resolve().parents[2]
-ACTIONS = {'file.read', 'index.read', 'workspace.read', 'discover.scan', 'config.read', 'config.save',
+ACTIONS = {'file.read', 'index.read', 'workspace.read', 'discover.scan', 'config.read', 'config.save', 'config.result',
            'task.create', 'task.get', 'task.prompt', 'task.result', 'task.select',
            'task.confirm', 'task.apply', 'task.refresh', 'scenario.plan', 'scenario.title', 'layout.plan',
            'history.list', 'history.restore', 'history.prune'}
@@ -55,12 +55,12 @@ class RulesHandler(Handler):
             if urlsplit(self.path).path not in ('/api/session','/api/control/stop','/api/activity','/api/stop','/api/residency'):
                 raise UIError('missing', '此入口不存在。', 404)
             return super().post()
+        payload = self.body()
         self.check_origin(post=True)
         self.server.lifetime()
         self.authorized()
         if not hmac.compare_digest(self.headers.get('X-CSRF-Token', ''), self.server.csrf):
             raise UIError('csrf', '请求校验失败，请重新打开页面。', 403)
-        payload = self.body()
         action, data = payload.get('action'), payload.get('data', {})
         if action not in ACTIONS or not isinstance(data, dict):
             raise UIError('action', '此工作台操作不可用。')
@@ -72,10 +72,28 @@ class RulesHandler(Handler):
                     raise RuleError('project', '所选项目目录不存在或不可访问。')
                 app = base if project == base.project else Maintenance(base.personal, project, environment=base.settings.environment,
                                                                        use_personal=base.settings.use_personal)
-                result = app.action(action, data)
+                request_id = data.get('request_id')
+                if action in ('config.save', 'config.result') and request_id is not None:
+                    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+                        raise RuleError('request', '保存请求标识无效。')
+                receipt_key = (str(project), request_id)
+                receipt = self.server.config_results.get(receipt_key) if request_id else None
+                if action == 'config.result':
+                    result = {'status': 'known', 'saved': receipt['result']} if receipt else {'status': 'unknown'}
+                elif action == 'config.save' and receipt:
+                    if receipt['signature'] != digest(data):
+                        raise RuleError('request', '此请求标识已用于不同内容。')
+                    result = receipt['result']
+                else:
+                    if action == 'config.save' and request_id and len(self.server.config_results) >= 512:
+                        raise RuleError('request', '此页面保存次数已满，请重新打开。')
+                    result = app.action(action, data)
+                    if action == 'config.save' and request_id:
+                        self.server.config_results[receipt_key] = {'signature': digest(data), 'result': result}
                 logging.info('workbench_action action=%s result=%s', action, result.get('status', 'ok'))
         except RuleError as exc:
-            raise UIError(exc.code, exc.message, 409 if exc.code in ('external_change', 'stale_plan', 'busy') else 400) from None
+            raise UIError(exc.code, exc.message, 500 if exc.code == 'config_uncertain' else
+                          409 if exc.code in ('external_change', 'stale_plan', 'busy', 'config_changed') else 400) from None
         except (KeyError, TypeError, ValueError, AttributeError):
             raise UIError('request', '请求字段或维护记录无效。') from None
         return self.send(200, {'result': result})
@@ -85,6 +103,7 @@ class RulesServer(Server):
     def __init__(self, app: Maintenance, directory: Path, idle_seconds: int, public_origin: str | None):
         super().__init__(RulesAdapter(app), app.project, 'configuration', directory, idle_seconds, public_origin)
         self.RequestHandlerClass = RulesHandler
+        self.config_results = {}
 
 
 def serve(args: Any, directory: Path) -> None:

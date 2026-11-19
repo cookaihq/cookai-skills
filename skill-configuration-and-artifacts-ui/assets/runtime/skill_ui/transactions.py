@@ -106,9 +106,11 @@ class JsonTransaction:
             result = verify()
             record['state'] = 'committed'
             atomic_json(self.journal, record, owner_path=self.owner_path, protect_git=True)
-        except Exception:
+        except Exception as error:
             self.recover()
-            raise
+            if isinstance(error, UIError):
+                raise
+            raise UIError('write_failed', '本组写入失败，已回读恢复原文件；草稿保留，可修复写入条件后重试。', 422) from None
         # After the durable commit marker, a lost response must be resolved by reread.
         self.journal.unlink()
         return result

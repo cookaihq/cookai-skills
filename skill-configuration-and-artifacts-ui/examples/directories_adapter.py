@@ -12,8 +12,9 @@ from pathlib import Path
 import secrets
 
 from skill_ui import Adapter, UIError
+from skill_ui.config_groups import groups, check_request_baseline
 from skill_ui.directories import retarget_request, selector_edits, check_directory_revision, planning_snapshot
-from skill_ui.scopes import ScopePlanner, annotate_snapshot
+from skill_ui.scopes import ScopePlanner, annotate_snapshot, validate_request
 from skill_ui.storage import apply_changes, file_lock
 from skill_ui.transactions import JsonTransaction
 
@@ -136,22 +137,33 @@ class DirectoryDemo(Adapter):
         return self._state()[0]
 
     def _edits(self, snapshot, data, files):
-        values = deepcopy(data)
+        error_layers = {row['layer'] for field in snapshot['fields'] for row in field['rows'] if row['status'] == 'error'}
+        error_paths = {layer['path'] for layer in snapshot['layers'] if layer['id'] in error_layers}
+        # An unreadable file is never an empty override in the next projection.
+        values = {name: deepcopy(value) for name, value in data.items() if name not in error_paths}
         for target, changes in files.items():
             layer = next((l for l in snapshot['layers'] if l['id'] == target), None)
             if not layer or layer['readonly']:
                 raise UIError('target', '请选择可写文件。', 422)
+            if layer['path'] in error_paths:
+                raise UIError('target', '配置文件无法安全更新：' + layer['path'], 422)
             fields = [f for f in snapshot['fields'] if target in f['targets']]
             values[layer['path']] = apply_changes(values[layer['path']], fields, changes)
         return values
 
     def _candidate(self, request, revision, *, saving=False):
+        validate_request(request)
         current, data = self._state()
-        if revision != current['revision']:
-            raise UIError('conflict', '配置已变化，请重新载入核对。', 409)
+        check_request_baseline(current, request, revision)
         selectors = selector_edits(current, request)
         anchors = self._edits(current, data, selectors)
         prospective, projected = self._state(anchors)
+        reads = set().union(*(related for _, related in groups(current, request)))
+        failed = {row['layer'] for field in prospective['fields'] if field['id'] in reads
+                  for row in field['rows'] if row['status'] == 'error'}
+        if failed:
+            paths = [layer['path'] for layer in prospective['layers'] if layer['id'] in failed]
+            raise UIError('target', '关联配置文件无法读取或格式无效：' + '、'.join(paths), 422)
         baseline_revision = prospective['revision']
         if selectors:
             check_directory_revision(request, baseline_revision, saving=saving)
@@ -166,6 +178,11 @@ class DirectoryDemo(Adapter):
         def project(files):
             values = self._edits(prospective, projected, files)
             candidate, _ = self._state(values)
+            affected = {key for edits in files.values() for key in edits}
+            affected.update(key for edits in selectors.values() for key in edits)
+            candidate['validation_errors'] = list({
+                '配置文件无法读取或格式无效。' for field in candidate['fields'] if field['id'] in affected
+                for row in field['rows'] if row['status'] == 'error'})
             touched = {next(l['path'] for l in prospective['layers'] if l['id'] == target) for target in files}
             touched.update(str(self.anchors[f['directory_scope']]) for f in current['fields']
                            if f.get('directory_scope') and any(f['id'] in edits for edits in request['files'].values()))

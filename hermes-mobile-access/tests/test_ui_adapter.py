@@ -71,6 +71,43 @@ def test_update_toggle_does_not_create_or_replace_connections(ui):
     assert ui.store.update_preference()[0] is True
 
 
+@pytest.mark.parametrize('uncertain', [False, True])
+def test_http_partial_save_keeps_connection_atomic_and_reads_original_store(ui, tmp_path, monkeypatch, uncertain):
+    import json
+    import threading
+    from http.cookiejar import CookieJar
+    from urllib.request import build_opener, ProxyHandler, HTTPCookieProcessor, Request
+    from skill_ui.server import Server
+    if uncertain:
+        def incomplete_restore(*args):
+            raise UIError('apply_and_restore_failed', '旧连接恢复未完成。')
+        monkeypatch.setattr(ui, '_save_connection', incomplete_restore)
+    directory = tmp_path / 'runtime'
+    directory.mkdir()
+    server = Server(ui, ui.project, 'configuration', directory)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
+    def request(route, body=None, csrf=''):
+        with client.open(Request(server.origin + route, data=None if body is None else json.dumps(body).encode(),
+            headers={'Origin': server.origin, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf}), timeout=15) as response:
+            return json.load(response)
+    try:
+        csrf = request('/api/session', {'token': server.token})['csrf']
+        initial = request('/api/state')['config']
+        result = request('/api/save', {'revision': initial['revision'], 'changes': {
+            'name': {'op': 'set', 'value': 'must-not-save'}, 'access_key': {'op': 'set', 'value': 'invalid'},
+            'update': {'op': 'set', 'value': False}}}, csrf)['config']
+        assert result['task']['field_results']['name']['status'] == ('uncertain' if uncertain else 'failed')
+        assert result['task']['field_results']['update']['status'] == 'saved'
+        assert not ui.store.snapshot().collection['connections']
+        assert ui.store.update_preference()[0] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 @pytest.mark.parametrize("running,expected", [
     (True, "入口尚未验证"), (False, "未连接"), (None, "状态无法核对")])
 def test_frp_process_and_route_do_not_establish_public_https_endpoint(ui, monkeypatch, running, expected):

@@ -1,8 +1,8 @@
 ---
 name: hermes-mobile-access
-description: v0.3.0｜将 Android Hermes Mobile 接入当前 Windows 或 macOS 上的 Hermes Desktop 后端，复用已有 FRP，检查认证、恢复端口变化并管理连接。适用于手机接入、连接排障和停用。
+description: v0.4.0｜将 Android Hermes Mobile 接入当前 Windows 或 macOS 上的 Hermes Desktop 后端，复用已有 FRP，检查认证、恢复端口变化并管理连接。适用于手机接入、连接排障和停用。
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 compatibility: Claude Code, Codex or WorkBuddy with a local shell and uv >= 0.8. Requires frpc-launch >= 1.6.0. Windows with Android basic text chat is tested; macOS, reconnect history and Desktop restart/sleep recovery remain unverified. The access process must run as the Hermes owner.
 ---
 

@@ -157,6 +157,8 @@ def prepare_private_write(path, *, temporary_for=None, private_directory=None, o
         directory = path.parent
         while not directory.exists():
             directory = directory.parent
+        if not any((parent / '.git').exists() for parent in (directory, *directory.parents)):
+            return path
         selectors = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
                      "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"}
         environment = {k: v for k, v in os.environ.items() if k not in selectors}

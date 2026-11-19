@@ -100,14 +100,14 @@ class LayerTests(unittest.TestCase):
         self.assertEqual(self.field("model")["effective"]["status"], "error")
         with self.assertRaises(UIError): self.store.save(file_edit("project_local", {"model":{"op":"set","value":"detail-v2"}}), self.store.snapshot()["revision"])
 
-    def test_atomic_record_not_merged_and_failure_not_saved(self):
+    def test_atomic_record_not_merged_and_unrelated_format_can_save(self):
         self.write("plugin_skill_env", {"binding":{"identity":"global", "workspace":"global", "resource":"complete"}})
         self.write("project_env", {"binding":{"identity":"project", "workspace":"local"}})
         self.assertEqual(self.field("binding")["effective"]["status"], "invalid")
         self.assertNotIn("resource", self.field("binding")["effective"]["value"])
-        before = self.store.path("project_local").read_bytes()
-        with self.assertRaises(UIError): self.store.save(file_edit("project_local", {"format":{"op":"set","value":"jpeg"}}), self.store.snapshot()["revision"])
-        self.assertEqual(before, self.store.path("project_local").read_bytes())
+        self.store.save(file_edit("project_local", {"format":{"op":"set","value":"jpeg"}}), self.store.snapshot()["revision"])
+        self.assertEqual(self.field('format')['effective']['value'], 'jpeg')
+        self.assertEqual(self.field('binding')['effective']['status'], 'invalid')
         fixed = self.preview("project_env", {"binding":{"op":"unset"}})
         self.assertEqual(self.field("binding", fixed)["effective"]["source"], "plugin_skill_env")
 

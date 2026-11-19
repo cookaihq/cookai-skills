@@ -37,6 +37,7 @@ class VideoAdapter(Adapter):
         self.caps = caps or vision.capabilities(host=host)
         self.secret = secrets.token_bytes(32)
         self.last_save: dict | None = None
+        self._baselines = {}
         self._capability_cache: dict | None = None
         self._capability_cache_key: tuple | None = None
         self._capability_cache_until = 0.0
@@ -84,10 +85,21 @@ class VideoAdapter(Adapter):
         route = group.get("routes", {}).get(self.host) or group.get("routes", {}).get("any", {})
         return route.get(field)
 
+    def group_id(self, field):
+        return 'identity' if field.startswith('feishu-') else field if field in SCALARS else 'vision'
+
+    def fingerprints(self):
+        values = self.values()
+        keys = {self.group_id(field): (list(config.IDENTITY_KEYS) if field.startswith('feishu-') else
+                [SCALARS[field]] if field in SCALARS else [config.VISION_KEY]) for field in LABELS}
+        return {group: hmac.new(self.secret, json.dumps({layer: {key: content.get(key) for key in names}
+                for layer, content in values.items()}, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+                for group, names in keys.items()}
+
     def snapshot(self, override=None):
         values = self.values(override)
         overrides = {str(p): values[k] for k, p in self.targets.items() if k != "global" or self.use_home}
-        resolved = config.resolve(self.env, self.project, use_home=self.use_home, home_config_dir=self.home_dir, overrides=overrides)
+        resolved = config.resolve(self.env, self.project, use_home=self.use_home, home_config_dir=self.home_dir, overrides=overrides, tolerate_errors=True)
         layers = self.layers()
         fields = []
         vision_source = resolved.sources.get("vision")
@@ -97,11 +109,17 @@ class VideoAdapter(Adapter):
                             "ffprobe": (resolved.ffprobe_bin, "ffprobe_bin")}
         for field in ["ask", "method", "model", "base_url", "api_key", "runtime", "protocol", "accept_unverified_model",
                       "max_images", "max_request_bytes", "max_context_chars", "call_limit", *SCALARS]:
-            rows = [{"layer": l["id"], "present": self.field_value(field, values[l["id"]]) is not None,
-                     "value": self.field_value(field, values[l["id"]]),
-                     "status": "configured" if self.field_value(field, values[l["id"]]) is not None else "absent"} for l in layers]
+            rows = []
+            for layer in layers:
+                try:
+                    value = self.field_value(field, values[layer['id']])
+                    rows.append({'layer': layer['id'], 'present': value is not None, 'value': value,
+                                 'status': 'configured' if value is not None else 'absent'})
+                except config.ConfigError:
+                    rows.append({'layer': layer['id'], 'present': True, 'value': None, 'status': 'invalid',
+                                 'message': '此文件的图像识别配置无效；原件保留，其他独立设置可保存。'})
             source = effective_layer
-            current = self.field_value(field, values[source]) if source else None
+            current = next((row['value'] for row in rows if row['layer'] == source), None)
             if field in resolved_scalars:
                 current, source_key = resolved_scalars[field]
                 source = next((l["id"] for l in layers if l["path"] == resolved.sources.get(source_key)), None)
@@ -133,9 +151,14 @@ class VideoAdapter(Adapter):
         # its fields, secret values, or a guessable hash of a secret.
         fields.append({"id": "save-receipt", "config_key": "current-session save receipt", "label": "保存回执", "type": "json", "readonly": True,
                        "effective": {"source": "service", "status": "reported", "value": self.last_save}, "rows": []})
-        return {"revision": self.revision(), "layers": layers, "fields": fields, "default_targets": ["project", "global"],
+        revision = self.revision()
+        if override is None:
+            self._baselines[revision] = self.fingerprints()
+            while len(self._baselines) > 256:
+                del self._baselines[next(iter(self._baselines))]
+        return {"revision": revision, "layers": layers, "fields": fields, "default_targets": ["project", "global"],
                 "note": "全局已显式启用" if self.use_home else "全局未启用；本次任务不会读取全局配置",
-                "validation_errors": [], "validation": "真实 dotenv 加载器校验及保存后回读"}
+                "validation_errors": list(resolved.errors.values()), "validation": "真实 dotenv 加载器校验及保存后回读"}
 
     def config(self):
         try:
@@ -146,14 +169,20 @@ class VideoAdapter(Adapter):
     def candidate(self, changes, revision, target):
         if target not in self.targets or (target == "global" and not self.use_home):
             raise UIError("target", "请选择已启用的项目或全局保存文件。")
-        if revision != self.revision():
-            raise UIError("conflict", "配置已被其他进程修改；草稿保留，请重新载入核对。", 409)
         if not isinstance(changes, dict) or set(changes) - (set(LABELS) | {"inherit", "request_id"}):
             raise UIError("field", "包含未知配置字段。")
+        expected = self._baselines.get(revision)
+        current = self.fingerprints()
+        if expected is None or any(expected[self.group_id(field)] != current[self.group_id(field)] for field in changes if field != 'request_id'):
+            raise UIError("conflict", "此项配置已被其他进程修改；草稿保留，请重新载入核对。", 409)
         if "inherit" in changes and any(f not in SCALARS and f not in {"inherit", "request_id"} for f in changes):
             raise UIError("operation", "恢复继承不能同时提交独立图像识别草稿。")
         values = self.values()[target]
-        group = config.vision_group(values.get(config.VISION_KEY)) or {"ask_each_task": True, "routes": {}}
+        edits_vision = any(f not in SCALARS and f not in {'inherit', 'request_id'} for f in changes)
+        try:
+            group = (config.vision_group(values.get(config.VISION_KEY)) if edits_vision else None) or {"ask_each_task": True, "routes": {}}
+        except config.ConfigError:
+            raise UIError('configuration', '此文件的图像识别配置无法安全合并；请先修复原配置。') from None
         # Copy only this file's group. Never copy a higher layer's connection/Key.
         group = json.loads(json.dumps(group))
         routes = group.setdefault("routes", {})
@@ -187,6 +216,8 @@ class VideoAdapter(Adapter):
             if field == "api_key" and not unset and (not isinstance(value, str) or not value.strip()):
                 raise UIError("operation", "空 Key 不表示删除；请取消替换，或明确删除此文件 Key。")
             if field in SCALARS:
+                if field == 'asr' and not unset and value not in config.PROVIDERS:
+                    raise UIError('validation', '语音转写须为 aihub-audio 或 feishu-minutes。')
                 updates[SCALARS[field]] = value
             elif field in {"ask", "call_limit"}:
                 name = "ask_each_task" if field == "ask" else field
@@ -231,9 +262,53 @@ class VideoAdapter(Adapter):
         return updates, snapshot
 
     def preview(self, changes, revision, target):
-        return self.candidate(changes, revision, target)[1]
+        return self._batch(changes, revision, target, write=False)
 
     def save(self, changes, revision, target):
+        return self._batch(changes, revision, target, write=True)
+
+    def _batch(self, changes, revision, target, *, write):
+        if not isinstance(changes, dict) or set(changes) - (set(LABELS) | {'inherit', 'request_id'}):
+            raise UIError('field', '包含未知配置字段。')
+        groups = {}
+        for field, operation in changes.items():
+            if field != 'request_id':
+                groups.setdefault(self.group_id(field), {})[field] = operation
+        results, failures, updates = {}, [], {}
+        for members in groups.values():
+            submitted = {**members, **({'request_id': changes['request_id']} if 'request_id' in changes else {})}
+            try:
+                if write:
+                    self._save_group(submitted, revision, target)
+                else:
+                    updates.update(self.candidate(submitted, revision, target)[0])
+                results.update({field: {'status': 'saved' if write else 'ready'} for field in members})
+            except UIError as error:
+                failures.append(error)
+                results.update({field: {'status': 'uncertain' if error.code == 'readback' else 'failed', 'code': error.code, 'message': error.message} for field in members})
+                if error.code == 'readback':
+                    for field in set(changes) - set(results) - {'request_id'}:
+                        results[field] = {'status': 'failed', 'code': 'not_attempted',
+                                          'message': '等待前一组保存结果核对后再提交；草稿已保留。'}
+                    break
+        if results and all(item['status'] == 'failed' for item in results.values()):
+            raise failures[0]
+        if write:
+            self.last_save = {'request_id': changes.get('request_id', {}).get('value'), 'target': target,
+                              'before_revision': revision, 'after_revision': self.revision(), 'field_results': results}
+            snapshot = self.config()
+        else:
+            merged = self.values()[target]
+            for key, value in updates.items():
+                if value is None:
+                    merged.pop(key, None)
+                else:
+                    merged[key] = value
+            snapshot = self.snapshot((target, merged))
+        snapshot['task'] = {'field_results': results}
+        return snapshot
+
+    def _save_group(self, changes, revision, target):
         updates, _ = self.candidate(changes, revision, target)
         path = self.targets[target]
         prepare_private_write(path, owner_path=self.project)
@@ -253,10 +328,13 @@ class VideoAdapter(Adapter):
                     stream.write(text.encode("utf-8"))
                     stream.flush()
                     os.fsync(stream.fileno())
-                if revision != self.revision():
+                if (path.read_bytes() if path.exists() else b'') != original:
                     raise UIError("conflict", "保存前配置发生变化，未覆盖；草稿保留。", 409)
                 private_files.replace_file(temporary, path)
-                private_files.protect(path, 0o600, assign_owner=False)
+                try:
+                    private_files.protect(path, 0o600, assign_owner=False)
+                except OSError:
+                    raise UIError('readback', '文件已替换，但保护状态待核对；请重新读取后检查此文件。', 500) from None
             except OSError as exc:
                 code = getattr(exc.__cause__, "winerror", getattr(exc, "winerror", None))
                 raise UIError("permission", "保存文件权限或原子替换失败；草稿保留。" + (" Windows 错误 " + str(code) if code else "")) from None
@@ -264,8 +342,6 @@ class VideoAdapter(Adapter):
                 temporary.unlink(missing_ok=True)
         if config.parse_dotenv(path.read_text(encoding="utf-8")) != config.parse_dotenv(text):
             raise UIError("readback", "已写入但回读不一致，请重新载入检查。")
-        self.last_save = {"request_id": changes.get("request_id", {}).get("value"), "target": target,
-                          "before_revision": revision, "after_revision": self.revision()}
         return self.config()
 
 

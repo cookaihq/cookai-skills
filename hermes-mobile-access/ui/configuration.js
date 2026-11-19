@@ -79,7 +79,7 @@ function decorateDomainPreview() {
   const urlError = document.querySelector('#error-subdomain');
   if (urlError) urlError.textContent = localErrors.subdomain || '';
   const save = document.querySelector('#save');
-  if (save) { save.textContent = '保存并应用'; save.disabled = !Object.keys(pending).length || Object.keys(localErrors).length > 0; }
+  if (save) { save.textContent = '保存修改'; save.disabled = mobileSaving || mobileUncertain || !Object.keys(pending).some(id=>!localErrors[id]); }
   const heading = document.querySelector('.heading h1');
   if (heading && value('mode', 'all') === 'all') heading.textContent = '手机接入配置';
   const text = document.querySelector('.heading p');
@@ -133,4 +133,32 @@ root.addEventListener('click', async event => {
   try { await navigator.clipboard.writeText(text); toast('已复制完整 Server URL'); }
   catch { toast('复制未完成，可选中完整地址后手动复制。'); }
 });
+let mobileSaving=false,mobileUncertain=false,mobileConflicts=new Set();
+// Business-specific save groups share the existing bottom save dock.
+root.addEventListener('click',async event=>{
+  const button=event.target.closest('[data-action]');
+  if(!button||!['save','reload'].includes(button.dataset.action))return;
+  event.stopImmediatePropagation();
+  if(button.dataset.action==='reload'){
+    try{await load();mobileUncertain=false;mobileConflicts.clear();decorateDomainPreview();toast('已重新载入，草稿保留，请核对来源后保存。');}catch(error){toast(error.message);}return;
+  }
+  if(mobileSaving||mobileUncertain||ended)return;
+  mobileSaving=true;root.inert=true;decorateDomainPreview();
+  try{
+    const connectionBlocked=Object.keys(pending).some(id=>id!=='update'&&(localErrors[id]||mobileConflicts.has(id)));
+    const changes=Object.fromEntries(Object.entries(pending).filter(([id])=>!localErrors[id]&&!mobileConflicts.has(id)&&(id==='update'||!connectionBlocked)));
+    if(!Object.keys(changes).length){document.querySelector('#save-message').textContent='请修正绑定配置，或重新载入核对冲突后保存。';return;}
+    const result=await api('/api/save',{revision:state.config.revision,changes});
+    const results=result.config.task?.field_results||{};
+    mobileUncertain=Object.values(results).some(outcome=>outcome.status==='uncertain');
+    for(const [id,outcome]of Object.entries(results))if(outcome.code==='conflict')mobileConflicts.add(id);
+    for(const [id,outcome]of Object.entries(results))if(outcome.status==='saved'){
+      delete pending[id];delete revealed[id];delete localErrors[id];
+    }
+    state.config=result.config;render();
+    document.querySelector('#save-message').textContent=Object.entries(results).map(([id,outcome])=>(state.config.fields.find(field=>field.id===id)?.label||id)+'：'+(outcome.status==='saved'?'已保存':outcome.message)).join('；');
+    if(mobileUncertain)document.querySelector('#save-message').textContent+='；保存结果待确认，请重新载入核对配置和连接状态，再继续。';
+  }catch(error){mobileUncertain=!error.status||error.status>=500;document.querySelector('#save-message').textContent=mobileUncertain?'保存结果需要核对。请重新载入，草稿保留；不会自动重试。':error.message;}
+  finally{mobileSaving=false;root.inert=false;decorateDomainPreview();}
+},true);
 decorateDomainPreview();

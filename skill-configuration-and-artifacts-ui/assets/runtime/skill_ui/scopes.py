@@ -5,15 +5,25 @@ import hmac
 import json
 
 from .contracts import UIError
+from .config_groups import check_request_baseline
 
 PROTOCOL = 'field-scopes-v1'
 
 
 def validate_request(request):
-    if not isinstance(request, dict) or 'files' not in request or set(request) - {'files', 'switches', 'file_edits', 'directory_revision'}:
+    if not isinstance(request, dict) or 'files' not in request or set(request) - {'files', 'switches', 'file_edits', 'directory_revision', 'field_revisions', 'invalid_fields', 'preview_tokens'}:
         raise UIError('contract', '配置请求需要迁移到逐项范围协议；请同时更新页面和适配器。', 422)
     if 'directory_revision' in request and not isinstance(request['directory_revision'], str):
         raise UIError('changes', '目录修订无效，请重新预览。', 422)
+    if 'field_revisions' in request and (not isinstance(request['field_revisions'], dict) or
+            any(not isinstance(k, str) or not isinstance(v, str) for k, v in request['field_revisions'].items())):
+        raise UIError('changes', '字段修订无效，请重新载入。', 422)
+    if 'invalid_fields' in request and (not isinstance(request['invalid_fields'], list) or
+            any(not isinstance(key, str) for key in request['invalid_fields'])):
+        raise UIError('changes', '字段状态无效。', 422)
+    if 'preview_tokens' in request and (not isinstance(request['preview_tokens'], dict) or
+            any(not isinstance(k, str) or not isinstance(v, str) for k, v in request['preview_tokens'].items())):
+        raise UIError('changes', '预览标识无效，请重新预览。', 422)
     files, switches, explicit = (request.get(key, {}) for key in ('files', 'switches', 'file_edits'))
     if not all(isinstance(value, dict) for value in (files, switches, explicit)) or any(
             not isinstance(changes, dict) for changes in files.values()):
@@ -36,7 +46,9 @@ def annotate_snapshot(snapshot, secret, empty=None):
         value = effective.get('value')
         effective['empty'] = bool(empty(field, value) if empty else value is None or isinstance(value, str) and not value.strip())
         field['edit_revision'] = hmac.new(secret, json.dumps(
-            [field['rows'], effective, field['targets']], sort_keys=True, ensure_ascii=False,
+            [[row for row in field['rows'] if row.get('status') != 'skipped'], effective, field['targets'],
+             [(layer['id'], layer.get('path'), layer.get('readonly'), layer.get('enabled'))
+              for layer in snapshot['layers'] if layer['id'] in field['targets']]], sort_keys=True, ensure_ascii=False,
         ).encode(), hashlib.sha256).hexdigest()
     return snapshot
 
@@ -52,15 +64,14 @@ class ScopePlanner:
     def plan(self, request, revision):
         """Plan a field switch against private values, then reuse the transaction.
 
-        Viewing a block never sends a switch. An explicit attempt can return an
-        unresolved choice; both save entry points must submit that same choice.
+        Selecting a scope stages a switch. An explicit attempt can return an
+        unresolved choice; the bottom save action submits the confirmed choice.
         Tokens bind a choice to this input, target and loader revision without
         sending saved secrets to the browser for comparisons.
         """
         validate_request(request)
         current = self.current
-        if current['revision'] != revision:
-            raise UIError('conflict', '配置已变化。草稿仍保留，请重新载入后核对。', 409)
+        check_request_baseline(current, request, revision)
         files = deepcopy(request.get('files', {}))
         switches = request.get('switches', {})
         explicit = request.get('file_edits', {})
@@ -114,14 +125,13 @@ class ScopePlanner:
             mode = intent.get('mode', 'existing')
             if mode not in ('existing', 'input'):
                 raise UIError('changes', '请选择有效的切换方式。', 422)
-            token = hmac.new(self.secret, json.dumps([revision, key, target, entered, mode], ensure_ascii=False, sort_keys=True).encode(), hashlib.sha256).hexdigest()
-            conflict = not same_source and has_target and dirty and not self._same(entered, row['value'])
+            token = hmac.new(self.secret, json.dumps([field.get('edit_revision', revision), key, target, entered, mode], ensure_ascii=False, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+            conflict = not same_source and has_target and (dirty or intent.get('choose_content')) and not self._same(entered, row['value'])
             choice = intent.get('choice') if intent.get('choice_token') == token else None
             plan.update(conflict=conflict, choice_token=token, input_changed=dirty)
             if conflict and choice not in ('input', 'target'):
                 plan.update(state='choice', message='这里已有不同内容，请选择本项要使用的内容。')
                 errors.append(field['label'] + '：请选择要使用的内容。')
-                continue
             value = (row['value'] if has_target and not same_source and
                      (not dirty and mode == 'existing' or choice == 'target') else entered)
             plan['uses_target'] = has_target and self._same(value, row['value'])
@@ -154,7 +164,12 @@ class ScopePlanner:
             for upper in higher:
                 files.setdefault(upper, {})[key] = dict(op='unset')
             plan['cleanup'] = higher
-            plan['message'] = ('使用这里已有的内容。' if plan['uses_target'] else '保存当前填写的内容并使用。')
+            plan['cleanup_token'] = hmac.new(self.secret, json.dumps(
+                [token, higher, [(layer['id'], layer.get('path')) for layer in current['layers'] if layer['id'] in higher]],
+                sort_keys=True).encode(), hashlib.sha256).hexdigest()
+            if plan['state'] == 'choice':
+                continue
+            plan['message'] = ('保存后使用这里已有的内容。' if plan['uses_target'] else '保存后使用当前填写的内容。')
             if higher:
                 plan['message'] += ' 同时移除 ' + str(len(higher)) + ' 处会覆盖它的本项设置；更低位置保留。'
             else:

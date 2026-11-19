@@ -54,11 +54,9 @@ def private_directory(path, owner_path=None):
     path = Path(path)
     if path.is_symlink():
         raise UIError("path", "运行目录不能是符号链接。")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name == "nt":
-        _private_windows(path, owner_path or path.parent)
-    else:
-        path.chmod(0o700)
+    path.mkdir(parents=True, exist_ok=True)
+    if not path.is_dir():
+        raise UIError("path", "运行位置必须是目录。")
     return path
 
 
@@ -159,6 +157,8 @@ def prepare_private_write(path, *, temporary_for=None, private_directory=None, o
         directory = path.parent
         while not directory.exists():
             directory = directory.parent
+        if not any(os.path.lexists(part / ".git") for part in (directory, *directory.parents)):
+            return
         selectors = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
                      "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"}
         environment = {k: v for k, v in os.environ.items() if k not in selectors}

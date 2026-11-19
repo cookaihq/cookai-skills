@@ -30,7 +30,7 @@ async function api(path,data){
   const response=await fetch(path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},
     body:data===undefined?undefined:JSON.stringify(data)});
   const result=await response.json();
-  if(!response.ok){const error=new Error(result.message||'请求未完成');error.code=result.error||result.code;throw error;}
+  if(!response.ok){const error=new Error(result.message||'请求未完成');error.code=result.error||result.code;error.status=response.status;throw error;}
   return result;
 }
 async function call(action,data={},project=state.project){return (await api('/api/rules',{action,data,project})).result;}
@@ -62,7 +62,7 @@ function render(){
   const context=state.workspace.project,global=state.scope==='global';
   const available=context.availability==='ready',reason=context.availability==='error'?'检测未完成':context.availability==='none'?'未关联项目':'尚未建立项目规则';
   const navigation=pages.map(([key,name])=>button(symbols[key]+'　'+name,'page:'+key,state.page===key?'active':'')).join('');
-  root.innerHTML='<div class="shell scope-'+(global?'personal':'project')+'"><aside class="rail"><div class="brand"><span class="brand-mark">▤</span>Agent 规则维护</div><div class="rail-note">WORKSPACE</div><nav class="nav" aria-label="规则维护操作">'+navigation+'</nav><div class="rail-bottom">'+button('⚙　设置','page:settings','rail-settings '+(state.page==='settings'?'active':''))+'<div class="rail-footer">agent-instructions-update<br>0.2.0 · 规则维护工作台</div></div></aside><div class="workspace"><header class="topbar"><div class="scope-header"><span class="scope-caption">维护范围</span><div class="scope-switch" role="group" aria-label="选择规则维护范围"><button data-action="scope:global" class="scope-option '+(global?'selected':'')+'" aria-pressed="'+global+'"><span><strong>全局规则</strong><small>用户级 · 跨项目复用</small></span></button><button data-action="scope:project" class="scope-option '+(!global?'selected':'')+'" aria-pressed="'+!global+'" '+(!available&&global?'disabled':'')+'><span><strong>项目规则</strong><small>'+escape(available?context.name:reason)+'</small></span></button></div><div class="project-availability">项目：<code>'+escape(context.path)+'</code> '+button('选择项目','project-picker','text')+(!available?button(context.availability==='error'?'重新检测':'建立项目规则',context.availability==='error'?'reload':'project-create','text'):'')+'</div></div><div class="service"><span id="lifetime">'+lifecycle()+'</span> '+button('结束页面','stop','text')+'</div></header><main class="content"><section class="scope-context" aria-label="当前维护范围"><div class="scope-context-title"><div><strong>当前维护：'+(global?'全局规则':'项目规则 · '+escape(context.name))+'</strong><span>'+(global?'用户级主规则与场景；供多个项目复用。':'仅维护此项目 · '+escape(context.path))+'</span></div></div>'+(state.page==='settings'?'<span class="scope-subnote">设置保存位置在本页单独选择。</span>':'')+'</section>'+(state.message?notice(state.message):'')+(state.workspace.errors.length?notice('部分位置读取失败：'+state.workspace.errors.join('；')):'')+bindingControls()+view()+taskView()+'</main></div></div>';
+  root.innerHTML='<div class="shell scope-'+(global?'personal':'project')+'"><aside class="rail"><div class="brand"><span class="brand-mark">▤</span>Agent 规则维护</div><div class="rail-note">WORKSPACE</div><nav class="nav" aria-label="规则维护操作">'+navigation+'</nav><div class="rail-bottom">'+button('⚙　设置','page:settings','rail-settings '+(state.page==='settings'?'active':''))+'<div class="rail-footer">agent-instructions-update<br>0.3.0 · 规则维护工作台</div></div></aside><div class="workspace"><header class="topbar"><div class="scope-header"><span class="scope-caption">维护范围</span><div class="scope-switch" role="group" aria-label="选择规则维护范围"><button data-action="scope:global" class="scope-option '+(global?'selected':'')+'" aria-pressed="'+global+'"><span><strong>全局规则</strong><small>用户级 · 跨项目复用</small></span></button><button data-action="scope:project" class="scope-option '+(!global?'selected':'')+'" aria-pressed="'+!global+'" '+(!available&&global?'disabled':'')+'><span><strong>项目规则</strong><small>'+escape(available?context.name:reason)+'</small></span></button></div><div class="project-availability">项目：<code>'+escape(context.path)+'</code> '+button('选择项目','project-picker','text')+(!available?button(context.availability==='error'?'重新检测':'建立项目规则',context.availability==='error'?'reload':'project-create','text'):'')+'</div></div><div class="service"><span id="lifetime">'+lifecycle()+'</span> '+button('结束页面','stop','text')+'</div></header><main class="content"><section class="scope-context" aria-label="当前维护范围"><div class="scope-context-title"><div><strong>当前维护：'+(global?'全局规则':'项目规则 · '+escape(context.name))+'</strong><span>'+(global?'用户级主规则与场景；供多个项目复用。':'仅维护此项目 · '+escape(context.path))+'</span></div></div>'+(state.page==='settings'?'<span class="scope-subnote">设置保存位置在本页单独选择。</span>':'')+'</section>'+(state.message?notice(state.message):'')+(state.workspace.errors.length?notice('部分位置读取失败：'+state.workspace.errors.join('；')):'')+bindingControls()+view()+taskView()+'</main></div></div>';
   const tree=root.querySelector('.scenario-tree-scroll');if(tree)tree.scrollTop=bucket().treeScroll;
   updateURL();
 }
@@ -112,15 +112,15 @@ function layoutView(){
 }
 function reviewView(){
   const b=bucket(),files=state.workspace.files.filter(f=>f.status==='found'&&!f.directory);
-  return heading('审阅建议','交给当前 Agent 分析，再回到同一任务查看结果。')+'<section class="card"><div class="card-body">'+area('本次审阅目标模型','review-models',(b.models??b.config.values.review_models).join('\n'),'每行一个模型 ID；本次选择不改动宿主配置。')+'<p class="small muted">配置默认模型与来源见“Agent 检测”；当前会话模型在没有证据时保持未知。</p><h3>选择规则</h3>'+files.map(f=>'<label class="check-line"><input type="checkbox" data-review-path="'+escape(f.path)+'" '+(b.reviewPaths.has(f.path)?'checked':'')+'> <span>'+escape(f.title||f.path)+'<small class="file-path">'+escape(f.path)+'</small></span></label>').join('')+'</div><div class="card-foot">'+button('建立审阅任务','review-create','primary',!b.reviewPaths.size)+'</div></section>';
+  return heading('审阅建议','交给当前 Agent 分析，再回到同一任务查看结果。')+'<section class="card"><div class="card-body">'+area('本次审阅目标模型','review-models',(b.models??b.config.values.review_models??[]).join('\n'),'每行一个模型 ID；本次选择不改动宿主配置。')+'<p class="small muted">配置默认模型与来源见“Agent 检测”；当前会话模型在没有证据时保持未知。</p><h3>选择规则</h3>'+files.map(f=>'<label class="check-line"><input type="checkbox" data-review-path="'+escape(f.path)+'" '+(b.reviewPaths.has(f.path)?'checked':'')+'> <span>'+escape(f.title||f.path)+'<small class="file-path">'+escape(f.path)+'</small></span></label>').join('')+'</div><div class="card-foot">'+button('建立审阅任务','review-create','primary',!b.reviewPaths.size)+'</div></section>';
 }
 function historyView(){return heading('任务历史','仅包含此范围实际产生的维护记录。',button('刷新历史','history-refresh')+button('清理已完成历史','history-prune','text'))+'<section class="card"><div class="table-wrap"><table class="table"><thead><tr><th>维护任务</th><th>状态</th><th>更新时间</th><th></th></tr></thead><tbody>'+bucket().history.map(t=>'<tr><td>'+escape(t.kind)+'<small class="file-path">'+escape(t.id)+'</small></td><td>'+escape(statusNames[t.status]||t.status)+'</td><td>'+new Date(t.updated_at*1000).toLocaleString()+'</td><td>'+button('查看 / 继续','task-open:'+t.id,'text')+button('预览恢复','restore:'+t.id,'text')+'</td></tr>').join('')+'</tbody></table></div></section>';}
 function settingsChanges(){const b=bucket();return Object.keys(b.settingsDraft).filter(key=>JSON.stringify(b.settingsDraft[key])!==JSON.stringify(b.config.values[key]));}
 function settingsView(){
   const b=bucket(),d=b.settingsDraft,c=b.config;
   const binding=d.binding||{scope:state.scope,project:state.scope==='project'?state.project:null,product:null,installation:null,profile:null,paths:[],authority:null,layout:null};
-  const source=key=>'<span class="file-path small">当前来源：'+escape(c.sources[key])+'</span>';
-  return heading('设置','Skill 持久偏好集中在此页；保存设置不会执行规则变更。',button('重读来源并保留编辑','settings-reload'))+'<div class="settings-wrap"><section class="card"><div class="card-head"><h2>保存位置</h2>'+badge(b.saveScope==='personal'?'个人设置':'项目覆盖','blue')+'</div><div class="card-body">'+select('本次保存范围','save-scope',[['personal','个人 · 跨项目复用'],['project','仅当前项目覆盖']],b.saveScope)+'<code>'+escape(c.save_locations[b.saveScope])+'</code></div><div class="settings-section"><div><h2>管理范围绑定</h2>'+source('binding')+'</div><div><label><input id="binding-enabled" type="checkbox" '+(d.binding?'checked':'')+'> 保存完整管理绑定</label>'+select('Agent 产品','binding-product',[['','未指定'],['codex','Codex'],['claude-code','Claude Code'],['workbuddy','WorkBuddy'],['hermes','Hermes'],['opencode','OpenCode']],binding.product||'')+field('安装实例','binding-installation',binding.installation||'')+field('Profile','binding-profile',binding.profile||'')+area('规则路径','binding-paths',binding.paths.join('\n'),'每行一个路径；相对路径按当前管理范围解析。')+field('权威文件','binding-authority',binding.authority||'')+select('布局偏好','binding-layout',[['','未指定'],['existing','保留现有布局'],['custom-root','自选物理根目录'],['personal-agents','个人 .agents 目录']],binding.layout||'')+'</div></div><div class="settings-section"><div><h2>常用审阅模型</h2>'+source('review_models')+'</div>'+area('模型 ID','setting-models',d.review_models.join('\n'))+'</div><div class="settings-section"><div><h2>历史保留</h2>'+source('history_keep')+'</div>'+field('已完成任务数量','setting-history',d.history_keep,'未完成、结果不明及待恢复任务不会自动清理。','number')+'</div><div class="settings-section"><div><h2>自动检查更新</h2>'+source('auto_update')+'</div><div><label><input id="setting-update" type="checkbox" '+(d.auto_update?'checked':'')+' '+(b.saveScope==='project'?'disabled':'')+'> 自动检查新版本</label><p class="small muted">此项仅保存在个人设置；安装更新仍须确认。</p></div></div></section><div class="save-dock"><div><p id="settings-dirty">'+settingsChanges().length+' 项未保存修改</p><span id="settings-result" class="file-path" role="status"></span></div>'+button('保存设置','settings-save','primary',!settingsChanges().length)+'</div></div>';
+  const source=key=>(c.errors?.[key]?notice(c.errors[key]):'')+'<span class="file-path small">当前来源：'+escape(c.sources[key])+'</span>';
+  return heading('设置','Skill 持久偏好集中在此页；保存设置不会执行规则变更。',button('重读来源并保留编辑','settings-reload'))+'<div class="settings-wrap"><section class="card"><div class="card-head"><h2>保存位置</h2>'+badge(b.saveScope==='personal'?'个人设置':'项目覆盖','blue')+'</div><div class="card-body">'+select('本次保存范围','save-scope',[['personal','个人 · 跨项目复用'],['project','仅当前项目覆盖']],b.saveScope)+'<code>'+escape(c.save_locations[b.saveScope])+'</code></div><div class="settings-section"><div><h2>管理范围绑定</h2>'+source('binding')+'</div><div><label><input id="binding-enabled" type="checkbox" '+(d.binding?'checked':'')+'> 保存完整管理绑定</label>'+select('Agent 产品','binding-product',[['','未指定'],['codex','Codex'],['claude-code','Claude Code'],['workbuddy','WorkBuddy'],['hermes','Hermes'],['opencode','OpenCode']],binding.product||'')+field('安装实例','binding-installation',binding.installation||'')+field('Profile','binding-profile',binding.profile||'')+area('规则路径','binding-paths',binding.paths.join('\n'),'每行一个路径；相对路径按当前管理范围解析。')+field('权威文件','binding-authority',binding.authority||'')+select('布局偏好','binding-layout',[['','未指定'],['existing','保留现有布局'],['custom-root','自选物理根目录'],['personal-agents','个人 .agents 目录']],binding.layout||'')+'</div></div><div class="settings-section"><div><h2>常用审阅模型</h2>'+source('review_models')+'</div>'+area('模型 ID','setting-models',(d.review_models??[]).join('\n'))+'</div><div class="settings-section"><div><h2>历史保留</h2>'+source('history_keep')+'</div>'+field('已完成任务数量','setting-history',d.history_keep,'未完成、结果不明及待恢复任务不会自动清理。','number')+'</div><div class="settings-section"><div><h2>自动检查更新</h2>'+source('auto_update')+'</div><div><label><input id="setting-update" type="checkbox" '+(d.auto_update?'checked':'')+' '+(b.saveScope==='project'?'disabled':'')+'> 自动检查新版本</label><p class="small muted">此项仅保存在个人设置；安装更新仍须确认。</p></div></div></section><div class="save-dock"><div><p id="settings-dirty">'+settingsChanges().length+' 项未保存修改</p><span id="settings-result" class="file-path" role="status"></span></div>'+button('保存修改','settings-save','primary',Boolean(b.saveUncertain)||!settingsChanges().length)+'</div></div>';
 }
 function taskView(){
   const task=currentTask();if(!task||state.page==='settings'||state.page==='detect')return '';
@@ -145,16 +145,17 @@ function bindingControls(){
   if(!binding||['detect','settings','history'].includes(state.page))return '';
   return '<div class="inline-note"><p>管理绑定：'+escape([binding.product,binding.installation,binding.profile,binding.layout].filter(Boolean).join(' · ')||'所选规则路径')+'</p><label><input id="task-paths-only" type="checkbox" '+(b.pathsOnly?'checked':'')+'> 仅按本次选择的路径操作，不沿用已保存的管理绑定</label></div>';
 }
-function captureSettings(){
+function captureSettings(id){
+  if(!id)return;
   const b=bucket(),value=id=>root.querySelector('#'+id)?.value??'';
-  b.settingsDraft.history_keep=Number(value('setting-history'));
-  b.settingsDraft.review_models=lines(value('setting-models'));
-  b.settingsDraft.auto_update=root.querySelector('#setting-update').checked;
-  b.settingsDraft.binding=root.querySelector('#binding-enabled').checked?{scope:state.scope,project:state.scope==='project'?state.project:null,
+  if(id==='setting-history')b.settingsDraft.history_keep=Number(value('setting-history'));
+  if(id==='setting-models')b.settingsDraft.review_models=lines(value('setting-models'));
+  if(id==='setting-update')b.settingsDraft.auto_update=root.querySelector('#setting-update').checked;
+  if(id.startsWith('binding-'))b.settingsDraft.binding=root.querySelector('#binding-enabled').checked?{scope:state.scope,project:state.scope==='project'?state.project:null,
     product:value('binding-product')||null,installation:value('binding-installation')||null,profile:value('binding-profile')||null,
     paths:lines(value('binding-paths')),authority:value('binding-authority')||null,layout:value('binding-layout')||null}:null;
   root.querySelector('#settings-dirty').textContent=settingsChanges().length+' 项未保存修改';
-  root.querySelector('[data-action="settings-save"]').disabled=!settingsChanges().length;
+  root.querySelector('[data-action="settings-save"]').disabled=Boolean(bucket().saveUncertain)||!settingsChanges().length;
 }
 async function copy(text){try{await navigator.clipboard.writeText(text);toast('已复制。');}catch{openDialog('复制文本',area('请求内容','copy-content',text));}}
 async function namedDraft(path,text,b,project){
@@ -171,7 +172,7 @@ async function namedDraft(path,text,b,project){
 }
 root.addEventListener('input',event=>{
   const el=event.target,b=bucket();
-  if(state.page==='settings')captureSettings();
+  if(state.page==='settings')captureSettings(event.target.id);
   if(el.id==='scenario-text'){
     const item=currentScenario(),project=state.project,text=el.value;
     delete b.tasks.scenarios;root.querySelector('[aria-label="当前维护任务"]')?.remove();updateURL();
@@ -254,27 +255,44 @@ async function act(action){
   if(action==='history-prune-run'){const result=await call('history.prune',{scope:scopeValue(),keep:Number(dialog.querySelector('#prune-count').value)});dialog.close();await refreshHistory();render();toast('已清理 '+result.removed.length+' 个已完成任务。');return;}
   if(action==='settings-reload'){
     captureSettings();const changes=Object.fromEntries(settingsChanges().map(key=>[key,b.settingsDraft[key]]));
+    if(b.saveUncertain){
+      const receipt=await call('config.result',{request_id:b.saveUncertain});
+      if(receipt.status!=='known')throw new Error('原保存结果尚未确认；草稿保留，请让 Agent 核对原操作和实际文件。');
+      for(const [key,result] of Object.entries(receipt.saved.field_results))if(result.status==='saved')delete changes[key];
+      b.saveUncertain=null;
+    }
     b.config=await call('config.read',{scope:scopeValue()});b.settingsDraft={...structuredClone(b.config.values),...changes};
     state.message='';render();root.querySelector('#settings-result').textContent='已重读最新来源，并保留本次编辑。请核对后保存。';return;
   }
   if(action==='settings-save'){
+    if(b.saveUncertain)throw new Error('请先重读来源核对原保存结果；当前不会重复提交。');
     captureSettings();const changes=Object.fromEntries(settingsChanges().map(key=>[key,b.settingsDraft[key]]));
-    const saved=await call('config.save',{scope:scopeValue(),save_scope:b.saveScope,revision:b.config.revision,values:changes});
-    b.config=saved;b.settingsDraft=structuredClone(saved.values);
-    if('binding' in changes){b.authority=saved.values.binding?.authority||'';await loadWorkspace();}
+    const request_id=crypto.randomUUID();let saved;
+    try{saved=await call('config.save',{scope:scopeValue(),save_scope:b.saveScope,revision:b.config.revision,field_revisions:b.config.field_revisions,values:changes,request_id});}
+    catch(error){
+      if(error.status && error.status<500)throw error;
+      b.saveUncertain=request_id;
+      const receipt=await call('config.result',{request_id});
+      if(receipt.status!=='known')throw new Error('原保存结果尚未确认；草稿保留，请重读来源核对，当前不会重复提交。');
+      saved=receipt.saved;b.saveUncertain=null;
+    }
+    const remaining=Object.fromEntries(Object.entries(changes).filter(([key])=>saved.field_results[key]?.status!=='saved'));
+    for(const key of Object.keys(remaining))saved.field_revisions[key]=b.config.field_revisions[key];
+    b.config=saved;b.settingsDraft={...structuredClone(saved.values),...remaining};
+    if(saved.field_results.binding?.status==='saved'){b.authority=saved.values.binding?.authority||'';await loadWorkspace();}
     render();
-    root.querySelector('#settings-result').textContent='已保存到 '+saved.saved_to+(saved.overridden.length?'；部分值仍被高优先级来源覆盖':'');return;
+    root.querySelector('#settings-result').textContent=Object.entries(saved.field_results).map(([key,result])=>key+'：'+(result.status==='saved'?'已保存到 '+saved.saved_to:result.message)).join('；')+(saved.overridden.length?'；部分值仍被高优先级来源覆盖':'');return;
   }
   if(action==='stop'){await api('/api/stop',{});state.stopped=true;root.innerHTML='<div class="loading"><h1>工作台已结束</h1><p>任务和已保存记录仍保留，可让 Agent 重新打开。</p></div>';return;}
 }
 document.addEventListener('click',event=>{
   const target=event.target.closest('[data-action]');if(!target||state.busy||state.stopped)return;
-  state.busy=true;root.setAttribute('aria-busy','true');
+  state.busy=true;root.inert=true;root.setAttribute('aria-busy','true');
   act(target.dataset.action).catch(async error=>{
     state.message=error.message;toast(error.message);
     if(target.dataset.action==='task-apply'&&currentTask()){try{remember(await call('task.get',{task_id:currentTask().id}));render();}catch{}}
     const result=root.querySelector('#settings-result');if(result)result.textContent=error.message;
-  }).finally(()=>{state.busy=false;root.removeAttribute('aria-busy');});
+  }).finally(()=>{state.busy=false;root.inert=false;root.removeAttribute('aria-busy');const save=root.querySelector('[data-action="settings-save"]');if(save)save.disabled=Boolean(bucket().saveUncertain)||!settingsChanges().length;});
 });
 async function activity(){if(state.stopped||!state.csrf||Date.now()-activityAt<25000)return;activityAt=Date.now();try{state.lifetime=await api('/api/activity',{});}catch(error){state.stopped=true;toast(error.message);}}
 for(const event of ['pointerdown','keydown','scroll'])document.addEventListener(event,activity,{passive:true,capture:true});

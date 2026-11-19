@@ -1,5 +1,7 @@
 """Approved AS page backed by the same Store and native catalog as launch."""
 import hmac
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -22,6 +24,7 @@ class Settings(Adapter):
         self.project = project
         self.store = Store(os.environ.get("AS_UI_CONFIG_FILE"))
         self.catalog = None
+        self.last_save = None
 
     def report(self, saved=None):
         if self.catalog is None:
@@ -32,12 +35,23 @@ class Settings(Adapter):
         else:
             value, revision = saved
             initialization = {"show": False}
+        try:
+            self.store.read()
+            readiness = {'ready': True}
+        except UIError as error:
+            readiness = {'ready': False, 'code': error.code,
+                         'message': '现有配置尚不能用于启动会话，请修复后再调用：' + error.message}
         return {"settings": value, "revision": revision, "catalog": self.catalog,
+                "readiness": readiness,
+                "record_revisions": {kind + '.' + key: self.store.record_revision(record)
+                    for kind in ('defaults', 'presets') for key, record in value[kind].items()},
+                "missing_record_revision": self.store.record_revision(None),
+                "last_save": self.last_save,
                 "source": str(self.store.path), "synthetic": False,
                 "initialization": {**initialization, "settings": common_settings()}}
 
     def config(self):
-        _, revision = self.store.read()
+        _, revision = self.store.read(tolerant=True)
         return {"revision": revision, "layers": [], "fields": []}
 
     def action(self, action, payload):
@@ -54,13 +68,25 @@ class Settings(Adapter):
             return {"catalog": self.catalog}
         if action != "save":
             raise UIError("missing", "此操作不存在。", 404)
+        request_id = payload.get('request_id')
+        if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 128):
+            raise UIError('request', '保存请求标识无效。')
+        signature = hashlib.sha256(json.dumps(payload.get('changes'), sort_keys=True).encode()).hexdigest()
+        if request_id and self.last_save and self.last_save['request_id'] == request_id:
+            if signature != self.last_save['signature']:
+                raise UIError('conflict', '此保存标识已用于其他内容，请重新读取。', 409)
+            return self._last_response
         self.catalog = discover(self.project)
-        saved = self.store.save(payload.get("settings"), payload.get("revision"), self.catalog,
-                                initializing=payload.get("initializing", False))
+        saved, results = self.store.save_changes(payload.get('changes'), self.catalog)
+        self.last_save = {'request_id': request_id, 'signature': signature, 'field_results': results}
+        self._last_response = {"settingsReport": self.report(saved), 'field_results': results}
         if saved[0]["defaults"] or saved[0]["presets"]:
-            self.store.initialization("dismiss")
+            try:
+                self.store.initialization("dismiss")
+            except UIError:
+                logging.warning('as_initialization_receipt_unavailable')
         logging.info("as_configuration_saved")
-        return {"settingsReport": self.report(saved)}
+        return self._last_response
 
 
 class SettingsHandler(core.Handler):

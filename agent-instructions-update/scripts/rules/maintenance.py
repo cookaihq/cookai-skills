@@ -535,7 +535,7 @@ class Maintenance:
             from .discovery import scan
             return scan(self.project, self.settings.environment, data)
         if action == 'config.read':
-            return self.settings.read(data.get('scope'))
+            return self.settings.read(data.get('scope'), tolerate_errors=True)
         if action == 'config.save':
             return self.settings.save(data)
         if action == 'history.prune':

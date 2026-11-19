@@ -13,5 +13,8 @@
     "static/configuration.js": "d1b763faee50f0f089dab7fd5c6c432d2ecd65becf90896c943e0b772c4880ba",
     "static/index.html": "0b8316cd5badf26c1b01a3125cc09fb7eed1ac6603e9d8219690dec846b4f7bc",
     "static/style.css": "ce99d3cdb5091acf95ff2612e4a35042b7708aef213547bfdb57139ea2cfe239"
+  },
+  "local_patches": {
+    "storage.py": "Configuration save reliability: directories retain OS/parent defaults; non-repository private writes do not require Git. Pinned core hashes remain the upstream baseline; vendor inspect must flag this limited patch before a full core migration."
   }
 }

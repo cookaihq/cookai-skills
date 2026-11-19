@@ -37,9 +37,9 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse((self.personal / 'settings.json').exists())
         partial = {scope: {'product': 'hermes'}}
         (self.project / '.env.agent-instructions-update').write_text('AGENT_RULES_BINDINGS=' + json.dumps(partial), encoding='utf-8')
-        with self.assertRaises(RuleError) as caught:
-            app.action('config.read', {})
-        self.assertEqual(caught.exception.code, 'binding_incomplete')
+        broken = app.action('config.read', {})
+        self.assertIn('binding', broken['errors'])
+        self.assertIsNone(broken['values']['binding'])
         (self.project / '.env.agent-instructions-update').unlink()
         clean = Maintenance(self.personal, self.project, environment={})
         before = clean.action('config.read', {})
@@ -65,8 +65,8 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(saved['values']['auto_update'])
         self.assertIn('AUTO_UPDATE_CHECK=0', (self.personal/'.env').read_text())
         self.assertFalse((self.project/'.env.local').exists())
-        with self.assertRaises(RuleError):
-            app.action('config.save', {'scope':'global', 'revision':saved['revision'], 'save_scope':'project', 'values':{'auto_update':True}})
+        failed = app.action('config.save', {'scope':'global', 'revision':saved['revision'], 'save_scope':'project', 'values':{'auto_update':True}})
+        self.assertEqual(failed['field_results']['auto_update']['status'], 'failed')
 
 
 if __name__ == '__main__':

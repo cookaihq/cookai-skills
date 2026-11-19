@@ -9,6 +9,7 @@ const agentLabel = agent => catalog[agent]?.label || agent;
 let saved, draft, revision, catalog, csrf = '', currentTab = 'presets', editing = null;
 let returnFocus = null, editorDrafts = {}, toastTimer, busy = false, expired = false, lastActivity = 0;
 let initialization = {show:false}, initializing = false;
+let recordRevisions={},missingRecordRevision='',saveUncertain=false,readiness={ready:true};
 const dirty = () => JSON.stringify(draft) !== JSON.stringify(saved);
 const model = (agent, id) => catalog[agent]?.models.find(item => item.id === id);
 const modelName = (agent, id) => model(agent, id)?.label || id;
@@ -36,14 +37,18 @@ function reportError(error) {
   if (error.status === 410) {expired = true;$('#lifetime').textContent='配置页已到期';$('#save').disabled=true;}
 }
 function applyReport(report) {
+  readiness=report.readiness||{ready:true};
+  recordRevisions=report.record_revisions||{};missingRecordRevision=report.missing_record_revision;
   saved = copy(report.settings);draft = copy(saved);revision=report.revision;catalog=report.catalog;
   initialization=report.initialization || {show:false};initializing=false;
   if(report.synthetic) {$('.preview-badge').textContent='合成数据预览';$('.catalog-note').textContent='模型目录为合成数据，仅用于审阅交互。保存不会影响个人配置或创建会话。';$('.demo-notice span:nth-child(2)').textContent='演示情景：仅 Codex 可用。所有操作只保存演示数据，不创建会话。';}
   $('#source-path').textContent=report.source;editorDrafts={};renderAgents();render();
 }
 function acceptSave(report) {
+  readiness=report.readiness||{ready:true};
   // The request owns its submitted snapshot; newer edits still belong to the user.
   saved=copy(report.settings);revision=report.revision;catalog=report.catalog;
+  recordRevisions=report.record_revisions||{};missingRecordRevision=report.missing_record_revision;
   initialization=report.initialization || {show:false};initializing=false;
   $('#source-path').textContent=report.source;renderAgents();render();
 }
@@ -54,10 +59,10 @@ function updateLifetime(lifetime) {
   $('#lifetime').textContent=`空闲 ${Math.ceil(lifetime.remaining / 60)} 分钟到期`;
 }
 function updateSaveState() {
-  const changed=dirty();$('#save').disabled=!changed || busy || expired;$('#discard').disabled=!changed || busy;
+  const changed=dirty();$('#save').disabled=!changed || busy || expired || saveUncertain;$('#discard').disabled=!changed || busy;
   $('#dirty-dot').classList.toggle('dirty',changed);
   $('#save-state').textContent=changed?'有未保存的变更':revision==='missing'?'尚未保存配置':'配置已保存';
-  $('#save-detail').textContent=changed?'预览正在使用草稿 · 保存后生效':'修改只在点击保存后写入个人配置';
+  $('#save-detail').textContent=!readiness.ready?readiness.message:changed?'预览正在使用草稿 · 点击保存修改后写入':'修改只在点击保存后写入个人配置';
 }
 function render() {
   renderInitialization();
@@ -68,7 +73,7 @@ function render() {
     changes.push(`<li><code>${h(kind+'.'+key)}</code> · ${!after?'移除':`${before?'修改':'新增'}：${h(agentLabel(after.agent || key))} · ${h(after.model)} · ${h(effortLabel(after.effort))}`}</li>`);
   }
   $('#change-summary').hidden=!changes.length;$('#change-list').innerHTML=changes.join('');
-  const presets=Object.entries(draft.presets);
+  const presets=Object.entries(draft.presets).map(([code,value])=>[code,value&&typeof value==='object'?value:{name:'无效预设，请编辑或移除',agent:'unknown'}]);
   $('#preset-count').textContent=presets.length;$('#nav-count').textContent=presets.length;
   $('#preset-rows').innerHTML=presets.map(([code,preset]) => `<tr>
     <td><div class="preset-identity"><span class="code-key">${h(code)}</span><div><div class="preset-name">${h(preset.name)}</div><div class="preset-command"><code>$as ${h(code)}</code></div></div></div></td>
@@ -76,7 +81,7 @@ function render() {
     <td><span class="effort-pill ${['high','xhigh'].includes(preset.effort)?'high':''}">${h(effortLabel(preset.effort))}</span></td>
     <td><button class="edit-button" data-edit="${h(code)}" aria-label="编辑预设 ${h(code)}">↗</button></td></tr>`).join('');
   $('#empty-presets').hidden=presets.length>0;$('.preset-table').hidden=presets.length===0;
-  $('#default-summary-chips').innerHTML=Object.entries(draft.defaults).map(([agent,value])=>`<span>${h(agentLabel(agent))} · ${h(effortLabel(value.effort))}</span>`).join('') || '<span>尚未保存默认值</span>';
+  $('#default-summary-chips').innerHTML=Object.entries(draft.defaults).map(([agent,value])=>`<span>${h(agentLabel(agent))} · ${h(effortLabel(value?.effort))}</span>`).join('') || '<span>尚未保存默认值</span>';
   $('#default-cards').innerHTML=Object.entries(catalog).map(([agent,entry])=>{
     const value=draft.defaults[agent] || {}, selected=model(agent,value.model);
     const choices=entry.models.map(m=>`<option value="${h(m.id)}" ${value.model===m.id?'selected':''}>${h(m.label)}</option>`).join('');
@@ -252,9 +257,44 @@ $('#default-cards').addEventListener('change',event=>{
 });
 $('#current-agent').addEventListener('change',renderPreview);$('#command').addEventListener('input',renderPreview);$('#preview-command').addEventListener('click',renderPreview);
 $('#save').addEventListener('click',async()=>{
+  if(busy||saveUncertain)return;
   busy=true;updateSaveState();$('#save').textContent='正在保存…';
-  try{const result=await api('/api/as/save',{settings:draft,revision,initializing});acceptSave(result.settingsReport);$('#app-error').hidden=true;toast(dirty()?'本次提交已保存，后续编辑仍需保存':'配置已保存，下次调用生效');}
-  catch(error){reportError(error);}finally{busy=false;$('#save').textContent='保存配置';updateSaveState();}
+  const changes=[];
+  for(const kind of ['defaults','presets'])for(const key of new Set([...Object.keys(saved[kind]),...Object.keys(draft[kind])]))if(JSON.stringify(saved[kind][key])!==JSON.stringify(draft[kind][key]))changes.push({kind,key,value:copy(draft[kind][key]??null),expected:recordRevisions[kind+'.'+key]??missingRecordRevision});
+  const submitted=copy(draft),request_id=crypto.randomUUID();
+  try{
+    let result;
+    try {result=await api('/api/as/save',{changes,request_id});}
+    catch(error){
+      if(error.status && error.status<500)throw error;
+      saveUncertain=true;
+      const latest=await api('/api/state'),receipt=latest.settingsReport.last_save;
+      if(receipt?.request_id!==request_id)throw new Error('原保存结果尚未确认，草稿已保留；请让 Agent 核对文件与原操作，当前不会重试。');
+      result={settingsReport:latest.settingsReport,field_results:receipt.field_results};saveUncertain=false;
+    }
+    const remaining=changes.filter(change=>result.field_results[change.kind+'.'+change.key]?.status!=='saved');
+    const newer=[];
+    for(const kind of ['defaults','presets'])for(const key of new Set([...Object.keys(submitted[kind]),...Object.keys(draft[kind])]))
+      if(JSON.stringify(submitted[kind][key])!==JSON.stringify(draft[kind][key]))newer.push({kind,key,value:copy(draft[kind][key]??null)});
+    draft=copy(result.settingsReport.settings);
+    for(const change of remaining)change.value===null?delete draft[change.kind][change.key]:draft[change.kind][change.key]=change.value;
+    for(const change of newer)change.value===null?delete draft[change.kind][change.key]:draft[change.kind][change.key]=change.value;
+    acceptSave(result.settingsReport);
+    for(const change of remaining)recordRevisions[change.kind+'.'+change.key]=change.expected;
+    const errors=Object.entries(result.field_results).filter(([,r])=>r.status==='failed').map(([id,r])=>id+'：'+r.message);
+    $('#app-error').hidden=!errors.length;$('#app-error').textContent=errors.join('；');
+    if(remaining.some(change=>result.field_results[change.kind+'.'+change.key]?.code==='conflict')){
+      const button=document.createElement('button');button.textContent='重新读取并核对草稿';
+      button.addEventListener('click',async()=>{
+        const edits=[];
+        for(const kind of ['defaults','presets'])for(const key of new Set([...Object.keys(saved[kind]),...Object.keys(draft[kind])]))
+          if(JSON.stringify(saved[kind][key])!==JSON.stringify(draft[kind][key]))edits.push({kind,key,value:copy(draft[kind][key]??null)});
+        try {await load();for(const edit of edits)edit.value===null?delete draft[edit.kind][edit.key]:draft[edit.kind][edit.key]=edit.value;
+          render();toast('已读取当前配置；请核对保留的草稿后再保存。');}catch(error){reportError(error);}
+      });$('#app-error').append(button);
+    }
+    toast('已保存 '+(changes.length-remaining.length)+' 项'+(remaining.length?'；失败草稿已保留':!readiness.ready?'；现有配置仍需修复':'，下次调用生效'));
+  }catch(error){reportError(error);}finally{busy=false;$('#save').textContent='保存修改';updateSaveState();}
 });
 $('#discard').addEventListener('click',()=>{draft=copy(saved);editorDrafts={};initializing=false;render();toast('已放弃未保存的变更');});
 $('#refresh-catalog').addEventListener('click',async()=>{

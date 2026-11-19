@@ -54,6 +54,7 @@ class Configuration(Adapter):
         self.explicit = options.get("connection")
         self.draft_id = new_id()
         self._profile_cache = None
+        self._baselines = {}
         self.manager = Manager(self.store, options['frp_skill'], options.get('candidate'))
 
     def _profiles(self, force=False):
@@ -89,19 +90,31 @@ class Configuration(Adapter):
             status = client.status()
         except ConfigError as exc:
             status = {"error": exc.report(), "modes": {"official": {"running": None}}}
-        context["_update_revision"] = self.store.update_preference()[1]
         profiles = self._profiles(force_profiles)
         profile_revision = profiles.get("revision") or json.dumps(profiles, sort_keys=True)
-        revision = hashlib.sha256((snap.revision + "|" + context["revision"] + "|" + context["_update_revision"]
+        revision = hashlib.sha256((snap.revision + "|" + context["revision"]
                                    + "|" + profile_revision).encode()).hexdigest()
         return snap, cid, record, context, status, revision, profiles
 
     def config(self):
         try:
+            update, update_revision = self.store.update_preference()
+            update_error = None
+        except ConfigError as error:
+            update, update_revision, update_error = None, 'unreadable', str(error)
+        update_field = dict(id='update', label='自动检查 Skill 更新', type='boolean', value=update,
+            default=True, explicit=True, group='高级', scope='个人设置', path=str(self.store.home / '.env'),
+            help=update_error or '只检查与提醒；应用更新仍逐次确认。此开关固定从个人配置读取。')
+        try:
             snap, cid, record, context, status, revision, profiles = self._snapshot()
         except ConfigError as exc:
-            return {"revision": "blocked", "fields": [], "note": str(exc),
+            revision = 'blocked-' + update_revision
+            self._baselines[revision] = {'connection': 'blocked', 'update': update_revision}
+            return {"revision": revision, "fields": [update_field], "note": str(exc),
                     "validation": "配置来源待修复：" + exc.source}
+        connection_revision = revision
+        revision = hashlib.sha256((revision + '|' + update_revision).encode()).hexdigest()
+        self._baselines[revision] = {'connection': connection_revision, 'update': update_revision}
         suffix = context["domain_suffix"].get("value", "")
         running = status.get("modes", {}).get("official", {}).get("running")
         route = status.get("route", {})
@@ -179,9 +192,7 @@ class Configuration(Adapter):
         fields.append(dict(id="monitor", label="连接期间自动恢复", type="boolean", value=record["auto_recover"],
             default=True, explicit=True, group="恢复", scope="当前连接", path=target,
             help="连接期间生效；断开时停止，不默认登录自启。关闭恢复仍检测身份失效并停止旧转发。"))
-        fields.append(dict(id="update", label="自动检查 Skill 更新", type="boolean", value=self.store.update_preference()[0],
-            default=True, explicit=True, group="高级", advanced=True, scope="个人设置", path=str(self.store.home / ".env"),
-            help="只检查与提醒；应用更新仍逐次确认。此开关固定从个人配置读取。"))
+        fields.append(update_field)
         return {"revision": revision, "fields": fields,
                 "note": "使用真实配置加载器保存连接。已有连接的变更先检查再应用；首次配置保存后由 Agent 连接。独立密钥用于手机 Token 模式。",
                 "validation": "本机配置格式、来源与修订检查；公网和手机未验证",
@@ -189,6 +200,37 @@ class Configuration(Adapter):
                          "continuation": "继续配置 Hermes 手机接入，核验目标电脑、FRP 和入口认证。"}}
 
     def save(self, changes, revision):
+        if not isinstance(changes, dict) or not changes:
+            raise UIError('changes', '没有待保存的配置。', 422)
+        baseline = self._baselines.get(revision)
+        if baseline is None:
+            raise UIError('conflict', '请重新载入并核对草稿。', 409)
+        results = {}
+        connection = {key: value for key, value in changes.items() if key != 'update'}
+        if connection:
+            try:
+                self._save_connection(connection, baseline['connection'])
+                results.update({key: {'status': 'saved'} for key in connection})
+            except UIError as error:
+                status = 'uncertain' if error.code == 'apply_and_restore_failed' else 'failed'
+                results.update({key: {'status': status, 'code': error.code, 'message': error.message} for key in connection})
+        if 'update' in changes:
+            try:
+                change = changes['update']
+                if not isinstance(change, dict) or change.get('op') not in ('set', 'unset'):
+                    raise ConfigError('changes', '更新偏好格式无效。')
+                self.store.save_update_preference(baseline['update'], True if change['op'] == 'unset' else change.get('value'))
+                results['update'] = {'status': 'saved'}
+            except ConfigError as error:
+                results['update'] = {'status': 'failed', 'code': error.code, 'message': str(error)}
+        if not any(result['status'] in ('saved', 'uncertain') for result in results.values()):
+            error = next(iter(results.values()))
+            raise UIError(error['code'], error['message'], 409 if error['code'] in ('conflict', 'preflight_unknown') else 422)
+        result = self.config()
+        result.setdefault('task', {})['field_results'] = results
+        return result
+
+    def _save_connection(self, changes, revision):
         try:
             snap, cid, record, context, status, current, profiles = self._snapshot(force_profiles=True)
             if revision != current:
@@ -198,17 +240,6 @@ class Configuration(Adapter):
             if (not isinstance(changes, dict) or not changes or
                     set(changes) - ({"name", "subdomain", "profile", "access_key", "monitor", "update"} | permission_ids)):
                 raise ConfigError("readonly", "变更包含只读或未验证字段。")
-            auto_update = None
-            if "update" in changes:
-                change = changes["update"]
-                if not isinstance(change, dict) or change.get("op") not in ("set", "unset"):
-                    raise ConfigError("changes", "变更格式无效。")
-                auto_update = True if change["op"] == "unset" else change.get("value")
-                if type(auto_update) is not bool:
-                    raise ConfigError("invalid_update", "自动检查更新须为布尔值。")
-                if len(changes) == 1:
-                    self.store.save_update_preference(context["_update_revision"], auto_update)
-                    return self.config()
             values = copy.deepcopy(record)
             for key, change in changes.items():
                 if key == "update":
@@ -265,7 +296,7 @@ class Configuration(Adapter):
                     values["frp"]["source_binding"] = context["source_binding"]
             collection["connections"][cid] = values
             self.manager.apply(cid, snap, collection, default_id=cid if first and not snap.selector else None,
-                               auto_update=auto_update)
+                               auto_update=None)
             self.explicit = cid
             return self.config()
         except ConfigError as exc:

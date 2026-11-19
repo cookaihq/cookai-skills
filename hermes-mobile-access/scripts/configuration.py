@@ -231,7 +231,7 @@ class ConfigStore:
     def snapshot(self):
         chosen, observations = {}, []
         for source, values, raw in self.layers():
-            observations.append([source, raw.hex() if raw is not None else values])
+            observations.append([source, {key: values.get(key) for key in (SELECTOR, COLLECTION)}])
             for key in (SELECTOR, COLLECTION):
                 if key not in chosen and values.get(key) not in (None, ""):
                     chosen[key] = (values[key], source)
@@ -248,7 +248,8 @@ class ConfigStore:
             if self.scope == "personal" and not self.use_local_key:
                 target = None
         if target:
-            observations.append([str(target), read_file(target).hex()])
+            target_values = parse_env(read_file(target), target)
+            observations.append([str(target), {key: target_values.get(key) for key in (SELECTOR, COLLECTION)}])
         revision = hmac.new(self.key, json.dumps(observations, sort_keys=True).encode(), hashlib.sha256).hexdigest()
         return Snapshot(collection, source, selector, selector_source, revision, target)
 
@@ -287,7 +288,7 @@ class ConfigStore:
                 value = match[2]
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                     value = value[1:-1]
-        return value != "0", hmac.new(self.key, raw, hashlib.sha256).hexdigest()
+        return value != "0", hmac.new(self.key, value.encode(), hashlib.sha256).hexdigest()
 
     def save_update_preference(self, revision, enabled):
         if type(enabled) is not bool:

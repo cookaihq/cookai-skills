@@ -70,7 +70,7 @@ def masked(value):
 def public_config(snapshot):
     if "layers" not in snapshot or snapshot.get("configuration_protocol") != "field-scopes-v1":
         raise UIError("contract", "配置适配器需要迁移到逐项范围协议；请同时升级适配器和共用核心。", 422)
-    result = {k: snapshot[k] for k in ("configuration_protocol", "revision", "directory_revision", "task", "validation", "note", "default_targets", "validation_errors") if k in snapshot}
+    result = {k: snapshot[k] for k in ("configuration_protocol", "revision", "directory_revision", "preview_tokens", "task", "validation", "note", "default_targets", "validation_errors", "save_status") if k in snapshot}
     presentation = snapshot.get("presentation", {})
     result["presentation"] = {k: presentation[k] for k in ("title", "description", "focus", "initial_target") if k in presentation}
     # Compute before masking; adapters may additionally report business-specific missing conditions.
@@ -86,7 +86,7 @@ def public_config(snapshot):
     result["fields"] = []
     allowed = ("id", "config_key", "label", "type", "sensitive", "required", "advanced", "readonly", "active", "group", "help",
                "choices", "choice_labels", "depends_on", "targets", "effect", "edit_revision",
-               "directory_scope", "default", "anchor")
+               "directory_scope", "default", "anchor", "dependencies", "atomic_group")
     for field in snapshot["fields"]:
         item = {k: field[k] for k in allowed if k in field}
         def public_value(record, keys):
@@ -99,11 +99,14 @@ def public_config(snapshot):
         item["effective"] = public_value(field["effective"], ("source", "status", "message", "empty"))
         item["rows"] = [public_value(row, ("layer", "present", "status", "message")) for row in field["rows"]]
         result["fields"].append(item)
-    plan_keys = ("target", "state", "cleanup", "writes_target", "conflict", "choice_token", "input_changed", "uses_target", "message")
+    plan_keys = ("target", "state", "cleanup", "cleanup_token", "writes_target", "conflict", "choice_token", "input_changed", "uses_target", "message")
     if "scope_plans" in snapshot:
         result["scope_plans"] = {key: {name: plan[name] for name in plan_keys if name in plan}
                                  for key, plan in snapshot["scope_plans"].items() if key in known}
     result["unchanged_fields"] = [key for key in snapshot.get("unchanged_fields", []) if key in known]
+    if 'field_results' in snapshot:
+        result['field_results'] = {key: {name: record[name] for name in ('status', 'code', 'message') if name in record}
+                                   for key, record in snapshot['field_results'].items() if key in known}
     if "directory_targets" in snapshot:
         result["directory_targets"] = {key: path for key, path in snapshot["directory_targets"].items()
                                        if key in known and isinstance(path, str)}

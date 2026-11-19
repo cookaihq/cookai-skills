@@ -60,14 +60,23 @@ class VideoConfigDrafts {
   pending() { return Object.keys(this.files).filter(t => Object.keys(this.changes(t)).length || this.parked(t)); }
   discard(target) { delete this.files[target]; delete this.secrets[target]; }
   acknowledge(target) { this.file(target).review = false; }
-  rebase(snapshot, savedTarget = null) {
+  rebase(snapshot, savedTarget = null, results = null) {
     const changed = snapshot.revision !== this.snapshot.revision, pending = this.pending();
+    const previous = savedTarget ? structuredClone(this.file(savedTarget)) : null;
+    const submitted = savedTarget ? this.changes(savedTarget) : {};
     const parked = savedTarget && this.parked(savedTarget) ? { ...this.file(savedTarget),
       edits: Object.fromEntries(Object.entries(this.file(savedTarget).edits).filter(([id]) => this.field(id).group === "vision")) } : null;
     if (savedTarget) this.discard(savedTarget);
     this.snapshot = snapshot;
     this.secrets = {};
     if (parked) this.files[savedTarget] = { ...parked, review: false };
+    if (previous && results) {
+      const remaining = Object.fromEntries(Object.entries(previous.edits).filter(([id]) => results[id]?.status !== 'saved'));
+      const visionFailed = Object.keys(submitted).some(id => (id === 'inherit' || this.field(id)?.group === 'vision') && results[id]?.status !== 'saved');
+      this.files[savedTarget] = { ...this.file(savedTarget), edits: remaining,
+        mode: visionFailed ? previous.mode : this.baseMode(savedTarget),
+        review: Object.values(results).some(result => result.code === 'conflict') };
+    }
     if (changed) for (const target of pending) if (target !== savedTarget) this.file(target).review = true;
   }
 }

@@ -8,107 +8,91 @@ globalThis.location={search:''};
 function snapshot(){
   return {configuration_protocol:'field-scopes-v1',revision:'r1',default_targets:{global:'global',project:'project'},readiness:{missing:[]},validation_errors:[],
     layers:[{id:'project',scope:'project',name:'Project',path:'/project/.env',readonly:false},{id:'global',scope:'global',name:'Global',path:'/global/.env',readonly:false}],
-    fields:[['a','saved-a','project'],['b','saved-b','global'],['empty','',null],['off',false,'project'],['zero',0,'project'],['list',[],'global']].map(([id,value,source])=>({id,label:id,type:typeof value==='boolean'?'boolean':typeof value==='number'?'number':Array.isArray(value)?'list':'text',targets:['project','global'],edit_revision:id+'-1',effective:{value,source,empty:value==='',status:source?'set':'optional'},rows:[{layer:'project',present:source==='project',status:source==='project'?'effective':'missing',value:source==='project'?value:null},{layer:'global',present:source==='global',status:source==='global'?'effective':'missing',value:source==='global'?value:null}]}))};
+    fields:[['a','saved-a','project'],['b','saved-b','global'],['empty','',null],['off',false,'project'],['zero',0,'project'],['list',[],'global']].map(([id,value,source])=>({id,config_key:'REAL_'+id,label:'Setting '+id,type:typeof value==='boolean'?'boolean':typeof value==='number'?'number':Array.isArray(value)?'list':'text',targets:['project','global'],edit_revision:id+'-1',effective:{value,source,empty:value==='',status:source?'set':'optional'},rows:[{layer:'project',present:source==='project',status:source==='project'?'effective':'missing',value:source==='project'?value:null},{layer:'global',present:source==='global',status:source==='global'?'effective':'missing',value:source==='global'?value:null}]}))};
 }
-function fixture(api=async()=>({})){const ui=new Configuration({root:{addEventListener(){},querySelectorAll(){return[];}},api,render(){},reload(){},toast(){}});ui.paint=()=>{};ui.rerender=()=>{};ui.queuePreview=function(){this.invalidate();};ui.set(snapshot());return ui;}
+function fixture(api=async()=>({config:snapshot()})){
+  const ui=new Configuration({root:{addEventListener(){},querySelectorAll(){return[];}},api,render(){},reload(){},toast(){}});
+  ui.paint=()=>{};ui.rerender=()=>{};ui.queuePreview=function(){this.invalidate();};ui.set(snapshot());return ui;
+}
+function ready(ui,ids=['a','b']){ui.preview={...snapshot(),field_results:Object.fromEntries(ids.map(id=>[id,{status:'ready'}]))};}
+const click=(ui,config,id,layer)=>ui.onClick({target:{closest:()=>({dataset:{config,id,layer}})}});
 
-test('empty uses allowed global default without claiming file source; typed values are present',()=>{
-  const ui=fixture();assert.equal(ui.fieldTarget('empty'),'global');
-  const html=ui.fieldHTML(ui.field('empty'));assert.match(html,/scope-block [^\"]*is-default/);assert.doesNotMatch(html,/aria-label="当前生效"/);
+test('empty defaults and typed false/zero/list retain their meaning',()=>{
+  const ui=fixture();assert.equal(ui.fieldTarget('empty'),'global');assert.match(ui.fieldHTML(ui.field('empty')),/is-default/);
   for(const id of ['off','zero','list'])assert.equal(ui.field(id).effective.empty,false);
-  const sole=snapshot();sole.fields[2].targets=['project'];ui.set(sole);assert.equal(ui.fieldTarget('empty'),'project');
-});
-test('inspection and clearing a project input do not move its draft target',()=>{
-  const ui=fixture();ui.stage('a',{op:'set',value:'edited'});ui.selectFieldTarget('a','global');
-  assert.equal(ui.fieldTarget('a'),'project');assert.equal(ui.payload().files.project.a.value,'edited');assert.deepEqual(ui.payload().switches,{});
-  ui.stage('a',{op:'set',value:''});assert.equal(ui.fieldTarget('a'),'project');
+  const state=snapshot();state.presentation={initial_target:'project'};delete ui.snapshot;ui.set(state);
+  assert.equal(ui.fieldTarget('empty'),'project');assert.equal(ui.fieldTarget('b'),'global');
 });
 
-test('an entry default applies only when the field has no writable saved source',()=>{
-  const ui=fixture(),state=snapshot();state.presentation={initial_target:'project'};
-  delete ui.snapshot;ui.set(state);
-  ui.stage('b',{op:'set',value:'edited-global'});
-  assert.equal(ui.fieldTarget('b'),'global');
-  assert.equal(ui.payload().files.global.b.value,'edited-global');
-  assert.equal(ui.fieldTarget('empty'),'project');
-});
-test('choices expire on new input, destination or snapshot revision',()=>{
-  const ui=fixture();ui.requestSwitch('a','global');Object.assign(ui.switchIntents.a,{choice:'target',choice_token:'old'});
-  ui.stage('a',{op:'set',value:'new'});assert.equal(ui.switchIntents.a.choice,undefined);
-  Object.assign(ui.switchIntents.a,{choice:'target',choice_token:'old'});ui.requestSwitch('a','project');assert.equal(ui.switchIntents.a,undefined);
-  ui.requestSwitch('a','global');Object.assign(ui.switchIntents.a,{choice:'target',choice_token:'old'});const next=snapshot();next.revision='r2';ui.set(next);assert.equal(ui.switchIntents.a.choice,undefined);
-});
-test('single save consumes only its fields, preserving and rechecking other drafts',async()=>{
-  const next=snapshot();next.revision='r2';next.fields[0].effective.value='new-a';next.fields[0].edit_revision='a-2';next.fields[1].effective.value='external-b';next.fields[1].edit_revision='b-2';
-  const requests=[];const ui=fixture(async(path,request)=>{requests.push([path,request]);return{config:path==='/api/save'?next:snapshot()};});
-  ui.stage('a',{op:'set',value:'new-a'});ui.stage('b',{op:'set',value:'my-b'});
-  const result=await ui.save('a');assert.equal(result.saved,true);assert.equal(ui.hasFieldDraft('a'),false);assert.equal(ui.draftValue('b'),'my-b');assert.equal(ui.fieldTarget('b'),'global');assert.equal(ui.needsReview.b,true);
-  for(const [,request]of requests)assert.deepEqual(Object.keys(request.changes.files),['project']);
-});
-test('unknown save result blocks retry until reread; expiry preserves typed input',async()=>{
-  let saves=0;const ui=fixture(async(path)=>{if(path==='/api/save'){saves++;throw Error('lost response');}return{config:snapshot()};});
-  ui.stage('a',{op:'set',value:'keep-this'});await ui.save('a');assert.equal(ui.uncertain,true);await ui.save('a');assert.equal(saves,1);assert.equal(ui.draftValue('a'),'keep-this');
-  ui.set(snapshot());assert.equal(ui.uncertain,false);ui.expire();assert.equal(ui.draftValue('a'),'keep-this');assert.equal(ui.canSave(),false);await ui.save('a');assert.equal(saves,1);
+test('scope cancellation preserves draft and target without writing',async()=>{
+  const requests=[],state=snapshot();state.scope_plans={a:{target:'global',state:'choice',conflict:true,cleanup:['project'],choice_token:'c',cleanup_token:'d'}};
+  const ui=fixture(async(path,request)=>{requests.push([path,request]);return{config:state};});
+  ui.stage('a',{op:'set',value:'edited'});ui.confirmScope=async()=>null;
+  const before=structuredClone(ui.payload());assert.equal(await ui.requestSwitch('a','global'),false);
+  assert.deepEqual(ui.payload(),before);assert.equal(ui.fieldTarget('a'),'project');
+  assert.deepEqual(requests.map(([path])=>path),['/api/preview']);
 });
 
-test('rereading a completed pure switch consumes its lost-response intent',async()=>{
-  const projected=snapshot();projected.fields[0].effective={value:'target-b',source:'global',empty:false};projected.fields[0].edit_revision='a-global-b';
-  let saves=0;
-  const ui=fixture(async path=>{if(path==='/api/save'){saves++;throw Error('lost response');}return{config:projected};});
-  ui.requestSwitch('a','global','existing');await ui.save('a');
-  assert.equal(ui.uncertain,true);assert.equal(saves,1);
-  const reread=structuredClone(projected);reread.revision='r2';ui.set(reread);
-  assert.equal(ui.count(),0);assert.equal(ui.hasFieldDraft('a'),false);
-  assert.equal(ui.needsReview.a,undefined);assert.deepEqual(ui.payload().switches,{});
+test('scope confirmation stages choice and cleanup; only bottom save writes',async()=>{
+  const requests=[],state=snapshot();state.scope_plans={a:{target:'global',state:'choice',conflict:true,cleanup:['project'],choice_token:'c',cleanup_token:'d'}};
+  const saved=snapshot();saved.fields[0].effective.source='global';saved.fields[0].edit_revision='a-2';saved.field_results={a:{status:'saved'}};
+  const ui=fixture(async(path,request)=>{requests.push([path,request]);return{status:'saved',config:path==='/api/save'?saved:state};});
+  ui.confirmScope=async()=>({content:'target'});
+  assert.equal(await ui.requestSwitch('a','global'),true);assert.equal(ui.fieldTarget('a'),'global');
+  assert.deepEqual(ui.switchIntents.a,{target:'global',mode:'input',choose_content:true,choice:'target',choice_token:'c',cleanup_token:'d'});
+  assert.match(ui.selectionHTML('a',ui.switchIntents.a,state.scope_plans.a),/保存后将清除/);
+  for(const text of ['REAL_a','/project/.env','Setting a'])assert.ok(ui.selectionHTML('a',ui.switchIntents.a,state.scope_plans.a).includes(text));
+  await assert.rejects(ui.save('a'),/单项保存入口已移除/);assert.equal(requests.filter(([path])=>path==='/api/save').length,0);
+  ready(ui,['a']);await ui.save();assert.equal(requests.filter(([path])=>path==='/api/save').length,1);assert.equal(ui.count(),0);
 });
 
-test('a switch plan names every cleaned file and its shared impact before applying',async()=>{
-  const state=snapshot();state.layers[0].scope_label='Project shared impact';
-  state.scope_plans={a:{target:'global',state:'ready',cleanup:['project'],message:'Switch is ready'}};
-  let inspected;const response=new Promise(resolve=>{inspected=resolve;});
-  const ui=fixture(async()=>{inspected();return{config:state};});
-  ui.set(state);ui.queuePreview=Configuration.prototype.queuePreview;
-  ui.requestSwitch('a','global','existing');await response;await Promise.resolve();
-  const html=ui.selectionHTML('a');
-  assert.match(html,/\/project\/\.env/);assert.match(html,/Project shared impact/);
-  assert.match(html,/不会.*恢复/);
+test('low to high stages without confirmation and cancel restores original target',async()=>{
+  const ui=fixture();ui.stage('b',{op:'set',value:'edited'});ui.confirmScope=async()=>assert.fail('no cleanup requires confirmation');
+  await ui.requestSwitch('b','project');assert.equal(ui.payload().files.project.b.value,'edited');
+  await click(ui,'cancel-switch','b');assert.equal(ui.fieldTarget('b'),'global');assert.equal(ui.draftValue('b'),'edited');
 });
 
-test('directory controls share drafts, stay outside ordinary groups, and reset at the anchor',async()=>{
-  const ui=fixture(),state=snapshot();
-  state.fields.push({id:'custom_location',config_key:'CUSTOM_LOCATION',label:'全局配置目录',type:'text',
-    directory_scope:'global',default:'/defaults',anchor:'/defaults/config.json',targets:['global'],
-    edit_revision:'directory-1',effective:{value:'/defaults',source:'default',empty:false},rows:[]});
-  ui.set(state);
-  assert.match(ui.directoryToggleHTML(),/aria-expanded="false"/);
-  assert.match(ui.html(),/id="configuration-directories"[^>]*hidden/);
-  ui.stage('custom_location',{op:'set',value:'/new root'});
-  ui.stage('b',{op:'set',value:'business edit'});
-  await ui.onClick({target:{closest:()=>({dataset:{config:'directories'}})}});
-  assert.match(ui.directoryToggleHTML(),/aria-expanded="true"/);
-  assert.equal(ui.draftValue('custom_location'),'/new root');
-  assert.equal(ui.payload().files.global.b.value,'business edit');
-  const html=ui.html();
-  assert.equal((html.match(/data-config-field="custom_location"/g)||[]).length,1);
-  assert.ok(html.indexOf('configuration-directories')<html.indexOf('class="heading"'));
-  await ui.onClick({target:{closest:()=>({dataset:{config:'reset-directory',id:'custom_location'}})}});
-  assert.deepEqual(ui.payload().files.global.custom_location,{op:'unset'});
-  assert.equal(ui.payload().files.global.b.value,'business edit');
-  assert.match(ui.html(),/value="\/defaults"/);
+test('partial save consumes success and preserves failed input and target',async()=>{
+  const next=snapshot();next.revision='r2';next.fields[0].edit_revision='a-2';next.fields[0].effective.value='new-a';next.field_results={a:{status:'saved'},b:{status:'failed',message:'bad value'}};
+  const checked=snapshot();checked.validation_errors=['bad value'];checked.field_results={a:{status:'ready'},b:{status:'failed'}};
+  const ui=fixture(async(path)=>({status:'partial',config:path==='/api/save'?next:checked}));
+  ui.stage('a',{op:'set',value:'new-a'});ui.stage('b',{op:'set',value:'bad-b'});ready(ui);
+  assert.equal((await ui.save()).saved,true);assert.equal(ui.hasFieldDraft('a'),false);
+  assert.equal(ui.draftValue('b'),'bad-b');assert.equal(ui.fieldTarget('b'),'global');assert.equal(ui.saveResults.b.status,'failed');
+  ui.stage('b',{op:'set',value:'fixed'});assert.equal(ui.saveResults.b,undefined);
 });
 
-test('directory preview revision binds full saves and expires when drafts change',async()=>{
-  const requests=[];
-  const ui=fixture(async(path,request)=>{requests.push([path,request]);return {config:snapshot()};});
-  ui.stage('b',{op:'set',value:'business edit'});
-  ui.preview={...snapshot(),directory_revision:'candidate-roots-1'};
-  assert.equal(ui.payload().directory_revision,'candidate-roots-1');
-  assert.equal(ui.payload('b').directory_revision,undefined);
-  assert.equal(ui.payload(['b']).directory_revision,undefined);
-  await ui.save();
-  assert.equal(requests.length,2);
-  for(const [,request]of requests)assert.equal(request.changes.directory_revision,'candidate-roots-1');
-  ui.preview={...snapshot(),directory_revision:'candidate-roots-2'};
-  ui.stage('b',{op:'set',value:'another edit'});
-  assert.equal(ui.payload().directory_revision,undefined);
+test('lost response uses original receipt without a second write',async()=>{
+  const completed=snapshot();completed.field_results={a:{status:'saved'}};let saves=0,lookup;
+  const ui=fixture(async(path,request)=>{if(path==='/api/save'){saves++;throw Error('lost response');}if(path==='/api/save-result'){lookup=request;return{status:'saved',config:completed};}return{config:snapshot()};});
+  ui.stage('a',{op:'set',value:'keep'});ready(ui,['a']);await ui.save();
+  assert.equal(saves,1);assert.equal(lookup.request_id,ui.saveRequestId);assert.equal(ui.count(),0);assert.equal(ui.uncertain,false);
+});
+
+test('unknown result blocks retries; expiry preserves failed drafts',async()=>{
+  const projected=snapshot();projected.fields[0].edit_revision='a-2';
+  let saves=0;const ui=fixture(async path=>{if(path==='/api/save'){saves++;throw Error('lost');}return{status:'unknown',config:path==='/api/preview'?projected:snapshot()};});
+  ui.stage('a',{op:'set',value:'keep'});ready(ui,['a']);await ui.save();assert.equal(ui.uncertain,true);
+  await ui.save();assert.equal(saves,1);assert.equal(ui.draftValue('a'),'keep');
+  ui.set(snapshot());ui.expire();assert.equal(ui.draftValue('a'),'keep');assert.equal(ui.canSave(),false);
+});
+
+test('new input invalidates confirmations; unrelated reload preserves them',async()=>{
+  const ui=fixture();await ui.requestSwitch('a','global');Object.assign(ui.switchIntents.a,{choice:'target',choice_token:'old',cleanup_token:'clean'});
+  const next=snapshot();next.revision='r2';next.fields[1].edit_revision='b-2';ui.set(next);
+  assert.equal(ui.switchIntents.a.choice,'target');ui.stage('a',{op:'set',value:'new'});
+  assert.equal(ui.switchIntents.a.choice,undefined);assert.equal(ui.switchIntents.a.cleanup_token,undefined);
+});
+
+test('file removal cancellation preserves input and confirmation stages unset',async()=>{
+  const paths=[],ui=fixture(async path=>{paths.push(path);return{config:snapshot()};});
+  ui.stage('a',{op:'set',value:'old draft'});await ui.requestFileRemoval('a','project');ui.dismissFileRemoval();assert.equal(ui.draftValue('a'),'old draft');
+  await ui.requestFileRemoval('a','project');await click(ui,'confirm-file-removal','a','project');
+  assert.deepEqual(ui.payload().files.project.a,{op:'unset'});assert.ok(paths.every(path=>path==='/api/preview'));
+});
+
+test('directory previews bind full drafts and expire on edits',()=>{
+  const ui=fixture();ui.stage('b',{op:'set',value:'edit'});ui.preview={...snapshot(),preview_tokens:{b:'candidate-1'}};
+  assert.deepEqual(ui.payload().preview_tokens,{b:'candidate-1'});assert.equal(ui.payload('b').preview_tokens,undefined);
+  ui.stage('b',{op:'set',value:'edit again'});assert.equal(ui.payload().preview_tokens,undefined);
 });

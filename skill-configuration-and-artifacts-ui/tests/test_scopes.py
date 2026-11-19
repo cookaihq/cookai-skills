@@ -143,7 +143,7 @@ class ScopeTests(unittest.TestCase):
                 if calls == 2: raise failure
                 original(path, raw)
             with patch.object(self.store.transaction, 'write', side_effect=fail_second):
-                with self.assertRaises(type(failure)): self.save(request)
+                with self.assertRaises(UIError if isinstance(failure, Exception) else type(failure)): self.save(request)
             self.store.snapshot()  # recover an interrupted transaction before retry
             for path, raw in before.items(): self.assertEqual(raw, path.read_bytes())
             self.assertFalse(self.store.transaction.journal.exists())

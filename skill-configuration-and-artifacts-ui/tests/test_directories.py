@@ -85,7 +85,7 @@ class Directories(unittest.TestCase):
             return original_write(instance, path, raw)
         request = self.request()
         self.approve(request, self.store.config()['revision'])
-        with patch.object(JsonTransaction, 'write', fail_new), self.assertRaises(OSError):
+        with patch.object(JsonTransaction, 'write', fail_new), self.assertRaises(UIError):
             self.store.save(request, self.store.config()['revision'])
         self.assertEqual(self.old.read_bytes(), before)
         self.assertFalse((self.new / 'config.json').exists())

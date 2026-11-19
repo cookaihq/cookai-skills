@@ -1,8 +1,8 @@
 ---
 name: as
-description: v1.2.0｜仅显式调用，通过 Orca CLI 在当前分支按默认配置或指定预设新建 Agent 会话，可发送首条消息。
+description: v1.3.0｜仅显式调用，通过 Orca CLI 在当前分支按默认配置或指定预设新建 Agent 会话，可发送首条消息。
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
 disable-model-invocation: true
 compatibility: Requires Orca, uv >= 0.8, Git and a locally installed Codex or Claude Code. Windows native and macOS entry points; host invocation differs.
 ---

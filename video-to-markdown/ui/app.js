@@ -342,7 +342,7 @@ $("reload").addEventListener("click", async () => {
   try {
     const latest = await api("/api/state"), receipt = latest.config.fields.find(f => f.id === "save-receipt")?.effective.value;
     const recovered = uncertain && receipt?.request_id === uncertain.id && receipt.target === uncertain.target && receipt.after_revision === latest.config.revision;
-    store.rebase(latest.config, recovered ? uncertain.target : null);
+    store.rebase(latest.config, recovered ? uncertain.target : null, recovered ? receipt.field_results : null);
     if (uncertain && !recovered) store.file(uncertain.target).review = true;
     uncertain = null; needsReload = false; session = latest; csrf = latest.csrf; snapshot = latest.config; previews = {}; reveals = {}; lifetime(latest.lifetime);
     render(); message(recovered ? "已回读确认上次保存成功。配置已保存，请继续。" : "已重新读取；未保存草稿已保留。有变化的草稿需核对后再保存。");
@@ -354,15 +354,17 @@ $("settings").addEventListener("submit", async e => {
   if (!editable() || store.file(target).review || !Object.keys(changes()).length) return;
   const caps = field("capabilities").effective.value, method = val("method"), model = caps.models.find(m => m.id === val("model"));
   const unavailable = caps.choices.find(c => c.method === method)?.available === false || method === "host-agent" && model && (model.available === false || model.vision === false);
-  if (mode() !== "inherit" && unavailable && !store.file(target).future && (method !== row("method")?.value || val("model") !== row("model")?.value)) {
+  if (Object.keys(changes()).some(id=>field(id)?.group==='vision') && mode() !== "inherit" && unavailable && !store.file(target).future && (method !== row("method")?.value || val("model") !== row("model")?.value)) {
     return message("所选方式或模型当前不可用。请选择其他方式，或勾选仅保存供未来会话使用。", true, true);
   }
   const saveTarget = target, edits = changes(), revision = snapshot.revision, id = crypto.randomUUID();
   busy = true; updatePreview();
   try {
     const r = await api("/api/save", { target: saveTarget, changes: { ...edits, request_id: { op: "set", value: id } }, revision });
-    store.rebase(r.config, saveTarget); snapshot = r.config; reveals = {}; previews = {}; render();
-    message("已保存并回读：" + name(saveTarget) + "（" + layer(saveTarget).path + "）。实际生效：" + description(snapshot) + " · 来源：" + name(field("ask").effective.source) + "。请回到 Agent 对话发送：配置已保存，请继续。", false, true);
+    const results=r.config.task?.field_results||{}, failures=Object.entries(results).filter(([,result])=>result.status!=='saved');
+    store.rebase(r.config, saveTarget, results); snapshot = r.config; reveals = {}; previews = {}; render();
+    if(failures.some(([,result])=>result.status==='uncertain'))uncertain={id,target:saveTarget};
+    message(Object.entries(results).map(([id,result])=>(field(id)?.label||id)+'：'+(result.status==='saved'?'已保存并回读':result.message)).join('；') + (failures.length?'；失败草稿已保留。':'。实际生效来源：'+name(field('ask').effective.source)+'。'), !!failures.length, true);
   } catch (error) {
     if (error.unknown) uncertain = { id, target: saveTarget };
     if (error.code === "conflict") { store.file(saveTarget).review = true; needsReload = true; }
