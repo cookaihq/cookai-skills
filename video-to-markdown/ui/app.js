@@ -354,14 +354,19 @@ $("settings").addEventListener("submit", async e => {
   if (!editable() || store.file(target).review || !Object.keys(changes()).length) return;
   const caps = field("capabilities").effective.value, method = val("method"), model = caps.models.find(m => m.id === val("model"));
   const unavailable = caps.choices.find(c => c.method === method)?.available === false || method === "host-agent" && model && (model.available === false || model.vision === false);
+  const saveTarget = target, edits = changes(), revision = snapshot.revision, id = crypto.randomUUID(), withheld = {};
   if (Object.keys(changes()).some(id=>field(id)?.group==='vision') && mode() !== "inherit" && unavailable && !store.file(target).future && (method !== row("method")?.value || val("model") !== row("model")?.value)) {
-    return message("所选方式或模型当前不可用。请选择其他方式，或勾选仅保存供未来会话使用。", true, true);
+    const reason = "所选方式或模型当前不可用。请选择其他方式，或勾选仅保存供未来会话使用。";
+    for (const key of Object.keys(edits)) if (field(key)?.group === "vision") {
+      withheld[key] = { status: "failed", code: "unavailable", message: reason };
+      delete edits[key];
+    }
+    if (!Object.keys(edits).length) return message(reason + " 草稿已保留。", true, true);
   }
-  const saveTarget = target, edits = changes(), revision = snapshot.revision, id = crypto.randomUUID();
   busy = true; updatePreview();
   try {
     const r = await api("/api/save", { target: saveTarget, changes: { ...edits, request_id: { op: "set", value: id } }, revision });
-    const results=r.config.task?.field_results||{}, failures=Object.entries(results).filter(([,result])=>result.status!=='saved');
+    const results={...withheld,...r.config.task?.field_results}, failures=Object.entries(results).filter(([,result])=>result.status!=='saved');
     store.rebase(r.config, saveTarget, results); snapshot = r.config; reveals = {}; previews = {}; render();
     if(failures.some(([,result])=>result.status==='uncertain'))uncertain={id,target:saveTarget};
     message(Object.entries(results).map(([id,result])=>(field(id)?.label||id)+'：'+(result.status==='saved'?'已保存并回读':result.message)).join('；') + (failures.length?'；失败草稿已保留。':'。实际生效来源：'+name(field('ask').effective.source)+'。'), !!failures.length, true);

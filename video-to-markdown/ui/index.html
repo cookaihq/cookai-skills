@@ -10,7 +10,7 @@
 <main>
   <div class="heading"><div><h1>配置</h1><p>为视频内容整理，选好看图方式。</p></div><div class="context" id="project-label"></div></div>
   <section class="effective" aria-label="当前生效配置"><span class="effective-mark" aria-hidden="true">✓</span><div><span class="eyebrow">已保存 · 当前生效</span><div id="effective-value">正在读取…</div><small id="effective-capability"></small></div><span class="source-badge" id="effective-source"></span><button type="button" class="text-button" id="source-jump">查看来源 ↗</button></section>
-  <form id="settings" method="post" action="/api/save" aria-label="video-to-markdown 配置">
+  <form id="settings" method="post" action="/api/save" aria-label="video-to-markdown 配置" novalidate>
     <section class="panel scope-panel">
       <div class="scope-row"><div><h2>编辑与保存位置</h2><p id="scope-help"></p></div><div class="segmented" role="group" aria-label="编辑文件范围"><button type="button" data-scope="project">本项目</button><button type="button" data-scope="global">个人全局</button></div></div>
       <p class="target-line"><code id="target-path"></code></p>

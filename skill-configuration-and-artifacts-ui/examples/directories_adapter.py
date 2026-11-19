@@ -163,7 +163,13 @@ class DirectoryDemo(Adapter):
                   for row in field['rows'] if row['status'] == 'error'}
         if failed:
             paths = [layer['path'] for layer in prospective['layers'] if layer['id'] in failed]
-            raise UIError('target', '关联配置文件无法读取或格式无效：' + '、'.join(paths), 422)
+            message = '关联配置文件无法读取或格式无效：' + '、'.join(paths)
+            if saving:
+                raise UIError('target', message, 422)
+            # Preview reports the real source errors without generating a write
+            # candidate. Save repeats the check under the transaction lock.
+            prospective.update(validation_errors=[message], scope_plans={}, unchanged_fields=[])
+            return prospective, {}
         baseline_revision = prospective['revision']
         if selectors:
             check_directory_revision(request, baseline_revision, saving=saving)
