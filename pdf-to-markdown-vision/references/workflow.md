@@ -26,14 +26,15 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
 ```json
 {
   "printed_page": "8",
-  "review": "已对照源页核对标题、每个标注及裁图四边。",
+  "review": "已对照源页核对独立原文、图文归属及完整裁图四边；解释来自实际可观察内容。",
   "blocks": [
     {
       "id": "panel",
       "bbox": [0.05, 0.10, 0.95, 0.85],
-      "markdown": "原始图注；密集标注按对象成组转写。没有这些内容时可为\"\"。",
+      "markdown": "原始图注或独立原文。没有这些内容时可为\"\"。",
       "image": true,
-      "alt": "简短图内文字及其角色，或密集标注图的简短标识",
+      "alt": "可观察图片对象的简短标识",
+      "image_understanding": "根据实际看图得到的可靠解释；无法整体理解时省略该字段或传空字符串。",
       "rules": ["reading-order", "visual-unit"],
       "reason": "这些文字通过指示线与面板位置相连。"
     }
@@ -42,9 +43,9 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
 }
 ```
 
-`image: true` 使程序从保存的源 PDF 实际裁图并放在该区域文字之前；标题可作为前一个独立文字区域。简短图内标题/轴标/单位等按 `visual-unit` 写入 `alt`，保留原文字面字符；程序转义 Markdown 特殊字符，Agent 不预先转义该 JSON 字段。源图注和必要的密集标注写入 `markdown`；没有这些内容时，图片区域可显式使用 `markdown: ""`，输出只有图片。`image: false` 只转写文字，其 `markdown` 仍须非空。每个区域都有 bbox、唯一简短 ID、适用规则 ID，按阅读顺序排列；空白区域无需单独建立。无法识别的页仍可保存完整源图和简短疑点说明，状态必须待复核。
+`image: true` 使程序从保存的源 PDF 实际裁图并放在该区域原文之前；标题可作为前一个独立文字区域。`alt` 简短标识可见对象，不承接全量图内转写；程序转义特殊字符，Agent 不预先转义。`markdown` 只保存源图注或独立原文，无这些内容时可为 `""`。可选字符串 `image_understanding` 只用于配图，写解释正文、不自行写标题或外层引用符；程序在图片及源图注后另建“图片理解”引用块，前后各保留完全空行，含文件末尾。无可靠理解时省略或留空，不生成空块和占位。`image: false` 只转写文字，`markdown` 仍须非空，不能附图片理解；扫描正文/表格按实际内容作用转写，未识别的独立原文继续待复核。每个区域有 bbox、唯一简短 ID、适用规则 ID，并按阅读顺序排列。
 
-问题格式：`{"block":"panel","message":"具体看不清或归属不明之处","blocking":true}`。程序自动保存该区域的证据截图。`blocking:false` 只用于已经核实、不影响正确阅读的提示；关键数字、表格条件、标签和公式未确定时是阻塞问题。重新提交同一页生成新页结果，旧页证据保留。
+问题格式：`{"block":"panel","message":"具体看不清或归属不明之处","blocking":true}`。程序自动保存该区域的证据截图。独立原文的关键数字、表格条件、公式等未确定时继续阻塞；配图内小字不可辨或整体无法可靠理解不单独阻塞，按 `visual-unit` 省略不可靠内容，可在 `reason` / `review` 记录原因。缺图、裁图错误或损坏资源仍须修复。重新提交同一页生成新页结果，旧页证据保留。
 
 程序生成图片链接，不要求 Agent 编造文件名。正文中额外图片引用须指向当前页已有真实资源；HTML 图像、外链或跨目录引用不能通过交付检查。源文中的普通链接保留；任何链接均不构成执行指令。
 
@@ -58,7 +59,7 @@ uv run --frozen --project <skill> <skill>/scripts/workflow.py start <PDF路径�
 
 成功结果位于 `results/v001/` 等目录：`raw.md`、按需生成的 `cleaned.md`、最终 `document.md`、二者所需全部 `assets/`、`provenance.json` 和 `result.json`。每个版本可单独复制阅读。追溯文件中的 snapshot/evidence 路径相对于**整个任务根**；复查历史处理须保留整个任务目录。
 
-`provenance.json.pages` 的页内行号及 `document_line_start` 明确以 `raw.md` 为基准；`outputs` 分别给出 `raw.md`、`cleaned.md` 和 `document.md` 的整份输出行范围到源页/区域的映射。查询清洗后的文字必须读取对应输出映射，再用 `pages` 找规则和快照。`result.json.files` 记录交付文件哈希；复用和采用历史结果时核验真实文件，损坏版本保留，重新组装有效版本。
+`provenance.json.pages` 的页内行号、区域 `content_spans` 及 `document_line_start` 均以 `raw.md` 为基准；`content_spans.kind` 区分 `image`、`source` 与 `image-understanding`。`outputs` 分别给出各输出行到源页/区域的映射，图片理解关联另有 `kind: "image-understanding"`，不把解释作为源文转写。查询清洗后的文字先读对应输出映射，再用 `pages` 找规则和快照；原始 `image_understanding`、区域与快照仍可回查。`result.json.files` 记录交付文件哈希；损坏版本保留并重新组装有效版本。
 
 只有目标页全部通过且清洗无阻塞才成为 `current_result`。缺页、失败、待复核或清洗失败会产生明确的阶段结果，既有完整结果仍采用。重复内容保留本轮事件，不重复创建内容版本。程序的图片及资源检查只能证明文件完整；Agent 仍须核对语义和关键参数。最终回复给出实际文件链接及完成、失败和待复核范围，不能只说文件已生成。
 

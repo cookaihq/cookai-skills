@@ -15,7 +15,7 @@ from typing import Any
 from filelock import FileLock
 
 from . import config, download, pdf, provenance
-from .files import SKILL, atomic, ignore_data, read_json, require_space, sha, validate_images, version, within, write_json
+from .files import SKILL, atomic, ignore_data, read_json, require_space, sha, validate_images, validate_understanding_blocks, version, within, write_json
 
 RULES = {"reading-order", "visual-unit", "table-groups", "merged-conditions", "formulas"}
 
@@ -322,6 +322,7 @@ def submit_cleaning(task: Path, state: dict, payload: dict) -> dict:
         if change.get("block") not in ids or not change.get("action") or not change.get("reason"):
             raise ValueError("Each cleaning change needs its source page/block, action and reason")
     validate_images(task / draft["path"], markdown)
+    validate_understanding_blocks(markdown)
     relative = f"pages/{state['run']['id']}/cleaning-{uuid.uuid4().hex[:10]}.json"
     write_json(task / relative, payload)
     commit(task, state, "cleaning-saved", {"cleaned": {"path": relative, "sha256": sha(task / relative),
@@ -372,6 +373,9 @@ def submit_page(task: Path, state: dict, page: int, payload: dict) -> dict:
             raise ValueError("Text blocks need content; image blocks may use an empty markdown string")
         if block.get("image") and not isinstance(block.get("alt", key), str):
             raise ValueError("Image alt must be a string")
+        understanding = block.get("image_understanding", "")
+        if not isinstance(understanding, str) or (understanding.strip() and not block.get("image")):
+            raise ValueError("image_understanding must be a string attached to an image block")
     for issue in payload.get("issues", []):
         if issue.get("block") not in ids or not issue.get("message") or type(issue.get("blocking")) is not bool:
             raise ValueError("Issues need a known block, message and boolean blocking flag")
@@ -382,19 +386,36 @@ def submit_page(task: Path, state: dict, page: int, payload: dict) -> dict:
     line = 1
     for block in blocks:
         content = block["markdown"].strip()
+        spans = []
         if block.get("image"):
             ref = f"assets/p{page:04d}-{block['id']}.png"
             pdf.render(task / "source/document.pdf", page, folder / ref, 220, block["bbox"])
             alt = " ".join(block.get("alt", block["id"]).split())
             alt = re.sub(r"([\\`*_\[\]<>!&])", r"\\\1", alt)
+            spans.append({"kind": "image", "line_start": line, "line_end": line})
+            if content:
+                spans.append({"kind": "source", "line_start": line + 2,
+                              "line_end": line + 1 + len(content.splitlines())})
             content = f"![{alt}]({ref})" + ("\n\n" + content if content else "")
+            understanding = block.get("image_understanding", "").strip()
+            if understanding:
+                start = line + len(content.splitlines()) + 1
+                quote = "> **图片理解**\n>\n" + "\n".join(
+                    "> " + text if text else ">" for text in understanding.splitlines())
+                content += "\n\n" + quote
+                spans.append({"kind": "image-understanding", "line_start": start,
+                              "line_end": line + len(content.splitlines()) - 1})
+        else:
+            spans.append({"kind": "source", "line_start": line,
+                          "line_end": line + len(content.splitlines()) - 1})
         validate_images(folder, content)
         count = len(content.splitlines())
         mappings.append({**block, "line_start": line, "line_end": line + count - 1,
-                         "snapshot": state["run"]["snapshot"]})
+                         "content_spans": spans, "snapshot": state["run"]["snapshot"]})
         markdown_parts.append(content)
         line += count + 1
-    raw = "\n\n".join(markdown_parts) + "\n"
+    raw = "\n\n".join(markdown_parts) + ("\n\n" if blocks[-1].get("image_understanding", "").strip() else "\n")
+    validate_understanding_blocks(raw)
     atomic(folder / "raw.md", raw)
     evidence = []
     for issue in payload.get("issues", []):
@@ -438,6 +459,7 @@ def finish(task: Path, state: dict) -> dict:
         page_mappings.append(mapping)
         line += len(content.splitlines()) + 1
     raw = "\n".join(texts)
+    validate_understanding_blocks(raw)
     line_sources = provenance.raw_line_sources(raw, page_mappings)
     outputs = {"raw.md": provenance.grouped(line_sources)}
     validate_images(folder, raw)
