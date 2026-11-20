@@ -90,6 +90,22 @@ def validate_images(root: Path, markdown: str) -> list[str]:
     return refs
 
 
+def validate_understanding_blocks(markdown: str) -> None:
+    """Check the rendered quote boundary, including the final blank line."""
+    lines = markdown.splitlines()
+    tokens = MarkdownIt("commonmark").parse(markdown)
+    for token in tokens:
+        if token.type != "blockquote_open" or token.map is None:
+            continue
+        start, end = token.map
+        if not any(line == "> **图片理解**" for line in lines[start:end]):
+            continue
+        if (lines[start] != "> **图片理解**" or end - start < 3 or lines[start + 1] != ">"
+                or start == 0 or lines[start - 1] != "" or end >= len(lines) or lines[end] != ""
+                or any(not line.startswith(">") for line in lines[start:end])):
+            raise ValueError("图片理解 needs its own quote, a quoted blank after the title and unquoted blank lines before/after")
+
+
 def ignore_data(project: Path) -> str:
     if not shutil.which("git"):
         return "git-unavailable"

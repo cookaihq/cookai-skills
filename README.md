@@ -35,7 +35,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | frpc-launch | 1.6.0 | [frpc-launch/v1.6.0](https://github.com/cookaihq/cookai-skills/releases/tag/frpc-launch%2Fv1.6.0) |
 | git-setup | 2.0.0 | [git-setup/v2.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/git-setup%2Fv2.0.0) |
 | hermes-mobile-access | 0.4.0 | [hermes-mobile-access/v0.4.0](https://github.com/cookaihq/cookai-skills/releases/tag/hermes-mobile-access%2Fv0.4.0) |
-| pdf-to-markdown-vision | 1.0.2 | [pdf-to-markdown-vision/v1.0.2](https://github.com/cookaihq/cookai-skills/releases/tag/pdf-to-markdown-vision%2Fv1.0.2) |
+| pdf-to-markdown-vision | 1.1.0 | [pdf-to-markdown-vision/v1.1.0](https://github.com/cookaihq/cookai-skills/releases/tag/pdf-to-markdown-vision%2Fv1.1.0) |
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | skill-configuration-and-artifacts-ui | 3.0.0 | [skill-configuration-and-artifacts-ui/v3.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv3.0.0) |

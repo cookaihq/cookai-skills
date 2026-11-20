@@ -11,6 +11,13 @@ def raw_line_sources(raw: str, pages: list[dict]) -> list[list[dict]]:
             end = page["document_line_start"] + block["line_end"] - 1
             for line in range(start, end):
                 sources[line].append({"page": page["physical_page"], "block": block["id"]})
+            for span in block.get("content_spans", []):
+                if span["kind"] == "image-understanding":
+                    first = page["document_line_start"] + span["line_start"] - 2
+                    last = page["document_line_start"] + span["line_end"] - 1
+                    for line in range(first, last):
+                        sources[line] = [{"page": page["physical_page"], "block": block["id"],
+                                          "kind": "image-understanding"}]
     return sources
 
 
@@ -38,8 +45,14 @@ def cleaned_sources(raw: str, cleaned: str, sources: list[list[dict]], changes: 
         if (not isinstance(span, list) or len(span) != 2 or any(type(n) is not int for n in span)
                 or not 1 <= span[0] <= span[1] <= len(after)):
             raise ValueError("output_lines must be a valid inclusive cleaned output line range")
+        kind = change.get("kind")
+        if kind not in (None, "source", "image-understanding"):
+            raise ValueError("Cleaning kind must be source or image-understanding")
+        binding = {"page": change["page"], "block": change["block"]}
+        if kind is not None:
+            binding["kind"] = kind
         for number in range(span[0] - 1, span[1]):
-            explicit.setdefault(number, []).append({"page": change["page"], "block": change["block"]})
+            explicit.setdefault(number, []).append(dict(binding))
     changed_text = set()
     for operation, a, b, c, d in SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
         if operation == "equal":
@@ -58,9 +71,21 @@ def cleaned_sources(raw: str, cleaned: str, sources: list[list[dict]], changes: 
             affected = bound or (declared if len(declared) == 1 else set())
             if not affected:
                 raise ValueError("Cleaning insertion has ambiguous provenance; give output_lines [start, end] in its source change")
-        related = [{"page": page, "block": block} for page, block in sorted(affected)]
+        related = []
+        for row in sources[a:b]:
+            for source in row:
+                if source not in related:
+                    related.append(source)
+        if not related:
+            related = [{"page": page, "block": block} for page, block in sorted(affected)]
         mapped[c:d] = [related for _ in range(c, d)]
     for number, related in explicit.items():
+        for source in related:
+            if "kind" not in source:
+                existing = [item for item in mapped[number]
+                            if item["page"] == source["page"] and item["block"] == source["block"]]
+                if existing and all(item.get("kind") == "image-understanding" for item in existing):
+                    source["kind"] = "image-understanding"
         mapped[number] = related
     for number, text in enumerate(after):
         if text in changed_text and text.strip() and not re.fullmatch(r"[\s|:\-]+", text):
