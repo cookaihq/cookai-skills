@@ -18,6 +18,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | [hermes-mobile-access](hermes-mobile-access/) | 复用 Hermes Desktop 和已有 FRP，为 Android 手机配置 HTTPS 接入、独立密钥与首选 profile，检查连接和恢复状态 | [README](hermes-mobile-access/README.md) · [SKILL.md](hermes-mobile-access/SKILL.md) |
 | [redskill-download](redskill-download/) | 下载小红书 RedSkill 分享的技能发布包，保存原始 ZIP、解压文件和校验记录，检查引用缺件；下载目录可配置 | [README](redskill-download/README.md) · [SKILL.md](redskill-download/SKILL.md) |
 | [skill-configuration-and-artifacts-ui](skill-configuration-and-artifacts-ui/) | 为新建或已有 Skill / Plugin 评估、预览和接入配置中心与产物集合；携带共用规则、运行代码和改造工具 | [README](skill-configuration-and-artifacts-ui/README.md) · [SKILL.md](skill-configuration-and-artifacts-ui/SKILL.md) |
+| [sops-setup](sops-setup/) | 用 SOPS 和 age 初始化仓库的加密配置、接入已有密钥管理、验证解密及更新接收者 | [README](sops-setup/README.md) · [SKILL.md](sops-setup/SKILL.md) |
 
 ## 版本与 Release
 
@@ -39,6 +40,7 @@ cookaihq 维护的 Agent Skill 集合 —— 每个 skill 是一份遵循 [agent
 | redskill-download | 1.0.0 | [redskill-download/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/redskill-download%2Fv1.0.0) |
 | s3-upload | 1.3.0 | [s3-upload/v1.3.0](https://github.com/cookaihq/cookai-skills/releases/tag/s3-upload%2Fv1.3.0) |
 | skill-configuration-and-artifacts-ui | 3.0.0 | [skill-configuration-and-artifacts-ui/v3.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/skill-configuration-and-artifacts-ui%2Fv3.0.0) |
+| sops-setup | 1.0.0 | [sops-setup/v1.0.0](https://github.com/cookaihq/cookai-skills/releases/tag/sops-setup%2Fv1.0.0) |
 | video-to-markdown | 4.5.0 | [video-to-markdown/v4.5.0](https://github.com/cookaihq/cookai-skills/releases/tag/video-to-markdown%2Fv4.5.0) |
 <!-- release-table:end -->
 

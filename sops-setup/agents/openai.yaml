@@ -1,0 +1,4 @@
+interface:
+  display_name: "SOPS Setup"
+  short_description: "用 SOPS 和 age 初始化仓库密钥管理、验证解密并更新接收者"
+  default_prompt: "用 $sops-setup 检查当前仓库的 SOPS 配置和解密状态。"
